@@ -1,0 +1,30 @@
+x-base: &base
+  build: .
+  image: splat-explorer:latest
+  volumes:
+    - ./3dgs_rooms:/app/3dgs_rooms:ro
+    - ./outputs:/app/outputs
+    - ./configs:/app/configs:ro
+
+services:
+  # One-off: sanity-render a panorama from the scene center into outputs/test_views/.
+  render-test:
+    <<: *base
+    profiles: ["tools"]
+    command: ["render-test"]
+
+  # Interactive splat viewer for debugging (browser at http://localhost:8080).
+  viewer:
+    <<: *base
+    command: ["viewer"]
+    ports:
+      - "8080:8080"
+
+  # The agent harness. Default config uses the scripted policy; set
+  # agent.vlm_backend: openai in a config override + OPENAI_API_KEY to go live.
+  harness:
+    <<: *base
+    profiles: ["tools"]
+    command: ["explore"]
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}

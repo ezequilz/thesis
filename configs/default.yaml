@@ -1,0 +1,51 @@
+# Default configuration for the splat-explorer harness.
+# Any value can be overridden with a second yaml passed via --config.
+
+scene:
+  # Path to the Gaussian splat asset (SOG v2 bundle, .sog). PLY support planned.
+  path: 3dgs_rooms/ArchInteriors_for_UE2_Atlux.sog
+  # Drop gaussians with opacity below this when building the working set (0 disables).
+  min_opacity: 0.05
+
+renderer:
+  # "cpu_points" — dependency-free numpy point renderer, works everywhere (debug quality).
+  # "gsplat"     — real 3DGS rasterization, requires NVIDIA GPU + the [gpu] extra.
+  backend: cpu_points
+  width: 960
+  height: 720
+  fov_deg: 75.0
+  # cpu_points only: screen-space radius of each projected point in pixels.
+  point_radius_px: 1
+
+camera:
+  # World up axis of the scene: one of +x,-x,+y,-y,+z,-z.
+  # The SOG spec defines y-up, but this asset (like most COLMAP-trained 3DGS
+  # scenes) is y-down — verified via render-test.
+  up_axis: "-y"
+  # Starting pose. "auto" places the camera at the robust centroid of the splat.
+  start_position: auto
+  start_yaw_deg: 0.0
+  # Eye height offset (in scene units) applied along up when start_position is auto.
+  eye_height: 0.0
+
+agent:
+  # "scripted" — canned action sequence, no API needed (for testing the loop).
+  # "openai"   — any OpenAI-compatible chat completions endpoint with vision + tools.
+  vlm_backend: scripted
+  model: gpt-4o
+  # Base URL for OpenAI-compatible APIs (vLLM, OpenRouter, Ollama, ...).
+  # Leave empty for api.openai.com. API key comes from the OPENAI_API_KEY env var.
+  base_url: ""
+  max_steps: 40
+  # Hard limits the harness enforces on tool call parameters.
+  max_move_distance: 2.0
+  max_rotate_degrees: 90.0
+
+viewer:
+  host: 0.0.0.0
+  port: 8080
+  # The browser can't handle 6M splats; subsample for debugging.
+  max_splats: 1_000_000
+
+output:
+  dir: outputs

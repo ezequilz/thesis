@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "splat-explorer"
+version = "0.1.0"
+description = "VLM agent harness for exploring 3D Gaussian splats and finding rendering artifacts"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# Debug viewer (browser-based, no GPU needed)
+viewer = ["viser>=0.2.7"]
+# Real 3DGS rasterization. Requires an NVIDIA GPU + CUDA toolchain.
+# torch must be installed first (gsplat compiles CUDA kernels against it).
+gpu = ["torch>=2.1", "gsplat>=1.4"]
+# VLM API access
+vlm = ["openai>=1.40"]
+
+[project.scripts]
+splat-explorer = "splat_explorer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

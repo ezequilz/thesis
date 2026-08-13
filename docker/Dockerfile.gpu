@@ -1,0 +1,27 @@
+# GPU image for real 3DGS rasterization via gsplat. STUB — not yet built/tested.
+# Requires an NVIDIA GPU host, the NVIDIA container toolkit, and
+# `docker run --gpus all`. gsplat compiles CUDA kernels on first use, so the
+# CUDA *devel* image (with nvcc) is required, not the runtime image.
+
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3-pip git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# torch must match the CUDA version of the base image.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124
+RUN pip install --no-cache-dir \
+    "numpy>=1.26" "pillow>=10.0" "pyyaml>=6.0" "openai>=1.40" "gsplat>=1.4"
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY configs ./configs
+RUN pip install --no-cache-dir --no-deps .
+
+# Select the gsplat backend at runtime:
+#   splat-explorer --config configs/gpu.yaml render-test   (renderer.backend: gsplat)
+ENTRYPOINT ["splat-explorer"]
+CMD ["render-test"]

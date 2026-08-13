@@ -1,0 +1,10 @@
+.git/
+.venv/
+venv/
+__pycache__/
+*.egg-info/
+outputs/
+.DS_Store
+.env
+# Splat assets are bind-mounted at runtime, not baked into the image.
+3dgs_rooms/
