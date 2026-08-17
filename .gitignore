@@ -6,3 +6,5 @@ venv/
 .DS_Store
 outputs/
 .env
+# Gemini browser-session cookie exports — never commit
+secrets/

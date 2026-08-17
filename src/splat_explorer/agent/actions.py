@@ -27,8 +27,8 @@ class Action:
             args["distance"] = float(min(max(args["distance"], 0.0), max_move))
         if self.name == "rotate" and "yaw_degrees" in args:
             args["yaw_degrees"] = float(max(-max_rotate, min(args["yaw_degrees"], max_rotate)))
-        if self.name == "look" and "pitch_degrees" in args:
-            args["pitch_degrees"] = float(max(-89.0, min(args["pitch_degrees"], 89.0)))
+        # if self.name == "look" and "pitch_degrees" in args:
+        #     args["pitch_degrees"] = float(max(-89.0, min(args["pitch_degrees"], 89.0)))
         return Action(self.name, args)
 
 

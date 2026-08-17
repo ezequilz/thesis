@@ -79,8 +79,33 @@ splat-explorer viewer
 
 ## Connecting a real VLM
 
-The default policy is `scripted` (no API needed). To drive the agent with a
-VLM, create a config override, e.g. `configs/live.yaml`:
+The default policy is `scripted` (no API needed). Two live backends exist:
+
+### Gemini via browser session (free testing stand-in)
+
+Uses the unofficial [gemini_webapi](https://github.com/HanaokaYuzu/Gemini-API)
+package, authenticating with cookies from a logged-in gemini.google.com
+browser session — no API key. Since the web endpoint has no tool calling, the
+backend (`agent/gemini_web.py`) sends the tool catalog as text and parses one
+JSON action per turn out of the reply.
+
+```bash
+pip install -e ".[gemini-web]"
+# Verify cookies + parsing with a single request first:
+python scripts/test_gemini_web.py
+# Then run an episode:
+splat-explorer --config configs/gemini_web.yaml explore
+```
+
+Cookie options (see `configs/gemini_web.yaml`): `auto_cookies: true` lifts
+them from your local browser (host only, gemini.google.com must be logged
+in); `cookie_file:` points at a cookie export (json/txt) and is the route
+that works inside Docker (mount the file). Keep the Gemini tab closed during
+runs and avoid hammering the endpoint — cookies expire faster otherwise.
+
+### OpenAI-compatible endpoints
+
+Create a config override, e.g. `configs/live.yaml`:
 
 ```yaml
 agent:
@@ -96,7 +121,7 @@ export OPENAI_API_KEY=sk-...
 splat-explorer --config configs/live.yaml explore
 ```
 
-The VLM client is a stub: written against the OpenAI chat-completions API but
+The OpenAI client is a stub: written against the chat-completions API but
 not yet exercised live (see `agent/vlm.py` TODOs on history management).
 
 ## Renderer backends

@@ -1,7 +1,9 @@
 """VLM policy backends: given the latest observation, pick the next action.
 
-Two backends exist so the loop can be exercised without burning API tokens:
-  - ScriptedPolicy: canned action sequence, no network.
+Backends:
+  - ScriptedPolicy: canned action sequence, no network (loop smoke-testing).
+  - GeminiWebPolicy (gemini_web.py): Gemini through browser-session cookies
+    via gemini_webapi. Free stand-in VLM for research/testing.
   - OpenAIVLMPolicy: STUB — any OpenAI-compatible vision endpoint with tool
     calling. Written but not yet exercised against a live API.
 """
@@ -116,6 +118,14 @@ def make_policy(agent_cfg) -> VLMPolicy:
     backend = agent_cfg.vlm_backend
     if backend == "scripted":
         return ScriptedPolicy()
+    if backend == "gemini_web":
+        from .gemini_web import GeminiWebPolicy
+
+        return GeminiWebPolicy(
+            cookie_file=agent_cfg.get("cookie_file", ""),
+            chrome_profile=agent_cfg.get("chrome_profile", ""),
+            auto_cookies=bool(agent_cfg.get("auto_cookies", False)),
+        )
     if backend == "openai":
         return OpenAIVLMPolicy(model=agent_cfg.model, base_url=agent_cfg.get("base_url", ""))
     raise ValueError(f"Unknown vlm_backend: {backend!r}")

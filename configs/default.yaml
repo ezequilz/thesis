@@ -29,13 +29,27 @@ camera:
   eye_height: 0.0
 
 agent:
-  # "scripted" — canned action sequence, no API needed (for testing the loop).
-  # "openai"   — any OpenAI-compatible chat completions endpoint with vision + tools.
+  # "scripted"   — canned action sequence, no API needed (for testing the loop).
+  # "gemini_web" — Gemini via browser-session cookies (python-gemini-api,
+  #                pip install ".[gemini-web]"). Free stand-in for testing.
+  # "openai"     — any OpenAI-compatible chat completions endpoint with vision + tools.
   vlm_backend: scripted
   model: gpt-4o
   # Base URL for OpenAI-compatible APIs (vLLM, OpenRouter, Ollama, ...).
   # Leave empty for api.openai.com. API key comes from the OPENAI_API_KEY env var.
   base_url: ""
+  # gemini_web only. Cookie sources, first match wins:
+  #   cookie_file    — path to a *.json/*.txt cookie export of gemini.google.com
+  #                    (also settable via GEMINI_COOKIE_FILE env). Works in
+  #                    Docker when the file is mounted.
+  #   chrome_profile — Chrome profile *directory* name (e.g. "Profile 1", see
+  #                    chrome://version) to read cookies from. Use when the
+  #                    logged-in session is in a non-default profile. Host-only.
+  #   auto_cookies   — lift cookies from the default browser profile
+  #                    (browser_cookie3). Host-only.
+  cookie_file: ""
+  chrome_profile: ""
+  auto_cookies: false
   max_steps: 40
   # Hard limits the harness enforces on tool call parameters.
   max_move_distance: 2.0

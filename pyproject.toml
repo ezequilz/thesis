@@ -21,6 +21,8 @@ viewer = ["viser>=0.2.7"]
 gpu = ["torch>=2.1", "gsplat>=1.4"]
 # VLM API access
 vlm = ["openai>=1.40"]
+# Gemini via browser-session cookies (unofficial, testing stand-in)
+gemini-web = ["gemini_webapi>=2.1", "browser-cookie3>=0.19"]
 
 [project.scripts]
 splat-explorer = "splat_explorer.cli:main"
