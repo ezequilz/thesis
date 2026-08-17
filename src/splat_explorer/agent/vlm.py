@@ -2,10 +2,10 @@
 
 Backends:
   - ScriptedPolicy: canned action sequence, no network (loop smoke-testing).
-  - GeminiWebPolicy (gemini_web.py): Gemini through browser-session cookies
-    via gemini_webapi. Free stand-in VLM for research/testing.
-  - OpenAIVLMPolicy: STUB — any OpenAI-compatible vision endpoint with tool
-    calling. Written but not yet exercised against a live API.
+  - CliRelayPolicy (cli_relay.py): Gemini/Claude/OpenAI through a self-hosted
+    CliRelay proxy (OpenAI-compatible endpoint, prompt-based action protocol).
+  - OpenAIVLMPolicy: STUB — any OpenAI-compatible vision endpoint with native
+    tool calling. Written but not yet exercised against a live API.
 """
 
 from __future__ import annotations
@@ -118,13 +118,13 @@ def make_policy(agent_cfg) -> VLMPolicy:
     backend = agent_cfg.vlm_backend
     if backend == "scripted":
         return ScriptedPolicy()
-    if backend == "gemini_web":
-        from .gemini_web import GeminiWebPolicy
+    if backend == "cli_relay":
+        from .cli_relay import CliRelayPolicy
 
-        return GeminiWebPolicy(
-            cookie_file=agent_cfg.get("cookie_file", ""),
-            chrome_profile=agent_cfg.get("chrome_profile", ""),
-            auto_cookies=bool(agent_cfg.get("auto_cookies", False)),
+        return CliRelayPolicy(
+            model=agent_cfg.model,
+            base_url=agent_cfg.get("relay_base_url", ""),
+            api_key=agent_cfg.get("relay_api_key", ""),
         )
     if backend == "openai":
         return OpenAIVLMPolicy(model=agent_cfg.model, base_url=agent_cfg.get("base_url", ""))

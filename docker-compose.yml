@@ -20,11 +20,16 @@ services:
     ports:
       - "8080:8080"
 
-  # The agent harness. Default config uses the scripted policy; set
-  # agent.vlm_backend: openai in a config override + OPENAI_API_KEY to go live.
+  # The agent harness. Default config uses the scripted policy; to go live use
+  # a config override (e.g. configs/cli_relay.yaml) + the matching API key env.
+  # Note: from inside the container a host-local CliRelay is reachable at
+  # http://host.docker.internal:8317/v1, not localhost.
   harness:
     <<: *base
     profiles: ["tools"]
     command: ["explore"]
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - CLIRELAY_API_KEY=${CLIRELAY_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

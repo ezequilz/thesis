@@ -38,6 +38,7 @@ src/splat_explorer/
     actions.py                    Action space + OpenAI tool schemas
     camera_rig.py                 Embodied camera: yaw/pitch/position, applies actions
     vlm.py                        Policies: scripted (works) / OpenAI-compatible [STUB]
+    cli_relay.py                  CliRelay backend: Gemini/Claude/OpenAI via one proxy
     loop.py                       observe → decide → act episode loop + logging
   tasks/
     artifact_hunt.py              Task prompt + scoring placeholder [STUB]
@@ -81,27 +82,34 @@ splat-explorer viewer
 
 The default policy is `scripted` (no API needed). Two live backends exist:
 
-### Gemini via browser session (free testing stand-in)
+### CliRelay (Gemini / Claude / OpenAI through one endpoint)
 
-Uses the unofficial [gemini_webapi](https://github.com/HanaokaYuzu/Gemini-API)
-package, authenticating with cookies from a logged-in gemini.google.com
-browser session — no API key. Since the web endpoint has no tool calling, the
-backend (`agent/gemini_web.py`) sends the tool catalog as text and parses one
-JSON action per turn out of the reply.
+[CliRelay](https://github.com/kittors/CliRelay) is a self-hosted proxy that
+turns AI CLI subscriptions and OAuth credentials (Gemini CLI, Claude Code,
+Codex, ...) into a single OpenAI-compatible endpoint at
+`http://localhost:8317/v1`. The backend (`agent/cli_relay.py`) sends the tool
+catalog as text and parses one JSON action per turn out of the reply, so it
+works with any vision model the relay routes to regardless of how well the
+upstream translates native tool calls.
+
+Set up the relay once (see its README: `docker compose up -d`, add your
+provider credentials in the panel at `http://localhost:8317/manage`, create
+an API key), then:
 
 ```bash
-pip install -e ".[gemini-web]"
-# Verify cookies + parsing with a single request first:
-python scripts/test_gemini_web.py
+pip install -e ".[vlm]"
+export CLIRELAY_API_KEY=sk-...   # key created in the CliRelay panel
+# Verify relay + model routing + parsing with a single request first:
+python scripts/test_cli_relay.py
 # Then run an episode:
-splat-explorer --config configs/gemini_web.yaml explore
+splat-explorer --config configs/cli_relay.yaml explore
 ```
 
-Cookie options (see `configs/gemini_web.yaml`): `auto_cookies: true` lifts
-them from your local browser (host only, gemini.google.com must be logged
-in); `cookie_file:` points at a cookie export (json/txt) and is the route
-that works inside Docker (mount the file). Keep the Gemini tab closed during
-runs and avoid hammering the endpoint — cookies expire faster otherwise.
+Pick the model in `configs/cli_relay.yaml` (`agent.model`) — any
+vision-capable model ID your relay routes, e.g. `gemini-2.5-pro`,
+`claude-sonnet-4-5`, or `gpt-4o`. If the relay runs elsewhere, set
+`agent.relay_base_url` (from inside Docker, a host-local relay is
+`http://host.docker.internal:8317/v1`).
 
 ### OpenAI-compatible endpoints
 

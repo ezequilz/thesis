@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""One-shot smoke test for the gemini_web backend.
+"""One-shot smoke test for the cli_relay backend.
 
-Renders a single view from the scene, sends it to Gemini through the
-browser-session client, and prints the raw reply plus the parsed action.
-Run this before a full episode to verify cookies work.
+Renders a single view from the scene, sends it through the CliRelay endpoint,
+and prints the raw reply plus the parsed action. Run this before a full
+episode to verify the relay, API key, and model routing work.
 
-Usage (from the repo root, venv active):
-    python scripts/test_gemini_web.py [--config configs/gemini_web.yaml]
+Usage (from the repo root, venv active, CliRelay running):
+    export CLIRELAY_API_KEY=sk-...
+    python scripts/test_cli_relay.py [--config configs/cli_relay.yaml]
 """
 
 from __future__ import annotations
@@ -19,7 +20,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from splat_explorer.agent.camera_rig import CameraRig
-from splat_explorer.agent.gemini_web import GeminiWebPolicy, parse_action, render_tool_catalog
+from splat_explorer.agent.cli_relay import (
+    CliRelayPolicy,
+    _png_data_url,
+    parse_action,
+    render_tool_catalog,
+)
 from splat_explorer.cli import _resolve_start
 from splat_explorer.config import load_config
 from splat_explorer.rendering import make_renderer
@@ -29,7 +35,7 @@ from splat_explorer.scene import load_scene
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/gemini_web.yaml")
+    parser.add_argument("--config", default="configs/cli_relay.yaml")
     args = parser.parse_args()
     cfg = load_config(args.config)
 
@@ -42,7 +48,7 @@ def main() -> int:
         rig.camera(cfg.renderer.width, cfg.renderer.height, cfg.renderer.fov_deg)
     )
 
-    out_path = Path(cfg.output.dir) / "gemini_web_smoke.png"
+    out_path = Path(cfg.output.dir) / "cli_relay_smoke.png"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     from PIL import Image
     Image.fromarray(observation).save(out_path)
@@ -51,19 +57,19 @@ def main() -> int:
     print("\n== Tool catalog sent to the model ==")
     print(render_tool_catalog())
 
-    print("\n== Connecting to Gemini (browser session) ==")
-    policy = GeminiWebPolicy(
-        cookie_file=cfg.agent.get("cookie_file", ""),
-        chrome_profile=cfg.agent.get("chrome_profile", ""),
-        auto_cookies=bool(cfg.agent.get("auto_cookies", False)),
+    print("\n== Sending one request through CliRelay ==")
+    policy = CliRelayPolicy(
+        model=cfg.agent.model,
+        base_url=cfg.agent.get("relay_base_url", ""),
+        api_key=cfg.agent.get("relay_api_key", ""),
     )
 
     prompt = policy._build_prompt(rig.state_description(), step=0)
-    from splat_explorer.agent.gemini_web import _png_bytes
-    text = policy._ask(prompt, _png_bytes(observation))
+    text = policy._ask(prompt, _png_data_url(observation))
 
-    print("\n== Raw Gemini reply ==")
-    print(text or "(empty reply — retry once without reinitializing, or refresh cookies)")
+    print("\n== Raw model reply ==")
+    print(text or "(empty reply — check the relay is up, the key is valid, "
+                  "and the model ID is routed; see the relay request logs)")
 
     action = parse_action(text) if text else None
     print("\n== Parsed action ==")
