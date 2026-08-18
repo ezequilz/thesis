@@ -27,7 +27,8 @@ trace for later evaluation.
 configs/default.yaml            All knobs: scene, renderer, camera, agent, viewer
 src/splat_explorer/
   scene/                        Asset loading
-    sog_loader.py                 SOG v2 (.sog) decoder — means/scales/quats/color/opacity
+    ply_loader.py                 Standard 3DGS .ply decoder (uncompressed, default)
+    sog_loader.py                 SOG v2 (.sog) decoder — compressed bundles
     types.py                      GaussianScene dataclass + robust bounds helpers
   rendering/
     base.py                       Camera model (OpenCV convention) + Renderer protocol
@@ -151,13 +152,26 @@ backends are swappable via `renderer.backend` in the config.
 
 ## Scene assets
 
-Scenes are SOG v2 bundles (`.sog` — PlayCanvas' compressed splat format,
-[spec](https://developer.playcanvas.com/user-manual/gaussian-splatting/formats/sog/)).
-The loader decodes positions, scales, orientations, base color and opacity;
+Two formats are supported (`scene.path` dispatches on extension):
+
+- **`.sog` (default)** — SOG v2 bundles (PlayCanvas' compressed splat format,
+  [spec](https://developer.playcanvas.com/user-manual/gaussian-splatting/formats/sog/)).
+  ~17x smaller than the raw export (78MB vs 1.4GB here) and git-friendly;
+  quantized, but decode statistics match the PLY to ~4 decimals on this asset.
+- **`.ply`** — standard uncompressed 3DGS exports as written by the INRIA
+  trainer, nerfstudio, gsplat, etc. Full float precision, higher-order SH
+  present in the file (not decoded yet). Useful as lossless reference when
+  you need to rule out compression as an artifact source. Too big for GitHub
+  (>100MB limit) — `3dgs_rooms/*.ply` is gitignored, keep these local.
+
+Both loaders decode positions, scales, orientations, base color and opacity;
 higher-order spherical harmonics (view-dependent color) are not decoded yet.
 
 Note: the provided asset is y-down (like most COLMAP-trained scenes) even
 though the SOG spec says y-up — `camera.up_axis` in the config handles this.
+
+Keep `.ply` assets out of git pushes to GitHub (100MB file limit) — track
+only the compact `.sog` or use Git LFS.
 
 ## Roadmap / open stubs
 
@@ -168,6 +182,6 @@ though the SOG spec says y-up — `camera.up_axis` in the config handles this.
       scoring, exploration-coverage metrics (`tasks/artifact_hunt.py`)
 - [ ] Collision handling: stop the agent walking through walls (occupancy
       from gaussian density)
-- [ ] PLY loading for uncompressed 3DGS exports
+- [x] PLY loading for uncompressed 3DGS exports
 - [ ] Viewer: overlay agent trajectory + camera frustum during episodes
 - [ ] Synthetic artifact injection for controlled benchmarks

@@ -2,7 +2,9 @@
 # Any value can be overridden with a second yaml passed via --config.
 
 scene:
-  # Path to the Gaussian splat asset (SOG v2 bundle, .sog). PLY support planned.
+  # Path to the Gaussian splat asset. Supported: SOG v2 .sog bundles
+  # (compressed/quantized — compact, default) and standard 3DGS .ply exports
+  # (uncompressed full precision; big files, keep them out of git).
   path: 3dgs_rooms/ArchInteriors_for_UE2_Atlux.sog
   # Drop gaussians with opacity below this when building the working set (0 disables).
   min_opacity: 0.05

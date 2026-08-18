@@ -1,7 +1,8 @@
 from .types import GaussianScene
 from .sog_loader import load_sog
+from .ply_loader import load_ply
 
-__all__ = ["GaussianScene", "load_sog", "load_scene"]
+__all__ = ["GaussianScene", "load_sog", "load_ply", "load_scene"]
 
 
 def load_scene(path, min_opacity: float = 0.0) -> GaussianScene:
@@ -12,7 +13,7 @@ def load_scene(path, min_opacity: float = 0.0) -> GaussianScene:
     if path.suffix.lower() == ".sog":
         scene = load_sog(path)
     elif path.suffix.lower() == ".ply":
-        raise NotImplementedError("PLY loading is planned but not implemented yet.")
+        scene = load_ply(path)
     else:
         raise ValueError(f"Unsupported splat format: {path.suffix}")
 

@@ -107,9 +107,55 @@ def cmd_explore(cfg, args) -> None:
     )
 
 
+def _stop_stale_viewers() -> None:
+    """Terminate other local `splat-explorer viewer` processes before starting.
+
+    Each viewer holds the fully decoded scene in RAM (GBs for big splats), so
+    starting a new one — e.g. after switching scenes — replaces the old run
+    instead of stacking up. Docker viewers are separate containers and are
+    managed by compose, not here.
+    """
+    import os
+    import signal
+    import subprocess
+    import time
+
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", "splat-explorer viewer"],
+            capture_output=True, text=True, check=False,
+        ).stdout
+    except FileNotFoundError:  # no pgrep (e.g. slim container images)
+        return
+
+    def is_viewer(pid: int) -> bool:
+        # pgrep -f also matches wrapper shells and sandbox helpers whose
+        # command line merely quotes the viewer command; only kill actual
+        # python processes running it.
+        cmd = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, check=False,
+        ).stdout.strip()
+        if not cmd:
+            return False
+        exe = Path(cmd.split()[0]).name.lower()
+        return exe.startswith("python") or exe == "splat-explorer"
+
+    stale = [int(p) for p in out.split() if int(p) != os.getpid() and is_viewer(int(p))]
+    for pid in stale:
+        logger.info("Stopping previous viewer (pid %d) to free RAM and its port", pid)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    if stale:
+        time.sleep(1.0)  # let ports and memory be released before binding
+
+
 def cmd_viewer(cfg, args) -> None:
     from .rendering.viser_viewer import serve_viewer
 
+    _stop_stale_viewers()
     scene = load_scene(cfg.scene.path, min_opacity=cfg.scene.min_opacity)
     serve_viewer(
         scene,
