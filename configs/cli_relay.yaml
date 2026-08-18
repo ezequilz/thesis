@@ -7,14 +7,16 @@
 
 agent:
   vlm_backend: cli_relay
-  # Any vision-capable model ID your relay routes, e.g.:
-  #   gemini-2.5-pro / gemini-2.5-flash  (Gemini CLI subscription)
-  #   claude-sonnet-4-5                  (Claude Code subscription)
-  #   gpt-4o                             (OpenAI / Codex)
-  model: gemini-2.5-pro
-  # Where CliRelay listens; /v1 is its OpenAI-compatible endpoint.
-  relay_base_url: "http://localhost:8317/v1"
-  # Prefer CLIRELAY_API_KEY env over hardcoding a key here.
+  # Any vision-capable model ID your relay routes (GET /v1/models lists them).
+  # Note: ChatGPT-account Codex channels reject some listed models (e.g.
+  # gpt-5.3-codex); gpt-5.6-luna / gpt-5.6-terra work.
+  model: gpt-5.6-luna
+  # Where CliRelay listens; /v1 is its OpenAI-compatible endpoint. Leave empty
+  # to use the CLIRELAY_BASE_URL env var (set in docker-compose to reach the
+  # host-local relay), falling back to http://localhost:8317/v1.
+  relay_base_url: ""
+  # Key from the CLIRELAY_API_KEY env var (loaded from .env by docker compose;
+  # on the host: set -a; source .env; set +a). Avoid hardcoding it here.
   # relay_api_key: "sk-..."
   # Keep first live episodes short while validating the setup.
   max_steps: 15

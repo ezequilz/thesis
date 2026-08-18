@@ -20,16 +20,19 @@ services:
     ports:
       - "8080:8080"
 
-  # The agent harness. Default config uses the scripted policy; to go live use
-  # a config override (e.g. configs/cli_relay.yaml) + the matching API key env.
-  # Note: from inside the container a host-local CliRelay is reachable at
-  # http://host.docker.internal:8317/v1, not localhost.
+  # The agent harness: runs a live episode through CliRelay (configs/
+  # cli_relay.yaml). The API key comes from ./.env (CLIRELAY_API_KEY);
+  # CLIRELAY_BASE_URL points at the host-local relay, which is reachable as
+  # host.docker.internal from inside the container, not localhost.
+  # For the scripted no-API policy: docker compose run --rm harness explore
   harness:
     <<: *base
     profiles: ["tools"]
-    command: ["explore"]
+    command: ["--config", "configs/cli_relay.yaml", "explore"]
+    env_file:
+      - path: .env
+        required: false
     environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - CLIRELAY_API_KEY=${CLIRELAY_API_KEY:-}
+      - CLIRELAY_BASE_URL=http://host.docker.internal:8317/v1
     extra_hosts:
       - "host.docker.internal:host-gateway"

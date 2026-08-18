@@ -46,7 +46,7 @@ src/splat_explorer/
 Dockerfile                      CPU image (loader, cpu renderer, viewer, harness)
 docker/Dockerfile.gpu           CUDA image for gsplat [STUB — untested]
 docker-compose.yml              Services: render-test, viewer, harness
-scripts/start.sh                Build → test render → viewer → episode
+scripts/start.sh                Start/restart the stack: CliRelay + build + viewer
 ```
 
 ## Quick start (Docker)
@@ -55,10 +55,14 @@ scripts/start.sh                Build → test render → viewer → episode
 ./scripts/start.sh
 ```
 
-This builds the image, renders a sanity panorama from the scene center to
-`outputs/test_views/` (open `contact_sheet.png`), starts the interactive
-viewer at http://localhost:8080, and runs a scripted agent episode into
-`outputs/episodes/<timestamp>/`.
+Safe to re-run at any time; it (re)starts the whole stack: CliRelay at
+http://localhost:8317 (cloned to `~/CliRelay` on first run; panel at
+`/manage`, admin password printed from its `.env`), builds the image, and
+(re)starts the interactive viewer at http://localhost:8080 — killing a stale
+locally-run viewer holding the port if needed. Optional one-off jobs:
+`--render-test` renders a sanity panorama to `outputs/test_views/`,
+`--episode` runs an agent episode into `outputs/episodes/<timestamp>/`, and
+`--stop` shuts everything down (project + CliRelay).
 
 Individual services:
 

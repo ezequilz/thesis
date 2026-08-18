@@ -35,11 +35,19 @@ def quats_to_covariances(quats: np.ndarray, scales: np.ndarray) -> np.ndarray:
     return np.einsum("nij,njk->nik", R * S2, R.transpose(0, 2, 1))
 
 
-def serve_viewer(scene: GaussianScene, host: str = "0.0.0.0", port: int = 8080, max_splats: int = 1_000_000):
+def serve_viewer(
+    scene: GaussianScene,
+    host: str = "0.0.0.0",
+    port: int = 8080,
+    max_splats: int = 1_000_000,
+    up_axis: str = "-y",
+):
     try:
         import viser
     except ImportError as exc:
         raise RuntimeError("viser is not installed — pip install '.[viewer]'") from exc
+
+    from .base import up_vector
 
     n = scene.num_gaussians
     if n > max_splats:
@@ -57,6 +65,21 @@ def serve_viewer(scene: GaussianScene, host: str = "0.0.0.0", port: int = 8080, 
         covariances=quats_to_covariances(scene.quats[idx], scene.scales[idx]),
     )
     server.scene.add_frame("/origin", axes_length=0.5, axes_radius=0.01)
+
+    # Start clients inside the room, gravity-aligned, instead of viser's
+    # default exterior orbit pose.
+    up = up_vector(up_axis).astype(np.float64)
+    center = scene.robust_centroid().astype(np.float64)
+    seed = np.array([0.0, 0.0, -1.0]) if abs(up[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+    forward = seed - up * np.dot(seed, up)
+    forward /= np.linalg.norm(forward)
+
+    @server.on_client_connect
+    def _(client: "viser.ClientHandle") -> None:
+        client.camera.up_direction = up
+        client.camera.position = center
+        client.camera.look_at = center + forward
+
     logger.info("Viser viewer running at http://%s:%d", host, port)
     # TODO: overlay the agent's camera frustum + trajectory during episodes.
     while True:

@@ -16,8 +16,10 @@ as an image part, and parses a single JSON action object from the reply.
 
 Configuration (configs/*.yaml, agent section):
   vlm_backend: cli_relay
-  model:          model ID the relay routes, e.g. gemini-2.5-pro
-  relay_base_url: relay endpoint, default http://localhost:8317/v1
+  model:          model ID the relay routes, e.g. gpt-5.3-codex
+  relay_base_url: relay endpoint; falls back to the CLIRELAY_BASE_URL env var
+                  (used in Docker to reach a host-local relay), then to
+                  http://localhost:8317/v1
 API key resolution, first match wins: agent.relay_api_key config key,
 CLIRELAY_API_KEY env, OPENAI_API_KEY env. If none is set a placeholder is
 sent, which only works when the relay runs with allow-unauthenticated: true.
@@ -131,7 +133,7 @@ class CliRelayPolicy:
             raise RuntimeError("Set agent.model to a model ID your CliRelay instance routes.")
 
         self.model = model
-        self.base_url = base_url or DEFAULT_BASE_URL
+        self.base_url = base_url or os.environ.get("CLIRELAY_BASE_URL", "") or DEFAULT_BASE_URL
         self.client = OpenAI(
             base_url=self.base_url,
             api_key=_resolve_api_key(api_key),

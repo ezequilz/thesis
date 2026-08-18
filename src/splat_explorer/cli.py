@@ -111,7 +111,13 @@ def cmd_viewer(cfg, args) -> None:
     from .rendering.viser_viewer import serve_viewer
 
     scene = load_scene(cfg.scene.path, min_opacity=cfg.scene.min_opacity)
-    serve_viewer(scene, host=cfg.viewer.host, port=cfg.viewer.port, max_splats=cfg.viewer.max_splats)
+    serve_viewer(
+        scene,
+        host=cfg.viewer.host,
+        port=cfg.viewer.port,
+        max_splats=cfg.viewer.max_splats,
+        up_axis=cfg.camera.up_axis,
+    )
 
 
 def main() -> None:
