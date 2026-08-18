@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 LIVE_STATE_PATH = Path("outputs/live/agent_state.json")
 
-RUN_DEFAULTS = {"backend": "scripted", "model": "", "max_steps": 15, "width": 480, "height": 360}
+RUN_DEFAULTS = {"backend": "scripted", "model": "", "max_steps": 5, "width": 480, "height": 360}
 RUN_LIMITS = {"max_steps": 200, "width": 1920, "height": 1440}
 
 

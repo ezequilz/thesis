@@ -43,7 +43,9 @@ agent:
   #               (pip install ".[vlm]", see configs/cli_relay.yaml).
   # "openai"    — any OpenAI-compatible chat completions endpoint with vision + tools.
   vlm_backend: scripted
-  model: gpt-4o
+  # Default model for live backends. Must be a vision-capable ID the CliRelay
+  # instance routes (GET /v1/models) when vlm_backend is cli_relay.
+  model: gpt-5.6-luna
   # openai backend only: base URL for OpenAI-compatible APIs (vLLM, OpenRouter,
   # Ollama, ...). Leave empty for api.openai.com. Key from OPENAI_API_KEY env.
   base_url: ""
