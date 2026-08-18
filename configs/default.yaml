@@ -48,7 +48,10 @@ agent:
   # Ollama, ...). Leave empty for api.openai.com. Key from OPENAI_API_KEY env.
   base_url: ""
   # cli_relay only. Endpoint of the CliRelay instance (OpenAI-compatible /v1).
-  relay_base_url: "http://localhost:8317/v1"
+  # Leave empty: falls back to the CLIRELAY_BASE_URL env var (set in
+  # docker-compose to reach the host-local relay via host.docker.internal),
+  # then to http://localhost:8317/v1. A value here would override both.
+  relay_base_url: ""
   # cli_relay only. API key created in the CliRelay panel; prefer setting the
   # CLIRELAY_API_KEY env var instead of putting the key in a config file.
   relay_api_key: ""

@@ -60,11 +60,13 @@ scripts/start.sh                Start/restart the stack: CliRelay + build + view
 ./scripts/start.sh
 ```
 
-Safe to re-run at any time; it (re)starts the whole stack: CliRelay at
-http://localhost:8317 (cloned to `~/CliRelay` on first run; panel at
+Safe to re-run at any time; it (re)starts the whole stack in order: the
+Docker daemon itself if needed (Docker Desktop / OrbStack on macOS), CliRelay
+at http://localhost:8317 (cloned to `~/CliRelay` on first run; panel at
 `/manage`, admin password printed from its `.env`), builds the image, and
-(re)starts the interactive viewer at http://localhost:8080 — killing a stale
-locally-run viewer holding the port if needed. Optional one-off jobs:
+(re)starts the interactive viewer at http://localhost:8080 plus the episode
+dashboard at http://localhost:8090 — killing stale locally-run instances
+holding those ports if needed. Optional one-off jobs:
 `--render-test` renders a sanity panorama to `outputs/test_views/`,
 `--episode` runs an agent episode into `outputs/episodes/<timestamp>/`, and
 `--stop` shuts everything down (project + CliRelay).
@@ -74,6 +76,7 @@ Individual services:
 ```bash
 docker compose run --rm render-test     # panorama sanity render
 docker compose up viewer                # viser debug viewer on :8080
+docker compose up dashboard             # episode dashboard on :8090
 docker compose run --rm harness         # agent episode (scripted policy)
 ```
 
@@ -90,7 +93,8 @@ splat-explorer viewer
 ## Episode dashboard (control + debugging in the browser)
 
 ```bash
-splat-explorer dashboard          # http://localhost:8090
+./scripts/start.sh                # part of the stack -> http://localhost:8090
+splat-explorer dashboard          # or standalone, outside Docker
 ```
 
 A lightweight local page (stdlib HTTP server, zero extra dependencies) to
@@ -110,9 +114,12 @@ start and watch agent episodes:
 - **Viser integration**: while an episode runs, the dashboard writes
   `outputs/live/agent_state.json`; the viser viewer (:8080) picks it up and
   draws the agent's camera frustum — with the current frame inside — plus the
-  trajectory in the live splat view. GUI checkboxes there: *Follow agent*
-  (snap your browser camera to the agent pose) and *Frame in frustum*. The
-  dashboard can also embed the viewer in an iframe ("embed live viewer").
+  trajectory in the live splat view. Clicking any step in the dashboard's
+  sidebar re-poses the viewer camera/frustum to that step; re-enabling
+  "follow latest step" returns it to the live agent. GUI checkboxes in the
+  viewer: *Follow agent* (snap your browser camera to the agent pose) and
+  *Frame in frustum*. The dashboard can also embed the viewer in an iframe
+  ("embed live viewer").
 
 Timings and raw VLM exchanges are also persisted per step in
 `outputs/episodes/<ts>/actions.jsonl`, so CLI runs (`explore`) capture the
