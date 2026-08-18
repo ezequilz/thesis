@@ -44,7 +44,10 @@ src/splat_explorer/
     loop.py                       observe → decide → act episode loop + logging
   tasks/
     artifact_hunt.py              Task prompt + scoring placeholder [STUB]
-  cli.py                        Entrypoints: render-test / explore / viewer
+  web/
+    server.py                     Episode dashboard server (stdlib http, no deps)
+    static/index.html             Dashboard page (vanilla JS, single file)
+  cli.py                        Entrypoints: render-test / explore / viewer / dashboard
 Dockerfile                      CPU image (loader, cpu renderer, viewer, harness)
 docker/Dockerfile.gpu           CUDA image for gsplat [STUB — untested]
 docker-compose.yml              Services: render-test, viewer, harness
@@ -83,6 +86,40 @@ splat-explorer render-test
 splat-explorer explore
 splat-explorer viewer
 ```
+
+## Episode dashboard (control + debugging in the browser)
+
+```bash
+splat-explorer dashboard          # http://localhost:8090
+```
+
+A lightweight local page (stdlib HTTP server, zero extra dependencies) to
+start and watch agent episodes:
+
+- **Start / stop runs** from the browser: pick the policy backend
+  (`scripted` or `cli_relay`), model, max steps, and render resolution
+  (lower = faster debug iterations). The scene is decoded **once** at server
+  startup and shared across runs.
+- **Live step feed** (~1s polling): every step shows its screenshot, the
+  chosen action with arguments, the agent pose, and render / VLM wall times.
+- **Full VLM debugging**: per step you can expand the exact raw model reply
+  (every retry attempt with latency and errors), the parsed action before
+  clamping, and the complete prompt that was sent. Fallback actions after
+  unparseable replies are flagged red.
+- **Artifact reports & episode summary** are collected as they happen.
+- **Viser integration**: while an episode runs, the dashboard writes
+  `outputs/live/agent_state.json`; the viser viewer (:8080) picks it up and
+  draws the agent's camera frustum — with the current frame inside — plus the
+  trajectory in the live splat view. GUI checkboxes there: *Follow agent*
+  (snap your browser camera to the agent pose) and *Frame in frustum*. The
+  dashboard can also embed the viewer in an iframe ("embed live viewer").
+
+Timings and raw VLM exchanges are also persisted per step in
+`outputs/episodes/<ts>/actions.jsonl`, so CLI runs (`explore`) capture the
+same debugging data.
+
+The dashboard reads `.env` at startup, so `CLIRELAY_API_KEY=...` there is
+enough for browser-started `cli_relay` runs.
 
 ## Connecting a real VLM
 

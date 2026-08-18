@@ -14,11 +14,30 @@ services:
     command: ["render-test"]
 
   # Interactive splat viewer for debugging (browser at http://localhost:8080).
+  # Polls outputs/live/agent_state.json (written by the dashboard) to overlay
+  # the agent's camera frustum + trajectory during episodes.
   viewer:
     <<: *base
     command: ["viewer"]
     ports:
       - "8080:8080"
+
+  # Episode control/debug dashboard (browser at http://localhost:8090):
+  # start/stop runs, watch frames + raw VLM replies + timings per step, and
+  # sync the viser viewer camera to any clicked step. Holds its own decoded
+  # copy of the scene (like the viewer) — budget Docker RAM accordingly.
+  dashboard:
+    <<: *base
+    command: ["dashboard"]
+    ports:
+      - "8090:8090"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - CLIRELAY_BASE_URL=http://host.docker.internal:8317/v1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # The agent harness: runs a live episode through CliRelay (configs/
   # cli_relay.yaml). The API key comes from ./.env (CLIRELAY_API_KEY);

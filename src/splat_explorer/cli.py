@@ -3,6 +3,7 @@
   splat-explorer render-test   render a panorama of test views from the scene center
   splat-explorer explore       run an agent episode (scripted policy by default)
   splat-explorer viewer        serve the interactive viser debug viewer
+  splat-explorer dashboard     serve the episode control/debug dashboard
 """
 
 from __future__ import annotations
@@ -166,6 +167,12 @@ def cmd_viewer(cfg, args) -> None:
     )
 
 
+def cmd_dashboard(cfg, args) -> None:
+    from .web.server import serve_dashboard
+
+    serve_dashboard(cfg, host=cfg.dashboard.host, port=args.port or cfg.dashboard.port)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -182,6 +189,10 @@ def main() -> None:
 
     p_viewer = sub.add_parser("viewer", help="Serve the viser debug viewer")
     p_viewer.set_defaults(func=cmd_viewer)
+
+    p_dash = sub.add_parser("dashboard", help="Serve the episode control/debug dashboard")
+    p_dash.add_argument("--port", type=int, default=None, help="Override dashboard.port")
+    p_dash.set_defaults(func=cmd_dashboard)
 
     args = parser.parse_args()
     cfg = load_config(args.config)

@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import re
+import time
 
 import numpy as np
 
@@ -140,6 +141,10 @@ class CliRelayPolicy:
             timeout=self.REQUEST_TIMEOUT_S,
         )
         self._history: list[str] = []
+        # Full record of the most recent decide(): prompt, per-attempt raw
+        # replies + latencies, parse outcome. Consumed by the episode loop for
+        # traces and by the debug dashboard.
+        self.last_debug: dict | None = None
         logger.info("CliRelay backend: %s via %s", self.model, self.base_url)
 
     def decide(self, observation: np.ndarray, pose_description: str, step: int) -> Action:
@@ -147,26 +152,48 @@ class CliRelayPolicy:
         image_url = _png_data_url(observation)
 
         action = None
+        attempts: list[dict] = []
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
-            text = self._ask(prompt, image_url)
-            if text:
+            t0 = time.perf_counter()
+            text, error = self._ask(prompt, image_url)
+            seconds = time.perf_counter() - t0
+            parsed = parse_action(text) if text else None
+            attempts.append({
+                "attempt": attempt,
+                "seconds": round(seconds, 3),
+                "reply": text,
+                "error": error,
+                "parsed_ok": parsed is not None,
+            })
+            if parsed:
                 logger.debug("CliRelay reply (step %d, attempt %d): %s", step, attempt, text)
-                action = parse_action(text)
-                if action:
-                    break
+                action = parsed
+                break
             logger.warning("CliRelay: no parseable action (step %d, attempt %d)", step, attempt)
 
-        if action is None:
+        fallback = action is None
+        if fallback:
             # Keep the episode alive rather than crash mid-run; the trace will
             # show the fallback so failures stay visible.
             action = Action("rotate", {"yaw_degrees": 45.0})
             logger.error("CliRelay: falling back to %s after %d attempts", action, self.MAX_ATTEMPTS)
 
+        self.last_debug = {
+            "backend": "cli_relay",
+            "model": self.model,
+            "base_url": self.base_url,
+            "prompt": prompt,
+            "attempts": attempts,
+            "raw_response": attempts[-1]["reply"] if attempts else "",
+            "parsed_action": {"name": action.name, "args": action.args},
+            "fallback": fallback,
+        }
         self._history.append(f"step {step}: {action.name} {json.dumps(action.args)}")
         logger.info("CliRelay chose: %s %s", action.name, action.args)
         return action
 
-    def _ask(self, prompt: str, image_url: str) -> str:
+    def _ask(self, prompt: str, image_url: str) -> tuple[str, str | None]:
+        """Returns (reply_text, error). Exactly one of the two is meaningful."""
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -180,13 +207,13 @@ class CliRelayPolicy:
                     }
                 ],
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("CliRelay request failed")
-            return ""
+            return "", f"{type(exc).__name__}: {exc}"
         choices = response.choices or []
         if not choices:
-            return ""
-        return (choices[0].message.content or "").strip()
+            return "", "relay returned no choices"
+        return (choices[0].message.content or "").strip(), None
 
     def _build_prompt(self, pose_description: str, step: int) -> str:
         history = self._history[-self.MAX_HISTORY_LINES:]

@@ -43,11 +43,17 @@ class ScriptedPolicy:
             ] * 4
             + [Action("done", {"summary": "Scripted run complete."})]
         )
+        self.last_debug: dict | None = None
 
     def decide(self, observation: np.ndarray, pose_description: str, step: int) -> Action:
-        if step < len(self._script):
-            return self._script[step]
-        return Action("done", {"summary": "Script exhausted."})
+        action = self._script[step] if step < len(self._script) else Action("done", {"summary": "Script exhausted."})
+        self.last_debug = {
+            "backend": "scripted",
+            "raw_response": f"(scripted step {step}/{len(self._script)})",
+            "parsed_action": {"name": action.name, "args": action.args},
+            "fallback": False,
+        }
+        return action
 
 
 def _encode_png_b64(image: np.ndarray) -> str:

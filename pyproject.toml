@@ -27,3 +27,6 @@ splat-explorer = "splat_explorer.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"splat_explorer.web" = ["static/*"]

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # One-command start/restart of the full dev stack. Safe to re-run at any time.
 #
+#   0. Docker daemon       started automatically if not running (macOS)
 #   1. CliRelay proxy      http://localhost:8317  (panel at /manage;
 #                          cloned to $CLIRELAY_DIR on first run)
 #   2. splat-explorer      image build + viser debug viewer at :8080
+#                          + episode dashboard at :8090
 #
 # Usage:
-#   scripts/start.sh                 (re)start CliRelay + viewer
+#   scripts/start.sh                 (re)start CliRelay + viewer + dashboard
 #   scripts/start.sh --render-test   ... and render sanity views first
 #   scripts/start.sh --episode       ... and run an agent episode at the end
 #   scripts/start.sh --stop          stop everything (project + CliRelay)
@@ -33,6 +35,31 @@ for arg in "$@"; do
     *) echo "Unknown option: $arg (see header of this script)"; exit 2 ;;
   esac
 done
+
+echo "==> [0/4] Checking the Docker daemon"
+if ! docker info >/dev/null 2>&1; then
+  if [ -d "/Applications/OrbStack.app" ]; then
+    echo "    Docker daemon not running — starting OrbStack"
+    open -a OrbStack
+  elif [ -d "/Applications/Docker.app" ]; then
+    echo "    Docker daemon not running — starting Docker Desktop"
+    open -a Docker
+  else
+    echo "    ERROR: Docker daemon not running and no Docker Desktop/OrbStack found."
+    exit 1
+  fi
+  printf "    Waiting for the daemon"
+  for _ in $(seq 1 60); do
+    if docker info >/dev/null 2>&1; then DOCKER_READY=1; break; fi
+    printf "."
+    sleep 2
+  done
+  echo ""
+  if [ "${DOCKER_READY:-0}" != 1 ]; then
+    echo "    ERROR: Docker daemon did not come up within 2 minutes."
+    exit 1
+  fi
+fi
 
 echo "==> [1/4] Starting CliRelay at $CLIRELAY_URL"
 if [ ! -d "$CLIRELAY_DIR" ]; then
@@ -62,25 +89,36 @@ fi
 echo "==> [2/4] Building splat-explorer image"
 docker compose build
 
-echo "==> [3/4] (Re)starting viser debug viewer at http://localhost:8080"
+echo "==> [3/4] (Re)starting viser viewer (:8080) + episode dashboard (:8090)"
 docker compose down --remove-orphans
-# Port 8080 may be held by a stale locally-run viewer ("splat-explorer viewer"
-# outside Docker) — kill our own, but only warn about anything else.
-PORT_PID=$(lsof -ti tcp:8080 -sTCP:LISTEN || true)
-if [ -n "$PORT_PID" ]; then
-  PORT_CMD=$(ps -p "$PORT_PID" -o command= || true)
-  if [[ "$PORT_CMD" == *"splat-explorer viewer"* ]]; then
-    echo "    Killing stale local viewer (pid $PORT_PID)"
-    kill "$PORT_PID" && sleep 1
-  else
-    echo "    WARNING: port 8080 is in use by another process, skipping viewer:"
-    echo "      $PORT_PID  $PORT_CMD"
-    echo "    Free it with: kill $PORT_PID"
-    SKIP_VIEWER=1
-  fi
-fi
-if [ "${SKIP_VIEWER:-0}" != 1 ]; then
-  docker compose up -d viewer
+# Ports may be held by stale locally-run instances ("splat-explorer viewer" /
+# "splat-explorer dashboard" outside Docker) — kill our own, warn about others.
+SERVICES=""
+free_port() {  # free_port <port> <cmd substring> ; returns 1 if a foreign process holds it
+  local pids pid cmd blocked=0
+  pids=$(lsof -ti "tcp:$1" -sTCP:LISTEN || true)
+  for pid in $pids; do
+    cmd=$(ps -p "$pid" -o command= || true)
+    if [[ "$cmd" == *"$2"* ]]; then
+      echo "    Killing stale local process on :$1 (pid $pid)"
+      kill "$pid" || true
+    else
+      echo "    WARNING: port $1 is in use by another process:"
+      echo "      $pid  $cmd"
+      echo "    Free it with: kill $pid"
+      blocked=1
+    fi
+  done
+  [ -n "$pids" ] && sleep 1
+  return $blocked
+}
+free_port 8080 "splat-explorer viewer"    && SERVICES="$SERVICES viewer" \
+  || echo "    Skipping viewer (port busy)"
+free_port 8090 "splat-explorer dashboard" && SERVICES="$SERVICES dashboard" \
+  || echo "    Skipping dashboard (port busy)"
+if [ -n "$SERVICES" ]; then
+  # shellcheck disable=SC2086
+  docker compose up -d $SERVICES
 fi
 
 echo "==> [4/4] Optional one-off jobs"
