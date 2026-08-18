@@ -8,12 +8,19 @@ scene:
   min_opacity: 0.05
 
 renderer:
-  # "cpu_points" — dependency-free numpy point renderer, works everywhere (debug quality).
-  # "gsplat"     — real 3DGS rasterization, requires NVIDIA GPU + the [gpu] extra.
-  backend: cpu_points
+  # "cpu_splats" — full gaussian splat rasterization on CPU (EWA splatting with
+  #                alpha blending + soft depth buffer). Works everywhere; this
+  #                is what the VLM and episode logs should always see.
+  # "gsplat"     — reference 3DGS rasterization, requires NVIDIA GPU + [gpu] extra.
+  # "cpu_points" — legacy dot-based debug renderer (speckled; not for VLM runs).
+  backend: cpu_splats
   width: 960
   height: 720
   fov_deg: 75.0
+  # cpu_splats only: cap on a single splat's screen-space radius in pixels
+  # (bounds worst-case render time). Too low turns room-sized low-opacity
+  # "fog" gaussians into visible blobs; 120 renders them faithfully as haze.
+  max_splat_radius_px: 120
   # cpu_points only: screen-space radius of each projected point in pixels.
   point_radius_px: 1
 
@@ -51,8 +58,9 @@ agent:
 viewer:
   host: 0.0.0.0
   port: 8080
-  # The browser can't handle 6M splats; subsample for debugging.
-  max_splats: 1_000_000
+  # Max splats served to the browser; 0 = no limit (full scene). Lower this if
+  # the viewer tab becomes unresponsive on weaker machines.
+  max_splats: 0
 
 output:
   dir: outputs

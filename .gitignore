@@ -8,3 +8,6 @@ outputs/
 .env
 # API keys and other credentials — never commit
 secrets/
+# Uncompressed splat exports are >1GB (GitHub rejects >100MB) — keep local,
+# track only the compact .sog bundles
+3dgs_rooms/*.ply

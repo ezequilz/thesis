@@ -31,7 +31,8 @@ src/splat_explorer/
     types.py                      GaussianScene dataclass + robust bounds helpers
   rendering/
     base.py                       Camera model (OpenCV convention) + Renderer protocol
-    cpu_point_renderer.py         Dependency-free debug renderer (works everywhere)
+    cpu_splat_renderer.py         Full gaussian splatting on CPU (EWA + soft z-buffer)
+    cpu_point_renderer.py         Dot-based debug renderer (legacy)
     gsplat_renderer.py            Real 3DGS rasterization [STUB — needs CUDA, untested]
     viser_viewer.py               Browser-based interactive debug viewer
   agent/
@@ -140,9 +141,10 @@ not yet exercised live (see `agent/vlm.py` TODOs on history management).
 
 | Backend      | Quality | Requirements | Status |
 |--------------|---------|--------------|--------|
-| `cpu_points` | debug (depth-sorted point cloud, no alpha blending) | none | working |
-| `gsplat`     | faithful 3DGS rasterization | NVIDIA GPU, `pip install ".[gpu]"`, `docker/Dockerfile.gpu` | stub, untested |
-| viser viewer | interactive browser splats | `pip install ".[viewer]"` | working (subsampled) |
+| `cpu_splats` | full anisotropic splats, alpha blending, soft depth buffer (~40s/frame at 960x720, full 5.7M-splat scene) | none | working, default |
+| `gsplat`     | reference 3DGS rasterization | NVIDIA GPU, `pip install ".[gpu]"`, `docker/Dockerfile.gpu` | stub, untested |
+| `cpu_points` | dot-based debug (speckled; legacy) | none | working |
+| viser viewer | interactive browser splats (full scene, `viewer.max_splats: 0` = no subsampling) | `pip install ".[viewer]"` | working |
 
 The renderer is behind a small `Renderer` protocol (`rendering/base.py`), so
 backends are swappable via `renderer.backend` in the config.

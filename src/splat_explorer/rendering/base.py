@@ -28,6 +28,23 @@ def up_vector(axis: str) -> np.ndarray:
         raise ValueError(f"up_axis must be one of {sorted(_AXES)}, got {axis!r}")
 
 
+def quats_to_covariances(quats: np.ndarray, scales: np.ndarray) -> np.ndarray:
+    """Covariance = R diag(s^2) R^T for (w,x,y,z) quats. Returns (N, 3, 3)."""
+    w, x, y, z = quats[:, 0], quats[:, 1], quats[:, 2], quats[:, 3]
+    R = np.empty((len(quats), 3, 3), dtype=np.float32)
+    R[:, 0, 0] = 1 - 2 * (y * y + z * z)
+    R[:, 0, 1] = 2 * (x * y - w * z)
+    R[:, 0, 2] = 2 * (x * z + w * y)
+    R[:, 1, 0] = 2 * (x * y + w * z)
+    R[:, 1, 1] = 1 - 2 * (x * x + z * z)
+    R[:, 1, 2] = 2 * (y * z - w * x)
+    R[:, 2, 0] = 2 * (x * z - w * y)
+    R[:, 2, 1] = 2 * (y * z + w * x)
+    R[:, 2, 2] = 1 - 2 * (x * x + y * y)
+    S2 = scales[:, None, :] ** 2  # broadcast diag(s^2)
+    return np.einsum("nij,njk->nik", R * S2, R.transpose(0, 2, 1))
+
+
 @dataclass
 class Camera:
     """Pinhole camera with a camera-to-world pose."""
@@ -94,6 +111,12 @@ class Renderer(Protocol):
 def make_renderer(scene: GaussianScene, renderer_cfg) -> Renderer:
     """Factory dispatching on config renderer.backend."""
     backend = renderer_cfg.backend
+    if backend == "cpu_splats":
+        from .cpu_splat_renderer import CpuSplatRenderer
+
+        return CpuSplatRenderer(
+            scene, max_splat_radius_px=renderer_cfg.get("max_splat_radius_px", 40)
+        )
     if backend == "cpu_points":
         from .cpu_point_renderer import CpuPointRenderer
 
