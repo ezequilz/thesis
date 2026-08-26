@@ -72,11 +72,15 @@
   .frames { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .frames.single { grid-template-columns: 1fr; }
   @media (max-width: 1100px) { .frames { grid-template-columns: 1fr; } }
-  .frames .stack { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
   .frames figure { margin: 0; }
   .frames figcaption { font-size: 11px; color: var(--dim); margin: 0 0 5px; letter-spacing: .02em; }
   .frames img.frame { max-height: 46vh; width: 100%; height: auto; object-fit: contain; }
   .frames.has-map img.frame { max-height: 34vh; }
+  .frames .missing {
+    min-height: 20vh; border: 1px dashed var(--border); border-radius: 6px;
+    color: var(--dim); display: flex; align-items: center; justify-content: center;
+    font-size: 12px; text-align: center; padding: 16px; background: #000;
+  }
   .step img.depth-thumb { width: 48px; opacity: .9; }
   .kv { display: grid; grid-template-columns: 110px 1fr; gap: 3px 12px;
         font-size: 13px; margin: 12px 0; }
@@ -379,17 +383,20 @@ function renderDetail() {
     </figure>`;
   const rgbFig = fig(`RGB — sent to the VLM (${vlmSize}, aspect preserved)`, s.frame_url, `step ${s.step} RGB`);
   const mapFig = s.map_frame_url ? fig(mapCaption, s.map_frame_url, `step ${s.step} map`) : "";
-  const coverageFig = s.coverage_frame_url ? fig(coverageCaption, s.coverage_frame_url, `step ${s.step} coverage`) : "";
+  const coverageFig = s.coverage_frame_url
+    ? fig(coverageCaption, s.coverage_frame_url, `step ${s.step} coverage`)
+    : "";
   const depthFig = s.depth_frame_url ? fig(depthCaption, s.depth_frame_url, `step ${s.step} depth`) : "";
+  const coverageSlot = coverageFig || (mapFig ? `
+    <figure>
+      <figcaption>COVERAGE MAP — viewed area (sent to the VLM after view_coverage_map)</figcaption>
+      <div class="missing">No coverage frame for this step.<br>Start a new episode to record it.</div>
+    </figure>` : "");
   let frames;
   if (mapFig || coverageFig || depthFig) {
-    const cls = "frames"
-      + (mapFig || coverageFig ? " has-map" : "")
-      + (depthFig || coverageFig ? "" : " single");
-    frames = `<div class="${cls}">
-      <div class="stack">${rgbFig}${mapFig}</div>
-      ${coverageFig || depthFig ? `<div class="stack">${coverageFig}${depthFig}</div>` : ""}
-    </div>`;
+    const cls = "frames has-map" + (depthFig || coverageSlot ? "" : " single");
+    // 2×2 reading order: RGB | depth / path map | coverage
+    frames = `<div class="${cls}">${rgbFig}${depthFig}${mapFig}${coverageSlot}</div>`;
   } else {
     frames = `<img class="frame" src="${s.frame_url}" alt="step ${s.step}">`;
   }
