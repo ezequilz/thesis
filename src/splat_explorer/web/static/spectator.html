@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>splat-explorer · spectator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #101318; --panel: #171c24; --border: #2a3342;
+    --text: #dce3ee; --dim: #8b97a8; --accent: #5aa2ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #000; color: var(--text);
+               font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+           background: var(--panel); border-bottom: 1px solid var(--border);
+           flex-shrink: 0; }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  header h1 span { color: var(--dim); font-weight: 400; }
+  .hint { color: var(--dim); font-size: 12px; }
+  a { color: var(--accent); text-decoration: none; }
+  .spacer { flex: 1; }
+  #stage { height: calc(100% - 41px); width: 100%; background: #000; }
+  #stage iframe { width: 100%; height: 100%; border: 0; display: block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>splat-explorer <span>· spectator (HD)</span></h1>
+  <span class="hint">This is the high-definition visor. The VLM only receives a cropped 960×720 (or dashboard-selected) copy — never a stretched one. Keep this window visible during episodes.</span>
+  <span class="spacer"></span>
+  <a href="/">episode dashboard</a>
+</header>
+<div id="stage"><iframe id="frame" title="HD visor" allow="autoplay"></iframe></div>
+<script>
+fetch("/api/state").then(r => r.json()).then(s => {
+  document.getElementById("frame").src = s.defaults.viewer_url || "http://localhost:8080";
+}).catch(() => {
+  document.getElementById("frame").src = "http://localhost:8080";
+});
+</script>
+</body>
+</html>

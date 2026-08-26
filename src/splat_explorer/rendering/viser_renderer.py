@@ -42,7 +42,7 @@ class ViserCaptureRenderer:
         scene: GaussianScene,
         url: str | None = None,
         viewer_url: str | None = None,
-        timeout_s: float = 60.0,
+        timeout_s: float = 180.0,
         client_wait_s: float = 90.0,
         max_splat_radius_px: int = 120,
     ):
@@ -88,7 +88,7 @@ class ViserCaptureRenderer:
             last = (
                 f"{info.get('clients', 0)} connected, none usable "
                 f"(viewports={viewports}). Open {self.viewer_url} in its own "
-                f"window at least ~{width}x{height}."
+                f"window (spectator or :8080). VLM frames are {width}x{height}."
             )
             if not warned:
                 logger.warning("Waiting for a full-page visor tab: %s", last)
@@ -107,7 +107,12 @@ class ViserCaptureRenderer:
         t0 = time.perf_counter()
         raw = self._request("POST", "/render", body=body, content_type="application/json")
         img = np.asarray(Image.open(io.BytesIO(raw)).convert("RGB"))
-        logger.info("Visor capture %dx%d in %.2fs", camera.width, camera.height, time.perf_counter() - t0)
+        need_w, need_h = int(camera.width), int(camera.height)
+        if img.shape[1] != need_w or img.shape[0] != need_h:
+            img = np.asarray(
+                Image.fromarray(img).resize((need_w, need_h), Image.Resampling.LANCZOS)
+            )
+        logger.info("Visor capture %dx%d in %.2fs", need_w, need_h, time.perf_counter() - t0)
         return img
 
     def _json(self, method: str, path: str, timeout: float | None = None) -> dict:

@@ -65,13 +65,14 @@
   .badge.done { background: var(--ok); color: #0a2417; }
 
   #detail { overflow-y: auto; padding: 14px 18px; }
-  #detail img.frame { max-width: 100%; max-height: 58vh; border-radius: 6px;
-                      border: 1px solid var(--border); background: #000; }
+  #detail img.frame { max-width: 100%; max-height: 58vh; width: auto; height: auto;
+                      object-fit: contain; border-radius: 6px;
+                      border: 1px solid var(--border); background: #000; display: block; }
   .frames { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   @media (max-width: 1100px) { .frames { grid-template-columns: 1fr; } }
   .frames figure { margin: 0; }
   .frames figcaption { font-size: 11px; color: var(--dim); margin: 0 0 5px; letter-spacing: .02em; }
-  .frames img.frame { max-height: 46vh; width: 100%; object-fit: contain; }
+  .frames img.frame { max-height: 46vh; width: 100%; height: auto; object-fit: contain; }
   .step img.depth-thumb { width: 48px; opacity: .9; }
   .kv { display: grid; grid-template-columns: 110px 1fr; gap: 3px 12px;
         font-size: 13px; margin: 12px 0; }
@@ -89,12 +90,30 @@
   .artifact { border: 1px solid var(--warn); border-radius: 6px; padding: 8px 12px;
               margin: 6px 0; font-size: 12.5px; background: var(--panel); }
   .empty { color: var(--dim); padding: 30px; text-align: center; }
-  #viser-wrap { display: none; padding: 8px 16px 12px;
-                border-bottom: 1px solid var(--border); background: var(--panel); }
-  #viser-wrap .hint { font-size: 12px; color: var(--dim); margin: 0 0 8px; }
-  #viser-frame-box { width: min(960px, 100%); aspect-ratio: 4 / 3; max-height: 48vh;
-                     margin: 0 auto; border: 1px solid var(--border); background: #000; }
-  #viser-wrap iframe { width: 100%; height: 100%; border: 0; display: block; }
+  /* 16:9 spectator pip — same aspect as a typical full-page visor tab, small
+     enough that the step list stays usable. Not stretched to 4:3. */
+  #viser-pip {
+    display: none; position: fixed; z-index: 40;
+    right: 16px; bottom: 16px;
+    width: min(640px, 42vw); aspect-ratio: 16 / 9;
+    background: #000; border: 1px solid var(--border); border-radius: 8px;
+    overflow: hidden; min-width: 320px;
+  }
+  #viser-pip.open { display: flex; flex-direction: column; }
+  #viser-pip .bar {
+    display: flex; align-items: center; gap: 8px; flex: none;
+    padding: 5px 8px; background: var(--panel);
+    border-bottom: 1px solid var(--border); cursor: grab; user-select: none;
+    font-size: 11px; color: var(--dim);
+  }
+  #viser-pip .bar b { color: var(--text); font-weight: 600; }
+  #viser-pip .bar .spacer { flex: 1; }
+  #viser-pip .bar button { padding: 3px 8px; font-size: 11px; }
+  #viser-pip .body { flex: 1; min-height: 0; background: #000; }
+  #viser-pip iframe { width: 100%; height: 100%; border: 0; display: block; }
+  @media (max-width: 900px) {
+    #viser-pip { width: min(100vw - 24px, 480px); right: 12px; bottom: 12px; }
+  }
   label.chk { flex-direction: row !important; align-items: center; gap: 6px !important;
               font-size: 12px !important; color: var(--dim); }
 </style>
@@ -107,8 +126,8 @@
   <span id="pill-run" class="pill">idle</span>
   <span id="pill-view" class="pill busy" style="display:none"></span>
   <span class="spacer"></span>
-  <a id="viser-link" href="http://localhost:8080" target="_blank" title="Agent frames are captured from this full-page tab. Keep it open, visible, and reasonably tall.">open visor (captures) ↗</a>
-  <button id="btn-viser" class="ghost">preview visor</button>
+  <a id="spectator-link" href="/spectator" target="_blank" title="Full-window HD visor. Keep it visible during episodes so captures are not frozen.">spectator (HD) ↗</a>
+  <button id="btn-viser" class="ghost">spectator window</button>
 </header>
 
 <div id="controls">
@@ -124,12 +143,12 @@
   <label>max steps
     <input id="in-steps" type="number" value="5" min="1" max="200" style="min-width:70px">
   </label>
-  <label>resolution
+  <label>VLM resolution
     <select id="in-res">
       <option value="320x240">320 × 240 (fast debug)</option>
       <option value="480x360">480 × 360</option>
       <option value="640x480">640 × 480</option>
-      <option value="960x720" selected>960 × 720 (visor match)</option>
+      <option value="960x720" selected>960 × 720 (default)</option>
     </select>
   </label>
   <label class="chk"><input type="checkbox" id="in-depth"> send depth map to VLM</label>
@@ -149,11 +168,6 @@
   <span>avg render <b id="st-render">–</b></span>
   <span>avg VLM <b id="st-vlm">–</b></span>
   <span>artifacts <b id="st-art">0</b></span>
-</div>
-
-<div id="viser-wrap">
-  <p class="hint">This preview is 4∶3 and is <b>not</b> used for agent screenshots. Keep the full-page visor tab open for captures.</p>
-  <div id="viser-frame-box"><iframe id="viser-frame"></iframe></div>
 </div>
 
 <div id="layout">

@@ -14,6 +14,7 @@ starting a new episode from the browser costs nothing but the rendering.
 
 Endpoints:
   GET  /                  dashboard page
+  GET  /spectator         HD visor (same aspect as :8080; not sent to the VLM)
   GET  /api/state         full dashboard state (scene status + current run)
   GET  /api/episodes      list all past runs on disk (meta.json summaries)
   GET  /api/episodes/<id>      full trace of one past run (steps + artifacts)
@@ -378,6 +379,7 @@ class DashboardApp:
                     "model": self.cfg.agent.model,
                     "send_depth": bool(self.cfg.agent.get("send_depth", False)),
                     "viewer_url": f"http://localhost:{self.cfg.viewer.port}",
+                    "spectator_path": "/spectator",
                 },
                 "now": time.time(),
             }
@@ -401,6 +403,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path in ("/", "/index.html"):
             self._send(200, (STATIC_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
+        elif path in ("/spectator", "/spectator.html"):
+            self._send(200, (STATIC_DIR / "spectator.html").read_bytes(), "text/html; charset=utf-8")
         elif path == "/api/state":
             self._send_json(self.app.snapshot())
         elif path == "/api/episodes":

@@ -207,6 +207,7 @@ def cmd_viewer(cfg, args) -> None:
         max_splats=cfg.viewer.max_splats,
         up_axis=cfg.camera.up_axis,
         render_port=int(cfg.viewer.get("render_port", 8081)),
+        fov_deg=float(cfg.renderer.fov_deg),
     )
 
 
