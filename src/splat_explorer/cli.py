@@ -99,7 +99,7 @@ def _build_navigation(cfg, scene):
     spawn = None
     if cfg.camera.start_position == "auto":
         try:
-            spawn = prepare_spawn_selection(scene, cfg)
+            spawn = prepare_spawn_selection(scene, cfg, world=world)
         except Exception:
             logger.exception("Spawn-point search failed; falling back to centroid start")
     return world, spawn

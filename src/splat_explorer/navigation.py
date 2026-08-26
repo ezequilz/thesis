@@ -1,25 +1,31 @@
 """Scene-aware navigation: ceiling removal, spawn-point search, collision.
 
+Splat-extent-aware clearance
+----------------------------
+Both the spawn search and collision treat every solid gaussian as a sphere of
+radius 2 sigma (its max scale) around the centroid, not as a point. This
+matters for translucent sheet geometry like sheer curtains: those are
+reconstructed as FEW, LARGE stretched gaussians, so center-distance metrics
+see mostly empty space where a person would see (and the renderer draws) a
+fabric wall. Clearance = min over the k nearest centers of
+(center distance - splat radius), via one batched cKDTree k-NN query.
+
 Spawn-point search
 ------------------
-Interior gaussians (ceiling stripped by height percentile) are projected onto
-the ground plane and binned into a 2D occupancy grid. A Euclidean distance
-transform (scipy.ndimage.distance_transform_edt) then gives every free cell
-its distance to the nearest occupied cell in O(cells) — an efficient way to
-find spots that are "as far as possible from the closest splats" even for
-multi-million-splat scenes (histogram + EDT, never pairwise distances). The
-score subtracts a pull toward the scene's 2D center of mass, so winners sit
-centrally (roughly equidistant from the surrounding geometry) instead of in
-far corners, and greedy non-max suppression spaces the picks apart. A cell
-only qualifies if solid floor splats exist beneath it, which rejects
-open-space maxima outside the room shell.
+Cells of a 2D ground grid (interior height range found by ceiling/floor
+percentiles) are scored by their 3D surface clearance at eye height minus a
+pull toward the scene's center of mass, so winners sit in open space,
+centrally (roughly equidistant from the surrounding geometry) rather than in
+far corners; greedy non-max suppression spaces the picks apart. A cell only
+qualifies if solid floor splats exist beneath it, which rejects open-space
+maxima outside the room shell. Cost is one k-NN batch over grid cells —
+fine for multi-million-splat scenes, never pairwise distances.
 
 Collision
 ---------
-CollisionWorld holds a cKDTree over solid (opacity-filtered) splat centers.
-Every camera move is clamped by sampling the path and stopping before the
-clearance to the nearest center drops below clearance_radius, so the agent can
-no longer end up inside walls or furniture.
+CollisionWorld clamps every camera move by sampling the path and stopping
+before surface clearance drops below clearance_radius, so the agent can no
+longer end up inside walls, furniture, or curtains.
 
 move_toward
 -----------
@@ -45,8 +51,8 @@ from .scene import GaussianScene
 
 logger = logging.getLogger(__name__)
 
-# Cap on occupancy grid cells; the cell size grows for huge scenes.
-_MAX_GRID_CELLS = 1_500_000
+# Cap on spawn-grid cells (each costs one k-NN query); cell size grows beyond.
+_MAX_GRID_CELLS = 400_000
 
 
 def ground_basis(up: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -77,21 +83,61 @@ def strip_ceiling(
 @dataclass
 class SpawnPoint:
     index: int
-    position: np.ndarray  # (3,) world
-    clearance: float      # horizontal distance to the nearest occupied cell (scene units)
+    position: np.ndarray   # (3,) world
+    clearance: float       # surface distance to the nearest solid splat (scene units)
+    view_distance: float   # median horizontal sight-line length (scene units)
+
+
+def _view_distances(
+    world: CollisionWorld,
+    origins: np.ndarray,
+    up: np.ndarray,
+    num_rays: int = 16,
+    max_dist: float = 6.0,
+    max_iters: int = 24,
+) -> np.ndarray:
+    """Median horizontal sight-line length per origin, via sphere tracing.
+
+    Casts num_rays evenly-spaced horizontal rays from each origin and marches
+    each by the local clearance until it hits geometry or max_dist. Separates
+    genuinely open vantage points from small enclosed pockets (e.g. inside a
+    curtained bed nook) that plain clearance cannot distinguish.
+    """
+    e0, e1 = ground_basis(up)
+    angles = np.linspace(0.0, 2.0 * np.pi, num_rays, endpoint=False)
+    dirs = np.cos(angles)[:, None] * e0[None, :] + np.sin(angles)[:, None] * e1[None, :]
+
+    M = len(origins)
+    P = np.repeat(origins, num_rays, axis=0)          # (M*R, 3)
+    D = np.tile(dirs, (M, 1))                          # (M*R, 3)
+    t = np.zeros(len(P))
+    active = np.ones(len(P), dtype=bool)
+    for _ in range(max_iters):
+        if not active.any():
+            break
+        c = np.asarray(world.clearance(P[active] + t[active, None] * D[active]))
+        t[active] += np.maximum(c, 0.0)
+        still = (c > 0.05) & (t[active] < max_dist)
+        active[np.flatnonzero(active)] = still
+    return np.median(np.minimum(t, max_dist).reshape(M, num_rays), axis=1)
 
 
 def find_spawn_points(
     scene: GaussianScene,
     up_axis: str,
+    world: CollisionWorld | None = None,
     num_points: int = 5,
     ceiling_percentile: float = 25.0,
     grid_cell: float = 0.15,
-    solid_opacity: float = 0.3,
+    solid_opacity: float = 0.1,
     spawn_height_fraction: float = 0.5,
     centroid_pull: float = 0.35,
 ) -> list[SpawnPoint]:
-    """Candidate start positions in open space with good vantage points."""
+    """Candidate start positions in open space with good vantage points.
+
+    Pass an existing CollisionWorld to reuse its KD-tree; otherwise one is
+    built here with the same solid_opacity.
+    """
     up = up_vector(up_axis).astype(np.float64)
     e0, e1 = ground_basis(up)
 
@@ -99,6 +145,8 @@ def find_spawn_points(
     if len(means) < 100:
         logger.warning("Spawn search: too few solid gaussians (%d)", len(means))
         return []
+    if world is None:
+        world = CollisionWorld(scene, solid_opacity=solid_opacity)
 
     h = means @ up
     floor = float(np.percentile(h, 3.0))
@@ -118,68 +166,110 @@ def find_spawn_points(
     ny = max(int(np.ceil(extent_y / cell)), 4)
     x_edges = np.linspace(x0, x1, nx + 1)
     y_edges = np.linspace(y0, y1, ny + 1)
+    cx_cells = 0.5 * (x_edges[:-1] + x_edges[1:])
+    cy_cells = 0.5 * (y_edges[:-1] + y_edges[1:])
+    CX, CY = np.meshgrid(cx_cells, cy_cells, indexing="ij")
 
-    # Occupancy: everything at body height (above floor clutter noise, below
-    # the ceiling cut). The floor band below tells us where the room actually
-    # extends, so free space outside the walls never qualifies.
+    # 3D surface clearance at eye height for every cell, splat extents
+    # included — sheer curtains and other sparse-center geometry count.
+    spawn_h = floor + spawn_height_fraction * interior
+    cell_points = (CX.ravel()[:, None] * e0[None, :]
+                   + CY.ravel()[:, None] * e1[None, :]
+                   + spawn_h * up[None, :])
+    clearance = np.asarray(world.clearance(cell_points)).reshape(CX.shape)
+
+    # Cells only qualify above solid floor splats, so free space outside the
+    # room shell never wins.
     body_lo = floor + 0.15 * interior
-    body = (h >= body_lo) & (h <= cut) & (x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)
-    occ_hist, _, _ = np.histogram2d(x[body], y[body], bins=(x_edges, y_edges))
-    occupied = occ_hist >= 2  # >=2 splats: robust to lone noise centers
-
     floor_band = (h >= floor - 0.05 * interior) & (h < body_lo)
     floor_hist, _, _ = np.histogram2d(x[floor_band], y[floor_band], bins=(x_edges, y_edges))
     has_floor = ndimage.binary_dilation(floor_hist >= 1, iterations=2)
 
-    # Distance (scene units) from every free cell to the nearest occupied cell.
-    clearance = ndimage.distance_transform_edt(~occupied) * cell
-
-    cx_cells = 0.5 * (x_edges[:-1] + x_edges[1:])
-    cy_cells = 0.5 * (y_edges[:-1] + y_edges[1:])
-    CX, CY = np.meshgrid(cx_cells, cy_cells, indexing="ij")
     dist_to_com = np.hypot(CX - float(x.mean()), CY - float(y.mean()))
 
     score = clearance - centroid_pull * dist_to_com
-    valid = (~occupied) & has_floor & (clearance >= max(2.0 * cell, 0.3))
+    valid = has_floor & (clearance >= max(2.0 * cell, 0.35))
     if not valid.any():
         logger.warning("Spawn search: no valid free cells found")
         return []
     score = np.where(valid, score, -np.inf)
 
-    # Greedy top-k with non-max suppression so points spread across the room.
+    # Stage 1: shortlist spatially-separated candidates by clearance score
+    # (greedy non-max suppression so they spread across the room).
     separation = max(4.0 * cell, 0.15 * min(extent_x, extent_y))
-    spawn_h = floor + spawn_height_fraction * interior
-    points: list[SpawnPoint] = []
-    for i in range(num_points):
+    num_candidates = max(3 * num_points, 12)
+    shortlist: list[tuple[float, float, float, float]] = []  # px, py, clearance, dist_to_com
+    for _ in range(num_candidates):
         flat = int(np.argmax(score))
         gi, gj = np.unravel_index(flat, score.shape)
         if not np.isfinite(score[gi, gj]):
             break
         px, py = float(cx_cells[gi]), float(cy_cells[gj])
-        position = px * e0 + py * e1 + spawn_h * up
-        points.append(SpawnPoint(index=i, position=position.astype(np.float64),
-                                 clearance=float(clearance[gi, gj])))
+        shortlist.append((px, py, float(clearance[gi, gj]), float(dist_to_com[gi, gj])))
         score[np.hypot(CX - px, CY - py) < separation] = -np.inf
+    if not shortlist:
+        return []
 
+    # Stage 2: rank the shortlist by actual visibility. Median sight-line
+    # length separates open-floor vantage points from enclosed pockets
+    # (curtained alcoves, gaps between furniture) that clearance alone scores
+    # the same. The centroid pull is deliberately weakened here: visibility is
+    # the better centrality signal, and a full pull would let a central but
+    # enclosed pocket outrank open floor.
+    positions = np.stack([px * e0 + py * e1 + spawn_h * up for px, py, _, _ in shortlist])
+    views = _view_distances(world, positions, up)
+    ranking = np.array([
+        view + 0.5 * clr - 0.3 * centroid_pull * dcom
+        for view, (_, _, clr, dcom) in zip(views, shortlist)
+    ])
+    order = np.argsort(-ranking)[:num_points]
+
+    points = [
+        SpawnPoint(index=i, position=positions[j].astype(np.float64),
+                   clearance=shortlist[j][2], view_distance=float(views[j]))
+        for i, j in enumerate(order)
+    ]
     logger.info("Spawn search: %d candidate(s) on a %dx%d grid (cell %.2f): %s",
                 len(points), nx, ny, cell,
-                [f"#{p.index} clr={p.clearance:.2f}" for p in points])
+                [f"#{p.index} clr={p.clearance:.2f} view={p.view_distance:.1f}" for p in points])
     return points
 
 
 class CollisionWorld:
-    """cKDTree over solid splat centers: clearance queries + motion clamping."""
+    """Splat-extent-aware clearance queries + motion clamping.
 
-    def __init__(self, scene: GaussianScene, solid_opacity: float = 0.3,
+    Every solid gaussian counts as a sphere of radius 2 sigma (max scale,
+    capped so room-sized fog splats can't block the whole scene) around its
+    center. Clearance at a point is min_k(center_distance_k - radius_k) over
+    the k nearest centers — one batched cKDTree query.
+    """
+
+    K_NEIGHBORS = 16
+    # Cap on a single splat's effective radius: large low-opacity "fog"
+    # gaussians would otherwise mark whole rooms as blocked.
+    MAX_SPLAT_RADIUS = 0.75
+
+    def __init__(self, scene: GaussianScene, solid_opacity: float = 0.1,
                  clearance_radius: float = 0.25):
         mask = scene.opacities >= solid_opacity
         self._tree = cKDTree(scene.means[mask].astype(np.float64))
+        self._radii = np.minimum(
+            2.0 * scene.scales[mask].max(axis=1).astype(np.float64),
+            self.MAX_SPLAT_RADIUS,
+        )
         self.clearance_radius = float(clearance_radius)
         logger.info("Collision world: %d solid gaussians, clearance radius %.2f",
                     int(mask.sum()), self.clearance_radius)
 
-    def clearance(self, point: np.ndarray) -> float:
-        return float(self._tree.query(np.asarray(point, dtype=np.float64))[0])
+    def clearance(self, points: np.ndarray) -> np.ndarray | float:
+        """Surface clearance for one (3,) point or a batch (M, 3)."""
+        pts = np.atleast_2d(np.asarray(points, dtype=np.float64))
+        k = min(self.K_NEIGHBORS, self._tree.n)
+        dists, idx = self._tree.query(pts, k=k)
+        if k == 1:
+            dists, idx = dists[:, None], idx[:, None]
+        surface = np.maximum(dists - self._radii[idx], 0.0).min(axis=1)
+        return float(surface[0]) if np.ndim(points) == 1 else surface
 
     def clamp_motion(
         self, start: np.ndarray, direction: np.ndarray, distance: float
@@ -187,7 +277,7 @@ class CollisionWorld:
         """Largest travel along unit `direction` keeping clearance_radius.
 
         Returns (allowed_distance, was_clamped). One batched KD-tree query
-        over path samples, so cost is O(samples * log N).
+        over path samples, so cost is O(samples * k * log N).
         """
         distance = float(distance)
         if distance <= 0.0:
@@ -196,8 +286,7 @@ class CollisionWorld:
         n = int(np.ceil(distance / step))
         ts = np.linspace(0.0, distance, n + 1)[1:]
         pts = np.asarray(start, dtype=np.float64)[None, :] + np.asarray(direction)[None, :] * ts[:, None]
-        dists, _ = self._tree.query(pts)
-        bad = np.flatnonzero(dists < self.clearance_radius)
+        bad = np.flatnonzero(self.clearance(pts) < self.clearance_radius)
         if len(bad) == 0:
             return distance, False
         allowed = max(float(ts[bad[0]]) - step, 0.0)
@@ -287,16 +376,20 @@ class SpawnSelection:
             x, y, z = p.position
             lines.append(
                 f"Point {p.index}: world coordinates ({x:.2f}, {y:.2f}, {z:.2f}), "
-                f"~{p.clearance:.2f} units of open space around it"
+                f"~{p.clearance:.2f} units of open space around it, "
+                f"median sight-line {p.view_distance:.1f} units"
             )
         return "\n".join(lines)
 
 
-def prepare_spawn_selection(scene: GaussianScene, cfg) -> SpawnSelection | None:
+def prepare_spawn_selection(
+    scene: GaussianScene, cfg, world: CollisionWorld | None = None
+) -> SpawnSelection | None:
     """Spawn-point search + annotated bird's-eye render, from the full config.
 
     Returns None when the search finds nothing usable (caller falls back to
-    the legacy centroid spawn).
+    the legacy centroid spawn). Pass the episode's CollisionWorld to reuse
+    its KD-tree.
     """
     from .rendering.annotate import draw_spawn_markers
     from .rendering.birdseye import render_birdseye
@@ -305,6 +398,7 @@ def prepare_spawn_selection(scene: GaussianScene, cfg) -> SpawnSelection | None:
     points = find_spawn_points(
         scene,
         up_axis=cfg.camera.up_axis,
+        world=world,
         num_points=int(nav.num_spawn_points),
         ceiling_percentile=float(nav.ceiling_percentile),
         grid_cell=float(nav.grid_cell),

@@ -50,7 +50,10 @@ navigation:
   # Cell size (scene units) of the 2D occupancy grid used by the spawn search.
   grid_cell: 0.15
   # Gaussians below this opacity are ignored for occupancy/collision (haze).
-  solid_opacity: 0.3
+  # Keep this LOW: semi-transparent geometry like sheer curtains sits around
+  # 0.1-0.3 opacity and must still count as an obstacle (splat extents are
+  # accounted for, so sparse large curtain gaussians block properly).
+  solid_opacity: 0.1
   # Minimum distance (scene units) the camera keeps from solid splat centers;
   # all movement is clamped so clearance never drops below this.
   clearance_radius: 0.25

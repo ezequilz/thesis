@@ -26,6 +26,13 @@ such as:
 The depth map helps: floaters appear as small bright patches much nearer than
 their surroundings, holes as black pixels inside otherwise solid surfaces.
 
+IMPORTANT — not artifacts: semi-transparent materials (sheer curtains, glass,
+foliage) legitimately render as layered translucent sheets and can look
+streaky, ghostly, or scalloped, especially from very close up, where this
+renderer exaggerates them. If the view is dominated by such translucency, move
+back and re-check from a second, more distant viewpoint before reporting; only
+report it if the anomaly persists from a normal viewing distance.
+
 How to move:
 - move_toward(pixel_x, pixel_y, amount) is your MAIN way to travel. Pick a
   pixel in the RGB view; you move `amount` (0..1) of the distance to the
