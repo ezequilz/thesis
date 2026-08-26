@@ -6,18 +6,19 @@ Episode flow:
      markers) and picks the starting point; the rig teleports there.
   2. Each step: render RGB (+ depth for navigation), overlay the walked path
      onto the cached bird's-eye map, hand the observation to the policy
-     (depth image only if send_depth; path map only if the previous action
-     was view_map), clamp and apply the returned action (collision-checked
-     through the MotionContext), and log everything to
+     (depth / path map only if send_depth is on or the previous action was
+     view_depth / view_map), clamp and apply the returned action
+     (collision-checked through the MotionContext), and log everything to
      outputs/episodes/<timestamp>/ as frames plus an actions.jsonl trace.
      The outcome of the previous motion (e.g. "move cut short by an obstacle")
      is fed back to the policy with the next prompt.
 
 Every step record includes render/decide wall times and, when the policy
 exposes a `last_debug` dict (see CliRelayPolicy), the raw VLM exchange —
-so traces double as debugging material for the dashboard. The path map PNG
-is always written (dashboard tile) and only attached to the VLM prompt after
-a view_map action, the same way the depth map is optional.
+so traces double as debugging material for the dashboard. Depth and path-map
+PNGs are always written (dashboard tiles) and only attached to the VLM prompt
+after the matching view_* action (or when send_depth is forced on). RGB is
+always in the prompt.
 """
 
 from __future__ import annotations
@@ -81,6 +82,11 @@ def _motion_note(outcome: dict | None) -> str | None:
         return (
             "previous action requested the map — this observation includes the "
             "bird's-eye path map next to the RGB view"
+        )
+    if kind == "view_depth":
+        return (
+            "previous action requested the depth map — this observation includes "
+            "the depth map next to the RGB view"
         )
     return None
 
@@ -148,11 +154,11 @@ def run_episode(
 
     nav enables collision clamping for all movement; spawn triggers the
     bird's-eye start-selection prompt before the first step. send_depth
-    controls whether the depth map is attached to the VLM prompt (it is
-    always rendered, saved, and used for move_toward). The path map is
-    always updated and saved; it is attached to the VLM prompt only on the
-    observation after a view_map action (RGB remains attached). run_meta is
-    merged into the episode's meta.json (e.g. dashboard run params).
+    forces the depth map onto every VLM prompt; otherwise it is attached
+    only on the observation after a view_depth action (it is always
+    rendered, saved, and used for move_toward). The path map is always
+    updated and saved, and attached after view_map. RGB is always in the
+    prompt. run_meta is merged into the episode's meta.json.
 
     on_step(record, frame_path, rig) fires after each decision — `record`
     matches the actions.jsonl line, `rig` still holds the pose the frame was
@@ -171,6 +177,7 @@ def run_episode(
     steps_done = 0
     motion_note: str | None = None
     send_map = False
+    send_depth_once = False
     expl_map: ExplorationMap | None = None
     if (
         spawn is not None
@@ -238,9 +245,10 @@ def run_episode(
                         pose += f" | {motion_note}"
 
                     t1 = time.perf_counter()
+                    attach_depth = (send_depth or send_depth_once) and depth_image is not None
                     action = policy.decide(
                         observation, pose, step,
-                        depth_image=depth_image if send_depth else None,
+                        depth_image=depth_image if attach_depth else None,
                         map_image=map_image if send_map else None,
                     )
                     decide_s = time.perf_counter() - t1
@@ -259,7 +267,7 @@ def run_episode(
                         "action": {"name": action.name, "args": action.args},
                         "frame": frame_path.name,
                         "depth_frame": depth_frame_name,
-                        "depth_sent": send_depth and depth_image is not None,
+                        "depth_sent": attach_depth,
                         "map_frame": map_frame_name,
                         "map_sent": send_map and map_image is not None,
                         "render_backend": render_backend,
@@ -282,6 +290,7 @@ def run_episode(
                         if motion_note:
                             logger.info("step %03d | %s", step, motion_note)
                     send_map = action.name == "view_map"
+                    send_depth_once = action.name == "view_depth"
 
                     trace.write(json.dumps(record) + "\n")
                     trace.flush()

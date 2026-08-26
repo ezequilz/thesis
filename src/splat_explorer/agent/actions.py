@@ -8,8 +8,8 @@ Movement model:
     you there instead of diving into it). amount = 1 lands right at (never
     inside) the geometry.
   - move remains for small body-relative correction steps.
-  - view_map requests a top-down path map (attached on the next observation,
-    RGB stays in the prompt). The map itself is refreshed every step.
+  - view_map / view_depth request an extra image on the next observation
+    (RGB stays in the prompt). Depth is always rendered for navigation.
   - rotate handles both yaw and (optional, absolute) pitch; the former
     separate `look` action was folded into it.
 All movement is collision-clamped by the harness before being applied.
@@ -65,8 +65,8 @@ ACTION_TOOLS: list[dict] = [
                 "(a point on the floor walks you there, not down into it). amount is the "
                 "fraction of the ground distance to travel: 0 = stay, 1.0 = walk right up "
                 "to that location (a safety margin is enforced, you can never enter "
-                "geometry). Check the depth map: black pixels have no geometry to move "
-                "toward. Use this for all larger moves."
+                "geometry). If unsure what is solid, call view_depth: black depth pixels "
+                "have no geometry to move toward. Use this for all larger moves."
             ),
             "parameters": {
                 "type": "object",
@@ -129,6 +129,24 @@ ACTION_TOOLS: list[dict] = [
                 "NEXT observation will include that map alongside the usual RGB view "
                 "(move_toward pixel coordinates still refer to RGB, not the map). Use this "
                 "to check coverage and avoid retracing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "view_depth",
+            "description": (
+                "Look at a DEPTH MAP of the current camera view (bright = near, dark = far, "
+                "black = no geometry). Does not move the camera. The NEXT observation will "
+                "include that depth map alongside the usual RGB view (move_toward pixel "
+                "coordinates still refer to RGB). Use this to judge distance, find holes/"
+                "floaters, or check whether a pixel has geometry before move_toward."
             ),
             "parameters": {
                 "type": "object",

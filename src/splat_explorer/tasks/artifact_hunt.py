@@ -8,11 +8,10 @@ Planned next steps:
   - artifact taxonomy shared between prompt and evaluation
 """
 
-_IMAGES_WITH_DEPTH = """After every action you receive two fresh \
-labelled images rendered from your current camera pose:
-1. RGB view — what the scene looks like.
-2. DEPTH MAP of the exact same view — bright = near, dark = far, black = no
-   geometry at all (background, or a hole in the reconstruction).
+_IMAGES_WITH_DEPTH = """After every action you receive a fresh RGB view of the \
+scene. This turn also includes a DEPTH MAP of the exact same view — bright = \
+near, dark = far, black = no geometry at all (background, or a hole in the \
+reconstruction).
 """
 
 _IMAGES_RGB_ONLY = """After every action you receive one fresh image \
@@ -21,6 +20,13 @@ rendered from your current camera pose: the RGB view of the scene.
 
 _DEPTH_HELP = """The depth map helps: floaters appear as small bright patches much nearer than
 their surroundings, holes as black pixels inside otherwise solid surfaces.
+"""
+
+_DEPTH_REQUEST_HELP = """You can call view_depth to see a depth map of your current view \
+(bright = near, dark = far, black = nothing). The NEXT observation after \
+view_depth includes that map next to the RGB view — pixel coordinates for \
+move_toward still refer to RGB. Use it to judge distance, find holes or \
+floaters, or check that a pixel has geometry before moving toward it.
 """
 
 _MAP_HELP = """You can call view_map to consult a top-down bird's-eye of the scene \
@@ -39,11 +45,11 @@ move_toward pixel coordinates still refer to the RGB view, not the map.
 
 
 def system_prompt(with_depth: bool = True, with_map: bool = False) -> str:
-    """Task prompt for the explore loop; wording adapts to whether the depth
-    map is attached alongside the RGB view (agent.send_depth), and whether
-    this turn also includes the on-demand bird's-eye path map."""
+    """Task prompt for the explore loop; wording adapts to whether this turn
+    includes a depth map and/or the on-demand bird's-eye path map. RGB is
+    always attached."""
     depth_hint = (" Check the\n  depth map first: black pixels have nothing to move toward."
-                  if with_depth else "")
+                  if with_depth else " Call view_depth first if you need to know what is solid.")
     return f"""\
 You are a quality-inspection agent walking through a 3D Gaussian Splatting \
 reconstruction of an indoor scene. {_IMAGES_WITH_DEPTH if with_depth else _IMAGES_RGB_ONLY}\
@@ -73,11 +79,14 @@ How to move:
 - move(direction, distance) is only for small corrective steps (0.3-1.0 units).
 - rotate(yaw_degrees, pitch_degrees) turns the camera; pitch is absolute
   (-85..85, positive = up, 0 = level).
+- view_depth() shows a depth map of the current view on the next observation
+  (RGB is still attached). Does not move you.
 - view_map() shows a top-down map of your path and past viewing directions
   on the next observation (RGB is still attached). Does not move you.
 - The harness blocks collisions. If your last movement was cut short, the next
   prompt tells you so — turn or pick a different direction instead of retrying.
 
+{_DEPTH_REQUEST_HELP if not with_depth else ""}\
 {_MAP_HELP if not with_map else ""}\
 Rules:
 - Call exactly one tool per turn.
@@ -90,8 +99,8 @@ Rules:
 """
 
 
-# Default prompt (depth attached) for callers that don't toggle it.
-SYSTEM_PROMPT = system_prompt(True)
+# Default prompt (RGB only; depth/map attached per-turn by the loop).
+SYSTEM_PROMPT = system_prompt(False)
 
 
 SPAWN_PROMPT = """\

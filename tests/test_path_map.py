@@ -81,27 +81,33 @@ def test_view_map_does_not_move_the_rig():
     eye = np.array([1.0, 1.5, 2.0])
     rig = CameraRig(eye, up_axis="+y", yaw_deg=40.0, pitch_deg=-10.0)
     before = (rig.position.copy(), rig.yaw_deg, rig.pitch_deg)
-    outcome = rig.apply(Action("view_map", {}))
-    assert outcome == {"kind": "view_map"}
-    np.testing.assert_array_equal(rig.position, before[0])
-    assert rig.yaw_deg == before[1]
-    assert rig.pitch_deg == before[2]
+    for name in ("view_map", "view_depth"):
+        rig.position[:] = before[0]
+        rig.yaw_deg, rig.pitch_deg = before[1], before[2]
+        outcome = rig.apply(Action(name, {}))
+        assert outcome == {"kind": name}
+        np.testing.assert_array_equal(rig.position, before[0])
+        assert rig.yaw_deg == before[1]
+        assert rig.pitch_deg == before[2]
 
 
-def test_parse_action_accepts_view_map():
+def test_parse_action_accepts_view_extras():
     names = {tool["function"]["name"] for tool in ACTION_TOOLS}
     assert "view_map" in names
-    action = parse_action('{"action": "view_map", "args": {}}')
-    assert action is not None
-    assert action.name == "view_map"
-    action = parse_action('{"action": "view_map"}')
-    assert action is not None and action.name == "view_map"
+    assert "view_depth" in names
+    for name in ("view_map", "view_depth"):
+        action = parse_action(f'{{"action": "{name}", "args": {{}}}}')
+        assert action is not None and action.name == name
+        action = parse_action(f'{{"action": "{name}"}}')
+        assert action is not None and action.name == name
 
 
-def test_system_prompt_mentions_map_when_attached():
+def test_system_prompt_mentions_extras_when_attached():
     base = system_prompt(with_depth=False, with_map=False)
-    attached = system_prompt(with_depth=False, with_map=True)
-    assert "view_map" in base
+    with_map = system_prompt(with_depth=False, with_map=True)
+    with_depth = system_prompt(with_depth=True, with_map=False)
+    assert "view_map" in base and "view_depth" in base
     assert "BIRD'S-EYE MAP" not in base
-    assert "BIRD'S-EYE MAP" in attached
-    assert "RGB view" in attached
+    assert "BIRD'S-EYE MAP" in with_map
+    assert "DEPTH MAP" in with_depth
+    assert "RGB view" in with_map and "RGB view" in with_depth

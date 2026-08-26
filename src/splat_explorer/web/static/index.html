@@ -165,7 +165,7 @@
       <option value="960x720" selected>960 × 720 (default)</option>
     </select>
   </label>
-  <label class="chk"><input type="checkbox" id="in-depth"> send depth map to VLM</label>
+  <label class="chk"><input type="checkbox" id="in-depth"> always send depth map to VLM</label>
   <button id="btn-start">▶ Start episode</button>
   <button id="btn-stop" disabled>■ Stop</button>
   <label class="chk"><input type="checkbox" id="in-follow" checked> follow latest step</label>
@@ -307,6 +307,7 @@ function renderSteps(steps) {
     if (s.vlm?.fallback) badge = '<span class="badge fb">FALLBACK</span>';
     if (a.name === "report_artifact") badge += '<span class="badge art">ARTIFACT</span>';
     if (a.name === "view_map") badge += '<span class="badge map">MAP</span>';
+    if (a.name === "view_depth") badge += '<span class="badge map">DEPTH</span>';
     if (a.name === "done") badge += '<span class="badge done">DONE</span>';
     div.innerHTML = `
       <img src="${s.frame_url}" loading="lazy" alt="step ${s.step}">
@@ -347,8 +348,8 @@ function renderDetail() {
     <div class="artifact">step ${a.step} · <b>${esc(a.severity ?? "?")}</b> ·
       ${esc(a.image_region ?? "")}<br>${esc(a.description ?? "")}</div>`).join("");
   const depthCaption = s.depth_sent
-    ? "DEPTH MAP — sent to the VLM (bright = near, black = nothing)"
-    : "DEPTH MAP — navigation only, not sent to the VLM";
+    ? "DEPTH MAP — sent to the VLM this step (bright = near, black = nothing)"
+    : "DEPTH MAP — navigation only (sent to the VLM after view_depth, or if always-send is on)";
   const mapCaption = s.map_sent
     ? "MAP — bird's-eye path + camera frustums, sent to the VLM this step"
     : "MAP — bird's-eye path + camera frustums (updated every step; sent to the VLM after view_map)";

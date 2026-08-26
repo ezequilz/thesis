@@ -141,8 +141,7 @@ def draw_path_map(
     fov_deg: float = 75.0,
     up: np.ndarray | None = None,
     title: str = (
-        "BIRD'S-EYE MAP (ceiling removed) | red line = path | "
-        "triangles = camera view | cyan = current pose"
+        "BIRD'S-EYE MAP (ceiling removed) | red = path | triangles = view | cyan = now"
     ),
 ) -> np.ndarray:
     """Paint the walked path and a top-down camera frustum at every past pose.

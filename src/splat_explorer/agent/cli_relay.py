@@ -340,7 +340,15 @@ class CliRelayPolicy:
             images_note = (
                 f"The attached images are {listed} (labelled). "
                 "Pixel coordinates for move_toward refer to the RGB view"
-                + (", not the map." if with_map else ".")
+                + (
+                    ", not "
+                    + " or ".join(
+                        (["the depth map"] if with_depth else [])
+                        + (["the map"] if with_map else [])
+                    )
+                    + "."
+                    if (with_depth or with_map) else "."
+                )
             )
         return (
             f"{system_prompt(with_depth, with_map)}\n"

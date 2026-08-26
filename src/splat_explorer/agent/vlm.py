@@ -46,9 +46,9 @@ class ScriptedPolicy:
 
     def __init__(self):
         self._script = (
-            [Action("rotate", {"yaw_degrees": 45.0})] * 4
-            + [Action("view_map", {})]
-            + [Action("rotate", {"yaw_degrees": 45.0})] * 4
+            [Action("rotate", {"yaw_degrees": 45.0})] * 3
+            + [Action("view_map", {}), Action("view_depth", {})]
+            + [Action("rotate", {"yaw_degrees": 45.0})] * 3
             + [
                 Action("rotate", {"pitch_degrees": -20.0}),
                 Action("rotate", {"yaw_degrees": 30.0, "pitch_degrees": 0.0}),

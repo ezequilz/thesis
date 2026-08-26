@@ -88,9 +88,9 @@ agent:
   # CLIRELAY_API_KEY env var instead of putting the key in a config file.
   relay_api_key: ""
   max_steps: 40
-  # Attach the depth map to the VLM prompt alongside the RGB view. Depth is
-  # always rendered, saved per step, and used for move_toward regardless —
-  # this only controls what the model sees (A/B-test both settings).
+  # Force-attach the depth map to every VLM prompt. Depth is always rendered,
+  # saved per step, and used for move_toward regardless. When false (default)
+  # the model can still call view_depth to see it on the next observation.
   send_depth: false
   # Hard limits the harness enforces on tool call parameters.
   max_move_distance: 2.0
