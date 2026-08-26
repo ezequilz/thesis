@@ -95,9 +95,9 @@
   #viser-pip {
     display: none; position: fixed; z-index: 40;
     right: 16px; bottom: 16px;
-    width: min(640px, 42vw); aspect-ratio: 16 / 9;
+    width: min(720px, calc(100vw - 440px)); aspect-ratio: 16 / 9;
     background: #000; border: 1px solid var(--border); border-radius: 8px;
-    overflow: hidden; min-width: 320px;
+    overflow: hidden; min-width: 360px; min-height: 202px;
   }
   #viser-pip.open { display: flex; flex-direction: column; }
   #viser-pip .bar {
@@ -109,8 +109,17 @@
   #viser-pip .bar b { color: var(--text); font-weight: 600; }
   #viser-pip .bar .spacer { flex: 1; }
   #viser-pip .bar button { padding: 3px 8px; font-size: 11px; }
-  #viser-pip .body { flex: 1; min-height: 0; background: #000; }
+  #viser-pip .body { flex: 1; min-height: 0; background: #000; position: relative; }
   #viser-pip iframe { width: 100%; height: 100%; border: 0; display: block; }
+  #viser-pip .resize {
+    position: absolute; right: 0; bottom: 0; width: 18px; height: 18px;
+    cursor: nwse-resize; z-index: 3;
+  }
+  #viser-pip .resize::after {
+    content: ""; position: absolute; right: 5px; bottom: 5px;
+    width: 7px; height: 7px;
+    border-right: 2px solid var(--dim); border-bottom: 2px solid var(--dim);
+  }
   @media (max-width: 900px) {
     #viser-pip { width: min(100vw - 24px, 480px); right: 12px; bottom: 12px; }
   }
@@ -182,7 +191,10 @@
     <button class="ghost" id="btn-pip-pop">pop out</button>
     <button class="ghost" id="btn-pip-hide">hide</button>
   </div>
-  <div class="body"><iframe id="viser-frame" title="HD visor"></iframe></div>
+  <div class="body">
+    <iframe id="viser-frame" title="HD visor"></iframe>
+    <div class="resize" id="viser-pip-resize" title="Drag to resize (keeps 16∶9)"></div>
+  </div>
 </div>
 
 <script>
@@ -458,24 +470,66 @@ $("btn-pip-pop").onclick = () => {
 };
 
 (function enablePipDrag() {
-  const pip = $("viser-pip"), bar = $("viser-pip-bar");
-  let ox = 0, oy = 0, dragging = false;
+  const pip = $("viser-pip"), bar = $("viser-pip-bar"), grip = $("viser-pip-resize");
+  const ASPECT = 16 / 9, MIN_W = 360, MIN_H = 202;
+  let mode = null, ox = 0, oy = 0, startW = 0, startH = 0, startX = 0, startY = 0;
+
+  function pinTopLeft() {
+    const r = pip.getBoundingClientRect();
+    pip.style.left = r.left + "px";
+    pip.style.top = r.top + "px";
+    pip.style.right = "auto";
+    pip.style.bottom = "auto";
+    pip.style.aspectRatio = "auto";
+    pip.style.width = r.width + "px";
+    pip.style.height = r.height + "px";
+    return r;
+  }
+
   bar.addEventListener("mousedown", e => {
     if (e.target.closest("button")) return;
-    dragging = true;
-    const r = pip.getBoundingClientRect();
+    const r = pinTopLeft();
+    mode = "move";
     ox = e.clientX - r.left; oy = e.clientY - r.top;
     bar.style.cursor = "grabbing";
     e.preventDefault();
   });
+  grip.addEventListener("mousedown", e => {
+    const r = pinTopLeft();
+    mode = "resize";
+    startW = r.width; startH = r.height;
+    startX = e.clientX; startY = e.clientY;
+    e.preventDefault();
+    e.stopPropagation();
+  });
   window.addEventListener("mousemove", e => {
-    if (!dragging) return;
-    pip.style.left = Math.max(8, e.clientX - ox) + "px";
-    pip.style.top = Math.max(8, e.clientY - oy) + "px";
-    pip.style.right = "auto"; pip.style.bottom = "auto";
+    if (!mode) return;
+    if (mode === "move") {
+      const maxL = window.innerWidth - pip.offsetWidth - 8;
+      const maxT = window.innerHeight - pip.offsetHeight - 8;
+      pip.style.left = Math.max(8, Math.min(maxL, e.clientX - ox)) + "px";
+      pip.style.top = Math.max(8, Math.min(maxT, e.clientY - oy)) + "px";
+      return;
+    }
+    const left = parseFloat(pip.style.left) || 8;
+    const top = parseFloat(pip.style.top) || 8;
+    const maxW = window.innerWidth - left - 8;
+    const maxH = window.innerHeight - top - 8;
+    let w = startW + (e.clientX - startX);
+    let h = startH + (e.clientY - startY);
+    // Follow the larger axis, keep 16∶9 so it matches a full-page visor tab.
+    if (Math.abs(e.clientX - startX) * 9 > Math.abs(e.clientY - startY) * 16)
+      h = w / ASPECT;
+    else
+      w = h * ASPECT;
+    w = Math.max(MIN_W, Math.min(maxW, w));
+    h = w / ASPECT;
+    if (h > maxH) { h = Math.max(MIN_H, maxH); w = h * ASPECT; }
+    pip.style.width = w + "px";
+    pip.style.height = h + "px";
   });
   window.addEventListener("mouseup", () => {
-    dragging = false; bar.style.cursor = "grab";
+    mode = null; bar.style.cursor = "grab";
   });
 })();
 

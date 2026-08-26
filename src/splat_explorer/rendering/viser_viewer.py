@@ -415,13 +415,43 @@ def serve_viewer(
             pass
 
     # --- live agent overlay (fed by the episode dashboard) -------------------
-    follow_agent = server.gui.add_checkbox(
-        "Follow agent", initial_value=False,
-        hint="Snap the browser camera to the agent pose after every step.")
-    show_frame = server.gui.add_checkbox(
-        "Frame in frustum", initial_value=True,
-        hint="Show the agent's current screenshot inside its camera frustum.")
-    agent_status = server.gui.add_markdown("**Agent**: no live episode data yet.")
+    server.gui.configure_theme(
+        control_layout="floating",
+        control_width="small",
+        show_logo=False,
+        show_share_button=False,
+        dark_mode=True,
+    )
+    server.gui.set_panel_label("Visor")
+    # Collapse the floating panel on load and keep it compact. <script> inside
+    # dangerouslySetInnerHTML does not run; an iframe srcdoc does.
+    server.gui.add_html(
+        '<iframe title="" style="width:0;height:0;border:0;position:absolute" srcdoc="'
+        "&lt;script&gt;"
+        "(function(){function go(){"
+        "var d=parent.document;"
+        "var h=d.querySelector('[data-testid=floating-panel-handle]');"
+        "if(!h){setTimeout(go,50);return;}"
+        "if(parent.__splatVisorChrome)return;"
+        "parent.__splatVisorChrome=1;"
+        "var s=d.createElement('style');"
+        "s.textContent='[data-testid=floating-panel]{width:9.5em!important;max-width:9.5em!important;"
+        "font-size:12px!important}[data-testid=floating-panel-handle]{height:1.7em!important;"
+        "padding:0 .4em!important;font-size:11px!important}';"
+        "d.head.appendChild(s);"
+        "setTimeout(function(){h.dispatchEvent(new MouseEvent('click',{bubbles:true}));},150);"
+        "}go();})();"
+        "&lt;/script&gt;"
+        '"></iframe>'
+    )
+    with server.gui.add_folder("Agent", expand_by_default=False):
+        follow_agent = server.gui.add_checkbox(
+            "Follow agent", initial_value=False,
+            hint="Snap the browser camera to the agent pose after every step.")
+        show_frame = server.gui.add_checkbox(
+            "Frame in frustum", initial_value=True,
+            hint="Show the agent's current screenshot inside its camera frustum.")
+        agent_status = server.gui.add_markdown("**Agent**: no live episode data yet.")
 
     overlay_lock = threading.Lock()
     overlay_handles: list = [origin]
