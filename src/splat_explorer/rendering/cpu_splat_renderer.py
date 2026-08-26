@@ -72,20 +72,28 @@ class CpuSplatRenderer:
         self._alphas = np.clip(scene.opacities, 0.0, 0.995)
 
     def render(self, camera: Camera) -> np.ndarray:
-        return self.render_with_depth(camera)[0]
+        """Full CPU RGB (kept for the cpu_splats backend and as a fallback)."""
+        return self._rasterize(camera, want_rgb=True, want_depth=False)[0]
+
+    def render_depth(self, camera: Camera) -> np.ndarray:
+        """Front-surface depth only — no RGB composite, no color bincounts."""
+        return self._rasterize(camera, want_rgb=False, want_depth=True)[1]
 
     def render_with_depth(self, camera: Camera) -> tuple[np.ndarray, np.ndarray]:
-        """Render RGB plus a per-pixel depth map.
+        return self._rasterize(camera, want_rgb=True, want_depth=True)
 
-        Depth is the soft front-surface depth (camera z, scene units) already
-        computed for occlusion in pass 1. Pixels with no meaningful coverage
-        (background / holes / thin haze) are np.inf.
-        """
+    def _rasterize(
+        self, camera: Camera, *, want_rgb: bool, want_depth: bool,
+    ) -> tuple[np.ndarray | None, np.ndarray]:
+        """Shared EWA pass. RGB composite is skipped when want_rgb is False so
+        visor-backed episodes can still get this depth map without paying for
+        a second CPU image."""
         t0 = time.perf_counter()
         W, H = camera.width, camera.height
         fx, fy = camera.fx, camera.fy
         w2c = camera.w2c
         R = w2c[:3, :3].astype(np.float32)
+        empty_depth = np.full((H, W), np.inf, dtype=np.float32)
 
         pcam = self.scene.means @ R.T + w2c[:3, 3]
         z = pcam[:, 2]
@@ -96,14 +104,13 @@ class CpuSplatRenderer:
         uf = fx * pcam[:, 0] / z + W / 2.0
         vf = fy * pcam[:, 1] / z + H / 2.0
 
-        # Cheap conservative screen cull before the covariance math.
         r_bound = 3.0 * self._max_scale[idx0] * max(fx, fy) / z
         on = (uf > -r_bound) & (uf < W + r_bound) & (vf > -r_bound) & (vf < H + r_bound)
         idx0, pcam, z, uf, vf = idx0[on], pcam[on], z[on], uf[on], vf[on]
         if len(idx0) == 0:
-            return self._flat_background(H, W), np.full((H, W), np.inf, dtype=np.float32)
+            img = self._flat_background(H, W) if want_rgb else None
+            return img, empty_depth
 
-        # EWA: Sigma2D = J (R Sigma R^T) J^T + low-pass, as elementwise math.
         cov = self._cov3[idx0]
         tmp = np.einsum("ij,njk->nik", R, cov)
         covc = np.einsum("nik,lk->nil", tmp, R)
@@ -122,26 +129,19 @@ class CpuSplatRenderer:
         idx0, z, uf, vf = idx0[ok], z[ok], uf[ok], vf[ok]
         A, B, C, det = A[ok], B[ok], C[ok], det[ok]
 
-        # Conic (inverse covariance) and 3-sigma pixel radius. Splats larger
-        # than the radius cap get their falloff shifted to reach zero exactly
-        # at the clipped footprint edge (no hard square truncation). Opacity
-        # is NOT renormalized when clipped — that used to concentrate mass
-        # into bright blobs.
         ia, ib, ic = C / det, -B / det, A / det
         lam_max = 0.5 * (A + C) + np.sqrt(np.square(0.5 * (A - C)) + B * B)
         r_f = np.minimum(3.0 * np.sqrt(lam_max), float(self.max_radius))
         radius = np.maximum(np.ceil(r_f), 1).astype(np.int32)
-        w_edge = np.exp(-0.5 * r_f * r_f / lam_max).astype(np.float32)  # ~0.011 unclipped
+        w_edge = np.exp(-0.5 * r_f * r_f / lam_max).astype(np.float32)
 
         alphas = self._alphas[idx0].astype(np.float32)
-        colors = self.scene.colors[idx0]
+        colors = self.scene.colors[idx0] if want_rgb else None
         splats = dict(uf=uf.astype(np.float32), vf=vf.astype(np.float32),
                       ia=ia.astype(np.float32), ib=ib.astype(np.float32),
                       ic=ic.astype(np.float32), alpha=alphas, w_edge=w_edge,
                       radius=radius)
 
-        # Log-depth layers: 0 = nearest, N-1 = farthest. Surfaces at different
-        # depths composite with viser's over-operator instead of mixing colors.
         z_lo = max(float(z.min()), self.near)
         z_hi = float(np.percentile(z, 99.5))
         log_lo, log_hi = np.log(z_lo), np.log(max(z_hi, z_lo * 1.01))
@@ -153,31 +153,38 @@ class CpuSplatRenderer:
 
         npix = H * W
         nL = _N_LAYERS
-        acc = np.zeros((nL, 5, npix))  # w, r, g, b, w*z
+        nchan = 5 if want_rgb else 2  # w, [r,g,b,] w*z
+        acc = np.zeros((nL, nchan, npix))
+        wz_ch = 4 if want_rgb else 1
         n_contrib = 0
         for pix, w, gi in self._contributions(splats, W, H):
             n_contrib += len(pix)
             lpix = pix + layer[gi].astype(np.int64) * npix
             acc[:, 0] += np.bincount(lpix, weights=w, minlength=nL * npix).reshape(nL, npix)
-            acc[:, 4] += np.bincount(lpix, weights=w * z[gi], minlength=nL * npix).reshape(nL, npix)
-            for ch in range(3):
-                acc[:, ch + 1] += np.bincount(
-                    lpix, weights=w * colors[gi, ch], minlength=nL * npix
-                ).reshape(nL, npix)
+            acc[:, wz_ch] += np.bincount(lpix, weights=w * z[gi], minlength=nL * npix).reshape(nL, npix)
+            if want_rgb:
+                for ch in range(3):
+                    acc[:, ch + 1] += np.bincount(
+                        lpix, weights=w * colors[gi, ch], minlength=nL * npix
+                    ).reshape(nL, npix)
 
-        img = self._composite(acc[:, :4], npix)
+        img = self._composite(acc[:, :4], npix).reshape(H, W, 3) if want_rgb else None
 
-        depth = np.full(npix, np.inf)
-        for li in range(nL):
-            wsum = acc[li, 0]
-            hit = (1.0 - np.exp(-self.coverage_boost * wsum) >= 0.15) & ~np.isfinite(depth)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                depth[hit] = acc[li, 4, hit] / np.maximum(wsum[hit], 1e-12)
-        depth = depth.astype(np.float32)
-
-        logger.debug("cpu_splats: %d splats, %d contributions, %d layers -> %dx%d in %.1fs",
+        depth = empty_depth.reshape(-1)
+        if want_depth:
+            depth = np.full(npix, np.inf)
+            for li in range(nL):
+                wsum = acc[li, 0]
+                hit = (1.0 - np.exp(-self.coverage_boost * wsum) >= 0.15) & ~np.isfinite(depth)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    depth[hit] = acc[li, wz_ch, hit] / np.maximum(wsum[hit], 1e-12)
+            depth = depth.astype(np.float32)
+        logger.debug("cpu_splats%s: %d splats, %d contributions, %d layers -> %dx%d in %.1fs",
+                     "" if want_rgb else " depth",
                      len(idx0), n_contrib, nL, W, H, time.perf_counter() - t0)
-        return img.reshape(H, W, 3), depth.reshape(H, W)
+        if not want_rgb:
+            logger.info("cpu_splats depth %dx%d in %.1fs", W, H, time.perf_counter() - t0)
+        return img, depth.reshape(H, W)
 
     def _contributions(
         self, s: dict, W: int, H: int

@@ -10,9 +10,9 @@ scene:
   min_opacity: 0.05
 
 renderer:
-  # "viser"      — capture RGB from the debug visor's WebGL splat view when a
-  #                browser tab is already connected; otherwise cpu_splats.
-  #                Does not block waiting for a visor tab.
+  # "viser"      — capture RGB from the full-page visor tab (http://localhost:8080).
+  #                The dashboard preview iframe is ignored (wrong aspect).
+  #                Waits for that tab; does not fall back to cpu_splats.
   # "cpu_splats" — CPU EWA rasterizer with visor-style back-to-front layers.
   # "gsplat"     — reference 3DGS rasterization, requires NVIDIA GPU + [gpu] extra.
   # "cpu_points" — legacy dot-based debug renderer (speckled; not for VLM runs).
