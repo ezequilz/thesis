@@ -316,11 +316,13 @@ function renderSteps(steps) {
     if (s.vlm?.fallback) badge = '<span class="badge fb">FALLBACK</span>';
     if (a.name === "report_artifact") badge += '<span class="badge art">ARTIFACT</span>';
     if (a.name === "view_map") badge += '<span class="badge map">MAP</span>';
+    if (a.name === "view_coverage_map") badge += '<span class="badge map">COVERAGE</span>';
     if (a.name === "view_depth") badge += '<span class="badge map">DEPTH</span>';
     if (a.name === "done") badge += '<span class="badge done">DONE</span>';
     div.innerHTML = `
       <img src="${s.frame_url}" loading="lazy" alt="step ${s.step}">
       ${s.depth_frame_url ? `<img class="depth-thumb" src="${s.depth_frame_url}" loading="lazy" alt="depth ${s.step}">` : ""}
+      ${s.coverage_frame_url ? `<img class="depth-thumb" src="${s.coverage_frame_url}" loading="lazy" alt="coverage ${s.step}">` : ""}
       <div class="info">
         <div class="act">#${s.step} <span class="name">${esc(a.name)}</span> ${esc(JSON.stringify(a.args))}${badge}</div>
         <div class="times">render ${fmtSecs(s.timing?.render_s)}${s.render_backend ? ` (${esc(s.render_backend)})` : ""} · vlm ${fmtSecs(s.timing?.decide_s)}</div>
@@ -362,6 +364,11 @@ function renderDetail() {
   const mapCaption = s.map_sent
     ? "MAP — bird's-eye path + camera frustums, sent to the VLM this step"
     : "MAP — bird's-eye path + camera frustums (updated every step; sent to the VLM after view_map)";
+  const coverageCaption = s.coverage_sent
+    ? "COVERAGE MAP — viewed area (yellow-green cones), sent to the VLM this step"
+      + (s.coverage != null ? ` · ${Math.round(s.coverage * 100)}%` : "")
+    : "COVERAGE MAP — viewed area (updated every step; sent to the VLM after view_coverage_map)"
+      + (s.coverage != null ? ` · ${Math.round(s.coverage * 100)}%` : "");
   const vlmSize = run?.params
     ? `${run.params.width}×${run.params.height}`
     : "960×720";
@@ -372,13 +379,16 @@ function renderDetail() {
     </figure>`;
   const rgbFig = fig(`RGB — sent to the VLM (${vlmSize}, aspect preserved)`, s.frame_url, `step ${s.step} RGB`);
   const mapFig = s.map_frame_url ? fig(mapCaption, s.map_frame_url, `step ${s.step} map`) : "";
+  const coverageFig = s.coverage_frame_url ? fig(coverageCaption, s.coverage_frame_url, `step ${s.step} coverage`) : "";
   const depthFig = s.depth_frame_url ? fig(depthCaption, s.depth_frame_url, `step ${s.step} depth`) : "";
   let frames;
-  if (mapFig || depthFig) {
-    const cls = "frames" + (mapFig ? " has-map" : "") + (depthFig ? "" : " single");
+  if (mapFig || coverageFig || depthFig) {
+    const cls = "frames"
+      + (mapFig || coverageFig ? " has-map" : "")
+      + (depthFig || coverageFig ? "" : " single");
     frames = `<div class="${cls}">
       <div class="stack">${rgbFig}${mapFig}</div>
-      ${depthFig ? `<div class="stack">${depthFig}</div>` : ""}
+      ${coverageFig || depthFig ? `<div class="stack">${coverageFig}${depthFig}</div>` : ""}
     </div>`;
   } else {
     frames = `<img class="frame" src="${s.frame_url}" alt="step ${s.step}">`;
@@ -389,6 +399,7 @@ function renderDetail() {
       <span class="k">step</span><span class="v">#${s.step} — ${esc(s.frame)}</span>
       <span class="k">pose</span><span class="v">${esc(s.pose)}</span>
       <span class="k">action</span><span class="v">${esc(s.action.name)} ${esc(JSON.stringify(s.action.args))}</span>
+      ${s.coverage != null ? `<span class="k">coverage</span><span class="v">${Math.round(s.coverage * 100)}% viewed area</span>` : ""}
       <span class="k">timing</span><span class="v">render ${fmtSecs(s.timing?.render_s)} · vlm decide ${fmtSecs(s.timing?.decide_s)}</span>
       ${s.render_backend ? `<span class="k">renderer</span><span class="v">${esc(s.render_backend)}</span>` : ""}
       ${vlm.backend ? `<span class="k">vlm</span><span class="v">${esc(vlm.backend)}${vlm.model ? " · " + esc(vlm.model) : ""}${vlm.fallback ? ' · <b style="color:var(--err)">fallback action used</b>' : ""}</span>` : ""}
@@ -402,7 +413,7 @@ function renderDetail() {
       <details><summary>parsed action (after clamping: see "action" above)</summary>
         <pre>${esc(JSON.stringify(vlm.parsed_action, null, 2))}</pre></details>` : ""}
     ${vlm.prompt ? `
-      <details><summary>full prompt sent (${vlm.prompt.length.toLocaleString()} chars + RGB${s.depth_sent ? " + depth" : ""}${s.map_sent ? " + map" : ""})</summary>
+      <details><summary>full prompt sent (${vlm.prompt.length.toLocaleString()} chars + RGB${s.depth_sent ? " + depth" : ""}${s.map_sent ? " + map" : ""}${s.coverage_sent ? " + coverage" : ""})</summary>
         <pre>${esc(vlm.prompt)}</pre></details>` : ""}
     ${run.summary ? `<details open><summary>episode summary (done)</summary><pre>${esc(run.summary)}</pre></details>` : ""}
     <div id="artifacts">${artifacts ? "<h3 style='font-size:13px'>Artifact reports</h3>" + artifacts : ""}</div>`;

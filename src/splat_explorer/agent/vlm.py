@@ -32,9 +32,11 @@ class VLMPolicy(Protocol):
         step: int,
         depth_image: np.ndarray | None = None,
         map_image: np.ndarray | None = None,
+        coverage_image: np.ndarray | None = None,
     ) -> Action:
         """Return the next action given the current rendered RGB view and,
-        when attached, the labelled depth-map and/or bird's-eye path map."""
+        when attached, the labelled depth-map, bird's-eye path map, and/or
+        coverage map."""
         ...
 
 
@@ -47,7 +49,7 @@ class ScriptedPolicy:
     def __init__(self):
         self._script = (
             [Action("rotate", {"yaw_degrees": 45.0})] * 3
-            + [Action("view_map", {}), Action("view_depth", {})]
+            + [Action("view_map", {}), Action("view_coverage_map", {}), Action("view_depth", {})]
             + [Action("rotate", {"yaw_degrees": 45.0})] * 3
             + [
                 Action("rotate", {"pitch_degrees": -20.0}),
@@ -81,6 +83,7 @@ class ScriptedPolicy:
         step: int,
         depth_image: np.ndarray | None = None,
         map_image: np.ndarray | None = None,
+        coverage_image: np.ndarray | None = None,
     ) -> Action:
         action = self._script[step] if step < len(self._script) else Action("done", {"summary": "Script exhausted."})
         if action.name == "move_toward" and (
@@ -140,6 +143,7 @@ class OpenAIVLMPolicy:
         step: int,
         depth_image: np.ndarray | None = None,
         map_image: np.ndarray | None = None,
+        coverage_image: np.ndarray | None = None,
     ) -> Action:
         content = [
             {"type": "text", "text": f"Step {step}. Current pose: {pose_description}. Choose exactly one tool call."},
@@ -159,6 +163,15 @@ class OpenAIVLMPolicy:
                     "triangles = camera view, cyan = current pose):"
                 )},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_encode_png_b64(map_image)}"}},
+            ]
+            n += 1
+        if coverage_image is not None:
+            content += [
+                {"type": "text", "text": (
+                    f"Image {n} — COVERAGE MAP (yellow-green = viewed floor, "
+                    "fades with distance, overlap stacks; coverage % on the label):"
+                )},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_encode_png_b64(coverage_image)}"}},
             ]
         self.messages.append({"role": "user", "content": content})
         self._trim_old_images()

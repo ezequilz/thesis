@@ -78,6 +78,8 @@ class CameraRig:
             return outcome
         if action.name == "view_map":
             return {"kind": "view_map"}
+        if action.name == "view_coverage_map":
+            return {"kind": "view_coverage_map"}
         if action.name == "view_depth":
             return {"kind": "view_depth"}
         # report_artifact / done don't change the pose.

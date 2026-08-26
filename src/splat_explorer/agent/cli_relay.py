@@ -228,11 +228,13 @@ class CliRelayPolicy:
         step: int,
         depth_image: np.ndarray | None = None,
         map_image: np.ndarray | None = None,
+        coverage_image: np.ndarray | None = None,
     ) -> Action:
         prompt = self._build_prompt(
             pose_description, step,
             with_depth=depth_image is not None,
             with_map=map_image is not None,
+            with_coverage=coverage_image is not None,
         )
         images = [("Image 1 - RGB view from your current pose:", _png_data_url(observation))]
         n = 2
@@ -248,6 +250,14 @@ class CliRelayPolicy:
                 "triangles = camera view at each step, cyan = current pose). "
                 "move_toward pixels still refer to the RGB view:",
                 _png_data_url(map_image),
+            ))
+            n += 1
+        if coverage_image is not None:
+            images.append((
+                f"Image {n} - COVERAGE MAP (yellow-green = viewed floor, stronger "
+                "nearby, fades with distance, overlaps stack; coverage % on the label). "
+                "move_toward pixels still refer to the RGB view:",
+                _png_data_url(coverage_image),
             ))
 
         action = None
@@ -312,7 +322,8 @@ class CliRelayPolicy:
         return (choices[0].message.content or "").strip(), None
 
     def _build_prompt(self, pose_description: str, step: int,
-                      with_depth: bool, with_map: bool = False) -> str:
+                      with_depth: bool, with_map: bool = False,
+                      with_coverage: bool = False) -> str:
         history = self._history[-self.MAX_HISTORY_LINES:]
         history_block = (
             "Your previous actions:\n" + "\n".join(history)
@@ -327,6 +338,15 @@ class CliRelayPolicy:
                 "a bird's-eye MAP of your path so far (ceiling removed; "
                 "frustums = viewing direction)"
             )
+        if with_coverage:
+            attached.append(
+                "a COVERAGE MAP of the floor you have looked at (yellow-green cones)"
+            )
+        extras = (
+            (["the depth map"] if with_depth else [])
+            + (["the path map"] if with_map else [])
+            + (["the coverage map"] if with_coverage else [])
+        )
         if len(attached) == 1:
             images_note = (
                 "The attached image is your current RGB view. Pixel coordinates "
@@ -340,18 +360,10 @@ class CliRelayPolicy:
             images_note = (
                 f"The attached images are {listed} (labelled). "
                 "Pixel coordinates for move_toward refer to the RGB view"
-                + (
-                    ", not "
-                    + " or ".join(
-                        (["the depth map"] if with_depth else [])
-                        + (["the map"] if with_map else [])
-                    )
-                    + "."
-                    if (with_depth or with_map) else "."
-                )
+                + (f", not {' or '.join(extras)}." if extras else ".")
             )
         return (
-            f"{system_prompt(with_depth, with_map)}\n"
+            f"{system_prompt(with_depth, with_map, with_coverage)}\n"
             f"Available tools:\n{render_tool_catalog()}\n\n"
             f"{history_block}\n\n"
             f"Step {step}. Current pose: {pose_description}. "

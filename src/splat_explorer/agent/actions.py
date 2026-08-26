@@ -8,8 +8,9 @@ Movement model:
     you there instead of diving into it). amount = 1 lands right at (never
     inside) the geometry.
   - move remains for small body-relative correction steps.
-  - view_map / view_depth request an extra image on the next observation
-    (RGB stays in the prompt). Depth is always rendered for navigation.
+  - view_map / view_coverage_map / view_depth request an extra image on the
+    next observation (RGB stays in the prompt). Depth is always rendered for
+    navigation.
   - rotate handles both yaw and (optional, absolute) pitch; the former
     separate `look` action was folded into it.
 All movement is collision-clamped by the harness before being applied.
@@ -128,7 +129,28 @@ ACTION_TOOLS: list[dict] = [
                 "frustum at each step for viewing direction. Does not move the camera. The "
                 "NEXT observation will include that map alongside the usual RGB view "
                 "(move_toward pixel coordinates still refer to RGB, not the map). Use this "
-                "to check coverage and avoid retracing."
+                "to check where you have walked and avoid retracing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "view_coverage_map",
+            "description": (
+                "Look at a COVERAGE MAP: the same top-down bird's-eye backdrop as view_map, "
+                "with a larger yellow-green cone painted for every direction you have looked. "
+                "Close floor is marked more strongly; strength falls off with distance so "
+                "the far side of a room / a distant wall stays faint or unshaded. Overlapping "
+                "views stack (still translucent). A coverage percentage (0-100%) is shown on "
+                "the image. Does not move the camera. The NEXT observation includes that map "
+                "alongside the usual RGB view (move_toward pixels still refer to RGB). Use "
+                "this to find unshaded rooms and avoid calling done while coverage is low."
             ),
             "parameters": {
                 "type": "object",
@@ -175,7 +197,7 @@ ACTION_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "done",
-            "description": "Finish the episode when the area has been sufficiently explored.",
+            "description": "Finish the episode when the area has been sufficiently explored (check the coverage map: unshaded rooms mean you have not been there).",
             "parameters": {
                 "type": "object",
                 "properties": {

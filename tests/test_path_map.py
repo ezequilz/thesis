@@ -81,7 +81,7 @@ def test_view_map_does_not_move_the_rig():
     eye = np.array([1.0, 1.5, 2.0])
     rig = CameraRig(eye, up_axis="+y", yaw_deg=40.0, pitch_deg=-10.0)
     before = (rig.position.copy(), rig.yaw_deg, rig.pitch_deg)
-    for name in ("view_map", "view_depth"):
+    for name in ("view_map", "view_coverage_map", "view_depth"):
         rig.position[:] = before[0]
         rig.yaw_deg, rig.pitch_deg = before[1], before[2]
         outcome = rig.apply(Action(name, {}))
@@ -94,8 +94,9 @@ def test_view_map_does_not_move_the_rig():
 def test_parse_action_accepts_view_extras():
     names = {tool["function"]["name"] for tool in ACTION_TOOLS}
     assert "view_map" in names
+    assert "view_coverage_map" in names
     assert "view_depth" in names
-    for name in ("view_map", "view_depth"):
+    for name in ("view_map", "view_coverage_map", "view_depth"):
         action = parse_action(f'{{"action": "{name}", "args": {{}}}}')
         assert action is not None and action.name == name
         action = parse_action(f'{{"action": "{name}"}}')
@@ -103,11 +104,16 @@ def test_parse_action_accepts_view_extras():
 
 
 def test_system_prompt_mentions_extras_when_attached():
-    base = system_prompt(with_depth=False, with_map=False)
+    base = system_prompt(with_depth=False, with_map=False, with_coverage=False)
     with_map = system_prompt(with_depth=False, with_map=True)
     with_depth = system_prompt(with_depth=True, with_map=False)
+    with_coverage = system_prompt(with_depth=False, with_coverage=True)
     assert "view_map" in base and "view_depth" in base
+    assert "view_coverage_map" in base
     assert "BIRD'S-EYE MAP" not in base
+    assert "This turn also includes a COVERAGE MAP" not in base
     assert "BIRD'S-EYE MAP" in with_map
     assert "DEPTH MAP" in with_depth
+    assert "This turn also includes a COVERAGE MAP" in with_coverage
     assert "RGB view" in with_map and "RGB view" in with_depth
+    assert "RGB view" in with_coverage

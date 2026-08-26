@@ -61,7 +61,9 @@ class ExplorationMap:
 
     The splat render is done once (at spawn / episode start). add_pose() only
     re-paints the walked path and camera frustums so the dashboard and the
-    optional VLM map stay cheap to refresh after every step.
+    optional VLM map stay cheap to refresh after every step. A second coverage
+    buffer accumulates large, distance-faded view cones (yellow-green) used by
+    the coverage map attached after view_coverage_map.
     """
 
     def __init__(
@@ -71,27 +73,54 @@ class ExplorationMap:
         fov_deg: float,
         up: np.ndarray,
     ):
+        from .annotate import scene_mask
+
         self.base_image = np.asarray(base_image)
         self.camera = camera
         self.fov_deg = float(fov_deg)
         self.up = np.asarray(up, dtype=np.float64)
         self.poses: list[dict] = []
+        h, w = self.base_image.shape[:2]
+        self.coverage = np.zeros((h, w), dtype=np.float32)
+        self._scene_mask = scene_mask(self.base_image)
 
     def add_pose(self, position: np.ndarray, heading: np.ndarray, step: int) -> None:
+        from .annotate import paint_coverage_cone
+
         h = np.asarray(heading, dtype=np.float64)
         n = np.linalg.norm(h)
         if n > 1e-8:
             h = h / n
+        position = np.asarray(position, dtype=np.float64).copy()
         self.poses.append({
-            "position": np.asarray(position, dtype=np.float64).copy(),
+            "position": position,
             "heading": h,
             "step": int(step),
         })
+        paint_coverage_cone(
+            self.coverage, self.camera, position, h, self.up, self.fov_deg,
+        )
+
+    @property
+    def coverage_fraction(self) -> float:
+        """Mean coverage in [0, 1] over reconstructed interior pixels."""
+        if not self._scene_mask.any():
+            return 0.0
+        return float(self.coverage[self._scene_mask].mean())
 
     def render(self) -> np.ndarray:
         from .annotate import draw_path_map
 
         return draw_path_map(
             self.base_image, self.camera, self.poses,
+            fov_deg=self.fov_deg, up=self.up,
+        )
+
+    def render_coverage(self) -> np.ndarray:
+        from .annotate import draw_coverage_map
+
+        return draw_coverage_map(
+            self.base_image, self.camera, self.poses, self.coverage,
+            coverage_fraction=self.coverage_fraction,
             fov_deg=self.fov_deg, up=self.up,
         )

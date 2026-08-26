@@ -6,6 +6,8 @@
   positions onto the bird's-eye render.
 - draw_path_map: paint the agent's walked path and per-step camera frustums
   onto the same bird's-eye render (used as the on-demand map action).
+- coverage overlay: accumulate large, distance-faded view cones on a duplicate
+  of that bird's-eye so the VLM can see which floor area has been looked at.
 """
 
 from __future__ import annotations
@@ -20,6 +22,13 @@ _MARKER_OUTLINE = (255, 255, 255)
 # Match the viser overlay: red trajectory + frustum, cyan for the live pose.
 _PATH_COLOR = (255, 80, 80)
 _CURRENT_COLOR = (90, 190, 255)
+# Coverage cones: yellow-green, low per-view gain so overlaps stack visibly.
+_COVERAGE_RGB = np.array([196.0, 214.0, 48.0], dtype=np.float64)
+_COVERAGE_GAIN = 0.14          # peak contribution of one close-range view
+_COVERAGE_NEAR_M = 1.6         # full strength out to this many scene units
+_COVERAGE_FAR_M = 5.5          # fade to zero by this distance (far walls stay faint)
+_COVERAGE_DISPLAY_ALPHA = 0.48  # even at coverage=1 the splat map stays readable
+_SCENE_LUMA_MIN = 16.0         # bird's-eye void is darker than this; rooms are not
 
 
 def _font(size: int) -> ImageFont.ImageFont:
@@ -219,3 +228,142 @@ def draw_path_map(
 
     _draw_label(ink, (8, 6), title)
     return np.asarray(img)
+
+
+def scene_mask(image: np.ndarray) -> np.ndarray:
+    """Pixels that look like reconstructed interior (not the dark void)."""
+    luma = np.asarray(image, dtype=np.float64).mean(axis=-1)
+    return luma > _SCENE_LUMA_MIN
+
+
+def overlay_coverage(image: np.ndarray, coverage: np.ndarray) -> np.ndarray:
+    """Tint `image` with accumulated coverage. Display alpha is capped so the
+    bird's-eye stays readable even where coverage saturates at 1."""
+    rgb = np.asarray(image, dtype=np.float64)
+    cov = np.clip(np.asarray(coverage, dtype=np.float64), 0.0, 1.0)
+    alpha = (cov * _COVERAGE_DISPLAY_ALPHA)[..., None]
+    out = rgb * (1.0 - alpha) + _COVERAGE_RGB * alpha
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def paint_coverage_cone(
+    coverage: np.ndarray,
+    camera: Camera,
+    position: np.ndarray,
+    heading: np.ndarray,
+    up: np.ndarray,
+    fov_deg: float,
+    gain: float = _COVERAGE_GAIN,
+    near_m: float = _COVERAGE_NEAR_M,
+    far_m: float = _COVERAGE_FAR_M,
+) -> None:
+    """Add one view cone into `coverage` (in-place, clipped to [0, 1]).
+
+    The cone matches the camera's horizontal FOV. Strength is `gain` at close
+    range and falls off with a smooth gradient to zero by `far_m`, so the far
+    side of a room / a distant wall is only lightly marked. Overlapping views
+    stack until the per-pixel value saturates at 1.
+    """
+    heading = _ground_heading(heading, up)
+    if heading is None:
+        return
+    position = np.asarray(position, dtype=np.float64)
+    up = np.asarray(up, dtype=np.float64)
+    up = up / max(np.linalg.norm(up), 1e-12)
+    H, W = coverage.shape
+    half_fov = float(fov_deg) / 2.0
+    box = _cone_bbox(camera, position, heading, up, far_m, half_fov, H, W)
+    if box is None:
+        return
+    y0, y1, x0, x1 = box
+
+    uu, vv = np.meshgrid(
+        np.arange(x0, x1, dtype=np.float64) + 0.5,
+        np.arange(y0, y1, dtype=np.float64) + 0.5,
+    )
+    fx, fy = float(camera.fx), float(camera.fy)
+    dirs_cam = np.stack([
+        (uu - camera.width / 2.0) / fx,
+        (vv - camera.height / 2.0) / fy,
+        np.ones_like(uu),
+    ], axis=-1)
+    R = np.asarray(camera.rotation, dtype=np.float64)
+    dirs = dirs_cam @ R.T
+    origin = np.asarray(camera.position, dtype=np.float64)
+    denom = dirs @ up
+    plane_h = float(np.dot(position, up))
+    origin_h = float(np.dot(origin, up))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = (plane_h - origin_h) / denom
+    valid = np.isfinite(t) & (t > 0.0)
+    pts = origin + t[..., None] * dirs
+    delta = pts - position
+    delta = delta - (delta @ up)[..., None] * up
+    dist = np.linalg.norm(delta, axis=-1)
+    along = delta @ heading
+    with np.errstate(invalid="ignore"):
+        cosang = np.divide(along, dist, out=np.zeros_like(along), where=dist > 1e-6)
+    in_cone = valid & (along > 0.05) & (cosang >= np.cos(np.radians(half_fov)))
+
+    span = max(far_m - near_m, 1e-3)
+    fade = np.clip((far_m - dist) / span, 0.0, 1.0)
+    falloff = fade * fade * (3.0 - 2.0 * fade)  # smoothstep
+    add = np.where(in_cone, gain * falloff, 0.0)
+    region = coverage[y0:y1, x0:x1]
+    np.clip(region + add, 0.0, 1.0, out=region)
+
+
+def _cone_bbox(
+    camera: Camera,
+    position: np.ndarray,
+    heading: np.ndarray,
+    up: np.ndarray,
+    far_m: float,
+    half_fov_deg: float,
+    H: int,
+    W: int,
+) -> tuple[int, int, int, int] | None:
+    """Pixel bbox of the coverage triangle, padded, clipped to the image."""
+    left = position + _rotate_around(heading, up, half_fov_deg) * far_m
+    right = position + _rotate_around(heading, up, -half_fov_deg) * far_m
+    tip = position + heading * far_m
+    uv = project_to_pixels(camera, np.stack([position, left, right, tip]))
+    ok = np.isfinite(uv).all(axis=1)
+    if not ok.any():
+        return None
+    pts = uv[ok]
+    x0 = int(np.floor(pts[:, 0].min())) - 2
+    x1 = int(np.ceil(pts[:, 0].max())) + 2
+    y0 = int(np.floor(pts[:, 1].min())) - 2
+    y1 = int(np.ceil(pts[:, 1].max())) + 2
+    x0, x1 = max(0, x0), min(W, x1)
+    y0, y1 = max(0, y0), min(H, y1)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return y0, y1, x0, x1
+
+
+def draw_coverage_map(
+    image: np.ndarray,
+    camera: Camera,
+    poses: list[dict],
+    coverage: np.ndarray,
+    coverage_fraction: float,
+    fov_deg: float = 75.0,
+    up: np.ndarray | None = None,
+) -> np.ndarray:
+    """Bird's-eye with accumulated view cones plus the usual path/frustum overlay.
+
+    Yellow-green paint marks floor that has been looked at; overlapping views
+    stack (capped). The small camera triangles stay on top so heading is still
+    readable. `coverage_fraction` is shown in the title (0..1).
+    """
+    tinted = overlay_coverage(image, coverage)
+    pct = int(round(100.0 * float(np.clip(coverage_fraction, 0.0, 1.0))))
+    title = (
+        f"COVERAGE MAP (viewed area) | lime = seen close-up, fades with distance "
+        f"| overlap stacks | coverage {pct}%"
+    )
+    return draw_path_map(
+        tinted, camera, poses, fov_deg=fov_deg, up=up, title=title,
+    )

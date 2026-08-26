@@ -33,7 +33,15 @@ _MAP_HELP = """You can call view_map to consult a top-down bird's-eye of the sce
 (ceiling removed) with your walked path, past camera positions, and a viewing \
 frustum at each step. The NEXT observation after view_map includes that map \
 next to the RGB view — pixel coordinates for move_toward still refer to RGB, \
-not the map. Use it to plan coverage and avoid retracing.
+not the map. Use it to plan where to walk next and avoid retracing.
+"""
+
+_COVERAGE_HELP = """You can call view_coverage_map to consult a COVERAGE MAP of the \
+floor you have actually looked at: the same bird's-eye backdrop, plus a larger \
+yellow-green cone for every view (close floor is stronger; far walls fade; \
+overlaps stack). A coverage percentage is printed on the image. The NEXT \
+observation after view_coverage_map includes that map next to the RGB view. \
+Unshaded rooms have not been visited — walk into them before calling done.
 """
 
 _MAP_ATTACHED = """This turn also includes a BIRD'S-EYE MAP of the scene (ceiling \
@@ -43,17 +51,35 @@ marker is a past camera position, and each triangle is the camera frustum \
 move_toward pixel coordinates still refer to the RGB view, not the map.
 """
 
+_COVERAGE_ATTACHED = """This turn also includes a COVERAGE MAP of the scene (ceiling \
+removed): yellow-green paint is floor you have looked at from close range. \
+Each past view adds a large cone that is strongest nearby and fades with \
+distance, so the far side of a room stays faint. Overlapping views stack \
+(still translucent). The number on the image is viewed-area coverage \
+(0-100%). Unshaded rooms have not been visited. move_toward pixel coordinates \
+still refer to the RGB view, not the coverage map.
+"""
 
-def system_prompt(with_depth: bool = True, with_map: bool = False) -> str:
+
+def system_prompt(
+    with_depth: bool = True,
+    with_map: bool = False,
+    with_coverage: bool = False,
+) -> str:
     """Task prompt for the explore loop; wording adapts to whether this turn
-    includes a depth map and/or the on-demand bird's-eye path map. RGB is
-    always attached."""
+    includes a depth map, the on-demand bird's-eye path map, and/or the
+    coverage map. RGB is always attached."""
     depth_hint = (" Check the\n  depth map first: black pixels have nothing to move toward."
                   if with_depth else " Call view_depth first if you need to know what is solid.")
+    extras = ""
+    if with_map:
+        extras += _MAP_ATTACHED
+    if with_coverage:
+        extras += _COVERAGE_ATTACHED
     return f"""\
 You are a quality-inspection agent walking through a 3D Gaussian Splatting \
 reconstruction of an indoor scene. {_IMAGES_WITH_DEPTH if with_depth else _IMAGES_RGB_ONLY}\
-{_MAP_ATTACHED if with_map else ""}\
+{extras}\
 Your goal is to systematically explore the area and find RENDERING ARTIFACTS, \
 such as:
 - floaters: blobs of color hanging in mid-air
@@ -83,19 +109,25 @@ How to move:
   (RGB is still attached). Does not move you.
 - view_map() shows a top-down map of your path and past viewing directions
   on the next observation (RGB is still attached). Does not move you.
+- view_coverage_map() shows which floor has been looked at (yellow-green cones,
+  coverage %) on the next observation. Does not move you. Call it before done.
 - The harness blocks collisions. If your last movement was cut short, the next
   prompt tells you so — turn or pick a different direction instead of retrying.
 
 {_DEPTH_REQUEST_HELP if not with_depth else ""}\
 {_MAP_HELP if not with_map else ""}\
+{_COVERAGE_HELP if not with_coverage else ""}\
 Rules:
 - Call exactly one tool per turn.
 - Explore methodically: look around from your start point first (rotate in
   steps of 45-90 degrees), then visit each part of the area with move_toward.
+  Adjacent rooms you have not walked into are not covered — go there.
 - When you see an artifact in the current image, call report_artifact BEFORE
   moving on. Re-check suspected artifacts from a second viewpoint if unsure —
   real objects stay consistent, artifacts often deform or become blurry.
-- Call done when you have covered the area.
+- Call done only when viewed-area coverage is high and no whole rooms remain
+  unshaded on the coverage map. If you have only looked around the first room,
+  keep exploring.
 """
 
 
