@@ -25,6 +25,7 @@ def _floor_scene(z_extent: float = 8.0, y: float = 0.0, scale: float = 0.30) -> 
     )
 
 
+
 def _forward_camera(position, height: int = 72, width: int = 96) -> Camera:
     pos = np.asarray(position, dtype=np.float64)
     return Camera.look_at(
