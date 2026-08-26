@@ -101,7 +101,12 @@ class Camera:
 
 
 class Renderer(Protocol):
-    """Renders a GaussianScene from a Camera into an RGB uint8 image."""
+    """Renders a GaussianScene from a Camera into an RGB uint8 image.
+
+    Backends that can also produce depth expose render_with_depth(camera)
+    -> ((H, W, 3) uint8 RGB, (H, W) float32 depth in scene units, np.inf where
+    nothing is rendered). The episode loop uses it when available.
+    """
 
     def render(self, camera: Camera) -> np.ndarray:
         """Return an (H, W, 3) uint8 image."""

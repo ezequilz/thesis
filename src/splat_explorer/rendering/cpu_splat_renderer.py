@@ -70,6 +70,15 @@ class CpuSplatRenderer:
         self._alphas = np.clip(scene.opacities, 0.0, 0.995)
 
     def render(self, camera: Camera) -> np.ndarray:
+        return self.render_with_depth(camera)[0]
+
+    def render_with_depth(self, camera: Camera) -> tuple[np.ndarray, np.ndarray]:
+        """Render RGB plus a per-pixel depth map.
+
+        Depth is the soft front-surface depth (camera z, scene units) already
+        computed for occlusion in pass 1. Pixels with no meaningful coverage
+        (background / holes / thin haze) are np.inf.
+        """
         t0 = time.perf_counter()
         W, H = camera.width, camera.height
         fx, fy = camera.fx, camera.fy
@@ -90,7 +99,7 @@ class CpuSplatRenderer:
         on = (uf > -r_bound) & (uf < W + r_bound) & (vf > -r_bound) & (vf < H + r_bound)
         idx0, pcam, z, uf, vf = idx0[on], pcam[on], z[on], uf[on], vf[on]
         if len(idx0) == 0:
-            return self._flat_background(H, W)
+            return self._flat_background(H, W), np.full((H, W), np.inf, dtype=np.float32)
 
         # EWA: Sigma2D = J (R Sigma R^T) J^T + low-pass, as elementwise math.
         cov = self._cov3[idx0]
@@ -159,9 +168,15 @@ class CpuSplatRenderer:
                 ).reshape(2, npix)
 
         img = self._composite(acc, npix)
+
+        # Depth map: the soft front-surface depth, masked to pixels with real
+        # coverage so thin haze doesn't read as a nearby surface.
+        coverage = 1.0 - np.exp(-self.coverage_boost * (acc[0, 0] + acc[1, 0]))
+        depth = np.where(coverage >= 0.15, z_front, np.inf).astype(np.float32)
+
         logger.debug("cpu_splats: %d splats, %d contributions -> %dx%d in %.1fs",
                      len(idx0), n_contrib, W, H, time.perf_counter() - t0)
-        return img.reshape(H, W, 3)
+        return img.reshape(H, W, 3), depth.reshape(H, W)
 
     def _contributions(
         self, s: dict, W: int, H: int

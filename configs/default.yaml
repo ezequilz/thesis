@@ -31,11 +31,34 @@ camera:
   # The SOG spec defines y-up, but this asset (like most COLMAP-trained 3DGS
   # scenes) is y-down — verified via render-test.
   up_axis: "-y"
-  # Starting pose. "auto" places the camera at the robust centroid of the splat.
+  # Starting pose. "auto" runs the spawn-point search (navigation section
+  # below) and lets the VLM pick a start from a bird's-eye view; an explicit
+  # [x, y, z] skips that phase and spawns there directly.
   start_position: auto
   start_yaw_deg: 0.0
   # Eye height offset (in scene units) applied along up when start_position is auto.
   eye_height: 0.0
+
+# Scene-aware navigation: spawn-point search, bird's-eye start selection, and
+# collision handling for agent movement (see splat_explorer/navigation.py).
+navigation:
+  # Percentage of gaussians removed from the top (by centroid height along the
+  # up axis) to cut the ceiling away for the bird's-eye view and spawn search.
+  ceiling_percentile: 25
+  # Number of candidate start positions offered to the VLM.
+  num_spawn_points: 5
+  # Cell size (scene units) of the 2D occupancy grid used by the spawn search.
+  grid_cell: 0.15
+  # Gaussians below this opacity are ignored for occupancy/collision (haze).
+  solid_opacity: 0.3
+  # Minimum distance (scene units) the camera keeps from solid splat centers;
+  # all movement is clamped so clearance never drops below this.
+  clearance_radius: 0.25
+  # Spawn eye height as a fraction of the interior height (floor -> ceiling cut).
+  spawn_height_fraction: 0.5
+  # Pull of spawn candidates toward the scene's center of mass: score =
+  # clearance - centroid_pull * distance_to_center. Higher = more central spots.
+  centroid_pull: 0.35
 
 agent:
   # "scripted"  — canned action sequence, no API needed (for testing the loop).

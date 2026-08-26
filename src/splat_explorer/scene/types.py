@@ -25,8 +25,8 @@ class GaussianScene:
     def num_gaussians(self) -> int:
         return len(self.means)
 
-    def filtered_by_opacity(self, min_opacity: float) -> "GaussianScene":
-        mask = self.opacities >= min_opacity
+    def filtered(self, mask: np.ndarray) -> "GaussianScene":
+        """New scene keeping only the gaussians where `mask` is True."""
         return replace(
             self,
             means=self.means[mask],
@@ -35,6 +35,9 @@ class GaussianScene:
             opacities=self.opacities[mask],
             colors=self.colors[mask],
         )
+
+    def filtered_by_opacity(self, min_opacity: float) -> "GaussianScene":
+        return self.filtered(self.opacities >= min_opacity)
 
     def robust_bounds(self, lower_pct: float = 2.0, upper_pct: float = 98.0):
         """Percentile-based AABB, ignoring stray background gaussians.

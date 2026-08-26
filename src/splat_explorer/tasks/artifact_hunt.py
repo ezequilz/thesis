@@ -17,7 +17,7 @@ Your goal is to systematically explore the area and find RENDERING ARTIFACTS, \
 such as:
 - floaters: blobs of color hanging in mid-air
 - holes: missing geometry showing the background through walls/floors
-- blur/mush: undertrained regions that look like smeared paint
+- blur/mush: undergenerated regions that look like smeared paint
 - stretched gaussians: long thin spikes or streaks
 - ghosting/duplicates: semi-transparent copies of objects
 
@@ -27,7 +27,7 @@ Rules:
   each part of the area. Prefer small movements (0.5-1.5 units).
 - When you see an artifact in the current image, call report_artifact BEFORE
   moving on. Re-check suspected artifacts from a second viewpoint if unsure —
-  real objects stay consistent, artifacts often deform or vanish.
+  real objects stay consistent, artifacts often deform or become blurry.
 - Call done when you have covered the area.
 """
 

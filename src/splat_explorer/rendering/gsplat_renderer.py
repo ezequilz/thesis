@@ -38,6 +38,11 @@ class GsplatRenderer:
         self.background = torch.tensor(background, device=device)
 
     def render(self, camera: Camera) -> np.ndarray:
+        return self.render_with_depth(camera)[0]
+
+    def render_with_depth(self, camera: Camera) -> tuple[np.ndarray, np.ndarray]:
+        """Render RGB plus expected depth ("RGB+ED" mode). Uncovered pixels
+        (alpha ~ 0) get depth np.inf, matching the CPU renderer."""
         import gsplat
 
         torch = self._torch
@@ -46,7 +51,7 @@ class GsplatRenderer:
         K = torch.from_numpy(camera.intrinsics).unsqueeze(0).to(device)
 
         with torch.no_grad():
-            renders, _, _ = gsplat.rasterization(
+            renders, alphas, _ = gsplat.rasterization(
                 means=self.means,
                 quats=self.quats,
                 scales=self.scales,
@@ -57,6 +62,10 @@ class GsplatRenderer:
                 width=camera.width,
                 height=camera.height,
                 backgrounds=self.background.unsqueeze(0),
+                render_mode="RGB+ED",
             )
-        img = renders[0].clamp(0, 1).mul(255).byte().cpu().numpy()
-        return img
+        img = renders[0, :, :, :3].clamp(0, 1).mul(255).byte().cpu().numpy()
+        depth = renders[0, :, :, 3].cpu().numpy().astype(np.float32)
+        covered = alphas[0, :, :, 0].cpu().numpy() >= 0.15
+        depth[~covered] = np.inf
+        return img, depth
