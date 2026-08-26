@@ -62,6 +62,7 @@
            margin-left: 5px; font-weight: 700; }
   .badge.fb { background: var(--err); color: #fff; }
   .badge.art { background: var(--warn); color: #22180a; }
+  .badge.map { background: var(--accent); color: #0b1220; }
   .badge.done { background: var(--ok); color: #0a2417; }
 
   #detail { overflow-y: auto; padding: 14px 18px; }
@@ -69,10 +70,13 @@
                       object-fit: contain; border-radius: 6px;
                       border: 1px solid var(--border); background: #000; display: block; }
   .frames { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .frames.single { grid-template-columns: 1fr; }
   @media (max-width: 1100px) { .frames { grid-template-columns: 1fr; } }
+  .frames .stack { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
   .frames figure { margin: 0; }
   .frames figcaption { font-size: 11px; color: var(--dim); margin: 0 0 5px; letter-spacing: .02em; }
   .frames img.frame { max-height: 46vh; width: 100%; height: auto; object-fit: contain; }
+  .frames.has-map img.frame { max-height: 34vh; }
   .step img.depth-thumb { width: 48px; opacity: .9; }
   .kv { display: grid; grid-template-columns: 110px 1fr; gap: 3px 12px;
         font-size: 13px; margin: 12px 0; }
@@ -302,6 +306,7 @@ function renderSteps(steps) {
     let badge = "";
     if (s.vlm?.fallback) badge = '<span class="badge fb">FALLBACK</span>';
     if (a.name === "report_artifact") badge += '<span class="badge art">ARTIFACT</span>';
+    if (a.name === "view_map") badge += '<span class="badge map">MAP</span>';
     if (a.name === "done") badge += '<span class="badge done">DONE</span>';
     div.innerHTML = `
       <img src="${s.frame_url}" loading="lazy" alt="step ${s.step}">
@@ -344,20 +349,30 @@ function renderDetail() {
   const depthCaption = s.depth_sent
     ? "DEPTH MAP — sent to the VLM (bright = near, black = nothing)"
     : "DEPTH MAP — navigation only, not sent to the VLM";
+  const mapCaption = s.map_sent
+    ? "MAP — bird's-eye path + camera frustums, sent to the VLM this step"
+    : "MAP — bird's-eye path + camera frustums (updated every step; sent to the VLM after view_map)";
   const vlmSize = run?.params
     ? `${run.params.width}×${run.params.height}`
     : "960×720";
-  const frames = s.depth_frame_url ? `
-    <div class="frames">
-      <figure>
-        <figcaption>RGB — sent to the VLM (${vlmSize}, aspect preserved)</figcaption>
-        <img class="frame" src="${s.frame_url}" alt="step ${s.step} RGB">
-      </figure>
-      <figure>
-        <figcaption>${depthCaption}</figcaption>
-        <img class="frame" src="${s.depth_frame_url}" alt="step ${s.step} depth">
-      </figure>
-    </div>` : `<img class="frame" src="${s.frame_url}" alt="step ${s.step}">`;
+  const fig = (caption, url, alt) => `
+    <figure>
+      <figcaption>${caption}</figcaption>
+      <img class="frame" src="${url}" alt="${alt}">
+    </figure>`;
+  const rgbFig = fig(`RGB — sent to the VLM (${vlmSize}, aspect preserved)`, s.frame_url, `step ${s.step} RGB`);
+  const mapFig = s.map_frame_url ? fig(mapCaption, s.map_frame_url, `step ${s.step} map`) : "";
+  const depthFig = s.depth_frame_url ? fig(depthCaption, s.depth_frame_url, `step ${s.step} depth`) : "";
+  let frames;
+  if (mapFig || depthFig) {
+    const cls = "frames" + (mapFig ? " has-map" : "") + (depthFig ? "" : " single");
+    frames = `<div class="${cls}">
+      <div class="stack">${rgbFig}${mapFig}</div>
+      ${depthFig ? `<div class="stack">${depthFig}</div>` : ""}
+    </div>`;
+  } else {
+    frames = `<img class="frame" src="${s.frame_url}" alt="step ${s.step}">`;
+  }
   d.innerHTML = `
     ${frames}
     <div class="kv">
@@ -377,7 +392,7 @@ function renderDetail() {
       <details><summary>parsed action (after clamping: see "action" above)</summary>
         <pre>${esc(JSON.stringify(vlm.parsed_action, null, 2))}</pre></details>` : ""}
     ${vlm.prompt ? `
-      <details><summary>full prompt sent (${vlm.prompt.length.toLocaleString()} chars + RGB${s.depth_sent ? " + depth" : ""})</summary>
+      <details><summary>full prompt sent (${vlm.prompt.length.toLocaleString()} chars + RGB${s.depth_sent ? " + depth" : ""}${s.map_sent ? " + map" : ""})</summary>
         <pre>${esc(vlm.prompt)}</pre></details>` : ""}
     ${run.summary ? `<details open><summary>episode summary (done)</summary><pre>${esc(run.summary)}</pre></details>` : ""}
     <div id="artifacts">${artifacts ? "<h3 style='font-size:13px'>Artifact reports</h3>" + artifacts : ""}</div>`;

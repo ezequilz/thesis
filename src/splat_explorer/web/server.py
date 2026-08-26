@@ -221,6 +221,9 @@ class DashboardApp:
         depth_name = record.get("depth_frame")
         if depth_name:
             step["depth_frame_url"] = f"/frames/{episode}/{depth_name}"
+        map_name = record.get("map_frame")
+        if map_name:
+            step["map_frame_url"] = f"/frames/{episode}/{map_name}"
         action = record["action"]
         with self.lock:
             self.run["episode"] = episode
@@ -357,6 +360,8 @@ class DashboardApp:
                     rec["frame_url"] = f"/frames/{d.name}/{rec['frame']}"
                     if rec.get("depth_frame"):
                         rec["depth_frame_url"] = f"/frames/{d.name}/{rec['depth_frame']}"
+                    if rec.get("map_frame"):
+                        rec["map_frame_url"] = f"/frames/{d.name}/{rec['map_frame']}"
                     steps.append(rec)
         except (OSError, json.JSONDecodeError):
             pass

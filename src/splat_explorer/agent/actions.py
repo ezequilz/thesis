@@ -8,6 +8,8 @@ Movement model:
     you there instead of diving into it). amount = 1 lands right at (never
     inside) the geometry.
   - move remains for small body-relative correction steps.
+  - view_map requests a top-down path map (attached on the next observation,
+    RGB stays in the prompt). The map itself is refreshed every step.
   - rotate handles both yaw and (optional, absolute) pitch; the former
     separate `look` action was folded into it.
 All movement is collision-clamped by the harness before being applied.

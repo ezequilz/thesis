@@ -80,6 +80,7 @@ class ScriptedPolicy:
         pose_description: str,
         step: int,
         depth_image: np.ndarray | None = None,
+        map_image: np.ndarray | None = None,
     ) -> Action:
         action = self._script[step] if step < len(self._script) else Action("done", {"summary": "Script exhausted."})
         if action.name == "move_toward" and (
@@ -138,6 +139,7 @@ class OpenAIVLMPolicy:
         pose_description: str,
         step: int,
         depth_image: np.ndarray | None = None,
+        map_image: np.ndarray | None = None,
     ) -> Action:
         content = [
             {"type": "text", "text": f"Step {step}. Current pose: {pose_description}. Choose exactly one tool call."},

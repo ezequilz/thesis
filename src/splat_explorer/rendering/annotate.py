@@ -192,16 +192,16 @@ def draw_path_map(
         lu, ru = _px(project_to_pixels(camera, left[None])[0]), _px(
             project_to_pixels(camera, right[None])[0]
         )
+        if current:
+            fill, outline = _CURRENT_COLOR + (130,), _CURRENT_COLOR + (255,)
+        else:
+            fade = int(50 + 90 * (i + 1) / n)
+            fill, outline = _PATH_COLOR + (fade,), _PATH_COLOR + (min(255, fade + 80),)
         if lu is not None and ru is not None:
-            if current:
-                fill, outline = _CURRENT_COLOR + (130,), _CURRENT_COLOR + (255,)
-            else:
-                fade = int(50 + 90 * (i + 1) / n)
-                fill, outline = _PATH_COLOR + (fade,), _PATH_COLOR + (min(255, fade + 80),)
             draw.polygon([uv, lu, ru], fill=fill, outline=outline)
         tip = _px(project_to_pixels(camera, (position + heading * length)[None])[0])
         if tip is not None:
-            draw.line([uv, tip], fill=(outline if lu is not None else _PATH_COLOR + (200,)), width=2)
+            draw.line([uv, tip], fill=outline, width=2)
         dot = _CURRENT_COLOR if current else _PATH_COLOR
         draw.ellipse((uv[0] - r, uv[1] - r, uv[0] + r, uv[1] + r),
                      fill=dot + (255,), outline=(255, 255, 255, 255), width=2)

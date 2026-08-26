@@ -333,12 +333,14 @@ class CliRelayPolicy:
                 "for move_toward refer to it."
             )
         else:
+            listed = (
+                " and ".join([", ".join(attached[:-1]), attached[-1]])
+                if len(attached) > 2 else " and ".join(attached)
+            )
             images_note = (
-                "The attached images are " + " and ".join(
-                    [", ".join(attached[:-1]), attached[-1]] if len(attached) > 2
-                    else attached
-                )
-                + " (labelled). Pixel coordinates for move_toward refer to the RGB view, not the map."
+                f"The attached images are {listed} (labelled). "
+                "Pixel coordinates for move_toward refer to the RGB view"
+                + (", not the map." if with_map else ".")
             )
         return (
             f"{system_prompt(with_depth, with_map)}\n"
