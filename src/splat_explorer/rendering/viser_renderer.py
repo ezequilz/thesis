@@ -1,8 +1,9 @@
 """Harness RGB from visor WebGL; depth from the CPU EWA rasterizer.
 
-RGB is captured from the full-page visor tab (not the dashboard preview).
-Depth uses CpuSplatRenderer.render_depth() — the same anisotropic footprints
-as the old CPU images, without compositing RGB (that path stays on
+RGB is captured from the dashboard's always-on visor iframe, which is sized
+to the selected VLM resolution (default 960x720). Depth uses
+CpuSplatRenderer.render_depth() — the same anisotropic footprints as the
+old CPU images, without compositing RGB (that path stays on
 CpuSplatRenderer.render() for the cpu_splats backend).
 """
 
@@ -34,8 +35,7 @@ class ViserCaptureError(RuntimeError):
 
 
 class ViserCaptureRenderer:
-    """RGB from the full-page visor WebGL view. Waits for a usable tab rather
-    than substituting the CPU rasterizer."""
+    """RGB from the dashboard visor WebGL view at the selected VLM size."""
 
     def __init__(
         self,
@@ -55,9 +55,9 @@ class ViserCaptureRenderer:
         # Same EWA pipeline as cpu_splats, but render_depth() skips RGB.
         self._cpu = CpuSplatRenderer(scene, max_splat_radius_px=max_splat_radius_px)
         self.last_backend: str | None = None
+        self._visor_settled = False
         logger.info(
-            "Viser capture renderer -> %s (open a full-page visor at %s; "
-            "the dashboard preview is not used for captures)",
+            "Viser capture renderer -> %s (dashboard visor at VLM resolution; %s is HD viewing only)",
             self.url, self.viewer_url,
         )
 
@@ -82,16 +82,25 @@ class ViserCaptureRenderer:
                 last = str(exc)
                 time.sleep(0.5)
                 continue
-            if int(info.get("capture_ready", 0)) > 0:
-                return
             viewports = info.get("viewports") or []
+            sized = [
+                v for v in viewports
+                if v.get("usable")
+                and int(v.get("width") or 0) >= width * 0.9
+                and int(v.get("height") or 0) >= height * 0.9
+            ]
+            if sized:
+                if not self._visor_settled:
+                    time.sleep(0.8)
+                    self._visor_settled = True
+                return
             last = (
-                f"{info.get('clients', 0)} connected, none usable "
-                f"(viewports={viewports}). Open {self.viewer_url} in its own "
-                f"window (spectator or :8080). VLM frames are {width}x{height}."
+                f"{info.get('clients', 0)} connected, none at {width}x{height} "
+                f"(viewports={viewports}). Keep the episode dashboard tab "
+                "visible so its capture visor can answer."
             )
             if not warned:
-                logger.warning("Waiting for a visor/spectator tab: %s", last)
+                logger.warning("Waiting for the dashboard capture visor: %s", last)
                 warned = True
             time.sleep(0.5)
         raise ViserCaptureError(last)
@@ -105,10 +114,30 @@ class ViserCaptureRenderer:
             "height": int(camera.height),
         }).encode()
         t0 = time.perf_counter()
-        raw = self._request("POST", "/render", body=body, content_type="application/json")
+        last_exc: Exception | None = None
+        raw = b""
+        for attempt in range(1, 4):
+            try:
+                raw = self._request("POST", "/render", body=body, content_type="application/json")
+                last_exc = None
+                break
+            except ViserCaptureError as exc:
+                last_exc = exc
+                msg = str(exc).lower()
+                retryable = "closed connection" in msg or "timed out" in msg or "timeout" in msg
+                if not retryable or attempt == 3:
+                    raise
+                logger.warning("Visor capture attempt %d failed (%s); retrying", attempt, exc)
+                time.sleep(0.4 * attempt)
+        if last_exc is not None:
+            raise last_exc
         img = np.asarray(Image.open(io.BytesIO(raw)).convert("RGB"))
         need_w, need_h = int(camera.width), int(camera.height)
         if img.shape[1] != need_w or img.shape[0] != need_h:
+            logger.warning(
+                "Capture size %dx%d != VLM %dx%d",
+                img.shape[1], img.shape[0], need_w, need_h,
+            )
             from .viser_viewer import _center_crop_and_resize
             img = _center_crop_and_resize(img, need_w, need_h)
         logger.info("Visor capture %dx%d in %.2fs", need_w, need_h, time.perf_counter() - t0)

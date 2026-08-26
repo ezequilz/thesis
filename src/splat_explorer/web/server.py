@@ -14,7 +14,7 @@ starting a new episode from the browser costs nothing but the rendering.
 
 Endpoints:
   GET  /                  dashboard page
-  GET  /spectator         HD visor (same aspect as :8080; not sent to the VLM)
+  GET  /spectator         HD visor for looking around (not used for VLM captures)
   GET  /api/state         full dashboard state (scene status + current run)
   GET  /api/episodes      list all past runs on disk (meta.json summaries)
   GET  /api/episodes/<id>      full trace of one past run (steps + artifacts)

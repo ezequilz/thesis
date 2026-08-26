@@ -11,9 +11,9 @@ with the current screenshot inside — plus its trajectory. A "Follow agent"
 checkbox snaps connected browser cameras to the agent pose after each step.
 
 Harness capture: a small HTTP API on render_port (default 8081) grabs a
-WebGL frame from a connected visor tab (prefer the full-page spectator).
-The VLM receives a center-cropped, downscaled copy (default 960x720); the
-tab itself stays HD.
+WebGL frame from the dashboard's always-on visor iframe, which is sized to
+the VLM resolution (default 960x720). Captures are requested at that size
+directly — no HD readback or crop.
 """
 
 from __future__ import annotations
@@ -36,11 +36,11 @@ logger = logging.getLogger(__name__)
 
 LIVE_STATE_PATH = Path("outputs/live/agent_state.json")
 
-# Viser's splat shader applies last frame's projection. Requesting 4:3 from a
-# 16:9 (or retina) tab therefore squeezes the image. Capture at the tab's
-# native aspect, then crop + downscale to the VLM size.
+# Viser's splat shader applies last frame's projection. The dashboard visor
+# iframe is therefore sized to the VLM's 4:3 so get_render(W,H) matches the
+# live canvas and we never read back a larger buffer.
 _VLM_MAX_W, _VLM_MAX_H = 1920, 1440
-_CAPTURE_MAX_W, _CAPTURE_MAX_H = 1920, 1080
+_ASPECT_TOL = 0.08
 
 
 def _center_crop_and_resize(arr: np.ndarray, need_w: int, need_h: int) -> np.ndarray:
@@ -68,13 +68,10 @@ def _center_crop_and_resize(arr: np.ndarray, need_w: int, need_h: int) -> np.nda
     return np.asarray(img.convert("RGB"))
 
 
-def _native_capture_size(view_w: int, view_h: int) -> tuple[int, int]:
-    """Same aspect as the visor canvas, capped so get_render stays responsive."""
-    view_w, view_h = max(int(view_w), 16), max(int(view_h), 16)
-    scale = min(1.0, _CAPTURE_MAX_W / view_w, _CAPTURE_MAX_H / view_h)
-    cap_w = max(16, int(round(view_w * scale)))
-    cap_h = max(16, int(round(view_h * scale)))
-    return cap_w, cap_h
+def _aspect_match(width: int, height: int, need_w: int, need_h: int) -> bool:
+    if width < 2 or height < 2 or need_h < 1:
+        return False
+    return abs((width / height) - (need_w / need_h)) <= _ASPECT_TOL
 
 
 def _load_live_state(path: Path) -> dict | None:
@@ -182,15 +179,14 @@ class CaptureError(RuntimeError):
 
 
 class _VisorCapture:
-    """Hides overlay gizmos, captures a visor tab, restores gizmos.
+    """Hides overlay gizmos, captures the dashboard visor, restores gizmos.
 
-    viser's Gaussian shader uses the live canvas aspect (one frame delayed).
-    We therefore capture at that native aspect, then crop and downscale to
-    the VLM size so pixels are never stretched. Prefers the largest visible
-    tab (full-page spectator / :8080); the dashboard pip is a fallback.
+    The dashboard iframe is sized to the VLM resolution (4:3), so we request
+    that size from get_render and skip HD readback. 16:9 spectator tabs are
+    ignored — they are the slow, easy-to-throttle path.
     """
 
-    GET_RENDER_TIMEOUT_S = 45.0
+    GET_RENDER_TIMEOUT_S = 12.0
     ATTEMPTS = 3
     MIN_VIEW_W, MIN_VIEW_H = 160, 90
 
@@ -226,19 +222,61 @@ class _VisorCapture:
             return 0, 0
 
     @classmethod
-    def _usable(cls, width: int, height: int) -> bool:
-        return width >= cls.MIN_VIEW_W and height >= cls.MIN_VIEW_H
+    def _usable(cls, width: int, height: int, need_w: int = 4, need_h: int = 3) -> bool:
+        """Dashboard capture visor is 4:3 at the VLM size. Skip 16:9 spectator tabs."""
+        if width < cls.MIN_VIEW_W or height < cls.MIN_VIEW_H:
+            return False
+        return _aspect_match(width, height, need_w, need_h)
 
-    def _pick_clients(self, clients: dict) -> list:
-        """Largest usable canvas first; last successful client wins ties."""
+    def _pick_clients(self, clients: dict, need_w: int, need_h: int) -> list:
+        """Prefer a 4:3 canvas closest to the VLM size (the dashboard iframe)."""
+        target_px = need_w * need_h
         ranked = []
         for cid, client in clients.items():
             w, h = self._viewport(client)
-            if not self._usable(w, h):
+            if not self._usable(w, h, need_w, need_h):
                 continue
-            ranked.append((cid != self._good_client_id, -(w * h), -h, -w, cid, client))
+            if w < need_w * 0.9 or h < need_h * 0.9:
+                continue
+            aspect_err = abs((w / h) - (need_w / need_h))
+            px_err = abs(w * h - target_px)
+            ranked.append((cid != self._good_client_id, aspect_err, px_err, cid, client))
         ranked.sort()
-        return [(cid, client) for _, _, _, _, cid, client in ranked]
+        return [(cid, client) for _, _, _, cid, client in ranked]
+
+    def _get_render(self, client, *, width: int, height: int, wxyz, position, fov):
+        """Call get_render at the VLM size, with a timeout so a frozen tab
+        cannot stall the episode for a minute."""
+        kwargs = dict(
+            height=height,
+            width=width,
+            wxyz=wxyz,
+            position=position,
+            fov=fov,
+            transport_format="jpeg",
+        )
+        box: dict = {}
+
+        def run() -> None:
+            try:
+                box["img"] = client.get_render(**kwargs)
+            except Exception as exc:
+                box["err"] = exc
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(self.GET_RENDER_TIMEOUT_S)
+        if thread.is_alive():
+            raise CaptureError(
+                f"get_render timed out after {self.GET_RENDER_TIMEOUT_S:.0f}s "
+                "(Chrome likely throttled the visor). Keep the dashboard tab visible."
+            )
+        if "err" in box:
+            raise box["err"]
+        img = box.get("img")
+        if img is None or getattr(img, "size", 0) == 0:
+            raise CaptureError("Visor returned an empty frame")
+        return img
 
     def _sync_fov(self, client, fov: float):
         """Match the live canvas FOV to the agent so the delayed splat
@@ -269,19 +307,20 @@ class _VisorCapture:
             clients = self._server.get_clients()
             if not clients:
                 raise CaptureError(
-                    "No visor tab connected. Open the spectator page or "
-                    "http://localhost:8080 and keep that window visible."
+                    "No visor connected. Keep the episode dashboard open — it "
+                    "runs a 4:3 capture visor at the selected VLM resolution."
                 )
-            order = self._pick_clients(clients)
+            order = self._pick_clients(clients, width, height)
             if not order:
                 sizes = [
                     f"{cid}:{self._viewport(c)[0]}x{self._viewport(c)[1]}"
                     for cid, c in clients.items()
                 ]
                 raise CaptureError(
-                    "No visor tab large enough to capture from "
+                    "No 4:3 capture visor ready "
                     f"(connected viewports: {', '.join(sizes) or 'none'}). "
-                    "Open /spectator or http://localhost:8080 and keep it visible."
+                    "Keep the episode dashboard tab visible; the visor iframe "
+                    f"must stay at {width}x{height}."
                 )
             hidden = []
             for handle in self._overlay:
@@ -294,19 +333,17 @@ class _VisorCapture:
                 for attempt in range(1, self.ATTEMPTS + 1):
                     for cid, client in order:
                         view_w, view_h = self._viewport(client)
-                        cap_w, cap_h = _native_capture_size(view_w, view_h)
                         old_fov = self._sync_fov(client, fov)
                         try:
-                            img = client.get_render(
-                                height=cap_h,
-                                width=cap_w,
+                            img = self._get_render(
+                                client,
+                                width=width,
+                                height=height,
                                 wxyz=wxyz,
                                 position=position,
                                 fov=fov,
-                                transport_format="jpeg",
-                                timeout=self.GET_RENDER_TIMEOUT_S,
                             )
-                            used = (cid, view_w, view_h, cap_w, cap_h)
+                            used = (cid, view_w, view_h, width, height)
                             self._good_client_id = cid
                             break
                         except Exception as exc:
@@ -333,23 +370,29 @@ class _VisorCapture:
         if img is None or getattr(img, "size", 0) == 0:
             raise CaptureError(
                 "; ".join(errors[-3:]) or "Visor returned an empty frame. "
-                "Keep the spectator/visor window visible — Chrome pauses hidden "
-                "tabs, so get_render never returns."
+                "Keep the episode dashboard tab visible so Chrome does not "
+                "throttle the capture visor."
             )
         arr = np.asarray(img)
         if arr.ndim == 2:
             arr = np.stack([arr, arr, arr], axis=-1)
         else:
             arr = arr[..., :3]
-        fitted = _center_crop_and_resize(arr.astype(np.uint8), width, height)
+        arr = arr.astype(np.uint8)
+        if arr.shape[1] != width or arr.shape[0] != height:
+            logger.warning(
+                "Visor returned %dx%d, expected %dx%d — resizing (should be rare)",
+                arr.shape[1], arr.shape[0], width, height,
+            )
+            arr = _center_crop_and_resize(arr, width, height)
         if used:
             cid, view_w, view_h, cap_w, cap_h = used
             logger.info(
-                "Visor capture client %s viewport %dx%d -> %dx%d crop/resize %dx%d",
-                cid, view_w, view_h, cap_w, cap_h, width, height,
+                "Visor capture client %s viewport %dx%d -> %dx%d (direct)",
+                cid, view_w, view_h, cap_w, cap_h,
             )
         buf = io.BytesIO()
-        Image.fromarray(fitted, mode="RGB").save(buf, format="JPEG", quality=85)
+        Image.fromarray(arr, mode="RGB").save(buf, format="JPEG", quality=85)
         return buf.getvalue()
 
 
@@ -399,8 +442,8 @@ def serve_viewer(
     forward = seed - up * np.dot(seed, up)
     forward /= np.linalg.norm(forward)
 
-    # viser's fov is vertical. Match the agent's vertical FOV at 4:3 so a
-    # 16:9 spectator crop lines up with the VLM's 960x720 pinhole.
+    # viser's fov is vertical. Match the agent's vertical FOV at 4:3 so the
+    # dashboard capture visor (sized to the VLM resolution) lines up.
     hfov = np.radians(float(fov_deg))
     vfov = float(2.0 * np.arctan(np.tan(hfov / 2.0) * 3.0 / 4.0))
 
@@ -459,7 +502,7 @@ def serve_viewer(
     _start_render_api(host, render_port, _VisorCapture(server, overlay_lock, overlay_handles), viewer_url)
 
     logger.info(
-        "Viser spectator at %s (HD). Agent frames are cropped/downscaled from this view.",
+        "Viser at %s. Agent frames are captured at VLM size from the dashboard visor.",
         viewer_url,
     )
     last_key: tuple | None = None

@@ -10,9 +10,10 @@ scene:
   min_opacity: 0.05
 
 renderer:
-  # "viser"      — capture RGB from the visor/spectator tab (http://localhost:8080).
-  #                The VLM gets a center-cropped, downscaled frame (default 960x720);
-  #                the tab itself stays HD. Hidden Chrome tabs cannot be captured.
+  # "viser"      — capture RGB from the dashboard visor iframe, sized to the
+  #                selected VLM resolution (default 960x720). Keep the dashboard
+  #                tab visible during episodes; Chrome throttles hidden tabs.
+  #                /spectator is HD viewing only and is not used for captures.
   # "cpu_splats" — CPU EWA rasterizer with visor-style back-to-front layers.
   # "gsplat"     — reference 3DGS rasterization, requires NVIDIA GPU + [gpu] extra.
   # "cpu_points" — legacy dot-based debug renderer (speckled; not for VLM runs).

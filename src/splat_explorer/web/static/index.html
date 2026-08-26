@@ -90,16 +90,16 @@
   .artifact { border: 1px solid var(--warn); border-radius: 6px; padding: 8px 12px;
               margin: 6px 0; font-size: 12.5px; background: var(--panel); }
   .empty { color: var(--dim); padding: 30px; text-align: center; }
-  /* 16:9 spectator pip — same aspect as a typical full-page visor tab, small
-     enough that the step list stays usable. Not stretched to 4:3. */
+  /* Capture visor: iframe stays at the selected VLM size (4:3). The window
+     is only visually scaled so WebGL still renders 960×720 (or whatever
+     you picked) while looking like a small pip. Never display:none. */
   #viser-pip {
     display: none; position: fixed; z-index: 40;
     right: 16px; bottom: 16px;
-    width: min(720px, calc(100vw - 440px)); aspect-ratio: 16 / 9;
     background: #000; border: 1px solid var(--border); border-radius: 8px;
-    overflow: hidden; min-width: 360px; min-height: 202px;
+    overflow: hidden; flex-direction: column;
   }
-  #viser-pip.open { display: flex; flex-direction: column; }
+  #viser-pip.live { display: flex; }
   #viser-pip .bar {
     display: flex; align-items: center; gap: 8px; flex: none;
     padding: 5px 8px; background: var(--panel);
@@ -109,8 +109,9 @@
   #viser-pip .bar b { color: var(--text); font-weight: 600; }
   #viser-pip .bar .spacer { flex: 1; }
   #viser-pip .bar button { padding: 3px 8px; font-size: 11px; }
-  #viser-pip .body { flex: 1; min-height: 0; background: #000; position: relative; }
-  #viser-pip iframe { width: 100%; height: 100%; border: 0; display: block; }
+  #viser-pip .body { background: #000; position: relative; overflow: hidden; flex: none; }
+  #viser-pip .stage { transform-origin: top left; }
+  #viser-pip iframe { border: 0; display: block; }
   #viser-pip .resize {
     position: absolute; right: 0; bottom: 0; width: 18px; height: 18px;
     cursor: nwse-resize; z-index: 3;
@@ -121,7 +122,7 @@
     border-right: 2px solid var(--dim); border-bottom: 2px solid var(--dim);
   }
   @media (max-width: 900px) {
-    #viser-pip { width: min(100vw - 24px, 480px); right: 12px; bottom: 12px; }
+    #viser-pip { right: 12px; bottom: 12px; }
   }
   label.chk { flex-direction: row !important; align-items: center; gap: 6px !important;
               font-size: 12px !important; color: var(--dim); }
@@ -135,8 +136,8 @@
   <span id="pill-run" class="pill">idle</span>
   <span id="pill-view" class="pill busy" style="display:none"></span>
   <span class="spacer"></span>
-  <a id="spectator-link" href="/spectator" target="_blank" title="Full-window HD visor. Keep it visible during episodes so captures are not frozen.">spectator (HD) ↗</a>
-  <button id="btn-viser" class="ghost">spectator window</button>
+  <a id="spectator-link" href="/spectator" target="_blank" title="Full-window HD visor for looking around. Captures use the dashboard visor, not this page.">spectator (HD) ↗</a>
+  <button id="btn-viser" class="ghost">show visor</button>
 </header>
 
 <div id="controls">
@@ -186,14 +187,16 @@
 
 <div id="viser-pip">
   <div class="bar" id="viser-pip-bar">
-    <b>Spectator</b> · 16∶9 HD visor · not sent to the VLM
+    <b>Capture visor</b> · <span id="viser-pip-label">960×720</span> · sent to the VLM
     <span class="spacer"></span>
-    <button class="ghost" id="btn-pip-pop">pop out</button>
-    <button class="ghost" id="btn-pip-hide">hide</button>
+    <button class="ghost" id="btn-pip-pop">pop out HD</button>
+    <button class="ghost" id="btn-pip-hide">minimize</button>
   </div>
-  <div class="body">
-    <iframe id="viser-frame" title="HD visor"></iframe>
-    <div class="resize" id="viser-pip-resize" title="Drag to resize (keeps 16∶9)"></div>
+  <div class="body" id="viser-pip-body">
+    <div class="stage" id="viser-stage">
+      <iframe id="viser-frame" title="Capture visor" allow="autoplay"></iframe>
+    </div>
+    <div class="resize" id="viser-pip-resize" title="Drag to resize the window (capture resolution stays put)"></div>
   </div>
 </div>
 
@@ -241,8 +244,6 @@ function render() {
     $("in-depth").dataset.init = "1";
   }
   $("spectator-link").href = "/spectator";
-  // Load the pip iframe only while the window is open (a hidden/throttled
-  // embed is a connected visor client that cannot answer get_render).
   const frame = $("viser-frame");
   if (!frame.dataset.url) frame.dataset.url = defaults.viewer_url;
 
@@ -256,6 +257,8 @@ function render() {
   }
   $("btn-start").disabled = scene.status !== "ready" || running;
   $("btn-stop").disabled = !running;
+  if (scene.status === "ready") ensureCaptureVisor();
+  else layoutVisor();
 
   const pv = $("pill-view");
   pv.style.display = hist ? "" : "none";
@@ -392,6 +395,7 @@ $("btn-start").onclick = () => {
   const [w, h] = $("in-res").value.split("x").map(Number);
   $("in-history").value = "";  // starting a run always returns to the live view
   hist = null;
+  ensureCaptureVisor();
   post("/api/run", {
     backend: $("in-backend").value,
     model: $("in-model").value.trim(),
@@ -452,27 +456,79 @@ $("in-follow").onchange = () => {
   if ($("in-follow").checked) post("/api/select", { step: null });  // viser back to live
 };
 
-function setPip(open) {
-  const pip = $("viser-pip"), frame = $("viser-frame");
-  pip.classList.toggle("open", open);
-  $("btn-viser").textContent = open ? "hide spectator" : "spectator window";
-  const url = frame.dataset.url || "http://localhost:8080";
-  if (open) {
-    if (!frame.src || /about:blank/.test(frame.src)) frame.src = url;
-  } else {
-    frame.src = "about:blank";
-  }
+function selectedRes() {
+  const [w, h] = $("in-res").value.split("x").map(Number);
+  return { w: w || 960, h: h || 720 };
 }
-$("btn-viser").onclick = () => setPip(!$("viser-pip").classList.contains("open"));
-$("btn-pip-hide").onclick = () => setPip(false);
+
+function captureRes() {
+  const run = state?.run;
+  const running = run && (run.status === "running" || run.status === "stopping");
+  if (running && run.params?.width && run.params?.height)
+    return { w: run.params.width, h: run.params.height };
+  return selectedRes();
+}
+
+let visorOpen = false;
+let visorVisualW = 0;
+let lastLayoutKey = "";
+
+function layoutVisor() {
+  const pip = $("viser-pip");
+  if (!pip.classList.contains("live")) return;
+  const { w, h } = captureRes();
+  const maxOpen = Math.min(w, Math.max(280, window.innerWidth - 440), 640);
+  const minVis = Math.min(280, w);
+  let visW = visorVisualW || (visorOpen ? maxOpen : minVis);
+  visW = Math.max(minVis, Math.min(maxOpen, visW));
+  if (!visorOpen && !visorVisualW) visW = minVis;
+  const key = w + "x" + h + ":" + visW + ":" + visorOpen;
+  if (key === lastLayoutKey) return;
+  lastLayoutKey = key;
+
+  const frame = $("viser-frame"), stage = $("viser-stage"), body = $("viser-pip-body");
+  frame.style.width = w + "px";
+  frame.style.height = h + "px";
+  stage.style.width = w + "px";
+  stage.style.height = h + "px";
+  $("viser-pip-label").textContent = w + "×" + h;
+  const scale = visW / w;
+  stage.style.transform = "scale(" + scale + ")";
+  body.style.width = Math.round(w * scale) + "px";
+  body.style.height = Math.round(h * scale) + "px";
+}
+
+function ensureCaptureVisor() {
+  const pip = $("viser-pip"), frame = $("viser-frame");
+  pip.classList.add("live");
+  const url = frame.dataset.url || "http://localhost:8080";
+  if (!frame.src || /about:blank/.test(frame.src)) frame.src = url;
+  $("btn-viser").textContent = visorOpen ? "minimize visor" : "show visor";
+  layoutVisor();
+}
+
+function setVisorOpen(open) {
+  visorOpen = !!open;
+  visorVisualW = 0;
+  $("viser-pip").classList.toggle("open", visorOpen);
+  $("btn-viser").textContent = visorOpen ? "minimize visor" : "show visor";
+  ensureCaptureVisor();
+}
+
+$("in-res").onchange = () => { visorVisualW = 0; layoutVisor(); };
+
+function setPip(open) {
+  setVisorOpen(open);
+}
+$("btn-viser").onclick = () => setVisorOpen(!visorOpen);
+$("btn-pip-hide").onclick = () => setVisorOpen(false);
 $("btn-pip-pop").onclick = () => {
   window.open("/spectator", "splat-spectator", "noopener");
 };
 
 (function enablePipDrag() {
   const pip = $("viser-pip"), bar = $("viser-pip-bar"), grip = $("viser-pip-resize");
-  const ASPECT = 16 / 9, MIN_W = 360, MIN_H = 202;
-  let mode = null, ox = 0, oy = 0, startW = 0, startH = 0, startX = 0, startY = 0;
+  let mode = null, ox = 0, oy = 0, startW = 0, startX = 0;
 
   function pinTopLeft() {
     const r = pip.getBoundingClientRect();
@@ -480,9 +536,6 @@ $("btn-pip-pop").onclick = () => {
     pip.style.top = r.top + "px";
     pip.style.right = "auto";
     pip.style.bottom = "auto";
-    pip.style.aspectRatio = "auto";
-    pip.style.width = r.width + "px";
-    pip.style.height = r.height + "px";
     return r;
   }
 
@@ -495,10 +548,10 @@ $("btn-pip-pop").onclick = () => {
     e.preventDefault();
   });
   grip.addEventListener("mousedown", e => {
-    const r = pinTopLeft();
+    pinTopLeft();
     mode = "resize";
-    startW = r.width; startH = r.height;
-    startX = e.clientX; startY = e.clientY;
+    startW = $("viser-pip-body").offsetWidth;
+    startX = e.clientX;
     e.preventDefault();
     e.stopPropagation();
   });
@@ -511,26 +564,15 @@ $("btn-pip-pop").onclick = () => {
       pip.style.top = Math.max(8, Math.min(maxT, e.clientY - oy)) + "px";
       return;
     }
-    const left = parseFloat(pip.style.left) || 8;
-    const top = parseFloat(pip.style.top) || 8;
-    const maxW = window.innerWidth - left - 8;
-    const maxH = window.innerHeight - top - 8;
-    let w = startW + (e.clientX - startX);
-    let h = startH + (e.clientY - startY);
-    // Follow the larger axis, keep 16∶9 so it matches a full-page visor tab.
-    if (Math.abs(e.clientX - startX) * 9 > Math.abs(e.clientY - startY) * 16)
-      h = w / ASPECT;
-    else
-      w = h * ASPECT;
-    w = Math.max(MIN_W, Math.min(maxW, w));
-    h = w / ASPECT;
-    if (h > maxH) { h = Math.max(MIN_H, maxH); w = h * ASPECT; }
-    pip.style.width = w + "px";
-    pip.style.height = h + "px";
+    visorOpen = true;
+    visorVisualW = Math.max(200, startW + (e.clientX - startX));
+    $("btn-viser").textContent = "minimize visor";
+    layoutVisor();
   });
   window.addEventListener("mouseup", () => {
     mode = null; bar.style.cursor = "grab";
   });
+  window.addEventListener("resize", () => layoutVisor());
 })();
 
 poll();
