@@ -47,7 +47,12 @@ def cmd_render_test(cfg, args) -> None:
     mins, maxs = scene.robust_bounds()
     logger.info("Robust bounds: mins=%s maxs=%s", np.round(mins, 2), np.round(maxs, 2))
 
-    renderer = make_renderer(scene, cfg.renderer)
+    from .config import Config
+    renderer_cfg = dict(cfg.renderer)
+    if renderer_cfg.get("backend") == "viser":
+        renderer_cfg["backend"] = "cpu_splats"
+        logger.info("render-test is headless; using cpu_splats instead of visor capture")
+    renderer = make_renderer(scene, Config(renderer_cfg))
     rig = CameraRig(_resolve_start(cfg, scene), up_axis=cfg.camera.up_axis,
                     yaw_deg=cfg.camera.start_yaw_deg)
 
@@ -133,6 +138,15 @@ def cmd_explore(cfg, args) -> None:
         max_rotate_degrees=cfg.agent.max_rotate_degrees,
         nav=world,
         spawn=spawn,
+        send_depth=bool(cfg.agent.get("send_depth", False)),
+        run_meta={"params": {
+            "backend": cfg.agent.vlm_backend,
+            "model": cfg.agent.model,
+            "max_steps": cfg.agent.max_steps,
+            "width": cfg.renderer.width,
+            "height": cfg.renderer.height,
+            "send_depth": bool(cfg.agent.get("send_depth", False)),
+        }},
     )
 
 
@@ -192,6 +206,7 @@ def cmd_viewer(cfg, args) -> None:
         port=cfg.viewer.port,
         max_splats=cfg.viewer.max_splats,
         up_axis=cfg.camera.up_axis,
+        render_port=int(cfg.viewer.get("render_port", 8081)),
     )
 
 

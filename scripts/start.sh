@@ -114,6 +114,7 @@ free_port() {  # free_port <port> <cmd substring> ; returns 1 if a foreign proce
 }
 free_port 8080 "splat-explorer viewer"    && SERVICES="$SERVICES viewer" \
   || echo "    Skipping viewer (port busy)"
+free_port 8081 "splat-explorer viewer"    || true
 free_port 8090 "splat-explorer dashboard" && SERVICES="$SERVICES dashboard" \
   || echo "    Skipping dashboard (port busy)"
 if [ -n "$SERVICES" ]; then

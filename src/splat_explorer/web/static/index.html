@@ -44,7 +44,7 @@
   #stats b { color: var(--text); font-family: var(--mono); font-weight: 600; }
   #msg { font-size: 12px; color: var(--warn); padding: 0 16px; }
 
-  #layout { display: grid; grid-template-columns: 340px 1fr; gap: 0;
+  #layout { display: grid; grid-template-columns: 400px 1fr; gap: 0;
             height: calc(100vh - 148px); }
   #steps { overflow-y: auto; border-right: 1px solid var(--border); }
   .step { display: flex; gap: 10px; padding: 8px 10px; cursor: pointer;
@@ -67,6 +67,12 @@
   #detail { overflow-y: auto; padding: 14px 18px; }
   #detail img.frame { max-width: 100%; max-height: 58vh; border-radius: 6px;
                       border: 1px solid var(--border); background: #000; }
+  .frames { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 1100px) { .frames { grid-template-columns: 1fr; } }
+  .frames figure { margin: 0; }
+  .frames figcaption { font-size: 11px; color: var(--dim); margin: 0 0 5px; letter-spacing: .02em; }
+  .frames img.frame { max-height: 46vh; width: 100%; object-fit: contain; }
+  .step img.depth-thumb { width: 48px; opacity: .9; }
   .kv { display: grid; grid-template-columns: 110px 1fr; gap: 3px 12px;
         font-size: 13px; margin: 12px 0; }
   .kv .k { color: var(--dim); }
@@ -83,8 +89,12 @@
   .artifact { border: 1px solid var(--warn); border-radius: 6px; padding: 8px 12px;
               margin: 6px 0; font-size: 12.5px; background: var(--panel); }
   .empty { color: var(--dim); padding: 30px; text-align: center; }
-  #viser-wrap { display: none; height: 46vh; border-bottom: 1px solid var(--border); }
-  #viser-wrap iframe { width: 100%; height: 100%; border: 0; background: #000; }
+  #viser-wrap { display: none; padding: 8px 16px 12px;
+                border-bottom: 1px solid var(--border); background: var(--panel); }
+  #viser-wrap .hint { font-size: 12px; color: var(--dim); margin: 0 0 8px; }
+  #viser-frame-box { width: min(960px, 100%); aspect-ratio: 4 / 3; max-height: 48vh;
+                     margin: 0 auto; border: 1px solid var(--border); background: #000; }
+  #viser-wrap iframe { width: 100%; height: 100%; border: 0; display: block; }
   label.chk { flex-direction: row !important; align-items: center; gap: 6px !important;
               font-size: 12px !important; color: var(--dim); }
 </style>
@@ -95,9 +105,10 @@
   <h1>splat-explorer <span>· episode dashboard</span></h1>
   <span id="pill-scene" class="pill">scene: loading…</span>
   <span id="pill-run" class="pill">idle</span>
+  <span id="pill-view" class="pill busy" style="display:none"></span>
   <span class="spacer"></span>
-  <a id="viser-link" href="http://localhost:8080" target="_blank">viser viewer ↗</a>
-  <button id="btn-viser" class="ghost">embed live viewer</button>
+  <a id="viser-link" href="http://localhost:8080" target="_blank" title="Agent frames are captured from this full-page tab. Keep it open, visible, and reasonably tall.">open visor (captures) ↗</a>
+  <button id="btn-viser" class="ghost">preview visor</button>
 </header>
 
 <div id="controls">
@@ -116,14 +127,18 @@
   <label>resolution
     <select id="in-res">
       <option value="320x240">320 × 240 (fast debug)</option>
-      <option value="480x360" selected>480 × 360</option>
+      <option value="480x360">480 × 360</option>
       <option value="640x480">640 × 480</option>
-      <option value="960x720">960 × 720 (config default)</option>
+      <option value="960x720" selected>960 × 720 (visor match)</option>
     </select>
   </label>
+  <label class="chk"><input type="checkbox" id="in-depth"> send depth map to VLM</label>
   <button id="btn-start">▶ Start episode</button>
   <button id="btn-stop" disabled>■ Stop</button>
   <label class="chk"><input type="checkbox" id="in-follow" checked> follow latest step</label>
+  <label>past runs
+    <select id="in-history" style="min-width:210px"><option value="">— live run —</option></select>
+  </label>
   <span id="msg"></span>
 </div>
 
@@ -136,7 +151,10 @@
   <span>artifacts <b id="st-art">0</b></span>
 </div>
 
-<div id="viser-wrap"><iframe id="viser-frame"></iframe></div>
+<div id="viser-wrap">
+  <p class="hint">This preview is 4∶3 and is <b>not</b> used for agent screenshots. Keep the full-page visor tab open for captures.</p>
+  <div id="viser-frame-box"><iframe id="viser-frame"></iframe></div>
+</div>
 
 <div id="layout">
   <div id="steps"><div class="empty">No steps yet — start an episode.</div></div>
@@ -147,6 +165,11 @@
 "use strict";
 const $ = id => document.getElementById(id);
 let state = null, selectedStep = null, renderedSteps = -1, renderedRunId = null;
+// When set, a past run loaded from /api/episodes/<id> is shown instead of
+// the live run (same shape as state.run).
+let hist = null;
+
+function activeRun() { return hist || state?.run; }
 
 function fmtSecs(s) {
   if (s == null) return "–";
@@ -177,8 +200,15 @@ function render() {
   } else { ps.textContent = "scene: loading…"; ps.className = "pill busy"; }
 
   if (!$("in-model").value && defaults.model) $("in-model").placeholder = defaults.model;
+  if (!$("in-depth").dataset.init) {
+    $("in-depth").checked = !!defaults.send_depth;
+    $("in-depth").dataset.init = "1";
+  }
   $("viser-link").href = defaults.viewer_url;
-  if (!$("viser-frame").src) $("viser-frame").dataset.url = defaults.viewer_url;
+  // Do not auto-load the visor iframe: a hidden/throttled embed is a connected
+  // client that cannot answer get_render, which used to hang the episode.
+  const frame = $("viser-frame");
+  if (!frame.dataset.url) frame.dataset.url = defaults.viewer_url;
 
   const pr = $("pill-run");
   const running = run && (run.status === "running" || run.status === "stopping");
@@ -191,26 +221,33 @@ function render() {
   $("btn-start").disabled = scene.status !== "ready" || running;
   $("btn-stop").disabled = !running;
 
-  // stats
-  $("st-ep").textContent = run?.episode ?? "–";
-  const steps = run?.steps ?? [];
-  $("st-steps").textContent = run ? `${steps.length}/${run.params.max_steps}` : "0";
-  const end = run?.finished_at ?? (state.now || Date.now() / 1000);
-  $("st-elapsed").textContent = run ? fmtSecs(end - run.started_at) : "0s";
+  const pv = $("pill-view");
+  pv.style.display = hist ? "" : "none";
+  if (hist) pv.textContent = `viewing past run ${hist.episode}`;
+
+  // stats + steps show either the live run or the selected past run
+  const view = activeRun();
+  $("st-ep").textContent = view?.episode ?? "–";
+  const steps = view?.steps ?? [];
+  $("st-steps").textContent = view ? `${steps.length}/${view.params?.max_steps ?? "?"}` : "0";
+  const end = view?.finished_at ?? (state.now || Date.now() / 1000);
+  $("st-elapsed").textContent = view?.started_at ? fmtSecs(end - view.started_at) : "–";
   const avg = key => steps.length
     ? fmtSecs(steps.reduce((a, s) => a + (s.timing?.[key] ?? 0), 0) / steps.length) : "–";
   $("st-render").textContent = avg("render_s");
   $("st-vlm").textContent = avg("decide_s");
-  $("st-art").textContent = run?.artifacts?.length ?? 0;
-  if (run?.error) { $("msg").textContent = run.error; }
+  $("st-art").textContent = view?.artifacts?.length ?? 0;
+  if (!hist && run?.error) { $("msg").textContent = run.error; }
 
-  // steps list: rebuild only when the run or step count changes
-  if (run && (run.id !== renderedRunId || steps.length !== renderedSteps)) {
-    if (run.id !== renderedRunId) selectedStep = null;
-    renderedRunId = run.id; renderedSteps = steps.length;
+  // steps list: rebuild only when the shown run or its step count changes
+  if (view && (view.id !== renderedRunId || steps.length !== renderedSteps)) {
+    if (view.id !== renderedRunId && (selectedStep == null || selectedStep >= steps.length))
+      selectedStep = steps.length ? steps.length - 1 : null;
+    renderedRunId = view.id; renderedSteps = steps.length;
     renderSteps(steps);
+    renderDetail();
   }
-  if ($("in-follow").checked && steps.length && run.id === renderedRunId) {
+  if (!hist && $("in-follow").checked && steps.length && view.id === renderedRunId) {
     const last = steps.length - 1;
     if (selectedStep !== last) { selectedStep = last; markSelected(); renderDetail(); }
   }
@@ -229,15 +266,16 @@ function renderSteps(steps) {
     if (a.name === "done") badge += '<span class="badge done">DONE</span>';
     div.innerHTML = `
       <img src="${s.frame_url}" loading="lazy" alt="step ${s.step}">
+      ${s.depth_frame_url ? `<img class="depth-thumb" src="${s.depth_frame_url}" loading="lazy" alt="depth ${s.step}">` : ""}
       <div class="info">
         <div class="act">#${s.step} <span class="name">${esc(a.name)}</span> ${esc(JSON.stringify(a.args))}${badge}</div>
-        <div class="times">render ${fmtSecs(s.timing?.render_s)} · vlm ${fmtSecs(s.timing?.decide_s)}</div>
+        <div class="times">render ${fmtSecs(s.timing?.render_s)}${s.render_backend ? ` (${esc(s.render_backend)})` : ""} · vlm ${fmtSecs(s.timing?.decide_s)}</div>
         <div class="times">${esc(s.pose)}</div>
       </div>`;
     div.onclick = () => {
       $("in-follow").checked = false;
       selectedStep = i; markSelected(); renderDetail();
-      post("/api/select", { step: i });  // move the viser camera/frustum to this step
+      if (!hist) post("/api/select", { step: i });  // move the viser camera/frustum to this step
     };
     box.appendChild(div);
   }
@@ -250,7 +288,8 @@ function markSelected() {
 }
 
 function renderDetail() {
-  const s = state?.run?.steps?.[selectedStep];
+  const run = activeRun();
+  const s = run?.steps?.[selectedStep];
   if (!s) return;
   const d = $("detail");
   const vlm = s.vlm || {};
@@ -260,17 +299,33 @@ function renderDetail() {
         ${a.parsed_ok ? "parsed OK" : (a.error ? "error" : "unparseable")}</span>
       <pre>${esc(a.error || a.reply || "(empty reply)")}</pre>
     </div>`).join("");
-  const artifacts = (state.run.artifacts || []).map(a => `
+  const artifacts = (run.artifacts || []).map(a => `
     <div class="artifact">step ${a.step} · <b>${esc(a.severity ?? "?")}</b> ·
       ${esc(a.image_region ?? "")}<br>${esc(a.description ?? "")}</div>`).join("");
+  const depthCaption = s.depth_sent
+    ? "DEPTH MAP — sent to the VLM (bright = near, black = nothing)"
+    : "DEPTH MAP — navigation only, not sent to the VLM";
+  const frames = s.depth_frame_url ? `
+    <div class="frames">
+      <figure>
+        <figcaption>RGB — sent to the VLM</figcaption>
+        <img class="frame" src="${s.frame_url}" alt="step ${s.step} RGB">
+      </figure>
+      <figure>
+        <figcaption>${depthCaption}</figcaption>
+        <img class="frame" src="${s.depth_frame_url}" alt="step ${s.step} depth">
+      </figure>
+    </div>` : `<img class="frame" src="${s.frame_url}" alt="step ${s.step}">`;
   d.innerHTML = `
-    <img class="frame" src="${s.frame_url}" alt="step ${s.step}">
+    ${frames}
     <div class="kv">
       <span class="k">step</span><span class="v">#${s.step} — ${esc(s.frame)}</span>
       <span class="k">pose</span><span class="v">${esc(s.pose)}</span>
       <span class="k">action</span><span class="v">${esc(s.action.name)} ${esc(JSON.stringify(s.action.args))}</span>
       <span class="k">timing</span><span class="v">render ${fmtSecs(s.timing?.render_s)} · vlm decide ${fmtSecs(s.timing?.decide_s)}</span>
+      ${s.render_backend ? `<span class="k">renderer</span><span class="v">${esc(s.render_backend)}</span>` : ""}
       ${vlm.backend ? `<span class="k">vlm</span><span class="v">${esc(vlm.backend)}${vlm.model ? " · " + esc(vlm.model) : ""}${vlm.fallback ? ' · <b style="color:var(--err)">fallback action used</b>' : ""}</span>` : ""}
+      ${run.episode ? `<span class="k">logs</span><span class="v"><a href="/api/episodes/${encodeURIComponent(run.episode)}/log" target="_blank">episode.log ↗</a></span>` : ""}
     </div>
     ${vlm.raw_response !== undefined ? `
       <details open><summary>raw VLM response (${(vlm.attempts || []).length || 1} attempt${(vlm.attempts||[]).length===1?"":"s"})</summary>
@@ -280,9 +335,9 @@ function renderDetail() {
       <details><summary>parsed action (after clamping: see "action" above)</summary>
         <pre>${esc(JSON.stringify(vlm.parsed_action, null, 2))}</pre></details>` : ""}
     ${vlm.prompt ? `
-      <details><summary>full prompt sent (${vlm.prompt.length.toLocaleString()} chars + screenshot)</summary>
+      <details><summary>full prompt sent (${vlm.prompt.length.toLocaleString()} chars + RGB${s.depth_sent ? " + depth" : ""})</summary>
         <pre>${esc(vlm.prompt)}</pre></details>` : ""}
-    ${state.run.summary ? `<details open><summary>episode summary (done)</summary><pre>${esc(state.run.summary)}</pre></details>` : ""}
+    ${run.summary ? `<details open><summary>episode summary (done)</summary><pre>${esc(run.summary)}</pre></details>` : ""}
     <div id="artifacts">${artifacts ? "<h3 style='font-size:13px'>Artifact reports</h3>" + artifacts : ""}</div>`;
 }
 
@@ -296,14 +351,64 @@ async function post(url, body) {
 
 $("btn-start").onclick = () => {
   const [w, h] = $("in-res").value.split("x").map(Number);
+  $("in-history").value = "";  // starting a run always returns to the live view
+  hist = null;
   post("/api/run", {
     backend: $("in-backend").value,
     model: $("in-model").value.trim(),
     max_steps: Number($("in-steps").value) || 5,
     width: w, height: h,
+    send_depth: $("in-depth").checked,
   });
 };
 $("btn-stop").onclick = () => post("/api/stop");
+
+// --- past-run history --------------------------------------------------------
+async function loadHistory() {
+  try {
+    const r = await fetch("/api/episodes");
+    const { episodes } = await r.json();
+    const sel = $("in-history"), current = sel.value;
+    sel.innerHTML = '<option value="">— live run —</option>' + episodes.map(e => {
+      const when = e.started_at ? new Date(e.started_at * 1000).toLocaleString() : e.id;
+      const backend = e.params?.backend ? ` · ${e.params.backend}` : "";
+      return `<option value="${esc(e.id)}">${esc(when)} · ${esc(e.status)} · ${e.steps} steps${backend}</option>`;
+    }).join("");
+    sel.value = current;  // keep the selection across refreshes
+    if (sel.value !== current) sel.value = "";
+  } catch (e) { /* dashboard unreachable; poll() already reports it */ }
+}
+
+$("in-history").onchange = async () => {
+  const id = $("in-history").value;
+  if (!id) { hist = null; renderedRunId = null; render(); return; }
+  try {
+    const r = await fetch(`/api/episodes/${encodeURIComponent(id)}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const ep = await r.json();
+    const m = ep.meta || {};
+    hist = {
+      id: "hist:" + ep.id,
+      episode: ep.id,
+      status: m.status ?? "archived",
+      params: m.params ?? { max_steps: m.max_steps },
+      steps: ep.steps,
+      artifacts: ep.artifacts,
+      summary: m.summary ?? null,
+      error: m.error ?? null,
+      started_at: m.started_at ?? null,
+      finished_at: m.finished_at ?? null,
+    };
+    $("in-follow").checked = false;
+    render();
+  } catch (e) {
+    $("msg").textContent = `Failed to load run ${id}: ${e.message}`;
+    $("in-history").value = ""; hist = null;
+  }
+};
+
+loadHistory();
+setInterval(loadHistory, 15000);
 $("in-follow").onchange = () => {
   if ($("in-follow").checked) post("/api/select", { step: null });  // viser back to live
 };
@@ -311,7 +416,7 @@ $("btn-viser").onclick = () => {
   const wrap = $("viser-wrap"), frame = $("viser-frame");
   const show = wrap.style.display !== "block";
   wrap.style.display = show ? "block" : "none";
-  $("btn-viser").textContent = show ? "hide live viewer" : "embed live viewer";
+  $("btn-viser").textContent = show ? "hide preview" : "preview visor";
   if (show && !frame.src) frame.src = frame.dataset.url || "http://localhost:8080";
 };
 

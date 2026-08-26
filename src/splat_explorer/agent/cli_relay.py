@@ -37,7 +37,7 @@ import time
 
 import numpy as np
 
-from ..tasks.artifact_hunt import SPAWN_PROMPT, SYSTEM_PROMPT
+from ..tasks.artifact_hunt import SPAWN_PROMPT, system_prompt
 from .actions import ACTION_TOOLS, Action
 
 logger = logging.getLogger(__name__)
@@ -228,7 +228,7 @@ class CliRelayPolicy:
         step: int,
         depth_image: np.ndarray | None = None,
     ) -> Action:
-        prompt = self._build_prompt(pose_description, step)
+        prompt = self._build_prompt(pose_description, step, with_depth=depth_image is not None)
         images = [("Image 1 - RGB view from your current pose:", _png_data_url(observation))]
         if depth_image is not None:
             images.append((
@@ -297,19 +297,25 @@ class CliRelayPolicy:
             return "", "relay returned no choices"
         return (choices[0].message.content or "").strip(), None
 
-    def _build_prompt(self, pose_description: str, step: int) -> str:
+    def _build_prompt(self, pose_description: str, step: int, with_depth: bool) -> str:
         history = self._history[-self.MAX_HISTORY_LINES:]
         history_block = (
             "Your previous actions:\n" + "\n".join(history)
             if history
             else "This is your first step; no actions taken yet."
         )
+        images_note = (
+            "The attached images are your current RGB view and its depth map "
+            "(labelled). Pixel coordinates for move_toward refer to the RGB view."
+            if with_depth else
+            "The attached image is your current RGB view. Pixel coordinates "
+            "for move_toward refer to it."
+        )
         return (
-            f"{SYSTEM_PROMPT}\n"
+            f"{system_prompt(with_depth)}\n"
             f"Available tools:\n{render_tool_catalog()}\n\n"
             f"{history_block}\n\n"
             f"Step {step}. Current pose: {pose_description}. "
-            f"The attached images are your current RGB view and its depth map "
-            f"(labelled). Pixel coordinates for move_toward refer to the RGB view.\n\n"
+            f"{images_note}\n\n"
             f"{RESPONSE_FORMAT}"
         )

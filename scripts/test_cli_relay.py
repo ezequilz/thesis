@@ -67,12 +67,15 @@ def main() -> int:
         api_key=cfg.agent.get("relay_api_key", ""),
     )
 
-    prompt = policy._build_prompt(rig.state_description(), step=0)
-    text, error = policy._ask(prompt, [
-        ("Image 1 - RGB view from your current pose:", _png_data_url(observation)),
-        ("Image 2 - DEPTH MAP of the same view (bright = near, dark = far, black = nothing):",
-         _png_data_url(depth_image)),
-    ])
+    send_depth = bool(cfg.agent.get("send_depth", False))
+    prompt = policy._build_prompt(rig.state_description(), step=0, with_depth=send_depth)
+    images = [("Image 1 - RGB view from your current pose:", _png_data_url(observation))]
+    if send_depth:
+        images.append((
+            "Image 2 - DEPTH MAP of the same view (bright = near, dark = far, black = nothing):",
+            _png_data_url(depth_image),
+        ))
+    text, error = policy._ask(prompt, images)
     if error:
         print(f"Request error: {error}")
 

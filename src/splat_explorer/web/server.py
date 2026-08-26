@@ -15,7 +15,10 @@ starting a new episode from the browser costs nothing but the rendering.
 Endpoints:
   GET  /                  dashboard page
   GET  /api/state         full dashboard state (scene status + current run)
-  POST /api/run           start an episode  {backend, model, max_steps, width, height}
+  GET  /api/episodes      list all past runs on disk (meta.json summaries)
+  GET  /api/episodes/<id>      full trace of one past run (steps + artifacts)
+  GET  /api/episodes/<id>/log  that run's episode.log
+  POST /api/run           start an episode  {backend, model, max_steps, width, height, send_depth}
   POST /api/stop          request cooperative stop of the running episode
   POST /api/select        pin the viser overlay to a step {step: int} / back to live {step: null}
   GET  /frames/<ep>/<png> step screenshots from outputs/episodes/
@@ -35,13 +38,15 @@ from urllib.parse import urlsplit
 import numpy as np
 
 from ..config import Config
+from ..rendering.base import rotation_to_wxyz
 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 LIVE_STATE_PATH = Path("outputs/live/agent_state.json")
 
-RUN_DEFAULTS = {"backend": "scripted", "model": "", "max_steps": 5, "width": 480, "height": 360}
+RUN_DEFAULTS = {"backend": "scripted", "model": "", "max_steps": 5,
+                "width": 960, "height": 720, "send_depth": False}
 RUN_LIMITS = {"max_steps": 200, "width": 1920, "height": 1440}
 
 
@@ -64,27 +69,6 @@ def load_dotenv(path: Path = Path(".env")) -> list[str]:
             os.environ[key] = value
             loaded.append(key)
     return loaded
-
-
-def rotation_to_wxyz(R: np.ndarray) -> list[float]:
-    """Rotation matrix -> quaternion (w, x, y, z), for viser frustum poses."""
-    m00, m01, m02 = R[0]
-    m10, m11, m12 = R[1]
-    m20, m21, m22 = R[2]
-    trace = m00 + m11 + m22
-    if trace > 0:
-        s = 2.0 * np.sqrt(trace + 1.0)
-        w, x, y, z = 0.25 * s, (m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s
-    elif m00 > m11 and m00 > m22:
-        s = 2.0 * np.sqrt(1.0 + m00 - m11 - m22)
-        w, x, y, z = (m21 - m12) / s, 0.25 * s, (m01 + m10) / s, (m02 + m20) / s
-    elif m11 > m22:
-        s = 2.0 * np.sqrt(1.0 + m11 - m00 - m22)
-        w, x, y, z = (m02 - m20) / s, (m01 + m10) / s, 0.25 * s, (m12 + m21) / s
-    else:
-        s = 2.0 * np.sqrt(1.0 + m22 - m00 - m11)
-        w, x, y, z = (m10 - m01) / s, (m02 + m20) / s, (m12 + m21) / s, 0.25 * s
-    return [float(w), float(x), float(y), float(z)]
 
 
 class DashboardApp:
@@ -143,6 +127,7 @@ class DashboardApp:
                 clean[key] = params[key]
         for key, cap in RUN_LIMITS.items():
             clean[key] = max(1, min(int(clean[key]), cap))
+        clean["send_depth"] = bool(clean["send_depth"])
 
         with self.lock:
             if self.scene_status != "ready":
@@ -212,6 +197,8 @@ class DashboardApp:
                 max_rotate_degrees=self.cfg.agent.max_rotate_degrees,
                 nav=self.nav_world,
                 spawn=self.spawn,
+                send_depth=params["send_depth"],
+                run_meta={"params": params},
                 on_step=self._on_step,
                 should_stop=self._stop.is_set,
             )
@@ -230,6 +217,9 @@ class DashboardApp:
         episode = frame_path.parent.name
         step = dict(record)
         step["frame_url"] = f"/frames/{episode}/{frame_path.name}"
+        depth_name = record.get("depth_frame")
+        if depth_name:
+            step["depth_frame_url"] = f"/frames/{episode}/{depth_name}"
         action = record["action"]
         with self.lock:
             self.run["episode"] = episode
@@ -288,7 +278,7 @@ class DashboardApp:
                 "step": record["step"],
                 "pose": record["pose"],
                 "position": record["position"],
-                "wxyz": rotation_to_wxyz(np.asarray(camera.rotation, dtype=np.float64)),
+                "wxyz": rotation_to_wxyz(np.asarray(camera.rotation, dtype=np.float64)).tolist(),
                 "view_dir": rig.view_direction().tolist(),
                 "fov_deg": self.cfg.renderer.fov_deg,
                 "aspect": params["width"] / params["height"],
@@ -304,6 +294,79 @@ class DashboardApp:
         except Exception:
             logger.exception("Failed to write live agent state")
 
+    # --- run history -------------------------------------------------------------
+    def _episodes_dir(self) -> Path:
+        return Path(self.cfg.output.dir) / "episodes"
+
+    def episode_path(self, ep_id: str) -> Path | None:
+        """Resolve an episode id to its directory, rejecting path escapes."""
+        root = self._episodes_dir().resolve()
+        target = (root / ep_id).resolve()
+        return target if target.parent == root and target.is_dir() else None
+
+    @staticmethod
+    def _read_json(path: Path):
+        try:
+            return json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def list_episodes(self) -> list[dict]:
+        """All episode dirs on disk, newest first, with meta.json summaries."""
+        root = self._episodes_dir()
+        entries = []
+        if not root.is_dir():
+            return entries
+        for d in sorted(root.iterdir(), reverse=True):
+            if not d.is_dir():
+                continue
+            meta = self._read_json(d / "meta.json") or {}
+            steps = meta.get("steps")
+            if steps is None:  # runs from before meta.json existed
+                try:
+                    with open(d / "actions.jsonl") as f:
+                        steps = sum(1 for line in f if line.strip())
+                except OSError:
+                    steps = 0
+            entries.append({
+                "id": d.name,
+                "status": meta.get("status", "unknown"),
+                "steps": steps,
+                "params": meta.get("params"),
+                "error": meta.get("error"),
+                "artifact_count": meta.get("artifact_count"),
+                "started_at": meta.get("started_at"),
+                "finished_at": meta.get("finished_at"),
+                "has_log": (d / "episode.log").is_file(),
+            })
+        return entries
+
+    def episode_detail(self, ep_id: str) -> dict | None:
+        """Full record of one past run: meta + per-step trace + artifacts."""
+        d = self.episode_path(ep_id)
+        if d is None:
+            return None
+        steps = []
+        try:
+            with open(d / "actions.jsonl") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    rec = json.loads(line)
+                    rec["frame_url"] = f"/frames/{d.name}/{rec['frame']}"
+                    if rec.get("depth_frame"):
+                        rec["depth_frame_url"] = f"/frames/{d.name}/{rec['depth_frame']}"
+                    steps.append(rec)
+        except (OSError, json.JSONDecodeError):
+            pass
+        return {
+            "id": d.name,
+            "meta": self._read_json(d / "meta.json") or {},
+            "steps": steps,
+            "artifacts": self._read_json(d / "artifacts.json") or [],
+            "has_log": (d / "episode.log").is_file(),
+        }
+
     # --- state snapshot --------------------------------------------------------
     def snapshot(self) -> dict:
         with self.lock:
@@ -313,6 +376,7 @@ class DashboardApp:
                 "defaults": {
                     **RUN_DEFAULTS,
                     "model": self.cfg.agent.model,
+                    "send_depth": bool(self.cfg.agent.get("send_depth", False)),
                     "viewer_url": f"http://localhost:{self.cfg.viewer.port}",
                 },
                 "now": time.time(),
@@ -339,10 +403,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(200, (STATIC_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
         elif path == "/api/state":
             self._send_json(self.app.snapshot())
+        elif path == "/api/episodes":
+            self._send_json({"episodes": self.app.list_episodes()})
+        elif path.startswith("/api/episodes/"):
+            self._serve_episode(path[len("/api/episodes/"):])
         elif path.startswith("/frames/"):
             self._serve_frame(path)
         else:
             self._send_json({"error": "not found"}, 404)
+
+    def _serve_episode(self, rest: str) -> None:
+        if rest.endswith("/log"):
+            ep_dir = self.app.episode_path(rest[:-len("/log")])
+            log = ep_dir / "episode.log" if ep_dir else None
+            if log is not None and log.is_file():
+                self._send(200, log.read_bytes(), "text/plain; charset=utf-8")
+            else:
+                self._send_json({"error": "not found"}, 404)
+            return
+        detail = self.app.episode_detail(rest)
+        if detail is None:
+            self._send_json({"error": "not found"}, 404)
+        else:
+            self._send_json(detail)
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path

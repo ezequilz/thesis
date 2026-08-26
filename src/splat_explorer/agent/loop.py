@@ -4,10 +4,10 @@ Episode flow:
   1. Optional start selection: when a SpawnSelection is provided, the policy
      is shown the annotated bird's-eye view (ceiling removed, numbered spawn
      markers) and picks the starting point; the rig teleports there.
-  2. Each step: render the current view as RGB + depth, hand both to the
-     policy, clamp and apply the returned action (collision-checked through
-     the MotionContext), and log everything to outputs/episodes/<timestamp>/
-     as step_NNN.png / step_NNN_depth.png frames plus an actions.jsonl trace.
+  2. Each step: render RGB (+ depth for navigation), hand the observation to
+     the policy (depth image only if send_depth), clamp and apply the returned
+     action (collision-checked through the MotionContext), and log everything
+     to outputs/episodes/<timestamp>/ as frames plus an actions.jsonl trace.
      The outcome of the previous motion (e.g. "move cut short by an obstacle")
      is fed back to the policy with the next prompt.
 
@@ -27,6 +27,7 @@ from typing import Callable
 import numpy as np
 from PIL import Image
 
+from ..logging_utils import log_to_file
 from ..navigation import CollisionWorld, MotionContext, SpawnSelection
 from ..rendering import Renderer
 from ..rendering.annotate import depth_to_image
@@ -35,6 +36,13 @@ from .camera_rig import CameraRig
 from .vlm import VLMPolicy
 
 logger = logging.getLogger(__name__)
+
+
+def _write_meta(episode_dir: Path, meta: dict) -> None:
+    """Atomically (re)write the episode's meta.json (run history metadata)."""
+    tmp = episode_dir / "meta.json.tmp"
+    tmp.write_text(json.dumps(meta, indent=2))
+    tmp.replace(episode_dir / "meta.json")
 
 
 def _motion_note(outcome: dict | None) -> str | None:
@@ -114,98 +122,152 @@ def run_episode(
     max_rotate_degrees: float = 90.0,
     nav: CollisionWorld | None = None,
     spawn: SpawnSelection | None = None,
+    send_depth: bool = False,
+    run_meta: dict | None = None,
     on_step: Callable[[dict, Path, CameraRig], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> Path:
     """Run one episode. Returns the episode output directory.
 
     nav enables collision clamping for all movement; spawn triggers the
-    bird's-eye start-selection prompt before the first step.
+    bird's-eye start-selection prompt before the first step. send_depth
+    controls whether the depth map is attached to the VLM prompt (it is
+    always rendered, saved, and used for move_toward). run_meta is merged
+    into the episode's meta.json (e.g. dashboard run params).
 
     on_step(record, frame_path, rig) fires after each decision — `record`
     matches the actions.jsonl line, `rig` still holds the pose the frame was
     rendered from. should_stop() is checked before each step for cooperative
     cancellation (e.g. from the dashboard).
+
+    Every run leaves in its episode directory: actions.jsonl (per-step
+    trace), meta.json (status/params/error), episode.log (all log output,
+    crashes included), artifacts.json, and the PNG frames.
     """
     episode_dir = output_dir / "episodes" / time.strftime("%Y%m%d_%H%M%S")
     episode_dir.mkdir(parents=True, exist_ok=True)
     artifacts: list[dict] = []
     status = "completed"
+    summary: str | None = None
+    steps_done = 0
     motion_note: str | None = None
 
-    with open(episode_dir / "actions.jsonl", "w") as trace:
-        if spawn is not None and spawn.points:
-            _select_start(policy, spawn, rig, episode_dir, trace, on_step)
+    meta = {
+        "episode": episode_dir.name,
+        "status": "running",
+        "error": None,
+        "started_at": time.time(),
+        "finished_at": None,
+        "steps": 0,
+        "max_steps": max_steps,
+        "send_depth": send_depth,
+        "artifact_count": 0,
+        "summary": None,
+        **(run_meta or {}),
+    }
+    _write_meta(episode_dir, meta)
 
-        for step in range(max_steps):
-            if should_stop and should_stop():
-                status = "stopped"
-                logger.info("Episode stop requested at step %d", step)
-                break
+    with log_to_file(episode_dir / "episode.log"):
+        try:
+            with open(episode_dir / "actions.jsonl", "w") as trace:
+                if spawn is not None and spawn.points:
+                    _select_start(policy, spawn, rig, episode_dir, trace, on_step)
 
-            t0 = time.perf_counter()
-            camera = rig.camera(width, height, fov_deg)
-            render_depth = getattr(renderer, "render_with_depth", None)
-            if render_depth is not None:
-                observation, depth = render_depth(camera)
-            else:
-                observation, depth = renderer.render(camera), None
-            render_s = time.perf_counter() - t0
+                for step in range(max_steps):
+                    if should_stop and should_stop():
+                        status = "stopped"
+                        logger.info("Episode stop requested at step %d", step)
+                        break
 
-            frame_path = episode_dir / f"step_{step:03d}.png"
-            Image.fromarray(observation).save(frame_path)
-            depth_image = None
-            if depth is not None:
-                depth_image = depth_to_image(depth)
-                Image.fromarray(depth_image).save(episode_dir / f"step_{step:03d}_depth.png")
+                    t0 = time.perf_counter()
+                    camera = rig.camera(width, height, fov_deg)
+                    render_depth = getattr(renderer, "render_with_depth", None)
+                    if render_depth is not None:
+                        observation, depth = render_depth(camera)
+                    else:
+                        observation, depth = renderer.render(camera), None
+                    render_s = time.perf_counter() - t0
+                    render_backend = getattr(renderer, "last_backend", None)
 
-            pose = rig.state_description()
-            if motion_note:
-                pose += f" | {motion_note}"
+                    frame_path = episode_dir / f"step_{step:03d}.png"
+                    Image.fromarray(observation).save(frame_path)
+                    depth_image = None
+                    depth_frame_name = None
+                    if depth is not None:
+                        depth_image = depth_to_image(depth)
+                        depth_frame_name = f"step_{step:03d}_depth.png"
+                        Image.fromarray(depth_image).save(episode_dir / depth_frame_name)
 
-            t1 = time.perf_counter()
-            action = policy.decide(observation, pose, step, depth_image=depth_image)
-            decide_s = time.perf_counter() - t1
-            action = action.clamped(max_move_distance, max_rotate_degrees)
-            logger.info(
-                "step %03d | %s | %s %s | render %.2fs decide %.2fs",
-                step, rig.state_description(), action.name, action.args, render_s, decide_s,
+                    pose = rig.state_description()
+                    if motion_note:
+                        pose += f" | {motion_note}"
+
+                    t1 = time.perf_counter()
+                    action = policy.decide(
+                        observation, pose, step,
+                        depth_image=depth_image if send_depth else None,
+                    )
+                    decide_s = time.perf_counter() - t1
+                    action = action.clamped(max_move_distance, max_rotate_degrees)
+                    logger.info(
+                        "step %03d | %s | %s %s | render %.2fs decide %.2fs",
+                        step, rig.state_description(), action.name, action.args, render_s, decide_s,
+                    )
+
+                    record = {
+                        "step": step,
+                        "pose": rig.state_description(),
+                        "position": rig.position.tolist(),
+                        "yaw_deg": rig.yaw_deg,
+                        "pitch_deg": rig.pitch_deg,
+                        "action": {"name": action.name, "args": action.args},
+                        "frame": frame_path.name,
+                        "depth_frame": depth_frame_name,
+                        "depth_sent": send_depth and depth_image is not None,
+                        "render_backend": render_backend,
+                        "timing": {"render_s": round(render_s, 3), "decide_s": round(decide_s, 3)},
+                        "vlm": getattr(policy, "last_debug", None),
+                    }
+
+                    if action.name == "report_artifact":
+                        artifacts.append({"step": step, **action.args})
+                    done = action.name == "done"
+                    if done:
+                        summary = action.args.get("summary")
+                    outcome = None
+                    if not done:
+                        ctx = MotionContext(world=nav, camera=camera, depth=depth)
+                        outcome = rig.apply(action, ctx)
+                    motion_note = _motion_note(outcome)
+                    if outcome is not None:
+                        record["motion"] = outcome
+                        if motion_note:
+                            logger.info("step %03d | %s", step, motion_note)
+
+                    trace.write(json.dumps(record) + "\n")
+                    trace.flush()
+                    steps_done = step + 1
+
+                    if on_step:
+                        on_step(record, frame_path, rig)
+                    if done:
+                        break
+        except Exception as exc:
+            status = "error"
+            meta["error"] = f"{type(exc).__name__}: {exc}"
+            logger.exception("Episode crashed at step %d", steps_done)
+            raise
+        finally:
+            meta.update(
+                status=status,
+                finished_at=time.time(),
+                steps=steps_done,
+                artifact_count=len(artifacts),
+                summary=summary,
             )
-
-            record = {
-                "step": step,
-                "pose": rig.state_description(),
-                "position": rig.position.tolist(),
-                "yaw_deg": rig.yaw_deg,
-                "pitch_deg": rig.pitch_deg,
-                "action": {"name": action.name, "args": action.args},
-                "frame": frame_path.name,
-                "timing": {"render_s": round(render_s, 3), "decide_s": round(decide_s, 3)},
-                "vlm": getattr(policy, "last_debug", None),
-            }
-
-            if action.name == "report_artifact":
-                artifacts.append({"step": step, **action.args})
-            done = action.name == "done"
-            outcome = None
-            if not done:
-                ctx = MotionContext(world=nav, camera=camera, depth=depth)
-                outcome = rig.apply(action, ctx)
-            motion_note = _motion_note(outcome)
-            if outcome is not None:
-                record["motion"] = outcome
-                if motion_note:
-                    logger.info("step %03d | %s", step, motion_note)
-
-            trace.write(json.dumps(record) + "\n")
-            trace.flush()
-
-            if on_step:
-                on_step(record, frame_path, rig)
-            if done:
-                break
-
-    with open(episode_dir / "artifacts.json", "w") as f:
-        json.dump(artifacts, f, indent=2)
-    logger.info("Episode %s: %d artifact report(s) -> %s", status, len(artifacts), episode_dir)
+            _write_meta(episode_dir, meta)
+            with open(episode_dir / "artifacts.json", "w") as f:
+                json.dump(artifacts, f, indent=2)
+            logger.info("Episode %s: %d artifact report(s) -> %s",
+                        status, len(artifacts), episode_dir)
     return episode_dir

@@ -99,6 +99,36 @@ class Camera:
         rotation = np.stack([right, down, forward], axis=1).astype(np.float32)
         return Camera(position=np.asarray(position, dtype=np.float32), rotation=rotation, **kwargs)
 
+    def vertical_fov_rad(self) -> float:
+        """Vertical field of view in radians (viser's get_render convention)."""
+        hfov = np.radians(self.fov_deg)
+        return float(2.0 * np.arctan(np.tan(hfov / 2.0) * self.height / self.width))
+
+    def rotation_wxyz(self) -> np.ndarray:
+        """Camera-to-world quaternion (w, x, y, z) for viser's OpenCV convention."""
+        return rotation_to_wxyz(self.rotation)
+
+
+def rotation_to_wxyz(R: np.ndarray) -> np.ndarray:
+    """Rotation matrix -> quaternion (w, x, y, z)."""
+    m00, m01, m02 = R[0]
+    m10, m11, m12 = R[1]
+    m20, m21, m22 = R[2]
+    trace = m00 + m11 + m22
+    if trace > 0:
+        s = 2.0 * np.sqrt(trace + 1.0)
+        w, x, y, z = 0.25 * s, (m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s
+    elif m00 > m11 and m00 > m22:
+        s = 2.0 * np.sqrt(1.0 + m00 - m11 - m22)
+        w, x, y, z = (m21 - m12) / s, 0.25 * s, (m01 + m10) / s, (m02 + m20) / s
+    elif m11 > m22:
+        s = 2.0 * np.sqrt(1.0 + m11 - m00 - m22)
+        w, x, y, z = (m02 - m20) / s, (m01 + m10) / s, 0.25 * s, (m12 + m21) / s
+    else:
+        s = 2.0 * np.sqrt(1.0 + m22 - m00 - m11)
+        w, x, y, z = (m10 - m01) / s, (m02 + m20) / s, (m12 + m21) / s, 0.25 * s
+    return np.array([w, x, y, z], dtype=np.float64)
+
 
 class Renderer(Protocol):
     """Renders a GaussianScene from a Camera into an RGB uint8 image.
@@ -116,11 +146,20 @@ class Renderer(Protocol):
 def make_renderer(scene: GaussianScene, renderer_cfg) -> Renderer:
     """Factory dispatching on config renderer.backend."""
     backend = renderer_cfg.backend
+    if backend == "viser":
+        from .viser_renderer import ViserCaptureRenderer
+
+        return ViserCaptureRenderer(
+            scene,
+            url=renderer_cfg.get("viser_url", "") or None,
+            viewer_url=renderer_cfg.get("viewer_url", "") or None,
+            max_splat_radius_px=renderer_cfg.get("max_splat_radius_px", 120),
+        )
     if backend == "cpu_splats":
         from .cpu_splat_renderer import CpuSplatRenderer
 
         return CpuSplatRenderer(
-            scene, max_splat_radius_px=renderer_cfg.get("max_splat_radius_px", 40)
+            scene, max_splat_radius_px=renderer_cfg.get("max_splat_radius_px", 120)
         )
     if backend == "cpu_points":
         from .cpu_point_renderer import CpuPointRenderer

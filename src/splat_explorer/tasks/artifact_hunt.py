@@ -8,14 +8,30 @@ Planned next steps:
   - artifact taxonomy shared between prompt and evaluation
 """
 
-SYSTEM_PROMPT = """\
-You are a quality-inspection agent walking through a 3D Gaussian Splatting \
-reconstruction of an indoor scene. After every action you receive two fresh \
+_IMAGES_WITH_DEPTH = """After every action you receive two fresh \
 labelled images rendered from your current camera pose:
 1. RGB view — what the scene looks like.
 2. DEPTH MAP of the exact same view — bright = near, dark = far, black = no
    geometry at all (background, or a hole in the reconstruction).
+"""
 
+_IMAGES_RGB_ONLY = """After every action you receive one fresh image \
+rendered from your current camera pose: the RGB view of the scene.
+"""
+
+_DEPTH_HELP = """The depth map helps: floaters appear as small bright patches much nearer than
+their surroundings, holes as black pixels inside otherwise solid surfaces.
+"""
+
+
+def system_prompt(with_depth: bool = True) -> str:
+    """Task prompt for the explore loop; wording adapts to whether the depth
+    map is attached alongside the RGB view (agent.send_depth)."""
+    depth_hint = (" Check the\n  depth map first: black pixels have nothing to move toward."
+                  if with_depth else "")
+    return f"""\
+You are a quality-inspection agent walking through a 3D Gaussian Splatting \
+reconstruction of an indoor scene. {_IMAGES_WITH_DEPTH if with_depth else _IMAGES_RGB_ONLY}
 Your goal is to systematically explore the area and find RENDERING ARTIFACTS, \
 such as:
 - floaters: blobs of color hanging in mid-air
@@ -23,9 +39,7 @@ such as:
 - blur/mush: undergenerated regions that look like smeared paint
 - stretched gaussians: long thin spikes or streaks
 - ghosting/duplicates: semi-transparent copies of objects
-The depth map helps: floaters appear as small bright patches much nearer than
-their surroundings, holes as black pixels inside otherwise solid surfaces.
-
+{_DEPTH_HELP if with_depth else ""}
 IMPORTANT — not artifacts: semi-transparent materials (sheer curtains, glass,
 foliage) legitimately render as layered translucent sheets and can look
 streaky, ghostly, or scalloped, especially from very close up, where this
@@ -37,8 +51,7 @@ How to move:
 - move_toward(pixel_x, pixel_y, amount) is your MAIN way to travel. Pick a
   pixel in the RGB view; you move `amount` (0..1) of the distance to the
   surface visible there. amount=1.0 brings you right up to that surface — you
-  can never enter geometry, so prefer confident values like 0.5-0.8. Check the
-  depth map first: black pixels have nothing to move toward.
+  can never enter geometry, so prefer confident values like 0.5-0.8.{depth_hint}
 - move(direction, distance) is only for small corrective steps (0.3-1.0 units).
 - rotate(yaw_degrees, pitch_degrees) turns the camera; pitch is absolute
   (-85..85, positive = up, 0 = level).
@@ -54,6 +67,10 @@ Rules:
   real objects stay consistent, artifacts often deform or become blurry.
 - Call done when you have covered the area.
 """
+
+
+# Default prompt (depth attached) for callers that don't toggle it.
+SYSTEM_PROMPT = system_prompt(True)
 
 
 SPAWN_PROMPT = """\

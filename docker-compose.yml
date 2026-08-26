@@ -1,7 +1,10 @@
 x-base: &base
   build: .
   image: splat-explorer:latest
+  environment:
+    - PYTHONPATH=/app/src
   volumes:
+    - ./src:/app/src
     - ./3dgs_rooms:/app/3dgs_rooms:ro
     - ./outputs:/app/outputs
     - ./configs:/app/configs:ro
@@ -15,12 +18,14 @@ services:
 
   # Interactive splat viewer for debugging (browser at http://localhost:8080).
   # Polls outputs/live/agent_state.json (written by the dashboard) to overlay
-  # the agent's camera frustum + trajectory during episodes.
+  # the agent's camera frustum + trajectory during episodes. :8081 is the
+  # WebGL capture API the harness uses so the VLM sees this same view.
   viewer:
     <<: *base
     command: ["viewer"]
     ports:
       - "8080:8080"
+      - "8081:8081"
 
   # Episode control/debug dashboard (browser at http://localhost:8090):
   # start/stop runs, watch frames + raw VLM replies + timings per step, and
@@ -35,7 +40,10 @@ services:
       - path: .env
         required: false
     environment:
+      - PYTHONPATH=/app/src
       - CLIRELAY_BASE_URL=http://host.docker.internal:8317/v1
+      - VISER_RENDER_URL=http://viewer:8081
+      - VISER_VIEWER_URL=http://localhost:8080
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -52,6 +60,9 @@ services:
       - path: .env
         required: false
     environment:
+      - PYTHONPATH=/app/src
       - CLIRELAY_BASE_URL=http://host.docker.internal:8317/v1
+      - VISER_RENDER_URL=http://viewer:8081
+      - VISER_VIEWER_URL=http://localhost:8080
     extra_hosts:
       - "host.docker.internal:host-gateway"
