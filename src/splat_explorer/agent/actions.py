@@ -3,9 +3,10 @@
 Movement model:
   - move_toward is the primary travel tool: the VLM picks a pixel in its
     current RGB view plus an amount in [0, 1]. The harness ray-casts through
-    that pixel via the depth map and moves the camera that fraction of the way
-    to the first splat surface, so amount = 1 lands right at (never inside)
-    the geometry.
+    that pixel via the depth map, then walks that fraction of the ground-plane
+    distance toward the surface (eye height is held, so a floor pixel walks
+    you there instead of diving into it). amount = 1 lands right at (never
+    inside) the geometry.
   - move remains for small body-relative correction steps.
   - rotate handles both yaw and (optional, absolute) pitch; the former
     separate `look` action was folded into it.
@@ -57,11 +58,13 @@ ACTION_TOOLS: list[dict] = [
         "function": {
             "name": "move_toward",
             "description": (
-                "PRIMARY movement tool. Pick a pixel in the CURRENT RGB view and move toward "
-                "the 3D surface visible at that pixel. amount is the fraction of the distance "
-                "to travel: 0 = stay, 1.0 = move right up to the surface (a safety margin is "
-                "enforced, you can never enter geometry). Check the depth map: black pixels "
-                "have no geometry to move toward. Use this for all larger moves."
+                "PRIMARY movement tool. Pick a pixel in the CURRENT RGB view and walk toward "
+                "the 3D surface visible at that pixel, staying at the current eye height "
+                "(a point on the floor walks you there, not down into it). amount is the "
+                "fraction of the ground distance to travel: 0 = stay, 1.0 = walk right up "
+                "to that location (a safety margin is enforced, you can never enter "
+                "geometry). Check the depth map: black pixels have no geometry to move "
+                "toward. Use this for all larger moves."
             ),
             "parameters": {
                 "type": "object",

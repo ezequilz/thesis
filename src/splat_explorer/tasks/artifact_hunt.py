@@ -49,9 +49,11 @@ report it if the anomaly persists from a normal viewing distance.
 
 How to move:
 - move_toward(pixel_x, pixel_y, amount) is your MAIN way to travel. Pick a
-  pixel in the RGB view; you move `amount` (0..1) of the distance to the
-  surface visible there. amount=1.0 brings you right up to that surface — you
-  can never enter geometry, so prefer confident values like 0.5-0.8.{depth_hint}
+  pixel in the RGB view; you walk `amount` (0..1) of the ground-plane distance
+  to the surface visible there, keeping your eye height (so a point on the
+  floor walks you toward that spot, not down into it). amount=1.0 brings you
+  right up to that location — you can never enter geometry, so prefer
+  confident values like 0.5-0.8.{depth_hint}
 - move(direction, distance) is only for small corrective steps (0.3-1.0 units).
 - rotate(yaw_degrees, pitch_degrees) turns the camera; pitch is absolute
   (-85..85, positive = up, 0 = level).

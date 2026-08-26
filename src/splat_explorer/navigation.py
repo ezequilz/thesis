@@ -32,9 +32,10 @@ move_toward
 The VLM picks a pixel in its current RGB view plus an amount in [0, 1]. The
 pixel is unprojected through the depth map rendered for that exact view (the
 depth value is the first splat surface hit along that ray), giving a world
-target; the camera travels amount x (distance to target), capped a safety
-margin short of the surface and additionally collision-clamped along the path.
-amount = 1 therefore means "right up to the surface", never inside it.
+target. Travel is then flattened onto the ground plane so the camera keeps
+its eye height: a pixel on the floor walks you toward that spot, rather than
+diving into it. amount = 1 means "walk up to the ground-projected surface",
+capped a safety margin short and additionally collision-clamped along the path.
 """
 
 from __future__ import annotations
@@ -278,15 +279,27 @@ class CollisionWorld:
 
         Returns (allowed_distance, was_clamped). One batched KD-tree query
         over path samples, so cost is O(samples * k * log N).
+
+        If the start pose is already inside the keep-out radius (e.g. after a
+        previous dive toward the floor), motion that does not get *closer* to
+        geometry is still allowed, so the agent can walk out horizontally.
         """
         distance = float(distance)
         if distance <= 0.0:
             return 0.0, False
+        start = np.asarray(start, dtype=np.float64)
+        start_c = float(self.clearance(start))
+        if start_c >= self.clearance_radius:
+            required = self.clearance_radius
+        elif start_c > 1e-3:
+            required = start_c
+        else:
+            required = self.clearance_radius
         step = self.clearance_radius * 0.5
         n = int(np.ceil(distance / step))
         ts = np.linspace(0.0, distance, n + 1)[1:]
-        pts = np.asarray(start, dtype=np.float64)[None, :] + np.asarray(direction)[None, :] * ts[:, None]
-        bad = np.flatnonzero(self.clearance(pts) < self.clearance_radius)
+        pts = start[None, :] + np.asarray(direction, dtype=np.float64)[None, :] * ts[:, None]
+        bad = np.flatnonzero(self.clearance(pts) < required - 1e-6)
         if len(bad) == 0:
             return distance, False
         allowed = max(float(ts[bad[0]]) - step, 0.0)
@@ -310,11 +323,15 @@ def resolve_move_toward(
     pixel_y: float,
     amount: float,
     world: CollisionWorld | None = None,
+    up: np.ndarray | None = None,
 ) -> dict | None:
     """Resolve a move_toward action into a new camera position.
 
+    The picked pixel is unprojected to a 3D surface point, then travel is
+    flattened onto the ground plane (`up`) so the camera keeps its eye height.
     Returns None when there is no geometry anywhere near the picked pixel;
-    otherwise a dict with new_position / target_distance / travelled / blocked.
+    otherwise a dict with new_position / target_distance / travelled / blocked
+    (or an `error` key when the pixel is too steep to walk toward).
     """
     H, W = depth.shape
     px = int(np.clip(pixel_x, 0, W - 1))
@@ -340,11 +357,24 @@ def resolve_move_toward(
     position = np.asarray(camera.position, dtype=np.float64)
     target = position + camera.rotation.astype(np.float64) @ ray_cam * z
 
-    vec = target - position
-    dist = float(np.linalg.norm(vec))
-    if dist < 1e-9:
-        return None
-    unit = vec / dist
+    walk = target - position
+    # Walk on the ground plane: a floor pixel means "go there", not "dive".
+    if up is not None:
+        upn = np.asarray(up, dtype=np.float64)
+        nrm = float(np.linalg.norm(upn))
+        if nrm > 1e-12:
+            upn = upn / nrm
+            walk = walk - upn * np.dot(walk, upn)
+
+    dist = float(np.linalg.norm(walk))
+    if dist < 1e-3:
+        return {
+            "error": (
+                "picked pixel is nearly vertical (under/above the camera); "
+                "pick a point farther into the view"
+            ),
+        }
+    unit = walk / dist
 
     margin = world.clearance_radius if world is not None else 0.25
     travel = float(np.clip(amount, 0.0, 1.0)) * dist
@@ -353,8 +383,16 @@ def resolve_move_toward(
     if world is not None and travel > 0.0:
         travel, blocked = world.clamp_motion(position, unit, travel)
 
+    new_position = position + unit * travel
+    if up is not None:
+        # Exact height lock (flattening already removes the up component, this
+        # just kills leftover numerical drift).
+        upn = np.asarray(up, dtype=np.float64)
+        upn = upn / np.linalg.norm(upn)
+        new_position = new_position + upn * np.dot(position - new_position, upn)
+
     return {
-        "new_position": position + unit * travel,
+        "new_position": new_position,
         "target": target,
         "target_distance": round(dist, 3),
         "travelled": round(travel, 3),

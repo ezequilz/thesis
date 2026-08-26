@@ -104,11 +104,19 @@ class CameraRig:
             action.args.get("pixel_y", 0),
             action.args.get("amount", 0.0),
             world=ctx.world,
+            up=self.up,
         )
         if result is None:
             return {
                 "kind": "move_toward",
                 "error": "no geometry at the picked pixel (empty depth); pick a non-black depth pixel",
+            }
+        if result.get("error"):
+            return {
+                "kind": "move_toward",
+                "pixel": [int(action.args.get("pixel_x", 0)), int(action.args.get("pixel_y", 0))],
+                "amount": float(action.args.get("amount", 0.0)),
+                "error": result["error"],
             }
         self.position = np.asarray(result["new_position"], dtype=np.float64)
         return {

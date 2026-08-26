@@ -58,6 +58,13 @@ def _motion_note(outcome: dict | None) -> str | None:
             note += " (stopped early by an obstacle)"
         return note
     if kind == "move_toward":
+        if outcome.get("travelled", 1) == 0 and outcome.get("blocked"):
+            note = (
+                f"previous move_toward travelled 0 units (blocked immediately) toward the "
+                f"surface {outcome['target_distance']} units away at pixel {outcome['pixel']}; "
+                "pick a more open direction or rotate"
+            )
+            return note
         note = (
             f"previous move_toward travelled {outcome['travelled']} units toward the surface "
             f"{outcome['target_distance']} units away at pixel {outcome['pixel']}"
