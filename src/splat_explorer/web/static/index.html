@@ -125,6 +125,15 @@
     width: 7px; height: 7px;
     border-right: 2px solid var(--dim); border-bottom: 2px solid var(--dim);
   }
+  /* Docked strip: bar + a peek of the view about as tall as the bar.
+     The iframe keeps rendering at capture size; overflow clips the rest. */
+  #viser-pip.mini { cursor: pointer; }
+  #viser-pip.mini .bar { cursor: pointer; white-space: nowrap; overflow: hidden; }
+  #viser-pip.mini .bar-extra,
+  #viser-pip.mini .bar .spacer,
+  #viser-pip.mini .bar button,
+  #viser-pip.mini .resize { display: none; }
+  #viser-pip.mini iframe { pointer-events: none; }
   @media (max-width: 900px) {
     #viser-pip { right: 12px; bottom: 12px; }
   }
@@ -191,7 +200,7 @@
 
 <div id="viser-pip">
   <div class="bar" id="viser-pip-bar">
-    <b>Capture visor</b> · <span id="viser-pip-label">960×720</span> · sent to the VLM
+    <b>Capture visor</b> · <span id="viser-pip-label">960×720</span><span class="bar-extra"> · sent to the VLM</span>
     <span class="spacer"></span>
     <button class="ghost" id="btn-pip-pop">pop out HD</button>
     <button class="ghost" id="btn-pip-hide">minimize</button>
@@ -489,25 +498,50 @@ let visorOpen = false;
 let visorVisualW = 0;
 let lastLayoutKey = "";
 
+function snapVisorBottomRight() {
+  const pip = $("viser-pip");
+  pip.style.left = "auto";
+  pip.style.top = "auto";
+  pip.style.right = "";
+  pip.style.bottom = "";
+}
+
 function layoutVisor() {
   const pip = $("viser-pip");
   if (!pip.classList.contains("live")) return;
   const { w, h } = captureRes();
-  const maxOpen = Math.min(w, Math.max(280, window.innerWidth - 440), 640);
-  const minVis = Math.min(280, w);
-  let visW = visorVisualW || (visorOpen ? maxOpen : minVis);
-  visW = Math.max(minVis, Math.min(maxOpen, visW));
-  if (!visorOpen && !visorVisualW) visW = minVis;
-  const key = w + "x" + h + ":" + visW + ":" + visorOpen;
-  if (key === lastLayoutKey) return;
-  lastLayoutKey = key;
-
   const frame = $("viser-frame"), stage = $("viser-stage"), body = $("viser-pip-body");
   frame.style.width = w + "px";
   frame.style.height = h + "px";
   stage.style.width = w + "px";
   stage.style.height = h + "px";
   $("viser-pip-label").textContent = w + "×" + h;
+
+  if (!visorOpen) {
+    pip.classList.add("mini");
+    pip.title = "Click to expand";
+    snapVisorBottomRight();
+    const barH = $("viser-pip-bar").offsetHeight || 28;
+    const visW = Math.min(240, Math.max(160, window.innerWidth - 24));
+    const key = w + "x" + h + ":mini:" + visW + ":" + barH;
+    if (key !== lastLayoutKey) {
+      lastLayoutKey = key;
+      stage.style.transform = "scale(" + (visW / w) + ")";
+      body.style.width = visW + "px";
+      body.style.height = barH + "px";
+    }
+    return;
+  }
+
+  pip.classList.remove("mini");
+  pip.title = "";
+  const maxOpen = Math.min(w, Math.max(280, window.innerWidth - 440), 640);
+  const minVis = Math.min(280, w);
+  let visW = visorVisualW || maxOpen;
+  visW = Math.max(minVis, Math.min(maxOpen, visW));
+  const key = w + "x" + h + ":" + visW + ":open";
+  if (key === lastLayoutKey) return;
+  lastLayoutKey = key;
   const scale = visW / w;
   stage.style.transform = "scale(" + scale + ")";
   body.style.width = Math.round(w * scale) + "px";
@@ -526,6 +560,7 @@ function ensureCaptureVisor() {
 function setVisorOpen(open) {
   visorOpen = !!open;
   visorVisualW = 0;
+  lastLayoutKey = "";
   $("viser-pip").classList.toggle("open", visorOpen);
   $("btn-viser").textContent = visorOpen ? "minimize visor" : "show visor";
   ensureCaptureVisor();
@@ -541,6 +576,10 @@ $("btn-pip-hide").onclick = () => setVisorOpen(false);
 $("btn-pip-pop").onclick = () => {
   window.open("/spectator", "splat-spectator", "noopener");
 };
+$("viser-pip").addEventListener("click", e => {
+  if (visorOpen || e.target.closest("button")) return;
+  setVisorOpen(true);
+});
 
 (function enablePipDrag() {
   const pip = $("viser-pip"), bar = $("viser-pip-bar"), grip = $("viser-pip-resize");
@@ -556,7 +595,7 @@ $("btn-pip-pop").onclick = () => {
   }
 
   bar.addEventListener("mousedown", e => {
-    if (e.target.closest("button")) return;
+    if (!visorOpen || e.target.closest("button")) return;
     const r = pinTopLeft();
     mode = "move";
     ox = e.clientX - r.left; oy = e.clientY - r.top;
@@ -564,6 +603,7 @@ $("btn-pip-pop").onclick = () => {
     e.preventDefault();
   });
   grip.addEventListener("mousedown", e => {
+    if (!visorOpen) return;
     pinTopLeft();
     mode = "resize";
     startW = $("viser-pip-body").offsetWidth;
