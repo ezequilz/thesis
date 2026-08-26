@@ -42,13 +42,15 @@ def test_cone_paints_ahead_not_behind_and_falls_off():
     paint_coverage_cone(coverage, camera, origin, heading, up, fov_deg=75.0)
 
     near = _sample(coverage, camera, [0.0, 1.5, 0.8])
+    curtain = _sample(coverage, camera, [0.0, 1.5, 1.45])
     mid = _sample(coverage, camera, [0.0, 1.5, 3.0])
     far = _sample(coverage, camera, [0.0, 1.5, 5.2])
     behind = _sample(coverage, camera, [0.0, 1.5, -1.5])
 
-    assert near > 0.08, f"close cone should be painted, got {near}"
-    assert near > mid > far, f"expected distance falloff, got near={near} mid={mid} far={far}"
-    assert far < 0.03, f"far end of the room should be faint, got {far}"
+    assert near > 0.20, f"close cone should be ~one-view gain, got {near}"
+    assert abs(curtain - near) < 0.03, f"full strength should hold to ~1.5m, near={near} curtain={curtain}"
+    assert near > mid > far, f"expected distance falloff after ~1.5m, got near={near} mid={mid} far={far}"
+    assert far < 0.04, f"far end of the room should be faint, got {far}"
     assert behind < 0.01, f"nothing behind the camera, got {behind}"
     assert float(coverage.max()) <= 1.0 + 1e-6
 
@@ -70,16 +72,19 @@ def test_overlapping_views_stack_until_one():
     assert float(twice.max()) <= 1.0 + 1e-6
 
 
-def test_overlay_keeps_map_readable():
+def test_overlay_one_view_is_a_wash_four_go_solid_lime():
+    from splat_explorer.rendering.annotate import _COVERAGE_GAIN, _COVERAGE_RGB
+
     base = np.full((40, 40, 3), 80, dtype=np.uint8)
-    full = np.ones((40, 40), dtype=np.float32)
-    out = overlay_coverage(base, full)
-    # Even at coverage=1 the backdrop must still show through.
-    assert np.all(out > 30)
-    assert np.all(out < 220)
-    # Tint is yellow-green: G high relative to B.
-    assert out[20, 20, 1] > out[20, 20, 2]
-    max_shift = float(np.abs(out.astype(np.float64) - 80).max())
+    one = overlay_coverage(base, np.full((40, 40), _COVERAGE_GAIN, dtype=np.float32))
+    full = overlay_coverage(base, np.ones((40, 40), dtype=np.float32))
+    # One close view: a visible lime wash, map still underneath.
+    assert one[20, 20, 1] > one[20, 20, 2]
+    assert abs(int(one[20, 20, 1]) - 80) > 20
+    assert abs(int(one[20, 20, 1]) - 80) < 80
+    # Saturated coverage is solid lime.
+    np.testing.assert_allclose(full[20, 20], _COVERAGE_RGB, atol=1)
+    max_shift = float(np.abs(full.astype(np.float64) - 80).max())
     assert max_shift <= 255 * _COVERAGE_DISPLAY_ALPHA + 1
 
 

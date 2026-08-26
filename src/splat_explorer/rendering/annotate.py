@@ -22,12 +22,14 @@ _MARKER_OUTLINE = (255, 255, 255)
 # Match the viser overlay: red trajectory + frustum, cyan for the live pose.
 _PATH_COLOR = (255, 80, 80)
 _CURRENT_COLOR = (90, 190, 255)
-# Coverage cones: yellow-green, low per-view gain so overlaps stack visibly.
-_COVERAGE_RGB = np.array([196.0, 214.0, 48.0], dtype=np.float64)
-_COVERAGE_GAIN = 0.14          # peak contribution of one close-range view
-_COVERAGE_NEAR_M = 1.6         # full strength out to this many scene units
+# Coverage cones: saturated lime. One close view is ~25% opaque (readable on
+# parquet); 4 overlapping looks saturate to solid lime. Full strength holds
+# out to ~1.5 m (curtain distance), then fades.
+_COVERAGE_RGB = np.array([110.0, 220.0, 40.0], dtype=np.float64)
+_COVERAGE_GAIN = 0.25          # peak contribution of one close-range view
+_COVERAGE_NEAR_M = 1.5         # full strength out to this many scene units
 _COVERAGE_FAR_M = 5.5          # fade to zero by this distance (far walls stay faint)
-_COVERAGE_DISPLAY_ALPHA = 0.48  # even at coverage=1 the splat map stays readable
+_COVERAGE_DISPLAY_ALPHA = 1.0  # coverage=1 is fully lime; the path map is separate
 _SCENE_LUMA_MIN = 16.0         # bird's-eye void is darker than this; rooms are not
 
 
@@ -237,8 +239,8 @@ def scene_mask(image: np.ndarray) -> np.ndarray:
 
 
 def overlay_coverage(image: np.ndarray, coverage: np.ndarray) -> np.ndarray:
-    """Tint `image` with accumulated coverage. Display alpha is capped so the
-    bird's-eye stays readable even where coverage saturates at 1."""
+    """Tint `image` with accumulated coverage. One close view is a light lime
+    wash; several overlapping views go to solid lime."""
     rgb = np.asarray(image, dtype=np.float64)
     cov = np.clip(np.asarray(coverage, dtype=np.float64), 0.0, 1.0)
     alpha = (cov * _COVERAGE_DISPLAY_ALPHA)[..., None]
@@ -259,10 +261,10 @@ def paint_coverage_cone(
 ) -> None:
     """Add one view cone into `coverage` (in-place, clipped to [0, 1]).
 
-    The cone matches the camera's horizontal FOV. Strength is `gain` at close
-    range and falls off with a smooth gradient to zero by `far_m`, so the far
-    side of a room / a distant wall is only lightly marked. Overlapping views
-    stack until the per-pixel value saturates at 1.
+    The cone matches the camera's horizontal FOV. Strength stays at `gain` for
+    a circular sector out to `near_m` (about 1.5 m / the curtains), then falls
+    off with a smooth gradient to zero by `far_m`. Overlapping views stack
+    until the per-pixel value saturates at 1 (~4 close looks).
     """
     heading = _ground_heading(heading, up)
     if heading is None:
@@ -354,15 +356,15 @@ def draw_coverage_map(
 ) -> np.ndarray:
     """Bird's-eye with accumulated view cones plus the usual path/frustum overlay.
 
-    Yellow-green paint marks floor that has been looked at; overlapping views
-    stack (capped). The small camera triangles stay on top so heading is still
-    readable. `coverage_fraction` is shown in the title (0..1).
+    Lime paint marks floor that has been looked at; overlapping views stack
+    toward solid lime. The small camera triangles stay on top so heading is
+    still readable. `coverage_fraction` is shown in the title (0..1).
     """
     tinted = overlay_coverage(image, coverage)
     pct = int(round(100.0 * float(np.clip(coverage_fraction, 0.0, 1.0))))
     title = (
-        f"COVERAGE MAP (viewed area) | lime = seen close-up, fades with distance "
-        f"| overlap stacks | coverage {pct}%"
+        f"COVERAGE MAP (viewed area) | lime = seen within ~1.5m, then fades "
+        f"| ~4 overlaps = solid | coverage {pct}%"
     )
     return draw_path_map(
         tinted, camera, poses, fov_deg=fov_deg, up=up, title=title,
