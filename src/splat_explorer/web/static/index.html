@@ -496,6 +496,7 @@ function captureRes() {
 
 let visorOpen = false;
 let visorVisualW = 0;
+let visorPlacement = null; // last expanded {left, top, visW} for this page load
 let lastLayoutKey = "";
 
 function snapVisorBottomRight() {
@@ -504,6 +505,32 @@ function snapVisorBottomRight() {
   pip.style.top = "auto";
   pip.style.right = "";
   pip.style.bottom = "";
+}
+
+function rememberVisorPlacement() {
+  const pip = $("viser-pip");
+  if (!visorOpen || pip.classList.contains("mini")) return;
+  const r = pip.getBoundingClientRect();
+  visorPlacement = {
+    left: r.left,
+    top: r.top,
+    visW: $("viser-pip-body").offsetWidth || visorVisualW,
+  };
+  visorVisualW = visorPlacement.visW;
+}
+
+function applyVisorPlacement() {
+  if (!visorPlacement) {
+    snapVisorBottomRight();
+    return;
+  }
+  const pip = $("viser-pip");
+  const maxL = Math.max(8, window.innerWidth - pip.offsetWidth - 8);
+  const maxT = Math.max(8, window.innerHeight - pip.offsetHeight - 8);
+  pip.style.left = Math.max(8, Math.min(maxL, visorPlacement.left)) + "px";
+  pip.style.top = Math.max(8, Math.min(maxT, visorPlacement.top)) + "px";
+  pip.style.right = "auto";
+  pip.style.bottom = "auto";
 }
 
 function layoutVisor() {
@@ -537,8 +564,9 @@ function layoutVisor() {
   pip.title = "";
   const maxOpen = Math.min(w, Math.max(280, window.innerWidth - 440), 640);
   const minVis = Math.min(280, w);
-  let visW = visorVisualW || maxOpen;
+  let visW = visorVisualW || (visorPlacement && visorPlacement.visW) || maxOpen;
   visW = Math.max(minVis, Math.min(maxOpen, visW));
+  visorVisualW = visW;
   const key = w + "x" + h + ":" + visW + ":open";
   if (key === lastLayoutKey) return;
   lastLayoutKey = key;
@@ -558,15 +586,24 @@ function ensureCaptureVisor() {
 }
 
 function setVisorOpen(open) {
+  if (visorOpen && !open) rememberVisorPlacement();
   visorOpen = !!open;
-  visorVisualW = 0;
   lastLayoutKey = "";
+  if (open && visorPlacement) {
+    visorVisualW = visorPlacement.visW;
+    const pip = $("viser-pip");
+    pip.style.left = visorPlacement.left + "px";
+    pip.style.top = visorPlacement.top + "px";
+    pip.style.right = "auto";
+    pip.style.bottom = "auto";
+  }
   $("viser-pip").classList.toggle("open", visorOpen);
   $("btn-viser").textContent = visorOpen ? "minimize visor" : "show visor";
   ensureCaptureVisor();
+  if (open) applyVisorPlacement();
 }
 
-$("in-res").onchange = () => { visorVisualW = 0; layoutVisor(); };
+$("in-res").onchange = () => { lastLayoutKey = ""; layoutVisor(); };
 
 function setPip(open) {
   setVisorOpen(open);
@@ -623,12 +660,18 @@ $("viser-pip").addEventListener("click", e => {
     visorOpen = true;
     visorVisualW = Math.max(200, startW + (e.clientX - startX));
     $("btn-viser").textContent = "minimize visor";
+    lastLayoutKey = "";
     layoutVisor();
   });
   window.addEventListener("mouseup", () => {
+    if (mode) rememberVisorPlacement();
     mode = null; bar.style.cursor = "grab";
   });
-  window.addEventListener("resize", () => layoutVisor());
+  window.addEventListener("resize", () => {
+    lastLayoutKey = "";
+    layoutVisor();
+    if (visorOpen) applyVisorPlacement();
+  });
 })();
 
 poll();
