@@ -31,9 +31,10 @@ class VLMPolicy(Protocol):
         pose_description: str,
         step: int,
         depth_image: np.ndarray | None = None,
+        map_image: np.ndarray | None = None,
     ) -> Action:
         """Return the next action given the current rendered RGB view and,
-        when the renderer supports it, the labelled depth-map image."""
+        when attached, the labelled depth-map and/or bird's-eye path map."""
         ...
 
 
@@ -45,7 +46,9 @@ class ScriptedPolicy:
 
     def __init__(self):
         self._script = (
-            [Action("rotate", {"yaw_degrees": 45.0})] * 8
+            [Action("rotate", {"yaw_degrees": 45.0})] * 4
+            + [Action("view_map", {})]
+            + [Action("rotate", {"yaw_degrees": 45.0})] * 4
             + [
                 Action("rotate", {"pitch_degrees": -20.0}),
                 Action("rotate", {"yaw_degrees": 30.0, "pitch_degrees": 0.0}),
@@ -145,6 +148,15 @@ class OpenAIVLMPolicy:
             content += [
                 {"type": "text", "text": "Image 2 — depth map of the same view (bright = near, black = nothing):"},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_encode_png_b64(depth_image)}"}},
+            ]
+        n = 3 if depth_image is not None else 2
+        if map_image is not None:
+            content += [
+                {"type": "text", "text": (
+                    f"Image {n} — bird's-eye MAP (ceiling removed; red line = path, "
+                    "triangles = camera view, cyan = current pose):"
+                )},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_encode_png_b64(map_image)}"}},
             ]
         self.messages.append({"role": "user", "content": content})
         self._trim_old_images()

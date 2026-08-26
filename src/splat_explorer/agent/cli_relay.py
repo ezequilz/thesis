@@ -227,13 +227,27 @@ class CliRelayPolicy:
         pose_description: str,
         step: int,
         depth_image: np.ndarray | None = None,
+        map_image: np.ndarray | None = None,
     ) -> Action:
-        prompt = self._build_prompt(pose_description, step, with_depth=depth_image is not None)
+        prompt = self._build_prompt(
+            pose_description, step,
+            with_depth=depth_image is not None,
+            with_map=map_image is not None,
+        )
         images = [("Image 1 - RGB view from your current pose:", _png_data_url(observation))]
+        n = 2
         if depth_image is not None:
             images.append((
-                "Image 2 - DEPTH MAP of the same view (bright = near, dark = far, black = nothing):",
+                f"Image {n} - DEPTH MAP of the same view (bright = near, dark = far, black = nothing):",
                 _png_data_url(depth_image),
+            ))
+            n += 1
+        if map_image is not None:
+            images.append((
+                f"Image {n} - BIRD'S-EYE MAP (ceiling removed; red line = path, "
+                "triangles = camera view at each step, cyan = current pose). "
+                "move_toward pixels still refer to the RGB view:",
+                _png_data_url(map_image),
             ))
 
         action = None
@@ -297,22 +311,37 @@ class CliRelayPolicy:
             return "", "relay returned no choices"
         return (choices[0].message.content or "").strip(), None
 
-    def _build_prompt(self, pose_description: str, step: int, with_depth: bool) -> str:
+    def _build_prompt(self, pose_description: str, step: int,
+                      with_depth: bool, with_map: bool = False) -> str:
         history = self._history[-self.MAX_HISTORY_LINES:]
         history_block = (
             "Your previous actions:\n" + "\n".join(history)
             if history
             else "This is your first step; no actions taken yet."
         )
-        images_note = (
-            "The attached images are your current RGB view and its depth map "
-            "(labelled). Pixel coordinates for move_toward refer to the RGB view."
-            if with_depth else
-            "The attached image is your current RGB view. Pixel coordinates "
-            "for move_toward refer to it."
-        )
+        attached = ["your current RGB view"]
+        if with_depth:
+            attached.append("its depth map")
+        if with_map:
+            attached.append(
+                "a bird's-eye MAP of your path so far (ceiling removed; "
+                "frustums = viewing direction)"
+            )
+        if len(attached) == 1:
+            images_note = (
+                "The attached image is your current RGB view. Pixel coordinates "
+                "for move_toward refer to it."
+            )
+        else:
+            images_note = (
+                "The attached images are " + " and ".join(
+                    [", ".join(attached[:-1]), attached[-1]] if len(attached) > 2
+                    else attached
+                )
+                + " (labelled). Pixel coordinates for move_toward refer to the RGB view, not the map."
+            )
         return (
-            f"{system_prompt(with_depth)}\n"
+            f"{system_prompt(with_depth, with_map)}\n"
             f"Available tools:\n{render_tool_catalog()}\n\n"
             f"{history_block}\n\n"
             f"Step {step}. Current pose: {pose_description}. "

@@ -23,15 +23,31 @@ _DEPTH_HELP = """The depth map helps: floaters appear as small bright patches mu
 their surroundings, holes as black pixels inside otherwise solid surfaces.
 """
 
+_MAP_HELP = """You can call view_map to consult a top-down bird's-eye of the scene \
+(ceiling removed) with your walked path, past camera positions, and a viewing \
+frustum at each step. The NEXT observation after view_map includes that map \
+next to the RGB view — pixel coordinates for move_toward still refer to RGB, \
+not the map. Use it to plan coverage and avoid retracing.
+"""
 
-def system_prompt(with_depth: bool = True) -> str:
+_MAP_ATTACHED = """This turn also includes a BIRD'S-EYE MAP of the scene (ceiling \
+removed): the connected red line is the path you have walked, each numbered \
+marker is a past camera position, and each triangle is the camera frustum \
+(viewing direction) at that step. Cyan highlights your CURRENT pose. \
+move_toward pixel coordinates still refer to the RGB view, not the map.
+"""
+
+
+def system_prompt(with_depth: bool = True, with_map: bool = False) -> str:
     """Task prompt for the explore loop; wording adapts to whether the depth
-    map is attached alongside the RGB view (agent.send_depth)."""
+    map is attached alongside the RGB view (agent.send_depth), and whether
+    this turn also includes the on-demand bird's-eye path map."""
     depth_hint = (" Check the\n  depth map first: black pixels have nothing to move toward."
                   if with_depth else "")
     return f"""\
 You are a quality-inspection agent walking through a 3D Gaussian Splatting \
-reconstruction of an indoor scene. {_IMAGES_WITH_DEPTH if with_depth else _IMAGES_RGB_ONLY}
+reconstruction of an indoor scene. {_IMAGES_WITH_DEPTH if with_depth else _IMAGES_RGB_ONLY}\
+{_MAP_ATTACHED if with_map else ""}\
 Your goal is to systematically explore the area and find RENDERING ARTIFACTS, \
 such as:
 - floaters: blobs of color hanging in mid-air
@@ -39,7 +55,7 @@ such as:
 - blur/mush: undergenerated regions that look like smeared paint
 - stretched gaussians: long thin spikes or streaks
 - ghosting/duplicates: semi-transparent copies of objects
-{_DEPTH_HELP if with_depth else ""}
+{_DEPTH_HELP if with_depth else ""}\
 IMPORTANT — not artifacts: semi-transparent materials (sheer curtains, glass,
 foliage) legitimately render as layered translucent sheets and can look
 streaky, ghostly, or scalloped, especially from very close up, where this
@@ -57,9 +73,12 @@ How to move:
 - move(direction, distance) is only for small corrective steps (0.3-1.0 units).
 - rotate(yaw_degrees, pitch_degrees) turns the camera; pitch is absolute
   (-85..85, positive = up, 0 = level).
+- view_map() shows a top-down map of your path and past viewing directions
+  on the next observation (RGB is still attached). Does not move you.
 - The harness blocks collisions. If your last movement was cut short, the next
   prompt tells you so — turn or pick a different direction instead of retrying.
 
+{_MAP_HELP if not with_map else ""}\
 Rules:
 - Call exactly one tool per turn.
 - Explore methodically: look around from your start point first (rotate in

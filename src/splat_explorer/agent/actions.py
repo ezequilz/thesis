@@ -119,6 +119,25 @@ ACTION_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "view_map",
+            "description": (
+                "Look at a top-down bird's-eye MAP of the scene (ceiling removed) showing "
+                "the path you have walked, every past camera position, and a small camera "
+                "frustum at each step for viewing direction. Does not move the camera. The "
+                "NEXT observation will include that map alongside the usual RGB view "
+                "(move_toward pixel coordinates still refer to RGB, not the map). Use this "
+                "to check coverage and avoid retracing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "report_artifact",
             "description": "Report a rendering artifact visible in the CURRENT view (floaters, holes, blur blobs, stretched gaussians, ghosting).",
             "parameters": {

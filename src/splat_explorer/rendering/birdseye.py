@@ -54,3 +54,44 @@ def render_birdseye(
 
     renderer = CpuSplatRenderer(scene, max_splat_radius_px=max_splat_radius_px)
     return renderer.render(camera), camera
+
+
+class ExplorationMap:
+    """Cached ceiling-stripped bird's-eye plus the agent's path overlay.
+
+    The splat render is done once (at spawn / episode start). add_pose() only
+    re-paints the walked path and camera frustums so the dashboard and the
+    optional VLM map stay cheap to refresh after every step.
+    """
+
+    def __init__(
+        self,
+        base_image: np.ndarray,
+        camera: Camera,
+        fov_deg: float,
+        up: np.ndarray,
+    ):
+        self.base_image = np.asarray(base_image)
+        self.camera = camera
+        self.fov_deg = float(fov_deg)
+        self.up = np.asarray(up, dtype=np.float64)
+        self.poses: list[dict] = []
+
+    def add_pose(self, position: np.ndarray, heading: np.ndarray, step: int) -> None:
+        h = np.asarray(heading, dtype=np.float64)
+        n = np.linalg.norm(h)
+        if n > 1e-8:
+            h = h / n
+        self.poses.append({
+            "position": np.asarray(position, dtype=np.float64).copy(),
+            "heading": h,
+            "step": int(step),
+        })
+
+    def render(self) -> np.ndarray:
+        from .annotate import draw_path_map
+
+        return draw_path_map(
+            self.base_image, self.camera, self.poses,
+            fov_deg=self.fov_deg, up=self.up,
+        )

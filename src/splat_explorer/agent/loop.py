@@ -4,16 +4,20 @@ Episode flow:
   1. Optional start selection: when a SpawnSelection is provided, the policy
      is shown the annotated bird's-eye view (ceiling removed, numbered spawn
      markers) and picks the starting point; the rig teleports there.
-  2. Each step: render RGB (+ depth for navigation), hand the observation to
-     the policy (depth image only if send_depth), clamp and apply the returned
-     action (collision-checked through the MotionContext), and log everything
-     to outputs/episodes/<timestamp>/ as frames plus an actions.jsonl trace.
+  2. Each step: render RGB (+ depth for navigation), overlay the walked path
+     onto the cached bird's-eye map, hand the observation to the policy
+     (depth image only if send_depth; path map only if the previous action
+     was view_map), clamp and apply the returned action (collision-checked
+     through the MotionContext), and log everything to
+     outputs/episodes/<timestamp>/ as frames plus an actions.jsonl trace.
      The outcome of the previous motion (e.g. "move cut short by an obstacle")
      is fed back to the policy with the next prompt.
 
 Every step record includes render/decide wall times and, when the policy
 exposes a `last_debug` dict (see CliRelayPolicy), the raw VLM exchange —
-so traces double as debugging material for the dashboard.
+so traces double as debugging material for the dashboard. The path map PNG
+is always written (dashboard tile) and only attached to the VLM prompt after
+a view_map action, the same way the depth map is optional.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from ..logging_utils import log_to_file
 from ..navigation import CollisionWorld, MotionContext, SpawnSelection
 from ..rendering import Renderer
 from ..rendering.annotate import depth_to_image
+from ..rendering.birdseye import ExplorationMap
 from .actions import Action
 from .camera_rig import CameraRig
 from .vlm import VLMPolicy
@@ -72,6 +77,11 @@ def _motion_note(outcome: dict | None) -> str | None:
         if outcome.get("blocked"):
             note += " (stopped early by an obstacle)"
         return note
+    if kind == "view_map":
+        return (
+            "previous action requested the map — this observation includes the "
+            "bird's-eye path map next to the RGB view"
+        )
     return None
 
 
@@ -139,8 +149,10 @@ def run_episode(
     nav enables collision clamping for all movement; spawn triggers the
     bird's-eye start-selection prompt before the first step. send_depth
     controls whether the depth map is attached to the VLM prompt (it is
-    always rendered, saved, and used for move_toward). run_meta is merged
-    into the episode's meta.json (e.g. dashboard run params).
+    always rendered, saved, and used for move_toward). The path map is
+    always updated and saved; it is attached to the VLM prompt only on the
+    observation after a view_map action (RGB remains attached). run_meta is
+    merged into the episode's meta.json (e.g. dashboard run params).
 
     on_step(record, frame_path, rig) fires after each decision — `record`
     matches the actions.jsonl line, `rig` still holds the pose the frame was
@@ -158,6 +170,14 @@ def run_episode(
     summary: str | None = None
     steps_done = 0
     motion_note: str | None = None
+    send_map = False
+    expl_map: ExplorationMap | None = None
+    if (
+        spawn is not None
+        and getattr(spawn, "base_image", None) is not None
+        and getattr(spawn, "camera", None) is not None
+    ):
+        expl_map = ExplorationMap(spawn.base_image, spawn.camera, fov_deg, rig.up)
 
     meta = {
         "episode": episode_dir.name,
@@ -205,6 +225,14 @@ def run_episode(
                         depth_frame_name = f"step_{step:03d}_depth.png"
                         Image.fromarray(depth_image).save(episode_dir / depth_frame_name)
 
+                    map_image = None
+                    map_frame_name = None
+                    if expl_map is not None:
+                        expl_map.add_pose(rig.position, rig.heading(), step)
+                        map_image = expl_map.render()
+                        map_frame_name = f"step_{step:03d}_map.png"
+                        Image.fromarray(map_image).save(episode_dir / map_frame_name)
+
                     pose = rig.state_description()
                     if motion_note:
                         pose += f" | {motion_note}"
@@ -213,6 +241,7 @@ def run_episode(
                     action = policy.decide(
                         observation, pose, step,
                         depth_image=depth_image if send_depth else None,
+                        map_image=map_image if send_map else None,
                     )
                     decide_s = time.perf_counter() - t1
                     action = action.clamped(max_move_distance, max_rotate_degrees)
@@ -231,6 +260,8 @@ def run_episode(
                         "frame": frame_path.name,
                         "depth_frame": depth_frame_name,
                         "depth_sent": send_depth and depth_image is not None,
+                        "map_frame": map_frame_name,
+                        "map_sent": send_map and map_image is not None,
                         "render_backend": render_backend,
                         "timing": {"render_s": round(render_s, 3), "decide_s": round(decide_s, 3)},
                         "vlm": getattr(policy, "last_debug", None),
@@ -250,6 +281,7 @@ def run_episode(
                         record["motion"] = outcome
                         if motion_note:
                             logger.info("step %03d | %s", step, motion_note)
+                    send_map = action.name == "view_map"
 
                     trace.write(json.dumps(record) + "\n")
                     trace.flush()

@@ -407,6 +407,8 @@ class SpawnSelection:
 
     image: np.ndarray                     # (H, W, 3) uint8 annotated render
     points: list[SpawnPoint] = field(default_factory=list)
+    base_image: np.ndarray | None = None  # unmarked bird's-eye (path-map backdrop)
+    camera: Camera | None = None          # camera used for the bird's-eye render
 
     def describe_points(self) -> str:
         lines = []
@@ -455,5 +457,6 @@ def prepare_spawn_selection(
         height=int(cfg.renderer.height),
         max_splat_radius_px=int(cfg.renderer.get("max_splat_radius_px", 120)),
     )
+    base_image = np.asarray(image).copy()
     image = draw_spawn_markers(image, camera, np.stack([p.position for p in points]))
-    return SpawnSelection(image=image, points=points)
+    return SpawnSelection(image=image, points=points, base_image=base_image, camera=camera)

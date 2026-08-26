@@ -48,6 +48,11 @@ class CameraRig:
         right = np.cross(forward, self.up)
         return forward, right
 
+    def heading(self) -> np.ndarray:
+        """Unit look direction in the ground plane (yaw only, ignores pitch)."""
+        forward, _ = self._heading()
+        return forward
+
     def view_direction(self) -> np.ndarray:
         forward, _ = self._heading()
         pitch = np.radians(self.pitch_deg)
@@ -71,6 +76,8 @@ class CameraRig:
                 self.pitch_deg = float(pitch)
                 outcome["pitch_degrees"] = float(pitch)
             return outcome
+        if action.name == "view_map":
+            return {"kind": "view_map"}
         # report_artifact / done don't change the pose.
         return None
 
