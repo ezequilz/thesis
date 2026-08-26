@@ -82,6 +82,29 @@ def cmd_render_test(cfg, args) -> None:
     logger.info("Contact sheet -> %s", sheet_path)
 
 
+def _build_navigation(cfg, scene):
+    """Collision world + (for auto start) the bird's-eye spawn selection.
+
+    Returns (world, spawn); spawn is None when start_position is explicit or
+    the spawn search finds nothing usable (legacy centroid start applies).
+    """
+    from .navigation import CollisionWorld, prepare_spawn_selection
+
+    nav_cfg = cfg.navigation
+    world = CollisionWorld(
+        scene,
+        solid_opacity=float(nav_cfg.solid_opacity),
+        clearance_radius=float(nav_cfg.clearance_radius),
+    )
+    spawn = None
+    if cfg.camera.start_position == "auto":
+        try:
+            spawn = prepare_spawn_selection(scene, cfg)
+        except Exception:
+            logger.exception("Spawn-point search failed; falling back to centroid start")
+    return world, spawn
+
+
 def cmd_explore(cfg, args) -> None:
     from .agent.camera_rig import CameraRig
     from .agent.loop import run_episode
@@ -90,9 +113,12 @@ def cmd_explore(cfg, args) -> None:
 
     scene = load_scene(cfg.scene.path, min_opacity=cfg.scene.min_opacity)
     renderer = make_renderer(scene, cfg.renderer)
-    rig = CameraRig(_resolve_start(cfg, scene), up_axis=cfg.camera.up_axis,
-                    yaw_deg=cfg.camera.start_yaw_deg)
     policy = make_policy(cfg.agent)
+
+    world, spawn = _build_navigation(cfg, scene)
+    start = spawn.points[0].position if spawn else _resolve_start(cfg, scene)
+    rig = CameraRig(start, up_axis=cfg.camera.up_axis,
+                    yaw_deg=cfg.camera.start_yaw_deg)
 
     run_episode(
         renderer=renderer,
@@ -105,6 +131,8 @@ def cmd_explore(cfg, args) -> None:
         max_steps=cfg.agent.max_steps,
         max_move_distance=cfg.agent.max_move_distance,
         max_rotate_degrees=cfg.agent.max_rotate_degrees,
+        nav=world,
+        spawn=spawn,
     )
 
 

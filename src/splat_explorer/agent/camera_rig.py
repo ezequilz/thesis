@@ -5,14 +5,19 @@ rotates around the world up axis; pitch tilts the view. Movement directions
 are yaw-relative but stay in the horizontal plane (except up/down), which
 matches how a person walks through a room.
 
-No collision handling yet — the agent can currently walk through walls.
-TODO: add occupancy checks against the gaussian density field.
+apply() takes an optional MotionContext (collision world + the camera/depth
+the current observation was rendered from): with it, `move` is clamped so the
+camera never enters geometry, and `move_toward` resolves a VLM-picked pixel
+through the depth map into a collision-safe travel toward that surface.
+apply() returns a small outcome dict (travelled distance, whether the move was
+cut short, ...) that the loop logs and feeds back into the next prompt.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
+from ..navigation import MotionContext, resolve_move_toward
 from ..rendering.base import Camera, up_vector
 from .actions import Action
 
@@ -49,21 +54,71 @@ class CameraRig:
         return np.cos(pitch) * forward + np.sin(pitch) * self.up
 
     # --- action application ----------------------------------------------------
-    def apply(self, action: Action) -> None:
+    def apply(self, action: Action, ctx: MotionContext | None = None) -> dict | None:
+        """Apply an action; returns an outcome dict for motion actions."""
         if action.name == "move":
-            forward, right = self._heading()
-            d = float(action.args["distance"])
-            direction = {
-                "forward": forward, "back": -forward,
-                "right": right, "left": -right,
-                "up": self.up, "down": -self.up,
-            }[action.args["direction"]]
-            self.position += direction * d
-        elif action.name == "rotate":
-            self.yaw_deg = (self.yaw_deg + float(action.args["yaw_degrees"])) % 360.0
-        elif action.name == "look":
-            self.pitch_deg = float(action.args["pitch_degrees"])
+            return self._apply_move(action, ctx)
+        if action.name == "move_toward":
+            return self._apply_move_toward(action, ctx)
+        if action.name == "rotate":
+            outcome = {"kind": "rotate"}
+            yaw = action.args.get("yaw_degrees")
+            if yaw is not None:
+                self.yaw_deg = (self.yaw_deg + float(yaw)) % 360.0
+                outcome["yaw_degrees"] = float(yaw)
+            pitch = action.args.get("pitch_degrees")
+            if pitch is not None:
+                self.pitch_deg = float(pitch)
+                outcome["pitch_degrees"] = float(pitch)
+            return outcome
         # report_artifact / done don't change the pose.
+        return None
+
+    def _apply_move(self, action: Action, ctx: MotionContext | None) -> dict:
+        forward, right = self._heading()
+        requested = float(action.args["distance"])
+        direction = {
+            "forward": forward, "back": -forward,
+            "right": right, "left": -right,
+            "up": self.up, "down": -self.up,
+        }[action.args["direction"]]
+        if ctx is not None and ctx.world is not None:
+            travelled, blocked = ctx.world.clamp_motion(self.position, direction, requested)
+        else:
+            travelled, blocked = requested, False
+        self.position += direction * travelled
+        return {
+            "kind": "move",
+            "direction": action.args["direction"],
+            "requested": round(requested, 3),
+            "travelled": round(travelled, 3),
+            "blocked": blocked,
+        }
+
+    def _apply_move_toward(self, action: Action, ctx: MotionContext | None) -> dict:
+        if ctx is None or ctx.camera is None or ctx.depth is None:
+            return {"kind": "move_toward", "error": "no depth map available for this view"}
+        result = resolve_move_toward(
+            ctx.camera, ctx.depth,
+            action.args.get("pixel_x", 0),
+            action.args.get("pixel_y", 0),
+            action.args.get("amount", 0.0),
+            world=ctx.world,
+        )
+        if result is None:
+            return {
+                "kind": "move_toward",
+                "error": "no geometry at the picked pixel (empty depth); pick a non-black depth pixel",
+            }
+        self.position = np.asarray(result["new_position"], dtype=np.float64)
+        return {
+            "kind": "move_toward",
+            "pixel": [int(action.args.get("pixel_x", 0)), int(action.args.get("pixel_y", 0))],
+            "amount": float(action.args.get("amount", 0.0)),
+            "target_distance": result["target_distance"],
+            "travelled": result["travelled"],
+            "blocked": result["blocked"],
+        }
 
     def camera(self, width: int, height: int, fov_deg: float) -> Camera:
         target = self.position + self.view_direction()

@@ -39,20 +39,23 @@ def main() -> int:
     args = parser.parse_args()
     cfg = load_config(args.config)
 
-    print("== Rendering one test view ==")
+    print("== Rendering one test view (RGB + depth) ==")
     scene = load_scene(cfg.scene.path, min_opacity=cfg.scene.min_opacity)
     renderer = make_renderer(scene, cfg.renderer)
     rig = CameraRig(_resolve_start(cfg, scene), up_axis=cfg.camera.up_axis,
                     yaw_deg=cfg.camera.start_yaw_deg)
-    observation = renderer.render(
-        rig.camera(cfg.renderer.width, cfg.renderer.height, cfg.renderer.fov_deg)
-    )
+    camera = rig.camera(cfg.renderer.width, cfg.renderer.height, cfg.renderer.fov_deg)
+    observation, depth = renderer.render_with_depth(camera)
+
+    from splat_explorer.rendering.annotate import depth_to_image
+    depth_image = depth_to_image(depth)
 
     out_path = Path(cfg.output.dir) / "cli_relay_smoke.png"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     from PIL import Image
     Image.fromarray(observation).save(out_path)
-    print(f"View saved to {out_path}")
+    Image.fromarray(depth_image).save(out_path.with_name("cli_relay_smoke_depth.png"))
+    print(f"Views saved to {out_path} (+ _depth)")
 
     print("\n== Tool catalog sent to the model ==")
     print(render_tool_catalog())
@@ -65,7 +68,13 @@ def main() -> int:
     )
 
     prompt = policy._build_prompt(rig.state_description(), step=0)
-    text = policy._ask(prompt, _png_data_url(observation))
+    text, error = policy._ask(prompt, [
+        ("Image 1 - RGB view from your current pose:", _png_data_url(observation)),
+        ("Image 2 - DEPTH MAP of the same view (bright = near, dark = far, black = nothing):",
+         _png_data_url(depth_image)),
+    ])
+    if error:
+        print(f"Request error: {error}")
 
     print("\n== Raw model reply ==")
     print(text or "(empty reply — check the relay is up, the key is valid, "

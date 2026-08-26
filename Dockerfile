@@ -7,10 +7,12 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install dependencies in their own layer so code edits don't re-download them.
+# Keep this list in sync with pyproject.toml (core + viewer + vlm extras).
 RUN pip install --no-cache-dir \
     "numpy>=1.26" \
     "pillow>=10.0" \
     "pyyaml>=6.0" \
+    "scipy>=1.11" \
     "viser>=0.2.7" \
     "openai>=1.40"
 

@@ -14,7 +14,7 @@ WORKDIR /app
 # torch must match the CUDA version of the base image.
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124
 RUN pip install --no-cache-dir \
-    "numpy>=1.26" "pillow>=10.0" "pyyaml>=6.0" "openai>=1.40" "gsplat>=1.4"
+    "numpy>=1.26" "pillow>=10.0" "pyyaml>=6.0" "scipy>=1.11" "openai>=1.40" "gsplat>=1.4"
 
 COPY pyproject.toml README.md ./
 COPY src ./src

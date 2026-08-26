@@ -1,9 +1,15 @@
 """The agent's action space, exposed to the VLM as OpenAI-style tool schemas.
 
-Movement is body-relative (forward = current viewing direction projected onto
-the ground plane), so the VLM reasons in "walk 1.5m forward, turn 30 degrees
-right" terms. The harness clamps parameters to configured limits before
-applying them.
+Movement model:
+  - move_toward is the primary travel tool: the VLM picks a pixel in its
+    current RGB view plus an amount in [0, 1]. The harness ray-casts through
+    that pixel via the depth map and moves the camera that fraction of the way
+    to the first splat surface, so amount = 1 lands right at (never inside)
+    the geometry.
+  - move remains for small body-relative correction steps.
+  - rotate handles both yaw and (optional, absolute) pitch; the former
+    separate `look` action was folded into it.
+All movement is collision-clamped by the harness before being applied.
 """
 
 from __future__ import annotations
@@ -12,6 +18,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 MOVE_DIRECTIONS = ("forward", "back", "left", "right", "up", "down")
+
+MAX_PITCH_DEGREES = 85.0
 
 
 @dataclass
@@ -25,10 +33,19 @@ class Action:
         args = dict(self.args)
         if self.name == "move" and "distance" in args:
             args["distance"] = float(min(max(args["distance"], 0.0), max_move))
-        if self.name == "rotate" and "yaw_degrees" in args:
-            args["yaw_degrees"] = float(max(-max_rotate, min(args["yaw_degrees"], max_rotate)))
-        # if self.name == "look" and "pitch_degrees" in args:
-        #     args["pitch_degrees"] = float(max(-89.0, min(args["pitch_degrees"], 89.0)))
+        if self.name == "move_toward":
+            if "amount" in args:
+                args["amount"] = float(min(max(args["amount"], 0.0), 1.0))
+            for key in ("pixel_x", "pixel_y"):
+                if key in args:
+                    args[key] = int(args[key])
+        if self.name == "rotate":
+            if "yaw_degrees" in args and args["yaw_degrees"] is not None:
+                args["yaw_degrees"] = float(max(-max_rotate, min(args["yaw_degrees"], max_rotate)))
+            if "pitch_degrees" in args and args["pitch_degrees"] is not None:
+                args["pitch_degrees"] = float(
+                    max(-MAX_PITCH_DEGREES, min(args["pitch_degrees"], MAX_PITCH_DEGREES))
+                )
         return Action(self.name, args)
 
 
@@ -38,8 +55,34 @@ ACTION_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "move_toward",
+            "description": (
+                "PRIMARY movement tool. Pick a pixel in the CURRENT RGB view and move toward "
+                "the 3D surface visible at that pixel. amount is the fraction of the distance "
+                "to travel: 0 = stay, 1.0 = move right up to the surface (a safety margin is "
+                "enforced, you can never enter geometry). Check the depth map: black pixels "
+                "have no geometry to move toward. Use this for all larger moves."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pixel_x": {"type": "integer", "description": "Pixel column in the RGB view, 0 = left edge."},
+                    "pixel_y": {"type": "integer", "description": "Pixel row in the RGB view, 0 = top edge."},
+                    "amount": {"type": "number", "description": "Fraction of the distance to the surface to travel, 0..1 (e.g. 0.8)."},
+                },
+                "required": ["pixel_x", "pixel_y", "amount"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "move",
-            "description": "Move the camera in a body-relative direction by a distance in scene units (roughly meters).",
+            "description": (
+                "Small body-relative correction step by a distance in scene units (roughly "
+                "meters). Use only for fine adjustments (about 0.3-1.0 units); prefer "
+                "move_toward for larger moves. Movement stops early if it would hit geometry."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -54,27 +97,19 @@ ACTION_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "rotate",
-            "description": "Rotate the camera around the vertical axis. Positive = right (clockwise from above).",
+            "description": (
+                "Rotate the camera. yaw_degrees turns around the vertical axis (positive = "
+                "right / clockwise from above, relative). pitch_degrees tilts the view and is "
+                "ABSOLUTE relative to horizontal (positive = up, -85..85; 0 = level). Provide "
+                "one or both."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "yaw_degrees": {"type": "number", "description": "Degrees to turn, e.g. 30 or -45"},
+                    "yaw_degrees": {"type": "number", "description": "Degrees to turn, e.g. 30 or -45."},
+                    "pitch_degrees": {"type": "number", "description": "Absolute pitch in degrees, -85..85."},
                 },
-                "required": ["yaw_degrees"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "look",
-            "description": "Tilt the camera up or down. Positive = up. Sets absolute pitch relative to horizontal.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pitch_degrees": {"type": "number", "description": "Absolute pitch in degrees, -89..89"},
-                },
-                "required": ["pitch_degrees"],
+                "required": [],
             },
         },
     },

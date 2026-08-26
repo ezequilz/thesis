@@ -95,6 +95,8 @@ class DashboardApp:
         self.lock = threading.Lock()
         self.scene = None
         self.renderer = None
+        self.nav_world = None
+        self.spawn = None
         self.scene_status = "loading"
         self.scene_info: dict = {"path": str(cfg.scene.path)}
         self.run: dict | None = None
@@ -106,6 +108,7 @@ class DashboardApp:
 
     # --- scene ----------------------------------------------------------------
     def _load_scene(self) -> None:
+        from ..cli import _build_navigation
         from ..rendering import make_renderer
         from ..scene import load_scene
 
@@ -113,8 +116,11 @@ class DashboardApp:
             t0 = time.perf_counter()
             scene = load_scene(self.cfg.scene.path, min_opacity=self.cfg.scene.min_opacity)
             renderer = make_renderer(scene, self.cfg.renderer)
+            # Collision world + bird's-eye spawn selection, shared by all runs.
+            nav_world, spawn = _build_navigation(self.cfg, scene)
             with self.lock:
                 self.scene, self.renderer = scene, renderer
+                self.nav_world, self.spawn = nav_world, spawn
                 self.scene_status = "ready"
                 self.scene_info.update(
                     num_gaussians=scene.num_gaussians,
@@ -185,8 +191,10 @@ class DashboardApp:
 
         try:
             policy = self._make_policy(params)
+            start = (self.spawn.points[0].position if self.spawn
+                     else _resolve_start(self.cfg, self.scene))
             rig = CameraRig(
-                _resolve_start(self.cfg, self.scene),
+                start,
                 up_axis=self.cfg.camera.up_axis,
                 yaw_deg=self.cfg.camera.start_yaw_deg,
             )
@@ -202,6 +210,8 @@ class DashboardApp:
                 max_steps=params["max_steps"],
                 max_move_distance=self.cfg.agent.max_move_distance,
                 max_rotate_degrees=self.cfg.agent.max_rotate_degrees,
+                nav=self.nav_world,
+                spawn=self.spawn,
                 on_step=self._on_step,
                 should_stop=self._stop.is_set,
             )

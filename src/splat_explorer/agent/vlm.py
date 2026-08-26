@@ -25,28 +25,71 @@ logger = logging.getLogger(__name__)
 
 
 class VLMPolicy(Protocol):
-    def decide(self, observation: np.ndarray, pose_description: str, step: int) -> Action:
-        """Return the next action given the current rendered view."""
+    def decide(
+        self,
+        observation: np.ndarray,
+        pose_description: str,
+        step: int,
+        depth_image: np.ndarray | None = None,
+    ) -> Action:
+        """Return the next action given the current rendered RGB view and,
+        when the renderer supports it, the labelled depth-map image."""
         ...
 
 
 class ScriptedPolicy:
-    """Rotates in place, then walks a small square. Useful for smoke-testing
-    the render->act->render loop and episode logging without a VLM."""
+    """Canned sequence covering every motion action (rotate with yaw/pitch,
+    move, move_toward at the image center). Useful for smoke-testing the
+    render->act->render loop, collision clamping, and episode logging
+    without a VLM."""
 
     def __init__(self):
         self._script = (
             [Action("rotate", {"yaw_degrees": 45.0})] * 8
             + [
+                Action("rotate", {"pitch_degrees": -20.0}),
+                Action("rotate", {"yaw_degrees": 30.0, "pitch_degrees": 0.0}),
+            ]
+            + [
+                # pixel -1/-1 is a placeholder resolved to the image center in
+                # decide(), where the actual render resolution is known.
+                Action("move_toward", {"pixel_x": -1, "pixel_y": -1, "amount": 0.5}),
                 Action("move", {"direction": "forward", "distance": 1.0}),
                 Action("rotate", {"yaw_degrees": 90.0}),
-            ] * 4
+            ] * 3
             + [Action("done", {"summary": "Scripted run complete."})]
         )
         self.last_debug: dict | None = None
 
-    def decide(self, observation: np.ndarray, pose_description: str, step: int) -> Action:
+    def choose_start(self, birdseye_image: np.ndarray, spawn) -> int:
+        """Scripted runs always take the top-ranked spawn point."""
+        self.last_debug = {
+            "backend": "scripted",
+            "raw_response": "(scripted: picked spawn point 0)",
+            "parsed_action": {"name": "choose_start", "args": {"point": 0}},
+            "fallback": False,
+        }
+        return 0
+
+    def decide(
+        self,
+        observation: np.ndarray,
+        pose_description: str,
+        step: int,
+        depth_image: np.ndarray | None = None,
+    ) -> Action:
         action = self._script[step] if step < len(self._script) else Action("done", {"summary": "Script exhausted."})
+        if action.name == "move_toward" and (
+            action.args.get("pixel_x", 0) < 0 or action.args.get("pixel_y", 0) < 0
+        ):
+            # Script entries are shared objects; build a fresh Action instead
+            # of mutating the placeholder in place.
+            height, width = observation.shape[:2]
+            action = Action("move_toward", {
+                **action.args,
+                "pixel_x": width // 2,
+                "pixel_y": height // 2,
+            })
         self.last_debug = {
             "backend": "scripted",
             "raw_response": f"(scripted step {step}/{len(self._script)})",
@@ -86,16 +129,24 @@ class OpenAIVLMPolicy:
         self.model = model
         self.messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    def decide(self, observation: np.ndarray, pose_description: str, step: int) -> Action:
-        self.messages.append(
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": f"Step {step}. Current pose: {pose_description}. Choose exactly one tool call."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_encode_png_b64(observation)}"}},
-                ],
-            }
-        )
+    def decide(
+        self,
+        observation: np.ndarray,
+        pose_description: str,
+        step: int,
+        depth_image: np.ndarray | None = None,
+    ) -> Action:
+        content = [
+            {"type": "text", "text": f"Step {step}. Current pose: {pose_description}. Choose exactly one tool call."},
+            {"type": "text", "text": "Image 1 — RGB view:"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_encode_png_b64(observation)}"}},
+        ]
+        if depth_image is not None:
+            content += [
+                {"type": "text", "text": "Image 2 — depth map of the same view (bright = near, black = nothing):"},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_encode_png_b64(depth_image)}"}},
+            ]
+        self.messages.append({"role": "user", "content": content})
         self._trim_old_images()
 
         response = self.client.chat.completions.create(

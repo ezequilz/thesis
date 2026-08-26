@@ -37,7 +37,7 @@ import time
 
 import numpy as np
 
-from ..tasks.artifact_hunt import SYSTEM_PROMPT
+from ..tasks.artifact_hunt import SPAWN_PROMPT, SYSTEM_PROMPT
 from .actions import ACTION_TOOLS, Action
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,33 @@ RESPONSE_FORMAT = """\
 Respond with ONLY one JSON object choosing your next action, no prose:
 {"action": "<tool name>", "args": {<tool args>}}
 
-Example: {"action": "move", "args": {"direction": "forward", "distance": 1.0}}"""
+Example: {"action": "move_toward", "args": {"pixel_x": 480, "pixel_y": 300, "amount": 0.7}}"""
+
+
+CHOOSE_START_FORMAT = """\
+Respond with ONLY one JSON object choosing your starting point, no prose:
+{"action": "choose_start", "args": {"point": <point number>}}"""
+
+
+def parse_start_choice(text: str, num_points: int) -> int | None:
+    """Extract the chosen spawn point index from a free-text model reply."""
+    match = _FENCED_JSON.search(text) or _BARE_JSON.search(text)
+    if not match:
+        return None
+    try:
+        obj = json.loads(match.group(1) if match.re is _FENCED_JSON else match.group(0))
+    except json.JSONDecodeError:
+        return None
+    args = obj.get("args") or obj.get("arguments") or obj
+    for key in ("point", "point_index", "index", "start"):
+        value = args.get(key) if isinstance(args, dict) else None
+        if value is not None:
+            try:
+                index = int(value)
+            except (TypeError, ValueError):
+                return None
+            return index if 0 <= index < num_points else None
+    return None
 
 
 def parse_action(text: str) -> Action | None:
@@ -147,15 +173,74 @@ class CliRelayPolicy:
         self.last_debug: dict | None = None
         logger.info("CliRelay backend: %s via %s", self.model, self.base_url)
 
-    def decide(self, observation: np.ndarray, pose_description: str, step: int) -> Action:
+    def choose_start(self, birdseye_image: np.ndarray, spawn) -> int:
+        """Initial prompt: bird's-eye view + numbered spawn points, returns the
+        index the model picked (falls back to the top-ranked point 0)."""
+        prompt = (
+            f"{SPAWN_PROMPT}\n"
+            f"Candidate starting points:\n{spawn.describe_points()}\n\n"
+            f"{CHOOSE_START_FORMAT}"
+        )
+        images = [("Bird's-eye view (numbered dots = starting points):", _png_data_url(birdseye_image))]
+
+        choice = None
+        attempts: list[dict] = []
+        for attempt in range(1, self.MAX_ATTEMPTS + 1):
+            t0 = time.perf_counter()
+            text, error = self._ask(prompt, images)
+            seconds = time.perf_counter() - t0
+            parsed = parse_start_choice(text, len(spawn.points)) if text else None
+            attempts.append({
+                "attempt": attempt,
+                "seconds": round(seconds, 3),
+                "reply": text,
+                "error": error,
+                "parsed_ok": parsed is not None,
+            })
+            if parsed is not None:
+                choice = parsed
+                break
+            logger.warning("CliRelay: no parseable start choice (attempt %d)", attempt)
+
+        fallback = choice is None
+        if fallback:
+            choice = 0
+            logger.error("CliRelay: falling back to spawn point 0 after %d attempts", self.MAX_ATTEMPTS)
+
+        self.last_debug = {
+            "backend": "cli_relay",
+            "model": self.model,
+            "base_url": self.base_url,
+            "prompt": prompt,
+            "attempts": attempts,
+            "raw_response": attempts[-1]["reply"] if attempts else "",
+            "parsed_action": {"name": "choose_start", "args": {"point": choice}},
+            "fallback": fallback,
+        }
+        self._history.append(f"start: chose spawn point {choice} from the bird's-eye view")
+        logger.info("CliRelay chose start point: %d", choice)
+        return choice
+
+    def decide(
+        self,
+        observation: np.ndarray,
+        pose_description: str,
+        step: int,
+        depth_image: np.ndarray | None = None,
+    ) -> Action:
         prompt = self._build_prompt(pose_description, step)
-        image_url = _png_data_url(observation)
+        images = [("Image 1 - RGB view from your current pose:", _png_data_url(observation))]
+        if depth_image is not None:
+            images.append((
+                "Image 2 - DEPTH MAP of the same view (bright = near, dark = far, black = nothing):",
+                _png_data_url(depth_image),
+            ))
 
         action = None
         attempts: list[dict] = []
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
             t0 = time.perf_counter()
-            text, error = self._ask(prompt, image_url)
+            text, error = self._ask(prompt, images)
             seconds = time.perf_counter() - t0
             parsed = parse_action(text) if text else None
             attempts.append({
@@ -192,20 +277,17 @@ class CliRelayPolicy:
         logger.info("CliRelay chose: %s %s", action.name, action.args)
         return action
 
-    def _ask(self, prompt: str, image_url: str) -> tuple[str, str | None]:
-        """Returns (reply_text, error). Exactly one of the two is meaningful."""
+    def _ask(self, prompt: str, images: list[tuple[str, str]]) -> tuple[str, str | None]:
+        """Send one prompt with labelled images. Returns (reply_text, error);
+        exactly one of the two is meaningful."""
+        content: list[dict] = [{"type": "text", "text": prompt}]
+        for label, url in images:
+            content.append({"type": "text", "text": label})
+            content.append({"type": "image_url", "image_url": {"url": url}})
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": image_url}},
-                        ],
-                    }
-                ],
+                messages=[{"role": "user", "content": content}],
             )
         except Exception as exc:
             logger.exception("CliRelay request failed")
@@ -227,6 +309,7 @@ class CliRelayPolicy:
             f"Available tools:\n{render_tool_catalog()}\n\n"
             f"{history_block}\n\n"
             f"Step {step}. Current pose: {pose_description}. "
-            f"The attached image is your current view.\n\n"
+            f"The attached images are your current RGB view and its depth map "
+            f"(labelled). Pixel coordinates for move_toward refer to the RGB view.\n\n"
             f"{RESPONSE_FORMAT}"
         )
