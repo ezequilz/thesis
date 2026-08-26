@@ -19,7 +19,7 @@ services:
   # Interactive splat viewer for debugging (browser at http://localhost:8080).
   # Polls outputs/live/agent_state.json (written by the dashboard) to overlay
   # the agent's camera frustum + trajectory during episodes. :8081 is the
-  # WebGL capture API the harness uses so the VLM sees this same view.
+  # WebGL capture API: HD visor in, cropped/downscaled VLM frame out.
   viewer:
     <<: *base
     command: ["viewer"]

@@ -175,6 +175,16 @@
   <div id="detail"><div class="empty">Step details will appear here.</div></div>
 </div>
 
+<div id="viser-pip">
+  <div class="bar" id="viser-pip-bar">
+    <b>Spectator</b> · 16∶9 HD visor · not sent to the VLM
+    <span class="spacer"></span>
+    <button class="ghost" id="btn-pip-pop">pop out</button>
+    <button class="ghost" id="btn-pip-hide">hide</button>
+  </div>
+  <div class="body"><iframe id="viser-frame" title="HD visor"></iframe></div>
+</div>
+
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -218,9 +228,9 @@ function render() {
     $("in-depth").checked = !!defaults.send_depth;
     $("in-depth").dataset.init = "1";
   }
-  $("viser-link").href = defaults.viewer_url;
-  // Do not auto-load the visor iframe: a hidden/throttled embed is a connected
-  // client that cannot answer get_render, which used to hang the episode.
+  $("spectator-link").href = "/spectator";
+  // Load the pip iframe only while the window is open (a hidden/throttled
+  // embed is a connected visor client that cannot answer get_render).
   const frame = $("viser-frame");
   if (!frame.dataset.url) frame.dataset.url = defaults.viewer_url;
 
@@ -319,10 +329,13 @@ function renderDetail() {
   const depthCaption = s.depth_sent
     ? "DEPTH MAP — sent to the VLM (bright = near, black = nothing)"
     : "DEPTH MAP — navigation only, not sent to the VLM";
+  const vlmSize = run?.params
+    ? `${run.params.width}×${run.params.height}`
+    : "960×720";
   const frames = s.depth_frame_url ? `
     <div class="frames">
       <figure>
-        <figcaption>RGB — sent to the VLM</figcaption>
+        <figcaption>RGB — sent to the VLM (${vlmSize}, aspect preserved)</figcaption>
         <img class="frame" src="${s.frame_url}" alt="step ${s.step} RGB">
       </figure>
       <figure>
@@ -426,13 +439,45 @@ setInterval(loadHistory, 15000);
 $("in-follow").onchange = () => {
   if ($("in-follow").checked) post("/api/select", { step: null });  // viser back to live
 };
-$("btn-viser").onclick = () => {
-  const wrap = $("viser-wrap"), frame = $("viser-frame");
-  const show = wrap.style.display !== "block";
-  wrap.style.display = show ? "block" : "none";
-  $("btn-viser").textContent = show ? "hide preview" : "preview visor";
-  if (show && !frame.src) frame.src = frame.dataset.url || "http://localhost:8080";
+
+function setPip(open) {
+  const pip = $("viser-pip"), frame = $("viser-frame");
+  pip.classList.toggle("open", open);
+  $("btn-viser").textContent = open ? "hide spectator" : "spectator window";
+  const url = frame.dataset.url || "http://localhost:8080";
+  if (open) {
+    if (!frame.src || /about:blank/.test(frame.src)) frame.src = url;
+  } else {
+    frame.src = "about:blank";
+  }
+}
+$("btn-viser").onclick = () => setPip(!$("viser-pip").classList.contains("open"));
+$("btn-pip-hide").onclick = () => setPip(false);
+$("btn-pip-pop").onclick = () => {
+  window.open("/spectator", "splat-spectator", "noopener");
 };
+
+(function enablePipDrag() {
+  const pip = $("viser-pip"), bar = $("viser-pip-bar");
+  let ox = 0, oy = 0, dragging = false;
+  bar.addEventListener("mousedown", e => {
+    if (e.target.closest("button")) return;
+    dragging = true;
+    const r = pip.getBoundingClientRect();
+    ox = e.clientX - r.left; oy = e.clientY - r.top;
+    bar.style.cursor = "grabbing";
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", e => {
+    if (!dragging) return;
+    pip.style.left = Math.max(8, e.clientX - ox) + "px";
+    pip.style.top = Math.max(8, e.clientY - oy) + "px";
+    pip.style.right = "auto"; pip.style.bottom = "auto";
+  });
+  window.addEventListener("mouseup", () => {
+    dragging = false; bar.style.cursor = "grab";
+  });
+})();
 
 poll();
 </script>

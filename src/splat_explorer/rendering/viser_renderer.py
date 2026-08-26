@@ -91,7 +91,7 @@ class ViserCaptureRenderer:
                 f"window (spectator or :8080). VLM frames are {width}x{height}."
             )
             if not warned:
-                logger.warning("Waiting for a full-page visor tab: %s", last)
+                logger.warning("Waiting for a visor/spectator tab: %s", last)
                 warned = True
             time.sleep(0.5)
         raise ViserCaptureError(last)
@@ -109,9 +109,8 @@ class ViserCaptureRenderer:
         img = np.asarray(Image.open(io.BytesIO(raw)).convert("RGB"))
         need_w, need_h = int(camera.width), int(camera.height)
         if img.shape[1] != need_w or img.shape[0] != need_h:
-            img = np.asarray(
-                Image.fromarray(img).resize((need_w, need_h), Image.Resampling.LANCZOS)
-            )
+            from .viser_viewer import _center_crop_and_resize
+            img = _center_crop_and_resize(img, need_w, need_h)
         logger.info("Visor capture %dx%d in %.2fs", need_w, need_h, time.perf_counter() - t0)
         return img
 
