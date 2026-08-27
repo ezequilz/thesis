@@ -33,7 +33,7 @@ scene:
       # Outdoor overlay. Switching to Starter / Venetian restores the indoor
       # YAML navigation defaults (including the original 120px bird's-eye).
       navigation: &outdoor_nav
-        spawn_eye_height: 0.55
+        spawn_eye_height: 0.80
         centroid_pull: 1.2
         reconstruction_pull: 2.5
         birdseye_frame: core
@@ -43,7 +43,9 @@ scene:
       path: "3dgs_rooms/Calico Basin at sunrise"
       up_axis: "+y"
       lod_level: 0
-      navigation: *outdoor_nav
+      navigation:
+        <<: *outdoor_nav
+        spawn_eye_height: 0.55
 
 renderer:
   # "viser"      — capture RGB from the dashboard visor iframe, sized to the

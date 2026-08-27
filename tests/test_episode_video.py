@@ -17,6 +17,7 @@ from splat_explorer.rendering.episode_video import (
     format_artifact_overlay,
     load_episode_steps,
     render_episode_video,
+    repaired_hold_count,
     summary_hold_count,
 )
 
@@ -160,24 +161,43 @@ def test_render_reuses_cached_file(tmp_path: Path):
     assert second.path.stat().st_mtime == mtime
 
 
-def test_repaired_image_replaces_map_on_that_step_only(tmp_path: Path):
+def test_repaired_image_is_an_extra_held_slide(tmp_path: Path):
     d = _episode(tmp_path)
     _write_png(d / "step_001_regen.png", (220, 200, 20), (64, 48))
     (d / "step_001_regen.json").write_text(json.dumps({
         "step": 1, "status": "ok", "image_name": "step_001_regen.png",
     }))
     cfg = EpisodeVideoConfig()
+    assert repaired_hold_count(cfg) == 2  # 2.0s at 1.0s/frame
     steps = load_episode_steps(d, cfg)
     frames = compose_episode_frames(d, steps, cfg)
-    assert len(frames) == 2
+    # step 0, report RGB, then two copies of the repaired slide.
+    assert len(frames) == 1 + 1 + repaired_hold_count(cfg)
+
     arr0 = np.asarray(frames[0])
-    arr1 = np.asarray(frames[1])
+    arr_report = np.asarray(frames[1])
+    arr_fix = np.asarray(frames[2])
     right0 = arr0[:, -40:]
-    right1 = arr1[:, -40:]
-    # Step 0 still uses the green map; step 1 uses the yellow repair.
+    right_report = arr_report[:, -40:]
+    right_fix = arr_fix[:, -40:]
+    left_report = arr_report[:, :64]
+    left_fix = arr_fix[:, :64]
+    # Map stays green on the report slide and the extra repaired slide.
     assert right0[:, :, 1].mean() > right0[:, :, 0].mean()
-    assert right1[:, :, 0].mean() > right1[:, :, 2].mean()
-    assert right1[:, :, 1].mean() > right1[:, :, 2].mean()
+    assert right_report[:, :, 1].mean() > right_report[:, :, 0].mean()
+    assert right_fix[:, :, 1].mean() > right_fix[:, :, 0].mean()
+    # Report left is the original blue RGB; extra left is the yellow repair.
+    assert left_report[:, :, 2].mean() > left_report[:, :, 0].mean()
+    assert left_fix[:, :, 0].mean() > left_fix[:, :, 2].mean()
+    assert left_fix[:, :, 1].mean() > left_fix[:, :, 2].mean()
+    # Held copies are identical.
+    assert np.array_equal(np.asarray(frames[2]), np.asarray(frames[3]))
+    # Overlay is still printed on the repaired left pane.
+    corner = left_fix[-18:, -36:].astype(int)
+    assert (corner.sum(axis=2) < 220 + 200 + 20 - 80).any()
+
+    built = build_video_frames(d, steps, cfg)
+    assert len(built) == len(frames) + summary_hold_count(cfg)
 
 
 def test_disabled_regen_keeps_the_map(tmp_path: Path):
@@ -188,6 +208,7 @@ def test_disabled_regen_keeps_the_map(tmp_path: Path):
     cfg = EpisodeVideoConfig()
     steps = load_episode_steps(d, cfg)
     frames = compose_episode_frames(d, steps, cfg)
+    assert len(frames) == 2
     right1 = np.asarray(frames[1])[:, -40:]
     assert right1[:, :, 1].mean() > right1[:, :, 0].mean()
 

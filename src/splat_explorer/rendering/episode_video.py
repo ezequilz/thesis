@@ -1,8 +1,9 @@
 """On-demand episode video: RGB | bird's-eye map, one frame per step.
 
-When a step has a gpt-image-2 repair (`step_NNN_regen.png`), that one slide
-shows RGB | repaired instead of the map, then the next step returns to
-RGB | map.
+When a step has a gpt-image-2 repair (`step_NNN_regen.png`), the report
+slide stays RGB | map with the artifact caption. An extra slide is then
+inserted: repaired RGB | the same map, caption still printed, held for
+`repaired_seconds` (default 2s) before the next step.
 
 Knobs live on `EpisodeVideoConfig` so timing, layout, overlay styling, and
 output names can be changed without touching the dashboard server. The
@@ -53,6 +54,8 @@ class EpisodeVideoConfig:
     overlay_max_width_frac: float = 0.46
     overlay_fill: tuple[int, int, int] = (236, 240, 246)
     overlay_box: tuple[int, int, int, int] = (12, 16, 22, 165)
+    # Extra slide after a repaired report_artifact (constant-fps copies).
+    repaired_seconds: float = 2.0
     # Final "Artifact reports" slide (dashboard-style cards, dark background).
     summary_seconds: float = 1.0
     summary_bg: tuple[int, int, int] = (16, 19, 24)       # --bg
@@ -64,7 +67,7 @@ class EpisodeVideoConfig:
 
 
 # Bump when frame composition changes so cached episode videos restitch.
-LAYOUT_VERSION = 2
+LAYOUT_VERSION = 3
 
 
 class EpisodeVideoError(Exception):
@@ -144,29 +147,27 @@ def compose_episode_frames(
 ) -> list[Image.Image]:
     """RGB | map composites, with artifact text on report_artifact steps.
 
-    If that step has a repaired PNG, the right pane is the repair instead of
-    the map (one comparison slide, then back to the path map).
+    A repaired PNG does not replace the map. After the report slide, an extra
+    repaired | map slide is inserted and held for `repaired_seconds`.
     """
     pane_w, pane_h = _pane_size(episode_dir, steps, cfg)
+    hold = repaired_hold_count(cfg)
     frames = []
     for rec in steps:
         rgb = Image.open(episode_dir / rec["frame"]).convert("RGB")
-        repaired = _repaired_image(episode_dir, rec)
+        map_name = rec.get("map_frame")
         map_img = None
-        if repaired is None:
-            map_name = rec.get("map_frame")
-            if map_name and (episode_dir / map_name).is_file():
-                map_img = Image.open(episode_dir / map_name).convert("RGB")
+        if map_name and (episode_dir / map_name).is_file():
+            map_img = Image.open(episode_dir / map_name).convert("RGB")
         overlay = None
         action = rec.get("action") or {}
         if action.get("name") == "report_artifact":
             overlay = format_artifact_overlay(action.get("args") or {})
-        right = repaired if repaired is not None else map_img
-        right_caption = "repaired" if repaired is not None else None
-        frames.append(_compose_pair(
-            rgb, right, overlay, pane_w, pane_h, cfg,
-            right_caption=right_caption,
-        ))
+        frames.append(_compose_pair(rgb, map_img, overlay, pane_w, pane_h, cfg))
+        repaired = _repaired_image(episode_dir, rec)
+        if repaired is not None:
+            extra = _compose_pair(repaired, map_img, overlay, pane_w, pane_h, cfg)
+            frames.extend([extra] * hold)
     return frames
 
 
@@ -190,6 +191,11 @@ def artifacts_from_steps(steps: list[dict]) -> list[dict]:
 def summary_hold_count(cfg: EpisodeVideoConfig) -> int:
     """How many constant-fps copies of the summary slide equal `summary_seconds`."""
     return max(1, int(round(cfg.summary_seconds / max(cfg.seconds_per_step, 0.05))))
+
+
+def repaired_hold_count(cfg: EpisodeVideoConfig) -> int:
+    """How many constant-fps copies of a repaired slide equal `repaired_seconds`."""
+    return max(1, int(round(cfg.repaired_seconds / max(cfg.seconds_per_step, 0.05))))
 
 
 def build_video_frames(
@@ -338,15 +344,12 @@ def _compose_pair(
     pane_w: int,
     pane_h: int,
     cfg: EpisodeVideoConfig,
-    right_caption: str | None = None,
 ) -> Image.Image:
     left = _fit(rgb, pane_w, pane_h, cfg.background)
     if overlay_text:
         left = _draw_overlay(left, overlay_text, cfg)
     right = _fit(map_img, pane_w, pane_h, cfg.background) if map_img is not None \
         else _placeholder_map(pane_w, pane_h, cfg)
-    if right_caption:
-        right = _draw_overlay(right, right_caption, cfg)
     gap = max(0, int(cfg.gap_px))
     canvas = Image.new("RGB", (pane_w * 2 + gap, pane_h), cfg.background)
     canvas.paste(left, (0, 0))
@@ -591,6 +594,8 @@ def _cache_valid(episode_dir: Path, cfg: EpisodeVideoConfig, n_steps: int) -> bo
         return False
     if abs(float(meta.get("summary_seconds", 0)) - cfg.summary_seconds) > 1e-6:
         return False
+    if abs(float(meta.get("repaired_seconds", 0)) - cfg.repaired_seconds) > 1e-6:
+        return False
     if int(meta.get("layout_version", 0)) != LAYOUT_VERSION:
         return False
     return True
@@ -601,6 +606,7 @@ def _write_meta(episode_dir: Path, cfg: EpisodeVideoConfig, n_steps: int, format
         "steps": n_steps,
         "seconds_per_step": cfg.seconds_per_step,
         "summary_seconds": cfg.summary_seconds,
+        "repaired_seconds": cfg.repaired_seconds,
         "summary_slide": True,
         "layout_version": LAYOUT_VERSION,
         "format": format,
