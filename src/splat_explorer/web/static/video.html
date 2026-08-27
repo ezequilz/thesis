@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>splat-explorer · episode video</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #101318; --panel: #171c24; --border: #2a3342;
+    --text: #dce3ee; --dim: #8b97a8; --accent: #5aa2ff; --err: #ef6a6a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+               font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+           background: var(--panel); border-bottom: 1px solid var(--border);
+           flex-shrink: 0; }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  header h1 span { color: var(--dim); font-weight: 400; }
+  a { color: var(--accent); text-decoration: none; }
+  .spacer { flex: 1; }
+  button, .dl {
+    border: 0; border-radius: 6px; padding: 6px 12px; font-size: 13px;
+    font-weight: 600; cursor: pointer; background: var(--accent); color: #0b1220;
+    text-decoration: none; display: none;
+  }
+  #stage { flex: 1; min-height: 0; display: flex; align-items: center;
+           justify-content: center; padding: 18px; }
+  body { display: flex; flex-direction: column; }
+  #status { color: var(--dim); font-size: 15px; }
+  #status.err { color: var(--err); }
+  video, img.frame { max-width: 100%; max-height: calc(100vh - 72px);
+                     background: #000; border-radius: 6px; display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>splat-explorer <span>· episode video</span></h1>
+  <span id="ep-label" style="color:var(--dim);font-size:12px;font-family:ui-monospace,Menlo,monospace"></span>
+  <span class="spacer"></span>
+  <a id="btn-dl" class="dl" download>Download</a>
+  <a href="/">dashboard</a>
+</header>
+<div id="stage">
+  <div id="status">Loading…</div>
+  <video id="player" controls playsinline></video>
+  <img id="still" class="frame" alt="episode video">
+</div>
+<script>
+"use strict";
+const ep = decodeURIComponent((location.pathname.replace(/^\/video\//, "").replace(/\/$/, "") || "").trim());
+document.getElementById("ep-label").textContent = ep || "";
+const status = document.getElementById("status");
+const player = document.getElementById("player");
+const still = document.getElementById("still");
+const dl = document.getElementById("btn-dl");
+
+if (!ep) {
+  status.textContent = "No episode id in the URL.";
+  status.className = "err";
+} else {
+  document.title = "episode video · " + ep;
+  fetch("/api/episodes/" + encodeURIComponent(ep) + "/video").then(async r => {
+    if (!r.ok) {
+      let msg = "Video render failed.";
+      try { const j = await r.json(); if (j.error) msg = j.error; } catch (_) {}
+      status.textContent = msg;
+      status.className = "err";
+      return;
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const type = (blob.type || "").toLowerCase();
+    const isVideo = type.startsWith("video/") || type === "application/octet-stream";
+    const ext = type.includes("webp") ? "webp" : (type.includes("mp4") || isVideo ? "mp4" : "bin");
+    dl.href = url;
+    dl.download = ep + "." + ext;
+    dl.style.display = "inline-block";
+    status.style.display = "none";
+    if (isVideo && !type.includes("webp")) {
+      player.src = url;
+      player.style.display = "block";
+    } else {
+      still.src = url;
+      still.style.display = "block";
+    }
+  }).catch(e => {
+    status.textContent = "Could not reach the dashboard: " + e.message;
+    status.className = "err";
+  });
+}
+</script>
+</body>
+</html>

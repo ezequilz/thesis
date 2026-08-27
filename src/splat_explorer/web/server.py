@@ -15,10 +15,12 @@ starting a new episode from the browser costs nothing but the rendering.
 Endpoints:
   GET  /                  dashboard page
   GET  /spectator         HD visor for looking around (not used for VLM captures)
+  GET  /video/<id>        player tab: loading, then the stitched episode video
   GET  /api/state         full dashboard state (scene status + current run)
   GET  /api/episodes      list all past runs on disk (meta.json summaries)
   GET  /api/episodes/<id>      full trace of one past run (steps + artifacts)
   GET  /api/episodes/<id>/log  that run's episode.log
+  GET  /api/episodes/<id>/video  RGB|map video (renders once, then cached on disk)
   POST /api/run           start an episode  {backend, model, max_steps, width, height, send_depth, send_coverage}
   POST /api/stop          request cooperative stop of the running episode
   POST /api/select        pin the viser overlay to a step {step: int} / back to live {step: null}
@@ -30,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -90,6 +93,9 @@ class DashboardApp:
         self._run_thread: threading.Thread | None = None
         # Step index the UI pinned the viser overlay to; None = follow live.
         self._pinned: int | None = None
+        # One lock per episode so two video-tab opens don't double-render.
+        self._video_locks: dict[str, threading.Lock] = {}
+        self._video_locks_guard = threading.Lock()
         threading.Thread(target=self._load_scene, daemon=True).start()
 
     # --- scene ----------------------------------------------------------------
@@ -384,6 +390,25 @@ class DashboardApp:
             "has_log": (d / "episode.log").is_file(),
         }
 
+    def episode_video(self, ep_id: str):
+        """Render-or-reuse the stitched RGB|map video. Returns (path, mime) or (None, error)."""
+        from ..rendering.episode_video import EpisodeVideoError, render_episode_video
+
+        d = self.episode_path(ep_id)
+        if d is None:
+            return None, "not found"
+        with self._video_locks_guard:
+            lock = self._video_locks.setdefault(ep_id, threading.Lock())
+        with lock:
+            try:
+                result = render_episode_video(d)
+            except EpisodeVideoError as exc:
+                return None, str(exc)
+            except Exception:
+                logger.exception("Episode video failed for %s", ep_id)
+                return None, "Video render failed."
+        return result, None
+
     # --- state snapshot --------------------------------------------------------
     def snapshot(self) -> dict:
         with self.lock:
@@ -422,6 +447,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(200, (STATIC_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
         elif path in ("/spectator", "/spectator.html"):
             self._send(200, (STATIC_DIR / "spectator.html").read_bytes(), "text/html; charset=utf-8")
+        elif path.startswith("/video/"):
+            ep = path[len("/video/"):]
+            if not ep or "/" in ep:
+                self._send_json({"error": "not found"}, 404)
+            else:
+                self._send(200, (STATIC_DIR / "video.html").read_bytes(), "text/html; charset=utf-8")
         elif path == "/api/state":
             self._send_json(self.app.snapshot())
         elif path == "/api/episodes":
@@ -441,6 +472,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send(200, log.read_bytes(), "text/plain; charset=utf-8")
             else:
                 self._send_json({"error": "not found"}, 404)
+            return
+        if rest.endswith("/video"):
+            self._serve_episode_video(rest[:-len("/video")])
             return
         detail = self.app.episode_detail(rest)
         if detail is None:
@@ -466,6 +500,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "not found"}, 404)
             return
         self._send_json({"ok": ok, "message": message}, 200 if ok else 409)
+
+    def _serve_episode_video(self, ep_id: str) -> None:
+        result, error = self.app.episode_video(ep_id)
+        if error or result is None:
+            code = 404 if error in ("not found",) else 409
+            self._send_json({"error": error or "not found"}, code)
+            return
+        name = result.path.name
+        self.send_response(200)
+        self.send_header("Content-Type", result.content_type)
+        self.send_header("Content-Length", str(result.path.stat().st_size))
+        self.send_header("Content-Disposition", f'inline; filename="{name}"')
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        with open(result.path, "rb") as f:
+            shutil.copyfileobj(f, self.wfile)
 
     def _serve_frame(self, path: str) -> None:
         episodes_dir = (Path(self.app.cfg.output.dir) / "episodes").resolve()
