@@ -161,7 +161,6 @@ class OpenFloorGrid:
     clearance: np.ndarray
     valid: np.ndarray
     dist_to_com: np.ndarray
-    density: np.ndarray
     extent_x: float
     extent_y: float
 
@@ -385,7 +384,6 @@ def _open_floor_grid(
     # All interior-height splats (floor + furniture + walls): rooms are dense,
     # reconstruction halo outside the shell is not.
     body_hist, _, _ = np.histogram2d(x[inside], y[inside], bins=(x_edges, y_edges))
-    density = _smoothed_density(body_hist, cell, radius=1.0)
     has_floor = _dense_floor_mask(floor_hist, cell, body_hist=body_hist)
 
     dist_to_com = np.hypot(CX - float(x.mean()), CY - float(y.mean()))
@@ -397,7 +395,7 @@ def _open_floor_grid(
         world=world, up=up, e0=e0, e1=e1, spawn_h=spawn_h, cell=cell,
         nx=nx, ny=ny, CX=CX, CY=CY, cx_cells=cx_cells, cy_cells=cy_cells,
         clearance=clearance, valid=valid, dist_to_com=dist_to_com,
-        density=density, extent_x=extent_x, extent_y=extent_y,
+        extent_x=extent_x, extent_y=extent_y,
     )
 
 
