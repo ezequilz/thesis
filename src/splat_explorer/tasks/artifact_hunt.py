@@ -104,7 +104,7 @@ How to move:
   pixel in the RGB view; you walk `amount` (0..1) of the ground-plane distance
   to the surface visible there, keeping your eye height (so a point on the
   floor walks you toward that spot, not down into it). amount=1.0 brings you
-  right up to that location — you can never enter geometry, so prefer
+  right up to that location (a small margin short of the picked surface). Prefer
   confident values like 0.5-0.8.{depth_hint}
 - move(direction, distance) is only for small corrective steps (0.3-1.0 units).
 - rotate(yaw_degrees, pitch_degrees) turns the camera; pitch is absolute
@@ -115,8 +115,8 @@ How to move:
   on the next observation (RGB is still attached). Does not move you.
 - view_coverage_map() shows which floor has been looked at (yellow-green cones,
   coverage %) on the next observation. Does not move you. Call it before done.
-- The harness blocks collisions. If your last movement was cut short, the next
-  prompt tells you so — turn or pick a different direction instead of retrying.
+- Prefer move_toward toward open floor or a doorway. If a move is cut short,
+  the next prompt tells you so — pick a more open direction instead of retrying.
 
 {_DEPTH_REQUEST_HELP if not with_depth else ""}\
 {_MAP_HELP if not with_map else ""}\

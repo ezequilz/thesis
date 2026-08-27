@@ -23,9 +23,16 @@ fine for multi-million-splat scenes, never pairwise distances.
 
 Collision
 ---------
-CollisionWorld clamps every camera move by sampling the path and stopping
-before surface clearance drops below clearance_radius, so the agent can no
-longer end up inside walls, furniture, or curtains.
+CollisionWorld can clamp every camera move by sampling the path and stopping
+before surface clearance drops below a keep-out radius. Door frames and other
+narrow openings are often reconstructed as large stretched gaussians, so the
+full clamp treats them as walls and traps the agent in one room.
+
+`navigation.collision` selects the policy (see CollisionWorld):
+  full — original hard break (clearance_radius keep-out along the path)
+  low  — same sampler, tiny keep-out so doorways stay passable
+  off  — free-cam: no path clamp (default). move_toward still uses depth to
+         walk toward a surface and stops a small margin short of that target.
 
 move_toward
 -----------
@@ -35,7 +42,8 @@ depth value is the first splat surface hit along that ray), giving a world
 target. Travel is then flattened onto the ground plane so the camera keeps
 its eye height: a pixel on the floor walks you toward that spot, rather than
 diving into it. amount = 1 means "walk up to the ground-projected surface",
-capped a safety margin short and additionally collision-clamped along the path.
+capped a safety margin short of the picked target. Path collision-clamping
+is applied on top only when navigation.collision is full or low.
 """
 
 from __future__ import annotations
@@ -54,6 +62,30 @@ logger = logging.getLogger(__name__)
 
 # Cap on spawn-grid cells (each costs one k-NN query); cell size grows beyond.
 _MAX_GRID_CELLS = 400_000
+
+# Path-clamp policies for agent movement (navigation.collision). Spawn search
+# always uses splat-extent clearance; these only affect move / move_toward.
+COLLISION_FULL = "full"
+COLLISION_LOW = "low"
+COLLISION_OFF = "off"
+COLLISION_MODES = (COLLISION_FULL, COLLISION_LOW, COLLISION_OFF)
+# Keep-out used by collision: low. Full uses clearance_radius (default 0.25).
+LOW_CLEARANCE = 0.05
+
+
+def _normalize_collision(value) -> str:
+    """Map config values onto COLLISION_MODES.
+
+    Unquoted YAML `off`/`on` become booleans; treat those as off/full.
+    """
+    if isinstance(value, bool):
+        return COLLISION_OFF if value is False else COLLISION_FULL
+    mode = str(value).strip().lower()
+    aliases = {
+        "false": COLLISION_OFF, "none": COLLISION_OFF, "no": COLLISION_OFF,
+        "true": COLLISION_FULL, "yes": COLLISION_FULL,
+    }
+    return aliases.get(mode, mode)
 
 
 def ground_basis(up: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -237,12 +269,16 @@ def find_spawn_points(
 
 
 class CollisionWorld:
-    """Splat-extent-aware clearance queries + motion clamping.
+    """Splat-extent-aware clearance queries + optional motion clamping.
 
     Every solid gaussian counts as a sphere of radius 2 sigma (max scale,
     capped so room-sized fog splats can't block the whole scene) around its
     center. Clearance at a point is min_k(center_distance_k - radius_k) over
     the k nearest centers — one batched cKDTree query.
+
+    collision selects the path clamp: "full" (original hard break), "low"
+    (tiny keep-out), or "off" (free-cam, the default). Spawn search always
+    uses clearance(); only move / move_toward go through clamp_motion.
     """
 
     K_NEIGHBORS = 16
@@ -251,7 +287,7 @@ class CollisionWorld:
     MAX_SPLAT_RADIUS = 0.75
 
     def __init__(self, scene: GaussianScene, solid_opacity: float = 0.1,
-                 clearance_radius: float = 0.25):
+                 clearance_radius: float = 0.25, collision: str = COLLISION_OFF):
         mask = scene.opacities >= solid_opacity
         self._tree = cKDTree(scene.means[mask].astype(np.float64))
         self._radii = np.minimum(
@@ -259,8 +295,24 @@ class CollisionWorld:
             self.MAX_SPLAT_RADIUS,
         )
         self.clearance_radius = float(clearance_radius)
-        logger.info("Collision world: %d solid gaussians, clearance radius %.2f",
-                    int(mask.sum()), self.clearance_radius)
+        mode = _normalize_collision(collision)
+        if mode not in COLLISION_MODES:
+            raise ValueError(
+                f"navigation.collision must be one of {COLLISION_MODES}, got {collision!r}"
+            )
+        self.collision = mode
+        logger.info(
+            "Collision world: %d solid gaussians, clearance radius %.2f, collision=%s",
+            int(mask.sum()), self.clearance_radius, self.collision,
+        )
+
+    def keep_out(self) -> float | None:
+        """Path keep-out radius, or None when collision is off (free-cam)."""
+        if self.collision == COLLISION_OFF:
+            return None
+        if self.collision == COLLISION_LOW:
+            return LOW_CLEARANCE
+        return self.clearance_radius
 
     def clearance(self, points: np.ndarray) -> np.ndarray | float:
         """Surface clearance for one (3,) point or a batch (M, 3)."""
@@ -275,10 +327,13 @@ class CollisionWorld:
     def clamp_motion(
         self, start: np.ndarray, direction: np.ndarray, distance: float
     ) -> tuple[float, bool]:
-        """Largest travel along unit `direction` keeping clearance_radius.
+        """Largest travel along unit `direction` keeping the mode's keep-out.
 
         Returns (allowed_distance, was_clamped). One batched KD-tree query
         over path samples, so cost is O(samples * k * log N).
+
+        collision=off is a no-op (free-cam). collision=full is the original
+        hard break (clearance_radius). collision=low uses LOW_CLEARANCE.
 
         If the start pose is already inside the keep-out radius (e.g. after a
         previous dive toward the floor), motion that does not get *closer* to
@@ -287,15 +342,18 @@ class CollisionWorld:
         distance = float(distance)
         if distance <= 0.0:
             return 0.0, False
+        keep_out = self.keep_out()
+        if keep_out is None:
+            return distance, False
         start = np.asarray(start, dtype=np.float64)
         start_c = float(self.clearance(start))
-        if start_c >= self.clearance_radius:
-            required = self.clearance_radius
+        if start_c >= keep_out:
+            required = keep_out
         elif start_c > 1e-3:
             required = start_c
         else:
-            required = self.clearance_radius
-        step = self.clearance_radius * 0.5
+            required = keep_out
+        step = max(keep_out * 0.5, 1e-3)
         n = int(np.ceil(distance / step))
         ts = np.linspace(0.0, distance, n + 1)[1:]
         pts = start[None, :] + np.asarray(direction, dtype=np.float64)[None, :] * ts[:, None]

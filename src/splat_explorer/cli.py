@@ -100,6 +100,7 @@ def _build_navigation(cfg, scene):
         scene,
         solid_opacity=float(nav_cfg.solid_opacity),
         clearance_radius=float(nav_cfg.clearance_radius),
+        collision=nav_cfg.get("collision", "off"),
     )
     spawn = None
     if cfg.camera.start_position == "auto":
@@ -139,6 +140,7 @@ def cmd_explore(cfg, args) -> None:
         nav=world,
         spawn=spawn,
         send_depth=bool(cfg.agent.get("send_depth", False)),
+        send_coverage=bool(cfg.agent.get("send_coverage", False)),
         run_meta={"params": {
             "backend": cfg.agent.vlm_backend,
             "model": cfg.agent.model,
@@ -146,7 +148,9 @@ def cmd_explore(cfg, args) -> None:
             "width": cfg.renderer.width,
             "height": cfg.renderer.height,
             "send_depth": bool(cfg.agent.get("send_depth", False)),
+            "send_coverage": bool(cfg.agent.get("send_coverage", False)),
             "prompt": cfg.agent.get("prompt", ""),
+            "collision": world.collision,
         }},
     )
 

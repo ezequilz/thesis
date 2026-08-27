@@ -6,9 +6,10 @@ Episode flow:
      markers) and picks the starting point; the rig teleports there.
   2. Each step: render RGB (+ depth for navigation), overlay the walked path
      onto the cached bird's-eye map, hand the observation to the policy
-     (depth / path map / coverage map only if send_depth is on or the previous
-     action was view_depth / view_map / view_coverage_map), clamp and apply
-     the returned action (collision-checked through the MotionContext), and
+     (depth / path map / coverage map only if send_depth / send_coverage is
+     on or the previous action was view_depth / view_map / view_coverage_map),
+     clamp and apply the returned action (optionally path-clamped through the
+     MotionContext when navigation.collision is full or low), and
      log everything to outputs/episodes/<timestamp>/ as frames plus an
      actions.jsonl trace. The outcome of the previous motion (e.g. "move cut
      short by an obstacle") is fed back to the policy with the next prompt.
@@ -16,9 +17,10 @@ Episode flow:
 Every step record includes render/decide wall times and, when the policy
 exposes a `last_debug` dict (see CliRelayPolicy), the raw VLM exchange —
 so traces double as debugging material for the dashboard. Depth, path-map,
-and coverage-map PNGs are always written (dashboard tiles) and only attached
-to the VLM prompt after the matching view_* action (or when send_depth is
-forced on). RGB is always in the prompt.
+and coverage-map PNGs are always written (dashboard tiles). Depth is attached
+after view_depth or when send_depth is on; the coverage map after
+view_coverage_map or, when send_coverage is on, as a freshly rendered
+low-res overview on every prompt (RGB first). RGB is always in the prompt.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ from ..logging_utils import log_to_file
 from ..navigation import CollisionWorld, MotionContext, SpawnSelection
 from ..rendering import Renderer
 from ..rendering.annotate import depth_to_image
-from ..rendering.birdseye import ExplorationMap
+from ..rendering.birdseye import COVERAGE_PROMPT_MAX_SIDE, ExplorationMap
 from .actions import Action
 from .camera_rig import CameraRig
 from .vlm import VLMPolicy
@@ -151,19 +153,23 @@ def run_episode(
     nav: CollisionWorld | None = None,
     spawn: SpawnSelection | None = None,
     send_depth: bool = False,
+    send_coverage: bool = False,
     run_meta: dict | None = None,
     on_step: Callable[[dict, Path, CameraRig], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> Path:
     """Run one episode. Returns the episode output directory.
 
-    nav enables collision clamping for all movement; spawn triggers the
+    nav is the collision world (path clamp follows navigation.collision);
+    spawn triggers the
     bird's-eye start-selection prompt before the first step. send_depth
     forces the depth map onto every VLM prompt; otherwise it is attached
     only on the observation after a view_depth action (it is always
-    rendered, saved, and used for move_toward). The path map and coverage map
-    are always updated and saved; the path map is attached after view_map and
-    the coverage map after view_coverage_map. RGB is always in the prompt.
+    rendered, saved, and used for move_toward). send_coverage forces a
+    low-res coverage map (redrawn from the original buffers) onto every
+    VLM prompt after RGB; otherwise the coverage map is attached only after
+    view_coverage_map. The path map and full-res coverage map are always
+    updated and saved. RGB is always in the prompt.
     run_meta is merged into the episode's meta.json.
 
     on_step(record, frame_path, rig) fires after each decision — `record`
@@ -183,7 +189,7 @@ def run_episode(
     steps_done = 0
     motion_note: str | None = None
     send_map = False
-    send_coverage = False
+    send_coverage_once = False
     send_depth_once = False
     expl_map: ExplorationMap | None = None
     if (
@@ -202,6 +208,7 @@ def run_episode(
         "steps": 0,
         "max_steps": max_steps,
         "send_depth": send_depth,
+        "send_coverage": send_coverage,
         "artifact_count": 0,
         "summary": None,
         **(run_meta or {}),
@@ -263,12 +270,27 @@ def run_episode(
                     t1 = time.perf_counter()
                     attach_depth = (send_depth or send_depth_once) and depth_image is not None
                     attach_map = send_map and map_image is not None
-                    attach_coverage = send_coverage and coverage_image is not None
+                    attach_coverage = (
+                        (send_coverage or send_coverage_once) and coverage_image is not None
+                    )
+                    prompt_coverage = None
+                    coverage_lowres = False
+                    if attach_coverage:
+                        # Always-on: redraw a compact map from the original
+                        # buffers so labels stay readable at low res.
+                        # view_coverage_map (without always-on) keeps full-res.
+                        if send_coverage and expl_map is not None:
+                            prompt_coverage = expl_map.render_coverage(
+                                max_side=COVERAGE_PROMPT_MAX_SIDE,
+                            )
+                            coverage_lowres = True
+                        else:
+                            prompt_coverage = coverage_image
                     action = policy.decide(
                         observation, pose, step,
                         depth_image=depth_image if attach_depth else None,
                         map_image=map_image if attach_map else None,
-                        coverage_image=coverage_image if attach_coverage else None,
+                        coverage_image=prompt_coverage,
                     )
                     decide_s = time.perf_counter() - t1
                     action = action.clamped(max_move_distance, max_rotate_degrees)
@@ -291,6 +313,7 @@ def run_episode(
                         "map_sent": attach_map,
                         "coverage_frame": coverage_frame_name,
                         "coverage_sent": attach_coverage,
+                        "coverage_lowres": coverage_lowres,
                         "coverage": None if coverage_frac is None else round(coverage_frac, 4),
                         "render_backend": render_backend,
                         "timing": {"render_s": round(render_s, 3), "decide_s": round(decide_s, 3)},
@@ -315,7 +338,7 @@ def run_episode(
                         if motion_note:
                             logger.info("step %03d | %s", step, motion_note)
                     send_map = action.name == "view_map"
-                    send_coverage = action.name == "view_coverage_map"
+                    send_coverage_once = action.name == "view_coverage_map"
                     send_depth_once = action.name == "view_depth"
 
                     trace.write(json.dumps(record) + "\n")

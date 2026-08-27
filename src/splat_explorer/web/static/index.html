@@ -179,6 +179,7 @@
     </select>
   </label>
   <label class="chk"><input type="checkbox" id="in-depth"> always send depth map to VLM</label>
+  <label class="chk"><input type="checkbox" id="in-coverage"> always send coverage map to VLM</label>
   <button id="btn-start">▶ Start episode</button>
   <button id="btn-stop" disabled>■ Stop</button>
   <label class="chk"><input type="checkbox" id="in-follow" checked> follow latest step</label>
@@ -259,6 +260,10 @@ function render() {
   if (!$("in-depth").dataset.init) {
     $("in-depth").checked = !!defaults.send_depth;
     $("in-depth").dataset.init = "1";
+  }
+  if (!$("in-coverage").dataset.init) {
+    $("in-coverage").checked = !!defaults.send_coverage;
+    $("in-coverage").dataset.init = "1";
   }
   $("spectator-link").href = "/spectator";
   const frame = $("viser-frame");
@@ -369,9 +374,11 @@ function renderDetail() {
     ? "MAP — bird's-eye path + camera frustums, sent to the VLM this step"
     : "MAP — bird's-eye path + camera frustums (updated every step; sent to the VLM after view_map)";
   const coverageCaption = s.coverage_sent
-    ? "COVERAGE MAP — viewed area (yellow-green cones), sent to the VLM this step"
+    ? (s.coverage_lowres
+        ? "COVERAGE MAP — low-res overview sent to the VLM this step (yellow-green cones)"
+        : "COVERAGE MAP — viewed area (yellow-green cones), sent to the VLM this step")
       + (s.coverage != null ? ` · ${Math.round(s.coverage * 100)}%` : "")
-    : "COVERAGE MAP — viewed area (updated every step; sent to the VLM after view_coverage_map)"
+    : "COVERAGE MAP — viewed area (updated every step; sent to the VLM after view_coverage_map, or if always-send is on)"
       + (s.coverage != null ? ` · ${Math.round(s.coverage * 100)}%` : "");
   const vlmSize = run?.params
     ? `${run.params.width}×${run.params.height}`
@@ -445,6 +452,7 @@ $("btn-start").onclick = () => {
     max_steps: Number($("in-steps").value) || 5,
     width: w, height: h,
     send_depth: $("in-depth").checked,
+    send_coverage: $("in-coverage").checked,
   });
 };
 $("btn-stop").onclick = () => post("/api/stop");

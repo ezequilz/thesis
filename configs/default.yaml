@@ -44,7 +44,7 @@ camera:
   eye_height: 0.0
 
 # Scene-aware navigation: spawn-point search, bird's-eye start selection, and
-# collision handling for agent movement (see splat_explorer/navigation.py).
+# optional collision clamping for agent movement (see splat_explorer/navigation.py).
 navigation:
   # Percentage of gaussians removed from the top (by centroid height along the
   # up axis) to cut the ceiling away for the bird's-eye view and spawn search.
@@ -58,9 +58,20 @@ navigation:
   # 0.1-0.3 opacity and must still count as an obstacle (splat extents are
   # accounted for, so sparse large curtain gaussians block properly).
   solid_opacity: 0.1
-  # Minimum distance (scene units) the camera keeps from solid splat centers;
-  # all movement is clamped so clearance never drops below this.
+  # Minimum distance (scene units) the camera keeps from solid splat surfaces
+  # when collision is "full". Spawn search still uses splat-extent clearance
+  # regardless of the collision mode below.
   clearance_radius: 0.25
+  # Path clamp for move / move_toward. Switch without changing the rest of
+  # navigation. Spawn search is unaffected.
+  #   full — original hard break: sample the path, stop before clearance
+  #          drops below clearance_radius. Reliable against walking into
+  #          furniture, but door frames often count as walls.
+  #   low  — same sampler, keep-out 0.05 so doorways stay passable.
+  #   "off" — free-cam: no path clamp. move_toward still walks toward the
+  #          picked surface via depth and stops a small margin short of it.
+  # Quoted because YAML 1.1 otherwise reads unquoted `off` as boolean false.
+  collision: "off"
   # Spawn eye height as a fraction of the interior height (floor -> ceiling cut).
   spawn_height_fraction: 0.5
   # Pull of spawn candidates toward the scene's center of mass: score =
@@ -95,6 +106,11 @@ agent:
   # saved per step, and used for move_toward regardless. When false (default)
   # the model can still call view_depth to see it on the next observation.
   send_depth: false
+  # Force-attach a compact coverage map to every VLM prompt (RGB first, then
+  # the map). The full-res coverage PNG is always saved for the dashboard.
+  # When false (default) the model can still call view_coverage_map to see it
+  # on the next observation.
+  send_coverage: false
   # Hard limits the harness enforces on tool call parameters.
   max_move_distance: 2.0
   max_rotate_degrees: 90.0

@@ -140,9 +140,13 @@ def _resolve_api_key(configured: str) -> str:
 class CliRelayPolicy:
     """Drives the explore loop through a CliRelay OpenAI-compatible endpoint.
 
-    Stateless prompting: full task + tool catalog + action history is resent
-    every turn, so no server-side conversation state is required and context
-    growth stays bounded regardless of episode length.
+    Stateless prompting: CliRelay's OpenAI-compatible /v1/chat/completions
+    endpoint has no server-side discussion session — each request is
+    independent. Every turn therefore resends the full task + tool catalog +
+    a compact text history of prior actions, plus the current screenshot
+    (and, when enabled, depth / coverage). Context growth stays bounded
+    regardless of episode length; spatial memory of where the agent has been
+    comes from the optional coverage map, not a rolling chat transcript.
     """
 
     # Retries per step for empty/unparseable replies.
@@ -262,7 +266,8 @@ class CliRelayPolicy:
             images.append((
                 f"Image {n} - COVERAGE MAP (yellow-green = viewed floor, stronger "
                 "nearby, fades with distance, overlaps stack; coverage % on the label). "
-                "move_toward pixels still refer to the RGB view:",
+                "This is your search history so far — unshaded rooms have not been "
+                "looked at. move_toward pixels still refer to the RGB view:",
                 _png_data_url(coverage_image),
             ))
 

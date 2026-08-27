@@ -19,7 +19,7 @@ Endpoints:
   GET  /api/episodes      list all past runs on disk (meta.json summaries)
   GET  /api/episodes/<id>      full trace of one past run (steps + artifacts)
   GET  /api/episodes/<id>/log  that run's episode.log
-  POST /api/run           start an episode  {backend, model, max_steps, width, height, send_depth}
+  POST /api/run           start an episode  {backend, model, max_steps, width, height, send_depth, send_coverage}
   POST /api/stop          request cooperative stop of the running episode
   POST /api/select        pin the viser overlay to a step {step: int} / back to live {step: null}
   GET  /frames/<ep>/<png> step screenshots from outputs/episodes/
@@ -47,7 +47,8 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 LIVE_STATE_PATH = Path("outputs/live/agent_state.json")
 
 RUN_DEFAULTS = {"backend": "scripted", "model": "", "max_steps": 5,
-                "width": 960, "height": 720, "send_depth": False}
+                "width": 960, "height": 720, "send_depth": False,
+                "send_coverage": False}
 RUN_LIMITS = {"max_steps": 200, "width": 1920, "height": 1440}
 
 
@@ -129,6 +130,7 @@ class DashboardApp:
         for key, cap in RUN_LIMITS.items():
             clean[key] = max(1, min(int(clean[key]), cap))
         clean["send_depth"] = bool(clean["send_depth"])
+        clean["send_coverage"] = bool(clean["send_coverage"])
 
         with self.lock:
             if self.scene_status != "ready":
@@ -185,6 +187,9 @@ class DashboardApp:
                 yaw_deg=self.cfg.camera.start_yaw_deg,
             )
             self._trajectory: list[list[float]] = []
+            meta_params = dict(params)
+            if self.nav_world is not None:
+                meta_params["collision"] = self.nav_world.collision
             run_episode(
                 renderer=self.renderer,
                 rig=rig,
@@ -199,7 +204,8 @@ class DashboardApp:
                 nav=self.nav_world,
                 spawn=self.spawn,
                 send_depth=params["send_depth"],
-                run_meta={"params": params},
+                send_coverage=params["send_coverage"],
+                run_meta={"params": meta_params},
                 on_step=self._on_step,
                 should_stop=self._stop.is_set,
             )
@@ -388,6 +394,7 @@ class DashboardApp:
                     **RUN_DEFAULTS,
                     "model": self.cfg.agent.model,
                     "send_depth": bool(self.cfg.agent.get("send_depth", False)),
+                    "send_coverage": bool(self.cfg.agent.get("send_coverage", False)),
                     "viewer_url": f"http://localhost:{self.cfg.viewer.port}",
                     "spectator_path": "/spectator",
                 },

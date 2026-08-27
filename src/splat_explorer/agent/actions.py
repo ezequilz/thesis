@@ -5,15 +5,15 @@ Movement model:
     current RGB view plus an amount in [0, 1]. The harness ray-casts through
     that pixel via the depth map, then walks that fraction of the ground-plane
     distance toward the surface (eye height is held, so a floor pixel walks
-    you there instead of diving into it). amount = 1 lands right at (never
-    inside) the geometry.
+    you there instead of diving into it). amount = 1 lands a margin short of
+    the picked surface.
   - move remains for small body-relative correction steps.
   - view_map / view_coverage_map / view_depth request an extra image on the
     next observation (RGB stays in the prompt). Depth is always rendered for
     navigation.
   - rotate handles both yaw and (optional, absolute) pitch; the former
     separate `look` action was folded into it.
-All movement is collision-clamped by the harness before being applied.
+Path collision-clamping is optional (navigation.collision: full / low / off).
 """
 
 from __future__ import annotations
@@ -65,9 +65,10 @@ ACTION_TOOLS: list[dict] = [
                 "the 3D surface visible at that pixel, staying at the current eye height "
                 "(a point on the floor walks you there, not down into it). amount is the "
                 "fraction of the ground distance to travel: 0 = stay, 1.0 = walk right up "
-                "to that location (a safety margin is enforced, you can never enter "
-                "geometry). If unsure what is solid, call view_depth: black depth pixels "
-                "have no geometry to move toward. Use this for all larger moves."
+                "to that location (stops a small margin short of the picked surface). "
+                "To enter another room, pick a pixel on the floor through a doorway. If "
+                "unsure what is solid, call view_depth: black depth pixels have no "
+                "geometry to move toward. Use this for all larger moves."
             ),
             "parameters": {
                 "type": "object",
@@ -87,7 +88,7 @@ ACTION_TOOLS: list[dict] = [
             "description": (
                 "Small body-relative correction step by a distance in scene units (roughly "
                 "meters). Use only for fine adjustments (about 0.3-1.0 units); prefer "
-                "move_toward for larger moves. Movement stops early if it would hit geometry."
+                "move_toward for larger moves."
             ),
             "parameters": {
                 "type": "object",

@@ -56,6 +56,49 @@ def render_birdseye(
     return renderer.render(camera), camera
 
 
+# Longest side of the compact coverage map attached to every VLM prompt when
+# send_coverage is on. Full-res is still saved for the dashboard.
+COVERAGE_PROMPT_MAX_SIDE = 320
+
+
+def _scaled_map(
+    image: np.ndarray,
+    camera: Camera,
+    coverage: np.ndarray,
+    max_side: int,
+) -> tuple[np.ndarray, Camera, np.ndarray]:
+    """Downscale the bird's-eye backdrop + coverage buffer and a matching camera.
+
+    The overlay (path, cones, labels) is then drawn at this size so text stays
+    readable, instead of shrinking a finished full-res PNG.
+    """
+    from PIL import Image as PILImage
+
+    h, w = image.shape[:2]
+    long_side = max(h, w)
+    if long_side <= max_side:
+        return image, camera, coverage
+    scale = max_side / long_side
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    small_img = np.asarray(
+        PILImage.fromarray(image).resize((new_w, new_h), PILImage.LANCZOS)
+    )
+    cov_f = np.asarray(coverage, dtype=np.float32)
+    small_cov = np.asarray(
+        PILImage.fromarray(cov_f, mode="F").resize((new_w, new_h), PILImage.BILINEAR),
+        dtype=np.float32,
+    )
+    small_cam = Camera(
+        position=np.asarray(camera.position).copy(),
+        rotation=np.asarray(camera.rotation).copy(),
+        width=new_w,
+        height=new_h,
+        fov_deg=camera.fov_deg,
+    )
+    return small_img, small_cam, small_cov
+
+
 class ExplorationMap:
     """Cached ceiling-stripped bird's-eye plus the agent's path overlay.
 
@@ -63,7 +106,8 @@ class ExplorationMap:
     re-paints the walked path and camera frustums so the dashboard and the
     optional VLM map stay cheap to refresh after every step. A second coverage
     buffer accumulates large, distance-faded view cones (yellow-green) used by
-    the coverage map attached after view_coverage_map.
+    the coverage map attached after view_coverage_map or, when send_coverage is
+    on, as a compact image on every VLM prompt.
     """
 
     def __init__(
@@ -116,11 +160,17 @@ class ExplorationMap:
             fov_deg=self.fov_deg, up=self.up,
         )
 
-    def render_coverage(self) -> np.ndarray:
+    def render_coverage(self, max_side: int | None = None) -> np.ndarray:
+        """Paint the coverage overlay. `max_side` redraws from the original
+        buffers at a smaller size (readable labels) for the VLM prompt."""
         from .annotate import draw_coverage_map
 
+        image, camera, coverage = self.base_image, self.camera, self.coverage
+        if max_side is not None:
+            image, camera, coverage = _scaled_map(image, camera, coverage, max_side)
         return draw_coverage_map(
-            self.base_image, self.camera, self.poses, self.coverage,
+            image, camera, self.poses, coverage,
             coverage_fraction=self.coverage_fraction,
             fov_deg=self.fov_deg, up=self.up,
+            compact=max_side is not None,
         )

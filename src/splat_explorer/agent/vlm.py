@@ -43,7 +43,7 @@ class VLMPolicy(Protocol):
 class ScriptedPolicy:
     """Canned sequence covering every motion action (rotate with yaw/pitch,
     move, move_toward at the image center). Useful for smoke-testing the
-    render->act->render loop, collision clamping, and episode logging
+    render->act->render loop, optional path collision clamping, and episode logging
     without a VLM."""
 
     def __init__(self):
@@ -172,7 +172,8 @@ class OpenAIVLMPolicy:
             content += [
                 {"type": "text", "text": (
                     f"Image {n} — COVERAGE MAP (yellow-green = viewed floor, "
-                    "fades with distance, overlap stacks; coverage % on the label):"
+                    "fades with distance, overlap stacks; coverage % on the label; "
+                    "unshaded rooms have not been looked at):"
                 )},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_encode_png_b64(coverage_image)}"}},
             ]

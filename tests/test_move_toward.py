@@ -61,7 +61,8 @@ def test_floor_pixel_walks_horizontally_instead_of_diving():
     walks forward at constant eye height.
 
     Camera sits exactly at the floor keep-out boundary (clearance ==
-    clearance_radius), so any downward component is immediately blocked.
+    clearance_radius), so any downward component is immediately blocked
+    under collision=full.
     """
     # radius = min(2*0.4, 0.75) = 0.75; eye at 1.0 => clearance 0.25.
     eye = np.array([0.0, 1.0, 0.0])
@@ -70,6 +71,7 @@ def test_floor_pixel_walks_horizontally_instead_of_diving():
     depth = _depth_to_floor(camera, px, py)
     world = CollisionWorld(
         _floor_scene(scale=0.40), solid_opacity=0.1, clearance_radius=0.25,
+        collision="full",
     )
     up = np.array([0.0, 1.0, 0.0])
     assert abs(float(world.clearance(eye)) - 0.25) < 0.02

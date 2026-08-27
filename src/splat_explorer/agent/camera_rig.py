@@ -6,9 +6,10 @@ are yaw-relative but stay in the horizontal plane (except up/down), which
 matches how a person walks through a room.
 
 apply() takes an optional MotionContext (collision world + the camera/depth
-the current observation was rendered from): with it, `move` is clamped so the
-camera never enters geometry, and `move_toward` resolves a VLM-picked pixel
-through the depth map into a collision-safe travel toward that surface.
+the current observation was rendered from): with it, `move` is path-clamped
+when navigation.collision is full or low, and `move_toward` resolves a
+VLM-picked pixel through the depth map into travel toward that surface
+(always stopping a margin short of the target; path-clamped only in full/low).
 apply() returns a small outcome dict (travelled distance, whether the move was
 cut short, ...) that the loop logs and feeds back into the next prompt.
 """

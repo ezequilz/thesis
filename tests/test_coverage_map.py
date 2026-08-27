@@ -103,3 +103,89 @@ def test_exploration_map_coverage_does_not_mutate_backdrop():
     assert 0.0 < emap.coverage_fraction <= 1.0
     path = emap.render()
     assert not np.array_equal(first, path)
+
+
+def test_render_coverage_max_side_redraws_compact_from_original():
+    """Always-on VLM attachment: a fresh smaller map, original buffers intact."""
+    from splat_explorer.rendering.birdseye import COVERAGE_PROMPT_MAX_SIDE
+
+    camera = _topdown_camera(width=240, height=180)
+    base = np.full((camera.height, camera.width, 3), 80, dtype=np.uint8)
+    emap = ExplorationMap(base, camera, fov_deg=75.0, up=np.array([0.0, 1.0, 0.0]))
+    emap.add_pose(np.array([0.0, 1.5, 0.0]), np.array([0.0, 0.0, 1.0]), 0)
+    cov_before = emap.coverage.copy()
+    full = emap.render_coverage()
+    small = emap.render_coverage(max_side=80)
+    still_full = emap.render_coverage()
+
+    np.testing.assert_array_equal(emap.coverage, cov_before)
+    np.testing.assert_array_equal(full, still_full)
+    assert full.shape[:2] == (180, 240)
+    assert max(small.shape[0], small.shape[1]) == 80
+    assert small.shape[0] < full.shape[0] and small.shape[1] < full.shape[1]
+    # Aspect roughly preserved.
+    assert abs(small.shape[1] / small.shape[0] - full.shape[1] / full.shape[0]) < 0.05
+    # Lime wash still present at the smaller size.
+    assert int(small[..., 1].max()) > int(small[..., 2].mean())
+    assert COVERAGE_PROMPT_MAX_SIDE == 320
+
+
+class _BlankRenderer:
+    def render_with_depth(self, camera):
+        rgb = np.full((camera.height, camera.width, 3), 30, dtype=np.uint8)
+        depth = np.full((camera.height, camera.width), np.inf, dtype=np.float32)
+        return rgb, depth
+
+
+class _RecordCoveragePolicy:
+    def __init__(self):
+        self.seen: list[tuple[int, int] | None] = []
+        self.last_debug = None
+        self.allow_done = True
+
+    def decide(self, observation, pose, step, depth_image=None, map_image=None,
+               coverage_image=None):
+        from splat_explorer.agent.actions import Action
+
+        self.seen.append(None if coverage_image is None else coverage_image.shape[:2])
+        if step >= 1:
+            return Action("done", {"summary": "ok"})
+        return Action("rotate", {"yaw_degrees": 45.0})
+
+
+def test_loop_send_coverage_attaches_compact_map_every_step(tmp_path):
+    from splat_explorer.agent.camera_rig import CameraRig
+    from splat_explorer.agent.loop import run_episode
+    from splat_explorer.navigation import SpawnSelection
+    from splat_explorer.rendering.birdseye import COVERAGE_PROMPT_MAX_SIDE
+
+    camera = _topdown_camera(width=400, height=300)
+    base = np.full((300, 400, 3), 80, dtype=np.uint8)
+    spawn = SpawnSelection(image=base, points=[], base_image=base, camera=camera)
+    policy = _RecordCoveragePolicy()
+    run_episode(
+        renderer=_BlankRenderer(),
+        rig=CameraRig(np.array([0.0, 1.5, 0.0]), up_axis="+y"),
+        policy=policy,
+        output_dir=tmp_path / "on",
+        width=96, height=72, fov_deg=75.0,
+        max_steps=2,
+        spawn=spawn,
+        send_coverage=True,
+    )
+    assert len(policy.seen) == 2
+    assert all(shape is not None for shape in policy.seen)
+    assert all(max(shape) == COVERAGE_PROMPT_MAX_SIDE for shape in policy.seen)
+
+    off = _RecordCoveragePolicy()
+    run_episode(
+        renderer=_BlankRenderer(),
+        rig=CameraRig(np.array([0.0, 1.5, 0.0]), up_axis="+y"),
+        policy=off,
+        output_dir=tmp_path / "off",
+        width=96, height=72, fov_deg=75.0,
+        max_steps=2,
+        spawn=spawn,
+        send_coverage=False,
+    )
+    assert all(shape is None for shape in off.seen)

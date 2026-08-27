@@ -353,19 +353,24 @@ def draw_coverage_map(
     coverage_fraction: float,
     fov_deg: float = 75.0,
     up: np.ndarray | None = None,
+    compact: bool = False,
 ) -> np.ndarray:
     """Bird's-eye with accumulated view cones plus the usual path/frustum overlay.
 
     Lime paint marks floor that has been looked at; overlapping views stack
     toward solid lime. The small camera triangles stay on top so heading is
     still readable. `coverage_fraction` is shown in the title (0..1).
+    `compact` uses a shorter title for the low-res VLM attachment.
     """
     tinted = overlay_coverage(image, coverage)
     pct = int(round(100.0 * float(np.clip(coverage_fraction, 0.0, 1.0))))
-    title = (
-        f"COVERAGE MAP (viewed area) | lime = seen within ~1.5m, then fades "
-        f"| ~4 overlaps = solid | coverage {pct}%"
-    )
+    if compact:
+        title = f"COVERAGE MAP  {pct}% viewed  (lime = looked at)"
+    else:
+        title = (
+            f"COVERAGE MAP (viewed area) | lime = seen within ~1.5m, then fades "
+            f"| ~4 overlaps = solid | coverage {pct}%"
+        )
     return draw_path_map(
         tinted, camera, poses, fov_deg=fov_deg, up=up, title=title,
     )
