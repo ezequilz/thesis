@@ -188,7 +188,7 @@ def draw_path_map(
     `poses` are dicts with `position` (3,), `heading` (3, horizontal look
     direction) and `step` (int). The last pose is treated as current.
     `waypoints` is an optional (N, 3) array of jump targets, painted first
-    as pale gold W# markers so the path stays more prominent.
+    as gold W# markers so the path stays more prominent.
     The splat backdrop is not re-rendered — only this overlay is cheap to
     refresh after every agent step.
     """

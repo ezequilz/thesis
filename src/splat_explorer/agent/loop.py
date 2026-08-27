@@ -5,7 +5,7 @@ Episode flow:
      is shown the annotated bird's-eye view (ceiling removed, numbered spawn
      markers) and picks the starting point; the rig teleports there.
   2. Each step: render RGB (+ depth for navigation), overlay the walked path
-     and pale gold waypoints onto the cached bird's-eye map, hand the
+     and gold waypoints onto the cached bird's-eye map, hand the
      observation to the policy
      (depth / path map / coverage map only if send_depth / send_map /
      send_coverage is on or the previous action was view_depth / view_map /

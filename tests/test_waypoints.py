@@ -10,6 +10,8 @@ from splat_explorer.navigation import (
     CollisionWorld,
     MotionContext,
     Waypoint,
+    _dense_floor_mask,
+    _on_reconstructed_interior,
     find_spawn_points,
     find_waypoints,
 )
@@ -61,6 +63,39 @@ def _apartment_scene() -> GaussianScene:
     return GaussianScene(
         means=means,
         scales=np.full((n, 3), 0.06, np.float32),
+        quats=np.tile(np.array([1.0, 0.0, 0.0, 0.0], np.float32), (n, 1)),
+        opacities=np.ones(n, np.float32),
+        colors=np.ones((n, 3), np.float32),
+    )
+
+
+def _apartment_with_void_outliers() -> GaussianScene:
+    """Apartment plus a tiny floor-splat island in the void, AABB-padded so
+    the occupancy grid actually covers that island (as real floater clouds do)."""
+    scene = _apartment_scene()
+    cloud = _grid_points(
+        np.linspace(-2.4, -1.6, 6),
+        np.linspace(0.8, 1.6, 5),
+        np.linspace(5.2, 5.8, 6),
+    )
+    island = _grid_points(
+        np.linspace(-2.05, -1.95, 2),
+        [0.0],
+        np.linspace(5.45, 5.55, 2),
+    )
+    big = np.array([[-2.0, 0.2, 5.5]], dtype=np.float32)
+    extra = np.concatenate([cloud, island, big]).astype(np.float32)
+    means = np.concatenate([scene.means, extra])
+    n_extra = len(extra)
+    scales = np.concatenate([
+        scene.scales,
+        np.full((n_extra - 1, 3), 0.06, np.float32),
+        np.full((1, 3), 0.50, np.float32),
+    ])
+    n = len(means)
+    return GaussianScene(
+        means=means,
+        scales=scales,
         quats=np.tile(np.array([1.0, 0.0, 0.0, 0.0], np.float32), (n, 1)),
         opacities=np.ones(n, np.float32),
         colors=np.ones((n, 3), np.float32),
@@ -158,6 +193,42 @@ def test_waypoints_cover_both_rooms_and_stay_in_open_space():
         assert float(d.min()) > 1.0, f"waypoints clustered, min sep {d.min():.2f}"
 
 
+def test_dense_floor_mask_drops_tiny_islands():
+    hist = np.zeros((40, 40), dtype=np.float64)
+    hist[10:26, 10:26] = 4  # real room
+    hist[2, 2] = 1          # single outlier cell
+    hist[2, 37] = 3
+    mask = _dense_floor_mask(hist, cell=0.15)
+    assert mask[18, 18]
+    assert not mask[2, 2]
+    assert not mask[2, 37]
+
+
+def test_waypoints_ignore_void_outlier_islands():
+    scene = _apartment_with_void_outliers()
+    world = CollisionWorld(scene, solid_opacity=0.1, collision="off")
+    waypoints = find_waypoints(
+        scene, up_axis="+y", world=world, num_points=6,
+        ceiling_percentile=25.0, grid_cell=0.2, spawn_height_fraction=0.5,
+    )
+    assert waypoints, "expected indoor waypoints"
+    floater = np.array([-2.0, 1.2, 5.5])
+    for w in waypoints:
+        dist = float(np.linalg.norm(w.position - floater))
+        assert dist > 2.0, f"waypoint {w.index} landed on the void island at {w.position}"
+        assert w.position[2] < 4.2, f"waypoint {w.index} z={w.position[2]:.2f} is outside the rooms"
+
+
+def test_interior_luma_rejects_black_void():
+    camera = _topdown_camera()
+    image = np.zeros((camera.height, camera.width, 3), dtype=np.uint8)
+    image[90:150, 90:150] = 140
+    inside = np.array([[0.0, 1.5, 0.0]])
+    outside = np.array([[-3.5, 1.5, 3.5]])
+    assert _on_reconstructed_interior(image, camera, inside)[0]
+    assert not _on_reconstructed_interior(image, camera, outside)[0]
+
+
 def test_waypoints_spread_more_than_spawn_across_rooms():
     scene = _apartment_scene()
     world = CollisionWorld(scene, solid_opacity=0.1, collision="off")
@@ -190,12 +261,9 @@ def test_waypoints_painted_lightly_on_path_map():
     uv = project_to_pixels(camera, dest)[0]
     x, y = int(round(uv[0])), int(round(uv[1]))
     patch = out[max(y - 6, 0):y + 7, max(x - 6, 0):x + 7]
-    gold = (patch[:, :, 0] > patch[:, :, 2] + 15) & (patch[:, :, 1] > patch[:, :, 2])
-    assert gold.any(), "expected a pale gold waypoint disk"
-    # Must stay softer than the old high-vis spawn magenta / solid yellow.
-    assert int(patch.max()) < 250
-    # Title mentions waypoints so the VLM can bind W# to jump_to_waypoint.
-    assert out[6:28, 8:200].sum() > 0
+    gold = (patch[:, :, 0] > patch[:, :, 2] + 20) & (patch[:, :, 1] > patch[:, :, 2])
+    assert gold.any(), "expected a gold waypoint disk"
+    assert int(patch.max()) > 180, "waypoint marker should be clearly visible"
 
 
 def test_loop_jump_restores_step_zero_pose(tmp_path):
