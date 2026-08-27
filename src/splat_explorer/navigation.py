@@ -27,7 +27,10 @@ The same occupancy grid is reused for jump_to_waypoint vantages, but
 selection maximises area coverage instead of centrality: clearance local
 maxima (room / hallway / alcove centers, never inside objects) are
 farthest-point sampled so one waypoint lands in each open region rather
-than a cluster in the largest room.
+than a cluster in the largest room. Valid cells must sit in a
+neighborhood of reconstructed splat mass comparable to the indoor core,
+so a large but sparse exterior halo (floaters outside the walls) cannot
+win just because it is empty and far from the other picks.
 
 Collision
 ---------
@@ -158,6 +161,7 @@ class OpenFloorGrid:
     clearance: np.ndarray
     valid: np.ndarray
     dist_to_com: np.ndarray
+    density: np.ndarray
     extent_x: float
     extent_y: float
 
@@ -232,47 +236,79 @@ def _view_hit_fraction(
     return hits.mean(axis=1)
 
 
-def _dense_floor_mask(floor_hist: np.ndarray, cell: float) -> np.ndarray:
-    """Keep floor cells that belong to a real interior, not lone outlier splats.
-
-    A single floater used to become a valid island after dilation (`>= 1`
-    plus two dilate steps). Drop tiny connected components first, dilate the
-    remaining rooms to fill holes, then require a modest neighborhood of
-    other floor so sparse void trails stay invalid.
-    """
-    occupied = np.asarray(floor_hist) >= 1
-    if not occupied.any():
-        return occupied
-    labeled, n_labels = ndimage.label(occupied)
-    # Lenient: keep anything covering ~0.35 m² (small alcove / closet) and
-    # drop 1–few cell floater clumps. cell=0.15 → ~16 cells.
-    min_cells = max(8, int(round(0.35 / max(cell * cell, 1e-6))))
-    sizes = ndimage.sum(occupied, labeled, index=np.arange(1, n_labels + 1))
-    keep_ids = np.flatnonzero(np.asarray(sizes) >= min_cells) + 1
-    keep = np.isin(labeled, keep_ids) if len(keep_ids) else np.zeros_like(occupied)
-    keep = ndimage.binary_dilation(keep, iterations=2)
-    win = max(3, int(round(0.9 / cell)))
+def _smoothed_density(hist: np.ndarray, cell: float, radius: float = 1.0) -> np.ndarray:
+    """Mean splat count in a `radius`-metre window (uniform filter)."""
+    win = max(3, int(round(radius / max(float(cell), 1e-6))))
     if win % 2 == 0:
         win += 1
-    support = ndimage.uniform_filter(keep.astype(np.float64), size=win, mode="constant")
-    # ~18% of a 0.9 m window is still floor — rooms pass, thin void trails don't.
-    return keep & (support >= 0.18)
+    return ndimage.uniform_filter(np.asarray(hist, dtype=np.float64), size=win, mode="constant")
+
+
+def _dense_floor_mask(
+    floor_hist: np.ndarray,
+    cell: float,
+    body_hist: np.ndarray | None = None,
+) -> np.ndarray:
+    """Keep floor cells that belong to a reconstructed interior.
+
+    Binary occupancy (`>= 1` splat) plus dilation treats a large but sparse
+    exterior floater cloud as a room — those cells then win waypoint covering
+    because they are empty (high clearance) and far from the indoor picks.
+    Score a ~1 m neighborhood of splat mass relative to the indoor core,
+    close 1–2 cell floor gaps without expanding into the void, and drop
+    tiny components.
+    """
+    floor_hist = np.asarray(floor_hist, dtype=np.float64)
+    mass = floor_hist if body_hist is None else np.asarray(body_hist, dtype=np.float64)
+    occupied = floor_hist >= 1.0
+    if not occupied.any():
+        return np.zeros_like(occupied)
+
+    density = _smoothed_density(mass, cell, radius=1.0)
+    core = density[occupied]
+    ref = float(np.percentile(core, 60)) if core.size else 0.0
+    # Hallways (floor + walls, little furniture) stay in; reconstruction
+    # halo / sky floaters sit far below typical indoor mass.
+    min_density = 0.22 * ref if ref > 0.0 else np.inf
+    keep = occupied & (density >= min_density)
+
+    keep = ndimage.binary_closing(keep, iterations=2)
+    keep = ndimage.binary_fill_holes(keep)
+
+    labeled, n_labels = ndimage.label(keep)
+    # ~0.35 m²: small alcove / closet stays; 1–few cell floater clumps drop.
+    min_cells = max(8, int(round(0.35 / max(cell * cell, 1e-6))))
+    sizes = ndimage.sum(keep, labeled, index=np.arange(1, n_labels + 1))
+    keep_ids = np.flatnonzero(np.asarray(sizes) >= min_cells) + 1
+    if len(keep_ids) == 0:
+        return np.zeros_like(occupied)
+    return np.isin(labeled, keep_ids)
 
 
 def _on_reconstructed_interior(
     image: np.ndarray,
     camera,
     positions: np.ndarray,
-    frac: float = 0.30,
+    frac: float = 0.40,
     radius_px: int = 8,
 ) -> np.ndarray:
-    """True where a point projects onto reconstructed interior, not the black void."""
-    from .rendering.annotate import project_to_pixels, scene_mask
+    """True where a point projects onto reconstructed interior, not void / grey halo.
 
+    `scene_mask` only rejects near-black pixels. Sparse exterior reconstruction
+    renders as dark grey and would still pass that cutoff, so also require the
+    patch luma to sit toward typical indoor brightness rather than the void.
+    """
+    from .rendering.annotate import _SCENE_LUMA_MIN, project_to_pixels, scene_mask
+
+    luma = np.asarray(image, dtype=np.float64).mean(axis=-1)
     mask = scene_mask(image)
     uv = project_to_pixels(camera, np.asarray(positions, dtype=np.float64))
     H, W = mask.shape
     keep = np.zeros(len(positions), dtype=bool)
+    if not mask.any():
+        return keep
+    indoor_luma = float(np.percentile(luma[mask], 50))
+    min_luma = 0.45 * indoor_luma + 0.55 * float(_SCENE_LUMA_MIN)
     for i, (u, v) in enumerate(uv):
         if not np.isfinite(u) or not np.isfinite(v):
             continue
@@ -282,7 +318,12 @@ def _on_reconstructed_interior(
         y0, y1 = max(0, y - radius_px), min(H, y + radius_px + 1)
         x0, x1 = max(0, x - radius_px), min(W, x + radius_px + 1)
         patch = mask[y0:y1, x0:x1]
-        if patch.size and float(patch.mean()) >= frac:
+        patch_luma = luma[y0:y1, x0:x1]
+        if (
+            patch.size
+            and float(patch.mean()) >= frac
+            and float(patch_luma.mean()) >= min_luma
+        ):
             keep[i] = True
     return keep
 
@@ -338,7 +379,11 @@ def _open_floor_grid(
     body_lo = floor + 0.15 * interior
     floor_band = (h >= floor - 0.05 * interior) & (h < body_lo)
     floor_hist, _, _ = np.histogram2d(x[floor_band], y[floor_band], bins=(x_edges, y_edges))
-    has_floor = _dense_floor_mask(floor_hist, cell)
+    # All interior-height splats (floor + furniture + walls): rooms are dense,
+    # reconstruction halo outside the shell is not.
+    body_hist, _, _ = np.histogram2d(x[inside], y[inside], bins=(x_edges, y_edges))
+    density = _smoothed_density(body_hist, cell, radius=1.0)
+    has_floor = _dense_floor_mask(floor_hist, cell, body_hist=body_hist)
 
     dist_to_com = np.hypot(CX - float(x.mean()), CY - float(y.mean()))
     valid = has_floor & (clearance >= max(2.0 * cell, 0.35))
@@ -349,7 +394,7 @@ def _open_floor_grid(
         world=world, up=up, e0=e0, e1=e1, spawn_h=spawn_h, cell=cell,
         nx=nx, ny=ny, CX=CX, CY=CY, cx_cells=cx_cells, cy_cells=cy_cells,
         clearance=clearance, valid=valid, dist_to_com=dist_to_com,
-        extent_x=extent_x, extent_y=extent_y,
+        density=density, extent_x=extent_x, extent_y=extent_y,
     )
 
 
@@ -461,8 +506,10 @@ def find_waypoints(
     splat volumes) but the selection maximises *coverage*: local maxima of
     clearance (centers of open clusters / rooms) are farthest-point sampled
     so picks land in different rooms rather than clustering near the scene
-    centroid. Void islands (lone outlier splats, black bird's-eye) and
-    enclosed pockets with short sight-lines are dropped.
+    centroid. Candidates must sit in a dense reconstructed neighborhood
+    (indoor floor / furniture / walls), not a sparse exterior halo. Void
+    islands, grey bird's-eye haze, and enclosed pockets with short
+    sight-lines are dropped.
     """
     if num_points <= 0:
         return []
@@ -522,6 +569,8 @@ def find_waypoints(
         if view >= min_view and hit_frac[i] >= min_hits and interior[i]
     ]
     if not kept:
+        # Relax sight-line checks, never the interior/density mask: those are
+        # what stop a sparse exterior halo from becoming a jump target.
         order = np.argsort(-views)[:num_points]
         kept = [
             (reps[i][0], reps[i][1], reps[i][2], float(views[i]), positions[i])

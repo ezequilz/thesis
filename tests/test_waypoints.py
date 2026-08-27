@@ -102,6 +102,35 @@ def _apartment_with_void_outliers() -> GaussianScene:
     )
 
 
+def _apartment_with_sparse_exterior() -> GaussianScene:
+    """Apartment plus a large, sparse reconstruction halo outside the walls.
+
+    Real 3DGS rooms have dense floor/furniture; the outdoor halo is a wide
+    but thin cloud of floaters. Size filters keep that halo (it covers
+    several m²); density must drop it.
+    """
+    scene = _apartment_scene()
+    indoor_floor = np.concatenate([
+        _grid_points(np.linspace(-3.8, 3.8, 48), [0.02], np.linspace(-3.3, 3.3, 42)),
+        _grid_points(np.linspace(8.1, 11.4, 22), [0.02], np.linspace(-1.3, 1.3, 18)),
+    ])
+    exterior = _grid_points(
+        np.linspace(-2.2, 2.2, 16),
+        [0.0],
+        np.linspace(6.4, 10.4, 16),
+    )
+    extra = np.concatenate([indoor_floor, exterior]).astype(np.float32)
+    means = np.concatenate([scene.means, extra])
+    n = len(means)
+    return GaussianScene(
+        means=means,
+        scales=np.full((n, 3), 0.06, np.float32),
+        quats=np.tile(np.array([1.0, 0.0, 0.0, 0.0], np.float32), (n, 1)),
+        opacities=np.ones(n, np.float32),
+        colors=np.ones((n, 3), np.float32),
+    )
+
+
 def _topdown_camera(width: int = 240, height: int = 240) -> Camera:
     up = up_vector("+y")
     _, e1 = ground_basis(up)
@@ -204,6 +233,25 @@ def test_dense_floor_mask_drops_tiny_islands():
     assert not mask[2, 37]
 
 
+def test_dense_floor_mask_drops_sparse_exterior():
+    hist = np.zeros((50, 50), dtype=np.float64)
+    hist[18:38, 18:38] = 8   # dense indoor room
+    hist[2:14, 2:14] = 1     # large but sparse exterior (well above 0.35 m²)
+    mask = _dense_floor_mask(hist, cell=0.15)
+    assert mask[28, 28]
+    assert not mask[6, 6]
+    assert not mask[12, 12]
+
+
+def test_dense_floor_mask_keeps_hallway_attached_to_rooms():
+    hist = np.zeros((50, 50), dtype=np.float64)
+    hist[10:30, 10:30] = 8   # room
+    hist[18:24, 30:42] = 5   # hallway of similar coverage, slightly less furniture
+    mask = _dense_floor_mask(hist, cell=0.15)
+    assert mask[20, 20]
+    assert mask[21, 36]
+
+
 def test_waypoints_ignore_void_outlier_islands():
     scene = _apartment_with_void_outliers()
     world = CollisionWorld(scene, solid_opacity=0.1, collision="off")
@@ -219,6 +267,24 @@ def test_waypoints_ignore_void_outlier_islands():
         assert w.position[2] < 4.2, f"waypoint {w.index} z={w.position[2]:.2f} is outside the rooms"
 
 
+def test_waypoints_ignore_sparse_exterior_halo():
+    scene = _apartment_with_sparse_exterior()
+    world = CollisionWorld(scene, solid_opacity=0.1, collision="off")
+    waypoints = find_waypoints(
+        scene, up_axis="+y", world=world, num_points=6,
+        ceiling_percentile=25.0, grid_cell=0.2, spawn_height_fraction=0.5,
+    )
+    assert waypoints, "expected indoor waypoints"
+    xs = np.array([w.position[0] for w in waypoints])
+    zs = np.array([w.position[2] for w in waypoints])
+    assert (xs < 4.0).any(), f"no living-room waypoint: {xs}"
+    for w in waypoints:
+        assert w.position[2] < 5.5, (
+            f"waypoint {w.index} landed in the sparse exterior halo at {w.position}"
+        )
+    assert (zs > 6.0).sum() == 0
+
+
 def test_interior_luma_rejects_black_void():
     camera = _topdown_camera()
     image = np.zeros((camera.height, camera.width, 3), dtype=np.uint8)
@@ -227,6 +293,16 @@ def test_interior_luma_rejects_black_void():
     outside = np.array([[-3.5, 1.5, 3.5]])
     assert _on_reconstructed_interior(image, camera, inside)[0]
     assert not _on_reconstructed_interior(image, camera, outside)[0]
+
+
+def test_interior_luma_rejects_grey_halo():
+    camera = _topdown_camera()
+    image = np.full((camera.height, camera.width, 3), 32, dtype=np.uint8)
+    image[90:150, 90:150] = 140
+    inside = np.array([[0.0, 1.5, 0.0]])
+    halo = np.array([[-3.5, 1.5, 3.5]])
+    assert _on_reconstructed_interior(image, camera, inside)[0]
+    assert not _on_reconstructed_interior(image, camera, halo)[0]
 
 
 def test_waypoints_spread_more_than_spawn_across_rooms():
