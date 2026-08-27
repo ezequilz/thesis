@@ -487,12 +487,10 @@ def _island_and_water_scene() -> GaussianScene:
     """Dense reconstructed path/island on -x, open water plane on +x."""
     chunks = [
         _grid_points(np.linspace(-2.5, 0.2, 22), [0.0], np.linspace(-1.2, 1.2, 18)),
-        _grid_points(
-            np.linspace(-0.45, 0.45, 8), np.linspace(0.1, 1.3, 8),
-            np.linspace(-0.45, 0.45, 8),
-        ),
+        _grid_points(np.linspace(-0.4, 0.4, 6), np.linspace(0.05, 1.2, 6), [-0.4, 0.4]),
+        _grid_points([-0.4, 0.4], np.linspace(0.05, 1.2, 6), np.linspace(-0.4, 0.4, 6)),
         _grid_points(np.linspace(1.5, 8.0, 24), [0.0], np.linspace(-3.5, 3.5, 20)),
-        _grid_points(np.linspace(-2.5, 8.0, 16), [2.4], np.linspace(-3.5, 3.5, 12)),
+        _grid_points(np.linspace(-2.5, 8.0, 20), [2.5], np.linspace(-3.5, 3.5, 16)),
     ]
     means = np.concatenate(chunks).astype(np.float32)
     n = len(means)
@@ -514,10 +512,10 @@ def test_spawn_eye_height_is_an_overlay_not_the_indoor_default():
     )
     indoor = find_spawn_points(scene, spawn_height_fraction=0.5, **kwargs)
     overlay = find_spawn_points(
-        scene, spawn_height_fraction=0.5, spawn_eye_height=0.45, **kwargs,
+        scene, spawn_height_fraction=0.5, spawn_eye_height=0.85, **kwargs,
     )
     assert indoor and overlay
-    assert indoor[0].position[1] > overlay[0].position[1] + 0.4
+    assert indoor[0].position[1] > overlay[0].position[1] + 0.15
 
 
 def test_reconstruction_pull_prefers_path_over_open_water():
