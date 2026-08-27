@@ -42,6 +42,64 @@ LIVE_STATE_PATH = Path("outputs/live/agent_state.json")
 _VLM_MAX_W, _VLM_MAX_H = 1920, 1440
 _ASPECT_TOL = 0.08
 
+# Debug gizmos that must never appear in VLM frames. `/agent` is the parent
+# frame for the frustum + path, so hiding it covers children even if the
+# handle list is stale. Fat Line2 segments that pass through the capture
+# camera smear into a thin unnaturally straight red streak — the VLM then
+# reports that streak as a scene artifact.
+_OVERLAY_NODE_NAMES = (
+    "/origin",
+    "/WorldAxes",
+    "/agent",
+    "/agent/camera",
+    "/agent/trajectory",
+)
+# One extra frame after a client-local hide so Three.js applies visibility
+# before get_render starts (the client pauses the message queue once a
+# render request is in flight).
+_OVERLAY_HIDE_SETTLE_S = 0.05
+
+
+def overlay_node_names(handles) -> tuple[str, ...]:
+    """Stable scene-tree names to hide for a VLM capture."""
+    names: list[str] = []
+    seen: set[str] = set()
+    extra = (
+        getattr(handle, "name", None)
+        for handle in handles
+        if handle is not None
+    )
+    for name in (*_OVERLAY_NODE_NAMES, *extra):
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return tuple(names)
+
+
+def queue_client_overlay_visibility(client, names: tuple[str, ...], visible: bool) -> bool:
+    """Hide/show overlay nodes on one client's websocket, not the broadcast bus.
+
+    ``handle.visible = False`` is broadcast. ``get_render`` is client-local.
+    Those two buffers race: if the render request is processed first, the
+    client stops handling messages until the JPEG is sent, so the hide never
+    applies and the red frustum/path leaks into the agent view.
+    """
+    conn = getattr(client, "_websock_connection", None)
+    if conn is None:
+        return False
+    try:
+        from viser._messages import SetSceneNodeVisibilityMessage
+    except ImportError:
+        return False
+    for name in names:
+        conn.queue_message(SetSceneNodeVisibilityMessage(name, visible))
+    try:
+        client.flush()
+    except Exception:
+        pass
+    return True
+
 
 def _center_crop_and_resize(arr: np.ndarray, need_w: int, need_h: int) -> np.ndarray:
     """Crop to `need_w`/`need_h` aspect (never stretch), then resize.
@@ -179,11 +237,13 @@ class CaptureError(RuntimeError):
 
 
 class _VisorCapture:
-    """Hides overlay gizmos, captures the dashboard visor, restores gizmos.
+    """Hides overlay gizmos on the capture tab, grabs a frame, restores gizmos.
 
     The dashboard iframe is sized to the VLM resolution (4:3), so we request
     that size from get_render and skip HD readback. 16:9 spectator tabs are
-    ignored — they are the slow, easy-to-throttle path.
+    ignored — they are the slow, easy-to-throttle path. Overlay hide is sent
+    on the same client websocket as get_render so the red frustum/path cannot
+    race into the JPEG the VLM sees; other tabs keep the gizmos.
     """
 
     GET_RENDER_TIMEOUT_S = 12.0
@@ -295,6 +355,28 @@ class _VisorCapture:
         except Exception:
             return None
 
+    def _set_overlays_visible_on_client(
+        self, client, names: tuple[str, ...], visible: bool
+    ) -> None:
+        """Toggle debug gizmos on `client` only. Spectator tabs stay put."""
+        if queue_client_overlay_visibility(client, names, visible):
+            if not visible:
+                time.sleep(_OVERLAY_HIDE_SETTLE_S)
+            return
+        for handle in self._overlay:
+            if handle is None:
+                continue
+            try:
+                handle.visible = visible
+            except Exception:
+                pass
+        try:
+            self._server.flush()
+        except Exception:
+            pass
+        if not visible:
+            time.sleep(_OVERLAY_HIDE_SETTLE_S * 2)
+
     def render(self, params: dict) -> bytes:
         width = int(params["width"])
         height = int(params["height"])
@@ -322,12 +404,8 @@ class _VisorCapture:
                     "Keep the episode dashboard tab visible; the visor iframe "
                     f"must stay at {width}x{height}."
                 )
-            hidden = []
-            for handle in self._overlay:
-                if handle is not None and getattr(handle, "visible", False):
-                    handle.visible = False
-                    hidden.append(handle)
             img, errors, used = None, [], None
+            names = overlay_node_names(self._overlay)
             try:
                 self._server.flush()
                 for attempt in range(1, self.ATTEMPTS + 1):
@@ -335,6 +413,7 @@ class _VisorCapture:
                         view_w, view_h = self._viewport(client)
                         old_fov = self._sync_fov(client, fov)
                         try:
+                            self._set_overlays_visible_on_client(client, names, False)
                             img = self._get_render(
                                 client,
                                 width=width,
@@ -355,6 +434,7 @@ class _VisorCapture:
                                 cid, attempt, exc,
                             )
                         finally:
+                            self._set_overlays_visible_on_client(client, names, True)
                             if old_fov is not None:
                                 try:
                                     client.camera.fov = old_fov
@@ -364,8 +444,6 @@ class _VisorCapture:
                     if img is not None:
                         break
             finally:
-                for handle in hidden:
-                    handle.visible = True
                 self._server.flush()
         if img is None or getattr(img, "size", 0) == 0:
             raise CaptureError(
@@ -521,6 +599,7 @@ def serve_viewer(
         position = np.asarray(state["position"], dtype=np.float64)
         image = _frustum_image(state) if show_frame.value else None
         with overlay_lock:
+            agent_root = server.scene.add_frame("/agent", show_axes=False)
             cam = server.scene.add_camera_frustum(
                 "/agent/camera",
                 fov=np.radians(state.get("fov_deg", 75.0)),
@@ -537,7 +616,12 @@ def serve_viewer(
                 traj = server.scene.add_spline_catmull_rom(
                     "/agent/trajectory", points=trajectory,
                     color=(255, 80, 80), line_width=3.0)
-            overlay_handles[:] = [origin, cam, traj]
+            else:
+                try:
+                    server.scene.remove_by_name("/agent/trajectory")
+                except Exception:
+                    pass
+            overlay_handles[:] = [origin, agent_root, cam, traj]
         agent_status.content = (
             f"**Agent**: episode `{state.get('episode', '?')}` step {state.get('step', '?')}  \n"
             f"{state.get('pose', '')}"
