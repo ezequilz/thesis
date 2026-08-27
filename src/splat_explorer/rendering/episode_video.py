@@ -2,8 +2,9 @@
 
 When a step has a gpt-image-2 repair (`step_NNN_regen.png`), the report
 slide stays RGB | map with the artifact caption. An extra slide is then
-inserted: repaired RGB | the same map, caption still printed, held for
-`repaired_seconds` (default 2s) before the next step.
+inserted: repaired RGB | the same map, with a small bottom-right
+"regenerated" caption, held for `repaired_seconds` (default 2s) before
+the next step.
 
 Knobs live on `EpisodeVideoConfig` so timing, layout, overlay styling, and
 output names can be changed without touching the dashboard server. The
@@ -67,7 +68,8 @@ class EpisodeVideoConfig:
 
 
 # Bump when frame composition changes so cached episode videos restitch.
-LAYOUT_VERSION = 3
+LAYOUT_VERSION = 4
+REGENERATED_LABEL = "regenerated"
 
 
 class EpisodeVideoError(Exception):
@@ -148,7 +150,8 @@ def compose_episode_frames(
     """RGB | map composites, with artifact text on report_artifact steps.
 
     A repaired PNG does not replace the map. After the report slide, an extra
-    repaired | map slide is inserted and held for `repaired_seconds`.
+    repaired | map slide is inserted (small "regenerated" caption, bottom-right)
+    and held for `repaired_seconds`.
     """
     pane_w, pane_h = _pane_size(episode_dir, steps, cfg)
     hold = repaired_hold_count(cfg)
@@ -166,7 +169,9 @@ def compose_episode_frames(
         frames.append(_compose_pair(rgb, map_img, overlay, pane_w, pane_h, cfg))
         repaired = _repaired_image(episode_dir, rec)
         if repaired is not None:
-            extra = _compose_pair(repaired, map_img, overlay, pane_w, pane_h, cfg)
+            extra = _compose_pair(
+                repaired, map_img, REGENERATED_LABEL, pane_w, pane_h, cfg,
+            )
             frames.extend([extra] * hold)
     return frames
 

@@ -192,9 +192,14 @@ def test_repaired_image_is_an_extra_held_slide(tmp_path: Path):
     assert left_fix[:, :, 1].mean() > left_fix[:, :, 2].mean()
     # Held copies are identical.
     assert np.array_equal(np.asarray(frames[2]), np.asarray(frames[3]))
-    # Overlay is still printed on the repaired left pane.
-    corner = left_fix[-18:, -36:].astype(int)
-    assert (corner.sum(axis=2) < 220 + 200 + 20 - 80).any()
+    # Compact "regenerated" caption, bottom-right of the repaired pane.
+    corner_fix = left_fix[-16:, -40:].astype(int)
+    corner_report = left_report[-16:, -40:].astype(int)
+    assert (corner_fix.sum(axis=2) < 220 + 200 + 20 - 80).any()
+    # Smaller than the report_artifact JSON box on the previous slide.
+    dark_fix = (corner_fix.sum(axis=2) < 200).mean()
+    dark_report = (corner_report.sum(axis=2) < 200).mean()
+    assert dark_fix < dark_report
 
     built = build_video_frames(d, steps, cfg)
     assert len(built) == len(frames) + summary_hold_count(cfg)
