@@ -106,6 +106,12 @@ agent:
   # saved per step, and used for move_toward regardless. When false (default)
   # the model can still call view_depth to see it on the next observation.
   send_depth: false
+  # Force-attach the full-resolution bird's-eye path map (ceiling removed,
+  # path + frustums) to every VLM prompt. Same size as the saved dashboard
+  # PNG (renderer width × height, typically 960×720) — not downsized.
+  # When false (default) the model can still call view_map to see it on the
+  # next observation.
+  send_map: false
   # Force-attach a compact coverage map to every VLM prompt (RGB first, then
   # the map). The full-res coverage PNG is always saved for the dashboard.
   # When false (default) the model can still call view_coverage_map to see it

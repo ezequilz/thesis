@@ -193,6 +193,7 @@
   </label>
   <div class="chk-group">
     <label class="chk"><input type="checkbox" id="in-depth">depth map</label>
+    <label class="chk"><input type="checkbox" id="in-map">bird's-eye map</label>
     <label class="chk"><input type="checkbox" id="in-coverage">coverage map</label>
   </div>
   <div class="btn-row">
@@ -295,6 +296,10 @@ function render() {
   if (!$("in-coverage").dataset.init) {
     $("in-coverage").checked = !!defaults.send_coverage;
     $("in-coverage").dataset.init = "1";
+  }
+  if (!$("in-map").dataset.init) {
+    $("in-map").checked = !!defaults.send_map;
+    $("in-map").dataset.init = "1";
   }
   $("spectator-link").href = "/spectator";
   const frame = $("viser-frame");
@@ -406,8 +411,8 @@ function renderDetail() {
     ? "DEPTH MAP — sent to the VLM this step (bright = near, black = nothing)"
     : "DEPTH MAP — navigation only (sent to the VLM after view_depth, or if always-send is on)";
   const mapCaption = s.map_sent
-    ? "MAP — bird's-eye path + camera frustums, sent to the VLM this step"
-    : "MAP — bird's-eye path + camera frustums (updated every step; sent to the VLM after view_map)";
+    ? "MAP — bird's-eye path + camera frustums, sent to the VLM this step (full resolution)"
+    : "MAP — bird's-eye path + camera frustums (updated every step; sent to the VLM after view_map, or if always-send is on)";
   const coverageCaption = s.coverage_sent
     ? (s.coverage_lowres
         ? "COVERAGE MAP — low-res overview sent to the VLM this step (yellow-green cones)"
@@ -488,6 +493,7 @@ $("btn-start").onclick = () => {
     width: w, height: h,
     send_depth: $("in-depth").checked,
     send_coverage: $("in-coverage").checked,
+    send_map: $("in-map").checked,
   });
 };
 $("btn-stop").onclick = () => post("/api/stop");

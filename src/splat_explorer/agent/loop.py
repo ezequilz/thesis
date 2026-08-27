@@ -6,8 +6,9 @@ Episode flow:
      markers) and picks the starting point; the rig teleports there.
   2. Each step: render RGB (+ depth for navigation), overlay the walked path
      onto the cached bird's-eye map, hand the observation to the policy
-     (depth / path map / coverage map only if send_depth / send_coverage is
-     on or the previous action was view_depth / view_map / view_coverage_map),
+     (depth / path map / coverage map only if send_depth / send_map /
+     send_coverage is on or the previous action was view_depth / view_map /
+     view_coverage_map),
      clamp and apply the returned action (optionally path-clamped through the
      MotionContext when navigation.collision is full or low), and
      log everything to outputs/episodes/<timestamp>/ as frames plus an
@@ -18,9 +19,11 @@ Every step record includes render/decide wall times and, when the policy
 exposes a `last_debug` dict (see CliRelayPolicy), the raw VLM exchange —
 so traces double as debugging material for the dashboard. Depth, path-map,
 and coverage-map PNGs are always written (dashboard tiles). Depth is attached
-after view_depth or when send_depth is on; the coverage map after
-view_coverage_map or, when send_coverage is on, as a freshly rendered
-low-res overview on every prompt (RGB first). RGB is always in the prompt.
+after view_depth or when send_depth is on; the bird's-eye path map after
+view_map or, when send_map is on, at full resolution on every prompt; the
+coverage map after view_coverage_map or, when send_coverage is on, as a
+freshly rendered low-res overview on every prompt (RGB first). RGB is always
+in the prompt.
 """
 
 from __future__ import annotations
@@ -153,6 +156,7 @@ def run_episode(
     nav: CollisionWorld | None = None,
     spawn: SpawnSelection | None = None,
     send_depth: bool = False,
+    send_map: bool = False,
     send_coverage: bool = False,
     run_meta: dict | None = None,
     on_step: Callable[[dict, Path, CameraRig], None] | None = None,
@@ -165,7 +169,9 @@ def run_episode(
     bird's-eye start-selection prompt before the first step. send_depth
     forces the depth map onto every VLM prompt; otherwise it is attached
     only on the observation after a view_depth action (it is always
-    rendered, saved, and used for move_toward). send_coverage forces a
+    rendered, saved, and used for move_toward). send_map forces the
+    full-resolution bird's-eye path map onto every VLM prompt (no downsize);
+    otherwise it is attached only after view_map. send_coverage forces a
     low-res coverage map (redrawn from the original buffers) onto every
     VLM prompt after RGB; otherwise the coverage map is attached only after
     view_coverage_map. The path map and full-res coverage map are always
@@ -188,7 +194,7 @@ def run_episode(
     summary: str | None = None
     steps_done = 0
     motion_note: str | None = None
-    send_map = False
+    send_map_once = False
     send_coverage_once = False
     send_depth_once = False
     expl_map: ExplorationMap | None = None
@@ -208,6 +214,7 @@ def run_episode(
         "steps": 0,
         "max_steps": max_steps,
         "send_depth": send_depth,
+        "send_map": send_map,
         "send_coverage": send_coverage,
         "artifact_count": 0,
         "summary": None,
@@ -269,7 +276,7 @@ def run_episode(
 
                     t1 = time.perf_counter()
                     attach_depth = (send_depth or send_depth_once) and depth_image is not None
-                    attach_map = send_map and map_image is not None
+                    attach_map = (send_map or send_map_once) and map_image is not None
                     attach_coverage = (
                         (send_coverage or send_coverage_once) and coverage_image is not None
                     )
@@ -337,7 +344,7 @@ def run_episode(
                         record["motion"] = outcome
                         if motion_note:
                             logger.info("step %03d | %s", step, motion_note)
-                    send_map = action.name == "view_map"
+                    send_map_once = action.name == "view_map"
                     send_coverage_once = action.name == "view_coverage_map"
                     send_depth_once = action.name == "view_depth"
 

@@ -21,7 +21,7 @@ Endpoints:
   GET  /api/episodes/<id>      full trace of one past run (steps + artifacts)
   GET  /api/episodes/<id>/log  that run's episode.log
   GET  /api/episodes/<id>/video  RGB|map video (renders once, then cached on disk)
-  POST /api/run           start an episode  {backend, model, max_steps, width, height, send_depth, send_coverage}
+  POST /api/run           start an episode  {backend, model, max_steps, width, height, send_depth, send_map, send_coverage}
   POST /api/stop          request cooperative stop of the running episode
   POST /api/select        pin the viser overlay to a step {step: int} / back to live {step: null}
   GET  /frames/<ep>/<png> step screenshots from outputs/episodes/
@@ -51,7 +51,7 @@ LIVE_STATE_PATH = Path("outputs/live/agent_state.json")
 
 RUN_DEFAULTS = {"backend": "cli_relay", "model": "", "max_steps": 10,
                 "width": 960, "height": 720, "send_depth": False,
-                "send_coverage": False}
+                "send_map": False, "send_coverage": False}
 RUN_LIMITS = {"max_steps": 200, "width": 1920, "height": 1440}
 
 
@@ -136,6 +136,7 @@ class DashboardApp:
         for key, cap in RUN_LIMITS.items():
             clean[key] = max(1, min(int(clean[key]), cap))
         clean["send_depth"] = bool(clean["send_depth"])
+        clean["send_map"] = bool(clean["send_map"])
         clean["send_coverage"] = bool(clean["send_coverage"])
 
         with self.lock:
@@ -210,6 +211,7 @@ class DashboardApp:
                 nav=self.nav_world,
                 spawn=self.spawn,
                 send_depth=params["send_depth"],
+                send_map=params["send_map"],
                 send_coverage=params["send_coverage"],
                 run_meta={"params": meta_params},
                 on_step=self._on_step,
@@ -419,6 +421,7 @@ class DashboardApp:
                     **RUN_DEFAULTS,
                     "model": self.cfg.agent.model,
                     "send_depth": bool(self.cfg.agent.get("send_depth", False)),
+                    "send_map": bool(self.cfg.agent.get("send_map", False)),
                     "send_coverage": bool(self.cfg.agent.get("send_coverage", False)),
                     "viewer_url": f"http://localhost:{self.cfg.viewer.port}",
                     "spectator_path": "/spectator",

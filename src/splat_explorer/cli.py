@@ -140,6 +140,7 @@ def cmd_explore(cfg, args) -> None:
         nav=world,
         spawn=spawn,
         send_depth=bool(cfg.agent.get("send_depth", False)),
+        send_map=bool(cfg.agent.get("send_map", False)),
         send_coverage=bool(cfg.agent.get("send_coverage", False)),
         run_meta={"params": {
             "backend": cfg.agent.vlm_backend,
@@ -148,6 +149,7 @@ def cmd_explore(cfg, args) -> None:
             "width": cfg.renderer.width,
             "height": cfg.renderer.height,
             "send_depth": bool(cfg.agent.get("send_depth", False)),
+            "send_map": bool(cfg.agent.get("send_map", False)),
             "send_coverage": bool(cfg.agent.get("send_coverage", False)),
             "prompt": cfg.agent.get("prompt", ""),
             "collision": world.collision,

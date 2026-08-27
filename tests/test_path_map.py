@@ -140,3 +140,62 @@ def test_prompt_variants_are_distinct_and_v3_is_default():
     assert "done" not in catalog
     assert parse_action('{"action": "done", "args": {"summary": "x"}}',
                         {t["function"]["name"] for t in filter_tools(hidden)}) is None
+
+
+class _BlankRenderer:
+    def render_with_depth(self, camera):
+        rgb = np.full((camera.height, camera.width, 3), 30, dtype=np.uint8)
+        depth = np.full((camera.height, camera.width), np.inf, dtype=np.float32)
+        return rgb, depth
+
+
+class _RecordMapPolicy:
+    def __init__(self):
+        self.seen: list[tuple[int, int] | None] = []
+        self.last_debug = None
+        self.allow_done = True
+
+    def decide(self, observation, pose, step, depth_image=None, map_image=None,
+               coverage_image=None):
+        self.seen.append(None if map_image is None else map_image.shape[:2])
+        if step >= 1:
+            return Action("done", {"summary": "ok"})
+        return Action("rotate", {"yaw_degrees": 45.0})
+
+
+def test_loop_send_map_attaches_full_res_every_step(tmp_path):
+    """Always-on bird's-eye: full spawn resolution, never the compact coverage size."""
+    from splat_explorer.agent.loop import run_episode
+    from splat_explorer.navigation import SpawnSelection
+    from splat_explorer.rendering.birdseye import COVERAGE_PROMPT_MAX_SIDE
+
+    camera = _topdown_camera(width=400, height=300)
+    base = np.full((300, 400, 3), 80, dtype=np.uint8)
+    spawn = SpawnSelection(image=base, points=[], base_image=base, camera=camera)
+    policy = _RecordMapPolicy()
+    run_episode(
+        renderer=_BlankRenderer(),
+        rig=CameraRig(np.array([0.0, 1.5, 0.0]), up_axis="+y"),
+        policy=policy,
+        output_dir=tmp_path / "on",
+        width=96, height=72, fov_deg=75.0,
+        max_steps=2,
+        spawn=spawn,
+        send_map=True,
+    )
+    assert len(policy.seen) == 2
+    assert all(shape == (300, 400) for shape in policy.seen)
+    assert all(max(shape) > COVERAGE_PROMPT_MAX_SIDE for shape in policy.seen)
+
+    off = _RecordMapPolicy()
+    run_episode(
+        renderer=_BlankRenderer(),
+        rig=CameraRig(np.array([0.0, 1.5, 0.0]), up_axis="+y"),
+        policy=off,
+        output_dir=tmp_path / "off",
+        width=96, height=72, fov_deg=75.0,
+        max_steps=2,
+        spawn=spawn,
+        send_map=False,
+    )
+    assert all(shape is None for shape in off.seen)
