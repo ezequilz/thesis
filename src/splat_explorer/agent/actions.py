@@ -155,7 +155,7 @@ ACTION_TOOLS: list[dict] = [
                 "the rooms), or 'step N' to return to the camera pose of that "
                 "earlier step. Heading is kept when jumping to a waypoint; a "
                 "past step restores that step's yaw and pitch. Use this to reach "
-                "another room or revisit a previous view without walking there."
+                "another room or revisit a previous view without walking there. Budget the use of jumping and make sure to exlore areas fully before moving on."
             ),
             "parameters": {
                 "type": "object",
