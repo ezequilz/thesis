@@ -163,12 +163,12 @@ def _frustum_image(state: dict, max_width: int = 200) -> np.ndarray | None:
     return None
 
 
-def _view_pose(scene: GaussianScene, up_axis: str, fov_deg: float) -> dict:
-    """Gravity-aligned start pose inside the reconstructed volume."""
+def _view_from_center(center: np.ndarray, up_axis: str, fov_deg: float) -> dict:
+    """Gravity-aligned look-from at `center` for the given up axis."""
     from .base import up_vector
 
     up = up_vector(up_axis).astype(np.float64)
-    center = scene.robust_centroid().astype(np.float64)
+    center = np.asarray(center, dtype=np.float64)
     seed = np.array([0.0, 0.0, -1.0]) if abs(up[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
     forward = seed - up * np.dot(seed, up)
     norm = float(np.linalg.norm(forward))
@@ -176,6 +176,11 @@ def _view_pose(scene: GaussianScene, up_axis: str, fov_deg: float) -> dict:
     hfov = np.radians(float(fov_deg))
     vfov = float(2.0 * np.arctan(np.tan(hfov / 2.0) * 3.0 / 4.0))
     return {"up": up, "center": center, "forward": forward, "vfov": vfov, "up_axis": up_axis}
+
+
+def _view_pose(scene: GaussianScene, up_axis: str, fov_deg: float) -> dict:
+    """Gravity-aligned start pose inside the reconstructed volume."""
+    return _view_from_center(scene.robust_centroid(), up_axis, fov_deg)
 
 
 def _splat_index(scene: GaussianScene, max_splats: int) -> np.ndarray:
@@ -660,11 +665,17 @@ def serve_viewer(
         path = str(req["path"])
         if gen < scene_state["generation"]:
             return
-        # Same asset: just ack a newer generation so the dashboard can proceed.
+        # Same asset: ack the new generation. Re-pose if only the up axis changed.
         if path == scene_state["path"] and scene_state["status"] == "ready":
             scene_state["generation"] = max(scene_state["generation"], gen)
             scene_state["id"] = req.get("id", scene_state["id"])
             scene_state["label"] = req.get("label", scene_state["label"])
+            up_ax = str(req.get("up_axis") or view["up_axis"])
+            if up_ax != scene_state.get("up_axis"):
+                logger.info("Viser flipping up axis %s -> %s", scene_state.get("up_axis"), up_ax)
+                view.update(_view_from_center(view["center"], up_ax, fov_deg))
+                _apply_view(server, view)
+                scene_state["up_axis"] = up_ax
             return
         if scene_state["status"] == "loading":
             return

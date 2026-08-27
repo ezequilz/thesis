@@ -14,16 +14,16 @@ scene:
   lod_level: 0
   # Dashboard scene dropdown. Missing files are skipped. Extra .sog / streamed
   # SOG folders in 3dgs_rooms/ are appended automatically. up_axis: SOG spec
-  # is +y; Arch Interiors is a COLMAP-trained asset and is y-down.
+  # is +y; Starter Scene and Pond shelter are COLMAP-style y-down.
   catalog:
     - id: arch-interiors
-      label: Arch Interiors
+      label: Starter Scene
       path: 3dgs_rooms/ArchInteriors_for_UE2_Atlux.sog
       up_axis: "-y"
     - id: pond-shelter
       label: Pond shelter
       path: "3dgs_rooms/Pond shelter.sog"
-      up_axis: "+y"
+      up_axis: "-y"
     - id: calico-basin
       label: Calico Basin at sunrise
       path: "3dgs_rooms/Calico Basin at sunrise"

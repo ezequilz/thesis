@@ -175,6 +175,9 @@ class DashboardApp:
             if (
                 current is not None
                 and current.id == spec.id
+                and current.up_axis == spec.up_axis
+                and current.lod_level == spec.lod_level
+                and current.path == spec.path
                 and self.scene_status == "ready"
             ):
                 return True, f"Already on {spec.label}."
