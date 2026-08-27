@@ -19,11 +19,12 @@
   header h1 span { color: var(--dim); font-weight: 400; }
   a { color: var(--accent); text-decoration: none; }
   .spacer { flex: 1; }
-  button, .dl {
-    border: 0; border-radius: 6px; padding: 6px 12px; font-size: 13px;
-    font-weight: 600; cursor: pointer; background: var(--accent); color: #0b1220;
-    text-decoration: none; display: none;
+  .dl {
+    display: none; color: var(--dim); font-size: 12px; font-weight: 400;
+    padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px;
+    background: transparent; cursor: pointer;
   }
+  .dl:hover { color: var(--text); }
   #stage { flex: 1; min-height: 0; display: flex; align-items: center;
            justify-content: center; padding: 18px; }
   body { display: flex; flex-direction: column; }
@@ -71,13 +72,12 @@ if (!ep) {
     const blob = await r.blob();
     const url = URL.createObjectURL(blob);
     const type = (blob.type || "").toLowerCase();
-    const isVideo = type.startsWith("video/") || type === "application/octet-stream";
-    const ext = type.includes("webp") ? "webp" : (type.includes("mp4") || isVideo ? "mp4" : "bin");
+    const isVideo = type.startsWith("video/") && !type.includes("webp");
     dl.href = url;
-    dl.download = ep + "." + ext;
+    dl.download = ep + (isVideo || type.includes("mp4") ? ".mp4" : ".webp");
     dl.style.display = "inline-block";
     status.style.display = "none";
-    if (isVideo && !type.includes("webp")) {
+    if (isVideo) {
       player.src = url;
       player.style.display = "block";
     } else {

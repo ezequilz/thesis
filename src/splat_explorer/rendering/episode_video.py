@@ -509,6 +509,11 @@ def _existing_output(
         return mp4, "video/mp4"
     webp = episode_dir / cfg.output_webp
     if webp.is_file() and webp.stat().st_size > 0:
+        converted = _webp_to_mp4(webp, mp4, cfg)
+        if converted is not None:
+            return converted, "video/mp4"
+        if shutil.which("ffmpeg"):
+            return None  # restitch once as H.264 rather than keep serving WebP
         return webp, "image/webp"
     return None
 
@@ -557,7 +562,33 @@ def _encode(
             logger.warning("ffmpeg encode failed (%s); falling back to WebP", exc)
     dest = episode_dir / cfg.output_webp
     _encode_webp(frames, dest, cfg)
+    converted = _webp_to_mp4(dest, episode_dir / cfg.output_mp4, cfg)
+    if converted is not None:
+        return converted, "video/mp4"
     return dest, "image/webp"
+
+
+def _webp_to_mp4(src: Path, dest: Path, cfg: EpisodeVideoConfig) -> Path | None:
+    """Remux an already-stitched WebP into H.264 MP4 (no frame restitch)."""
+    if not shutil.which("ffmpeg"):
+        return None
+    tmp_out = dest.with_name(dest.stem + ".encoding.mp4")
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(src),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        str(tmp_out),
+    ]
+    try:
+        subprocess.run(cmd, check=True, timeout=cfg.ffmpeg_timeout_s)
+        tmp_out.replace(dest)
+        return dest
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        logger.warning("webp→mp4 convert failed (%s)", exc)
+        if tmp_out.is_file():
+            tmp_out.unlink()
+        return None
 
 
 def _encode_mp4(frames: list[Image.Image], dest: Path, cfg: EpisodeVideoConfig) -> None:
