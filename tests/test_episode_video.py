@@ -158,3 +158,36 @@ def test_render_reuses_cached_file(tmp_path: Path):
     assert second.cached is True
     assert second.path == first.path
     assert second.path.stat().st_mtime == mtime
+
+
+def test_repaired_image_replaces_map_on_that_step_only(tmp_path: Path):
+    d = _episode(tmp_path)
+    _write_png(d / "step_001_regen.png", (220, 200, 20), (64, 48))
+    (d / "step_001_regen.json").write_text(json.dumps({
+        "step": 1, "status": "ok", "image_name": "step_001_regen.png",
+    }))
+    cfg = EpisodeVideoConfig()
+    steps = load_episode_steps(d, cfg)
+    frames = compose_episode_frames(d, steps, cfg)
+    assert len(frames) == 2
+    arr0 = np.asarray(frames[0])
+    arr1 = np.asarray(frames[1])
+    right0 = arr0[:, -40:]
+    right1 = arr1[:, -40:]
+    # Step 0 still uses the green map; step 1 uses the yellow repair.
+    assert right0[:, :, 1].mean() > right0[:, :, 0].mean()
+    assert right1[:, :, 0].mean() > right1[:, :, 2].mean()
+    assert right1[:, :, 1].mean() > right1[:, :, 2].mean()
+
+
+def test_disabled_regen_keeps_the_map(tmp_path: Path):
+    d = _episode(tmp_path)
+    (d / "step_001_regen.json").write_text(json.dumps({
+        "step": 1, "status": "disabled", "error": "image regeneration setting off",
+    }))
+    cfg = EpisodeVideoConfig()
+    steps = load_episode_steps(d, cfg)
+    frames = compose_episode_frames(d, steps, cfg)
+    right1 = np.asarray(frames[1])[:, -40:]
+    assert right1[:, :, 1].mean() > right1[:, :, 0].mean()
+

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -51,3 +52,19 @@ class GaussianScene:
     def robust_centroid(self) -> np.ndarray:
         mins, maxs = self.robust_bounds()
         return ((mins + maxs) / 2).astype(np.float32)
+
+    @staticmethod
+    def concatenate(scenes: Sequence["GaussianScene"]) -> "GaussianScene":
+        """Stack independently decoded chunks into one working set."""
+        parts = [s for s in scenes if s is not None and s.num_gaussians]
+        if not parts:
+            raise ValueError("No gaussians to concatenate")
+        if len(parts) == 1:
+            return parts[0]
+        return GaussianScene(
+            means=np.concatenate([s.means for s in parts]),
+            scales=np.concatenate([s.scales for s in parts]),
+            quats=np.concatenate([s.quats for s in parts]),
+            opacities=np.concatenate([s.opacities for s in parts]),
+            colors=np.concatenate([s.colors for s in parts]),
+        )
