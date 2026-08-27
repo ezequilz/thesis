@@ -51,7 +51,7 @@ LIVE_STATE_PATH = Path("outputs/live/agent_state.json")
 
 RUN_DEFAULTS = {"backend": "cli_relay", "model": "", "max_steps": 10,
                 "width": 960, "height": 720, "send_depth": False,
-                "send_map": False, "send_coverage": False,
+                "send_map": True, "send_coverage": False,
                 "compute_depth": False, "compute_coverage": False}
 RUN_LIMITS = {"max_steps": 200, "width": 1920, "height": 1440}
 
@@ -431,7 +431,7 @@ class DashboardApp:
                     **RUN_DEFAULTS,
                     "model": self.cfg.agent.model,
                     "send_depth": bool(self.cfg.agent.get("send_depth", False)),
-                    "send_map": bool(self.cfg.agent.get("send_map", False)),
+                    "send_map": True,
                     "send_coverage": bool(self.cfg.agent.get("send_coverage", False)),
                     "compute_depth": bool(self.cfg.agent.get("compute_depth", False)),
                     "compute_coverage": bool(self.cfg.agent.get("compute_coverage", False)),

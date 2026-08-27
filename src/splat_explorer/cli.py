@@ -140,7 +140,7 @@ def cmd_explore(cfg, args) -> None:
         nav=world,
         spawn=spawn,
         send_depth=bool(cfg.agent.get("send_depth", False)),
-        send_map=bool(cfg.agent.get("send_map", False)),
+        send_map=bool(cfg.agent.get("send_map", True)),
         send_coverage=bool(cfg.agent.get("send_coverage", False)),
         compute_depth=bool(cfg.agent.get("compute_depth", False)),
         compute_coverage=bool(cfg.agent.get("compute_coverage", False)),

@@ -118,9 +118,9 @@ agent:
   # Force-attach the full-resolution bird's-eye path map (ceiling removed,
   # path + frustums) to every VLM prompt. Same size as the saved dashboard
   # PNG (renderer width × height, typically 960×720) — not downsized.
-  # When false (default) the model can still call view_map to see it on the
-  # next observation.
-  send_map: false
+  # Default on so the model can pick jump waypoints and look directions
+  # from the map each step. Set false to attach it only after view_map.
+  send_map: true
   # Render and save a coverage PNG every step for the dashboard. Off by
   # default. send_coverage implies this. When both are false, the coverage
   # map is still rendered after a view_coverage_map action.
