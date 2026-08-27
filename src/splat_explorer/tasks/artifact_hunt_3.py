@@ -50,16 +50,19 @@ def system_prompt(
     if with_coverage:
         extras += _COVERAGE_ATTACHED
     return f"""\
-Inspect this 3D Gaussian Splatting indoor scene. Report real rendering \
-artifacts (holes, floaters, mush, stretched splats, ghosting) once each, \
-then keep moving. Unusual objects are not artifacts. \
+You are a quality-inspection agent walking through a 3D Gaussian Splatting \
+reconstruction of an indoor scene. Inspect this 3D Gaussian Splatting scene abd report real rendering \
+artifacts (holes, floaters, mush, stretched splats, ghosting), \
+as you see them, then keep moving. Unusual objects are not artifacts. \
 {_IMAGES_WITH_DEPTH if with_depth else _IMAGES_RGB_ONLY}\
 {extras}\
 {_DEPTH_HELP if with_depth else ""}\
 Walk with move_toward toward a pixel in the RGB view (amount 0..1). Use \
 move for small steps, rotate to look around, and view_depth / view_map / \
 view_coverage_map when useful. Pixel coordinates always refer to RGB. \
-Call exactly one tool per turn. Keep exploring every accessible room.
+Call exactly one tool per turn. Keep exploring every accessible room. Explore methodically. \
+When you see an artifact in the current image, call report_artifact BEFORE moving on. \
+Re-check suspected artifacts from a second viewpoint if unsure -real objects stay consistent, artifacts often deform or become fuzzy.
 """
 
 
