@@ -150,7 +150,7 @@ ACTION_TOOLS: list[dict] = [
                 "views stack (still translucent). A coverage percentage (0-100%) is shown on "
                 "the image. Does not move the camera. The NEXT observation includes that map "
                 "alongside the usual RGB view (move_toward pixels still refer to RGB). Use "
-                "this to find unshaded rooms and avoid calling done while coverage is low."
+                "this to find unshaded rooms and see which floor has actually been looked at."
             ),
             "parameters": {
                 "type": "object",
@@ -208,3 +208,9 @@ ACTION_TOOLS: list[dict] = [
         },
     },
 ]
+
+
+def filter_tools(hidden: tuple[str, ...] | list[str] = ()) -> list[dict]:
+    """ACTION_TOOLS with named tools removed (e.g. hide `done` for a prompt)."""
+    hide = set(hidden)
+    return [tool for tool in ACTION_TOOLS if tool["function"]["name"] not in hide]

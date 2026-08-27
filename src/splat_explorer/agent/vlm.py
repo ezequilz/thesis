@@ -19,7 +19,7 @@ from typing import Protocol
 import numpy as np
 
 from ..tasks.registry import load_prompt
-from .actions import ACTION_TOOLS, Action
+from .actions import Action, filter_tools
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +135,8 @@ class OpenAIVLMPolicy:
         self.client = OpenAI(base_url=base_url or None)
         self.model = model
         task = load_prompt(prompt or None)
+        self._tools = filter_tools(getattr(task, "HIDDEN_TOOLS", ()))
+        self.allow_done = "done" not in getattr(task, "HIDDEN_TOOLS", ())
         self.messages: list[dict] = [{"role": "system", "content": task.SYSTEM_PROMPT}]
 
     def decide(
@@ -180,7 +182,7 @@ class OpenAIVLMPolicy:
         response = self.client.chat.completions.create(
             model=self.model,
             messages=self.messages,
-            tools=ACTION_TOOLS,
+            tools=self._tools,
             tool_choice="required",
         )
         message = response.choices[0].message

@@ -43,9 +43,10 @@ src/splat_explorer/
     cli_relay.py                  CliRelay backend: Gemini/Claude/OpenAI via one proxy
     loop.py                       observe → decide → act episode loop + logging
   tasks/
-    registry.py                   Prompt variant switch (agent.prompt: v1 / v2)
+    registry.py                   Prompt variant switch (agent.prompt: v1 / v2 / v3)
     artifact_hunt.py              Task prompt v1 + scoring placeholder [STUB]
-    artifact_hunt_2.py            Task prompt v2 (default)
+    artifact_hunt_2.py            Task prompt v2
+    artifact_hunt_3.py            Task prompt v3 (default; no done tool)
   web/
     server.py                     Episode dashboard server (stdlib http, no deps)
     static/index.html             Dashboard page (vanilla JS, single file)

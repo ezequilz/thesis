@@ -299,7 +299,10 @@ def run_episode(
 
                     if action.name == "report_artifact":
                         artifacts.append({"step": step, **action.args})
-                    done = action.name == "done"
+                    # Some prompts hide `done`; the run still ends at max_steps.
+                    done = action.name == "done" and getattr(policy, "allow_done", True)
+                    if action.name == "done" and not done:
+                        logger.warning("Ignoring done at step %d (prompt does not allow it)", step)
                     if done:
                         summary = action.args.get("summary")
                     outcome = None

@@ -39,7 +39,7 @@ import time
 import numpy as np
 
 from ..tasks.registry import load_prompt
-from .actions import ACTION_TOOLS, Action
+from .actions import ACTION_TOOLS, Action, filter_tools
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +50,10 @@ _FENCED_JSON = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _BARE_JSON = re.compile(r"\{.*\}", re.DOTALL)
 
 
-def render_tool_catalog() -> str:
-    """Render ACTION_TOOLS as plain text for the prompt-based action protocol."""
+def render_tool_catalog(tools: list[dict] | None = None) -> str:
+    """Render tool schemas as plain text for the prompt-based action protocol."""
     lines = []
-    for tool in ACTION_TOOLS:
+    for tool in tools if tools is not None else ACTION_TOOLS:
         fn = tool["function"]
         args = []
         for name, spec in fn["parameters"]["properties"].items():
@@ -98,7 +98,7 @@ def parse_start_choice(text: str, num_points: int) -> int | None:
     return None
 
 
-def parse_action(text: str) -> Action | None:
+def parse_action(text: str, allowed: set[str] | None = None) -> Action | None:
     """Extract the first JSON action object from a free-text model reply."""
     match = _FENCED_JSON.search(text) or _BARE_JSON.search(text)
     if not match:
@@ -110,7 +110,7 @@ def parse_action(text: str) -> Action | None:
     name = obj.get("action") or obj.get("name") or obj.get("tool")
     if not isinstance(name, str):
         return None
-    known = {tool["function"]["name"] for tool in ACTION_TOOLS}
+    known = allowed if allowed is not None else {tool["function"]["name"] for tool in ACTION_TOOLS}
     if name not in known:
         return None
     args = obj.get("args") or obj.get("arguments") or {}
@@ -170,6 +170,8 @@ class CliRelayPolicy:
         )
         self._history: list[str] = []
         self._task = load_prompt(prompt or None)
+        self._tools = filter_tools(getattr(self._task, "HIDDEN_TOOLS", ()))
+        self.allow_done = "done" not in getattr(self._task, "HIDDEN_TOOLS", ())
         # Full record of the most recent decide(): prompt, per-attempt raw
         # replies + latencies, parse outcome. Consumed by the episode loop for
         # traces and by the debug dashboard.
@@ -270,7 +272,7 @@ class CliRelayPolicy:
             t0 = time.perf_counter()
             text, error = self._ask(prompt, images)
             seconds = time.perf_counter() - t0
-            parsed = parse_action(text) if text else None
+            parsed = parse_action(text, {t["function"]["name"] for t in self._tools}) if text else None
             attempts.append({
                 "attempt": attempt,
                 "seconds": round(seconds, 3),
@@ -368,7 +370,7 @@ class CliRelayPolicy:
             )
         return (
             f"{self._task.system_prompt(with_depth, with_map, with_coverage)}\n"
-            f"Available tools:\n{render_tool_catalog()}\n\n"
+            f"Available tools:\n{render_tool_catalog(self._tools)}\n\n"
             f"{history_block}\n\n"
             f"Step {step}. Current pose: {pose_description}. "
             f"{images_note}\n\n"

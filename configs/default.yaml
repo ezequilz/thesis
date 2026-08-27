@@ -88,9 +88,9 @@ agent:
   # CLIRELAY_API_KEY env var instead of putting the key in a config file.
   relay_api_key: ""
   max_steps: 40
-  # Task prompt variant: v2 = precision-first inspector (artifact_hunt_2.py),
-  # v1 = original (artifact_hunt.py). Add more names in tasks/registry.py.
-  prompt: v2
+  # Task prompt variant: v3 = short inspector, no done (artifact_hunt_3.py),
+  # v2 = precision-first, v1 = original. Add more names in tasks/registry.py.
+  prompt: v3
   # Force-attach the depth map to every VLM prompt. Depth is always rendered,
   # saved per step, and used for move_toward regardless. When false (default)
   # the model can still call view_depth to see it on the next observation.

@@ -6,7 +6,7 @@ import numpy as np
 
 from splat_explorer.agent.actions import ACTION_TOOLS, Action
 from splat_explorer.agent.camera_rig import CameraRig
-from splat_explorer.agent.cli_relay import parse_action
+from splat_explorer.agent.cli_relay import parse_action, render_tool_catalog
 from splat_explorer.navigation import ground_basis
 from splat_explorer.rendering.annotate import draw_path_map, project_to_pixels
 from splat_explorer.rendering.base import Camera, up_vector
@@ -121,13 +121,22 @@ def test_system_prompt_mentions_extras_when_attached():
         assert "RGB view" in with_coverage, name
 
 
-def test_prompt_variants_are_distinct_and_v2_is_default():
+def test_prompt_variants_are_distinct_and_v3_is_default():
+    from splat_explorer.agent.actions import filter_tools
     from splat_explorer.tasks.registry import DEFAULT_PROMPT
 
-    assert DEFAULT_PROMPT == "v2"
+    assert DEFAULT_PROMPT == "v3"
+    assert canonical_names() == ["v1", "v2", "v3"]
     v1 = load_prompt("v1").system_prompt(False)
     v2 = load_prompt("v2").system_prompt(False)
+    v3 = load_prompt("v3").system_prompt(False)
     assert "quality-inspection agent walking" in v1
     assert "autonomous visual inspector" in v2
-    assert "How to move:" in v1 and "How to move:" in v2
-    assert load_prompt().system_prompt(False) == v2
+    assert "Inspect this 3D Gaussian Splatting indoor scene" in v3
+    assert "done" not in v3.lower()
+    assert load_prompt().system_prompt(False) == v3
+    hidden = getattr(load_prompt("v3"), "HIDDEN_TOOLS", ())
+    catalog = render_tool_catalog(filter_tools(hidden))
+    assert "done" not in catalog
+    assert parse_action('{"action": "done", "args": {"summary": "x"}}',
+                        {t["function"]["name"] for t in filter_tools(hidden)}) is None

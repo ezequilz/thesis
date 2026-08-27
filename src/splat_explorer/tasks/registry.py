@@ -17,10 +17,12 @@ PROMPT_VARIANTS = {
     "artifact_hunt": "splat_explorer.tasks.artifact_hunt",
     "v2": "splat_explorer.tasks.artifact_hunt_2",
     "artifact_hunt_2": "splat_explorer.tasks.artifact_hunt_2",
+    "v3": "splat_explorer.tasks.artifact_hunt_3",
+    "artifact_hunt_3": "splat_explorer.tasks.artifact_hunt_3",
 }
 
-# Active default when agent.prompt is unset. Flip to "v1" to restore the original.
-DEFAULT_PROMPT = "v2"
+# Active default when agent.prompt is unset. Flip to "v1" / "v2" to restore an older prompt.
+DEFAULT_PROMPT = "v3"
 
 
 def canonical_names() -> list[str]:
