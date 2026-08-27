@@ -411,8 +411,8 @@ function renderDetail() {
     ? "DEPTH MAP — sent to the VLM this step (bright = near, black = nothing)"
     : "DEPTH MAP — navigation only (sent to the VLM after view_depth, or if always-send is on)";
   const mapCaption = s.map_sent
-    ? "MAP — bird's-eye path + camera frustums, sent to the VLM this step (full resolution)"
-    : "MAP — bird's-eye path + camera frustums (updated every step; sent to the VLM after view_map, or if always-send is on)";
+    ? "MAP — bird's-eye path + gold W# jump waypoints, sent to the VLM this step (full resolution)"
+    : "MAP — bird's-eye path + gold W# jump waypoints (updated every step; sent to the VLM after view_map, or if always-send is on)";
   const coverageCaption = s.coverage_sent
     ? (s.coverage_lowres
         ? "COVERAGE MAP — low-res overview sent to the VLM this step (yellow-green cones)"

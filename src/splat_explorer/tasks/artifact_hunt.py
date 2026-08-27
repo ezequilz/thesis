@@ -34,10 +34,11 @@ floaters, or check that a pixel has geometry before moving toward it.
 """
 
 _MAP_HELP = """You can call view_map to consult a top-down bird's-eye of the scene \
-(ceiling removed) with your walked path, past camera positions, and a viewing \
-frustum at each step. The NEXT observation after view_map includes that map \
-next to the RGB view — pixel coordinates for move_toward still refer to RGB, \
-not the map. Use it to plan where to walk next and avoid retracing.
+(ceiling removed) with your walked path, past camera positions, a viewing \
+frustum at each step, and pale gold W# jump waypoints. The NEXT observation \
+after view_map includes that map next to the RGB view — pixel coordinates \
+for move_toward still refer to RGB, not the map. Use it to plan where to \
+walk or jump next and avoid retracing.
 """
 
 _COVERAGE_HELP = """You can call view_coverage_map to consult a COVERAGE MAP of the \
@@ -51,7 +52,8 @@ Unshaded rooms have not been visited — walk into them before calling done.
 _MAP_ATTACHED = """This turn also includes a BIRD'S-EYE MAP of the scene (ceiling \
 removed): the connected red line is the path you have walked, each numbered \
 marker is a past camera position, and each triangle is the camera frustum \
-(viewing direction) at that step. Cyan highlights your CURRENT pose. \
+(viewing direction) at that step. Cyan highlights your CURRENT pose. Pale \
+gold W# markers are jump_to_waypoint vantages covering the rooms. \
 move_toward pixel coordinates still refer to the RGB view, not the map.
 """
 
@@ -113,6 +115,8 @@ How to move:
   (RGB is still attached). Does not move you.
 - view_map() shows a top-down map of your path and past viewing directions
   on the next observation (RGB is still attached). Does not move you.
+- jump_to_waypoint(target) teleports to a gold W# vantage on the map
+  (target "waypoint 2" / "W2" / "2") or back to a past pose ("step 3").
 - view_coverage_map() shows which floor has been looked at (yellow-green cones,
   coverage %) on the next observation. Does not move you. Call it before done.
 - Prefer move_toward toward open floor or a doorway. If a move is cut short,

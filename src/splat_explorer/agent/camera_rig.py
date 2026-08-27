@@ -20,7 +20,7 @@ import numpy as np
 
 from ..navigation import MotionContext, resolve_move_toward
 from ..rendering.base import Camera, up_vector
-from .actions import Action
+from .actions import Action, parse_jump_target
 
 
 class CameraRig:
@@ -83,8 +83,58 @@ class CameraRig:
             return {"kind": "view_coverage_map"}
         if action.name == "view_depth":
             return {"kind": "view_depth"}
+        if action.name == "jump_to_waypoint":
+            return self._apply_jump(action, ctx)
         # report_artifact / done don't change the pose.
         return None
+
+    def _apply_jump(self, action: Action, ctx: MotionContext | None) -> dict:
+        parsed = parse_jump_target(action.args)
+        if parsed is None:
+            return {
+                "kind": "jump_to_waypoint",
+                "error": "could not parse target; use 'waypoint N' / 'W N' or 'step N'",
+            }
+        kind, index = parsed
+        if kind == "waypoint":
+            waypoints = list(ctx.waypoints) if ctx is not None and ctx.waypoints else []
+            if not waypoints:
+                return {"kind": "jump_to_waypoint", "error": "no waypoints available"}
+            match = next((w for w in waypoints if int(w.index) == index), None)
+            if match is None:
+                available = ", ".join(f"W{w.index}" for w in waypoints)
+                return {
+                    "kind": "jump_to_waypoint",
+                    "error": f"waypoint {index} out of range (available {available})",
+                }
+            self.position = np.asarray(match.position, dtype=np.float64).copy()
+            return {
+                "kind": "jump_to_waypoint",
+                "target_kind": "waypoint",
+                "index": index,
+                "destination": f"waypoint {index} (W{index})",
+            }
+        history = list(ctx.pose_history) if ctx is not None and ctx.pose_history else []
+        pose = next((p for p in history if int(p.get("step", -999)) == index), None)
+        if pose is None:
+            steps = [int(p.get("step", -1)) for p in history]
+            lo, hi = (min(steps), max(steps)) if steps else (None, None)
+            span = f"{lo}..{hi}" if steps else "none recorded yet"
+            return {
+                "kind": "jump_to_waypoint",
+                "error": f"step {index} is not a recorded pose (available {span})",
+            }
+        self.position = np.asarray(pose["position"], dtype=np.float64).copy()
+        if "yaw_deg" in pose:
+            self.yaw_deg = float(pose["yaw_deg"])
+        if "pitch_deg" in pose:
+            self.pitch_deg = float(pose["pitch_deg"])
+        return {
+            "kind": "jump_to_waypoint",
+            "target_kind": "step",
+            "index": index,
+            "destination": f"step {index}",
+        }
 
     def _apply_move(self, action: Action, ctx: MotionContext | None) -> dict:
         forward, right = self._heading()

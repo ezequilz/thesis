@@ -5,7 +5,8 @@
 - draw_spawn_markers: paint numbered high-visibility dots for candidate start
   positions onto the bird's-eye render.
 - draw_path_map: paint the agent's walked path and per-step camera frustums
-  onto the same bird's-eye render (used as the on-demand map action).
+  onto the same bird's-eye render (used as the on-demand map action), plus
+  pale gold W# markers for jump_to_waypoint vantages.
 - coverage overlay: accumulate large, distance-faded view cones on a duplicate
   of that bird's-eye so the VLM can see which floor area has been looked at.
 """
@@ -22,6 +23,10 @@ _MARKER_OUTLINE = (255, 255, 255)
 # Match the viser overlay: red trajectory + frustum, cyan for the live pose.
 _PATH_COLOR = (255, 80, 80)
 _CURRENT_COLOR = (90, 190, 255)
+# Waypoints: muted gold, kept translucent so they don't compete with the path.
+_WAYPOINT_FILL = (210, 175, 70, 110)
+_WAYPOINT_OUTLINE = (230, 200, 100, 160)
+_WAYPOINT_LABEL = (210, 175, 80)
 # Coverage cones: saturated lime. One close view is ~25% opaque (readable on
 # parquet); 4 overlapping looks saturate to solid lime. Full strength holds
 # out to ~1.5 m (curtain distance), then fades.
@@ -145,6 +150,28 @@ def _frustum_length(camera: Camera, position: np.ndarray, heading: np.ndarray,
     return float(np.clip(target_px / px_per_unit, 0.4, 8.0))
 
 
+def _draw_waypoint_overlay(
+    overlay: Image.Image,
+    camera: Camera,
+    waypoints: np.ndarray,
+    image_width: int,
+) -> list[tuple[int, tuple[float, float], int]]:
+    """Pale gold disks under the path. Returns (index, uv, radius) for labels."""
+    draw = ImageDraw.Draw(overlay)
+    r = max(3, image_width // 160)
+    placed: list[tuple[int, tuple[float, float], int]] = []
+    uv = project_to_pixels(camera, np.asarray(waypoints, dtype=np.float64))
+    for i, (u, v) in enumerate(uv):
+        if not np.isfinite(u) or not np.isfinite(v):
+            continue
+        draw.ellipse(
+            (u - r, v - r, u + r, v + r),
+            fill=_WAYPOINT_FILL, outline=_WAYPOINT_OUTLINE, width=1,
+        )
+        placed.append((i, (float(u), float(v)), r))
+    return placed
+
+
 def draw_path_map(
     image: np.ndarray,
     camera: Camera,
@@ -152,18 +179,26 @@ def draw_path_map(
     fov_deg: float = 75.0,
     up: np.ndarray | None = None,
     title: str = (
-        "BIRD'S-EYE MAP (ceiling removed) | red = path | triangles = view | cyan = now"
+        "BIRD'S-EYE MAP (ceiling removed) | red = path | cyan = now | gold W# = jump"
     ),
+    waypoints: np.ndarray | None = None,
 ) -> np.ndarray:
     """Paint the walked path and a top-down camera frustum at every past pose.
 
     `poses` are dicts with `position` (3,), `heading` (3, horizontal look
     direction) and `step` (int). The last pose is treated as current.
+    `waypoints` is an optional (N, 3) array of jump targets, painted first
+    as pale gold W# markers so the path stays more prominent.
     The splat backdrop is not re-rendered — only this overlay is cheap to
     refresh after every agent step.
     """
     img = Image.fromarray(image).convert("RGBA")
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    waypoint_marks: list[tuple[int, tuple[float, float], int]] = []
+    if waypoints is not None and len(waypoints) > 0:
+        waypoint_marks = _draw_waypoint_overlay(
+            overlay, camera, np.asarray(waypoints), image.shape[1],
+        )
     draw = ImageDraw.Draw(overlay)
     up_vec = np.asarray(up if up is not None else (0.0, 1.0, 0.0), dtype=np.float64)
     up_vec = up_vec / max(np.linalg.norm(up_vec), 1e-12)
@@ -218,6 +253,13 @@ def draw_path_map(
 
     img = Image.alpha_composite(img, overlay).convert("RGB")
     ink = ImageDraw.Draw(img)
+    wp_font = _font(max(9, image.shape[1] // 90))
+    for idx, uv, wr in waypoint_marks:
+        text = f"W{idx}"
+        tx, ty = uv[0] + wr + 2, uv[1] - wr - 1
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            ink.text((tx + dx, ty + dy), text, fill=(40, 30, 10), font=wp_font)
+        ink.text((tx, ty), text, fill=_WAYPOINT_LABEL, font=wp_font)
     font = _font(max(12, 2 * r - 6))
     for i, (pose, uv, _) in enumerate(prepared):
         current = i == len(prepared) - 1
@@ -354,6 +396,7 @@ def draw_coverage_map(
     fov_deg: float = 75.0,
     up: np.ndarray | None = None,
     compact: bool = False,
+    waypoints: np.ndarray | None = None,
 ) -> np.ndarray:
     """Bird's-eye with accumulated view cones plus the usual path/frustum overlay.
 
@@ -373,4 +416,5 @@ def draw_coverage_map(
         )
     return draw_path_map(
         tinted, camera, poses, fov_deg=fov_deg, up=up, title=title,
+        waypoints=waypoints,
     )

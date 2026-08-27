@@ -50,6 +50,7 @@ class ScriptedPolicy:
         self._script = (
             [Action("rotate", {"yaw_degrees": 45.0})] * 3
             + [Action("view_map", {}), Action("view_coverage_map", {}), Action("view_depth", {})]
+            + [Action("jump_to_waypoint", {"target": "waypoint 0"})]
             + [Action("rotate", {"yaw_degrees": 45.0})] * 3
             + [
                 Action("rotate", {"pitch_degrees": -20.0}),
@@ -163,7 +164,7 @@ class OpenAIVLMPolicy:
             content += [
                 {"type": "text", "text": (
                     f"Image {n} — bird's-eye MAP (ceiling removed; red line = path, "
-                    "triangles = camera view, cyan = current pose):"
+                    "triangles = camera view, cyan = current pose, pale gold W# = jump waypoints):"
                 )},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_encode_png_b64(map_image)}"}},
             ]

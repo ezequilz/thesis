@@ -258,7 +258,8 @@ class CliRelayPolicy:
         if map_image is not None:
             images.append((
                 f"Image {n} - BIRD'S-EYE MAP (ceiling removed; red line = path, "
-                "triangles = camera view at each step, cyan = current pose). "
+                "triangles = camera view at each step, cyan = current pose, "
+                "pale gold W# = jump_to_waypoint vantages). "
                 "move_toward pixels still refer to the RGB view:",
                 _png_data_url(map_image),
             ))
@@ -348,7 +349,7 @@ class CliRelayPolicy:
         if with_map:
             attached.append(
                 "a bird's-eye MAP of your path so far (ceiling removed; "
-                "frustums = viewing direction)"
+                "frustums = viewing direction, pale gold W# = jump waypoints)"
             )
         if with_coverage:
             attached.append(

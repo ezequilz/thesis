@@ -21,6 +21,14 @@ qualifies if solid floor splats exist beneath it, which rejects open-space
 maxima outside the room shell. Cost is one k-NN batch over grid cells —
 fine for multi-million-splat scenes, never pairwise distances.
 
+Waypoint covering
+-----------------
+The same occupancy grid is reused for jump_to_waypoint vantages, but
+selection maximises area coverage instead of centrality: clearance local
+maxima (room / hallway / alcove centers, never inside objects) are
+farthest-point sampled so one waypoint lands in each open region rather
+than a cluster in the largest room.
+
 Collision
 ---------
 CollisionWorld can clamp every camera move by sampling the path and stopping
@@ -121,6 +129,42 @@ class SpawnPoint:
     view_distance: float   # median horizontal sight-line length (scene units)
 
 
+@dataclass
+class Waypoint:
+    """A precomputed open-space vantage the agent can jump to."""
+
+    index: int
+    position: np.ndarray   # (3,) world
+    clearance: float
+    view_distance: float
+
+
+@dataclass
+class OpenFloorGrid:
+    """2D ground-plane occupancy shared by spawn search and waypoint covering."""
+
+    world: CollisionWorld
+    up: np.ndarray
+    e0: np.ndarray
+    e1: np.ndarray
+    spawn_h: float
+    cell: float
+    nx: int
+    ny: int
+    CX: np.ndarray
+    CY: np.ndarray
+    cx_cells: np.ndarray
+    cy_cells: np.ndarray
+    clearance: np.ndarray
+    valid: np.ndarray
+    dist_to_com: np.ndarray
+    extent_x: float
+    extent_y: float
+
+    def world_point(self, px: float, py: float) -> np.ndarray:
+        return px * self.e0 + py * self.e1 + self.spawn_h * self.up
+
+
 def _view_distances(
     world: CollisionWorld,
     origins: np.ndarray,
@@ -155,29 +199,23 @@ def _view_distances(
     return np.median(np.minimum(t, max_dist).reshape(M, num_rays), axis=1)
 
 
-def find_spawn_points(
+def _open_floor_grid(
     scene: GaussianScene,
     up_axis: str,
     world: CollisionWorld | None = None,
-    num_points: int = 5,
     ceiling_percentile: float = 25.0,
     grid_cell: float = 0.15,
     solid_opacity: float = 0.1,
     spawn_height_fraction: float = 0.5,
-    centroid_pull: float = 0.35,
-) -> list[SpawnPoint]:
-    """Candidate start positions in open space with good vantage points.
-
-    Pass an existing CollisionWorld to reuse its KD-tree; otherwise one is
-    built here with the same solid_opacity.
-    """
+) -> OpenFloorGrid | None:
+    """Eye-height clearance grid over cells that sit above solid floor."""
     up = up_vector(up_axis).astype(np.float64)
     e0, e1 = ground_basis(up)
 
     means = scene.means[scene.opacities >= solid_opacity].astype(np.float64)
     if len(means) < 100:
-        logger.warning("Spawn search: too few solid gaussians (%d)", len(means))
-        return []
+        logger.warning("Open-floor grid: too few solid gaussians (%d)", len(means))
+        return None
     if world is None:
         world = CollisionWorld(scene, solid_opacity=solid_opacity)
 
@@ -203,33 +241,80 @@ def find_spawn_points(
     cy_cells = 0.5 * (y_edges[:-1] + y_edges[1:])
     CX, CY = np.meshgrid(cx_cells, cy_cells, indexing="ij")
 
-    # 3D surface clearance at eye height for every cell, splat extents
-    # included — sheer curtains and other sparse-center geometry count.
     spawn_h = floor + spawn_height_fraction * interior
     cell_points = (CX.ravel()[:, None] * e0[None, :]
                    + CY.ravel()[:, None] * e1[None, :]
                    + spawn_h * up[None, :])
     clearance = np.asarray(world.clearance(cell_points)).reshape(CX.shape)
 
-    # Cells only qualify above solid floor splats, so free space outside the
-    # room shell never wins.
     body_lo = floor + 0.15 * interior
     floor_band = (h >= floor - 0.05 * interior) & (h < body_lo)
     floor_hist, _, _ = np.histogram2d(x[floor_band], y[floor_band], bins=(x_edges, y_edges))
     has_floor = ndimage.binary_dilation(floor_hist >= 1, iterations=2)
 
     dist_to_com = np.hypot(CX - float(x.mean()), CY - float(y.mean()))
-
-    score = clearance - centroid_pull * dist_to_com
     valid = has_floor & (clearance >= max(2.0 * cell, 0.35))
     if not valid.any():
-        logger.warning("Spawn search: no valid free cells found")
+        logger.warning("Open-floor grid: no valid free cells found")
+        return None
+    return OpenFloorGrid(
+        world=world, up=up, e0=e0, e1=e1, spawn_h=spawn_h, cell=cell,
+        nx=nx, ny=ny, CX=CX, CY=CY, cx_cells=cx_cells, cy_cells=cy_cells,
+        clearance=clearance, valid=valid, dist_to_com=dist_to_com,
+        extent_x=extent_x, extent_y=extent_y,
+    )
+
+
+def _nms_clearance(
+    grid: OpenFloorGrid, mask: np.ndarray, radius: float, limit: int,
+) -> list[tuple[float, float, float]]:
+    """Greedy non-max suppression on clearance; returns (px, py, clearance)."""
+    score = np.where(mask, grid.clearance, -np.inf)
+    out: list[tuple[float, float, float]] = []
+    for _ in range(max(limit, 0)):
+        flat = int(np.argmax(score))
+        gi, gj = np.unravel_index(flat, score.shape)
+        if not np.isfinite(score[gi, gj]):
+            break
+        px, py = float(grid.cx_cells[gi]), float(grid.cy_cells[gj])
+        out.append((px, py, float(grid.clearance[gi, gj])))
+        score[np.hypot(grid.CX - px, grid.CY - py) < radius] = -np.inf
+    return out
+
+
+def find_spawn_points(
+    scene: GaussianScene,
+    up_axis: str,
+    world: CollisionWorld | None = None,
+    num_points: int = 5,
+    ceiling_percentile: float = 25.0,
+    grid_cell: float = 0.15,
+    solid_opacity: float = 0.1,
+    spawn_height_fraction: float = 0.5,
+    centroid_pull: float = 0.35,
+    grid: OpenFloorGrid | None = None,
+) -> list[SpawnPoint]:
+    """Candidate start positions in open space with good vantage points.
+
+    Pass an existing CollisionWorld to reuse its KD-tree; otherwise one is
+    built here with the same solid_opacity. Pass `grid` to reuse an occupancy
+    grid already built for waypoint search.
+    """
+    if grid is None:
+        grid = _open_floor_grid(
+            scene, up_axis, world=world,
+            ceiling_percentile=ceiling_percentile, grid_cell=grid_cell,
+            solid_opacity=solid_opacity, spawn_height_fraction=spawn_height_fraction,
+        )
+    if grid is None:
         return []
-    score = np.where(valid, score, -np.inf)
+
+    score = grid.clearance - centroid_pull * grid.dist_to_com
+    score = np.where(grid.valid, score, -np.inf)
 
     # Stage 1: shortlist spatially-separated candidates by clearance score
     # (greedy non-max suppression so they spread across the room).
-    separation = max(4.0 * cell, 0.15 * min(extent_x, extent_y))
+    separation = max(4.0 * grid.cell, 0.15 * min(grid.extent_x, grid.extent_y))
     num_candidates = max(3 * num_points, 12)
     shortlist: list[tuple[float, float, float, float]] = []  # px, py, clearance, dist_to_com
     for _ in range(num_candidates):
@@ -237,9 +322,10 @@ def find_spawn_points(
         gi, gj = np.unravel_index(flat, score.shape)
         if not np.isfinite(score[gi, gj]):
             break
-        px, py = float(cx_cells[gi]), float(cy_cells[gj])
-        shortlist.append((px, py, float(clearance[gi, gj]), float(dist_to_com[gi, gj])))
-        score[np.hypot(CX - px, CY - py) < separation] = -np.inf
+        px, py = float(grid.cx_cells[gi]), float(grid.cy_cells[gj])
+        shortlist.append((px, py, float(grid.clearance[gi, gj]),
+                          float(grid.dist_to_com[gi, gj])))
+        score[np.hypot(grid.CX - px, grid.CY - py) < separation] = -np.inf
     if not shortlist:
         return []
 
@@ -249,8 +335,8 @@ def find_spawn_points(
     # the same. The centroid pull is deliberately weakened here: visibility is
     # the better centrality signal, and a full pull would let a central but
     # enclosed pocket outrank open floor.
-    positions = np.stack([px * e0 + py * e1 + spawn_h * up for px, py, _, _ in shortlist])
-    views = _view_distances(world, positions, up)
+    positions = np.stack([grid.world_point(px, py) for px, py, _, _ in shortlist])
+    views = _view_distances(grid.world, positions, grid.up)
     ranking = np.array([
         view + 0.5 * clr - 0.3 * centroid_pull * dcom
         for view, (_, _, clr, dcom) in zip(views, shortlist)
@@ -263,9 +349,121 @@ def find_spawn_points(
         for i, j in enumerate(order)
     ]
     logger.info("Spawn search: %d candidate(s) on a %dx%d grid (cell %.2f): %s",
-                len(points), nx, ny, cell,
+                len(points), grid.nx, grid.ny, grid.cell,
                 [f"#{p.index} clr={p.clearance:.2f} view={p.view_distance:.1f}" for p in points])
     return points
+
+
+def find_waypoints(
+    scene: GaussianScene,
+    up_axis: str,
+    world: CollisionWorld | None = None,
+    num_points: int = 8,
+    ceiling_percentile: float = 25.0,
+    grid_cell: float = 0.15,
+    solid_opacity: float = 0.1,
+    spawn_height_fraction: float = 0.5,
+    grid: OpenFloorGrid | None = None,
+) -> list[Waypoint]:
+    """Spread vantage-point waypoints across reachable indoor floor.
+
+    Same occupancy grid as spawn (open cells at eye height, never inside
+    splat volumes) but the selection maximises *coverage*: local maxima of
+    clearance (centers of open clusters / rooms) are farthest-point sampled
+    so picks land in different rooms rather than clustering near the scene
+    centroid. Enclosed pockets with short sight-lines are dropped.
+    """
+    if num_points <= 0:
+        return []
+    if grid is None:
+        grid = _open_floor_grid(
+            scene, up_axis, world=world,
+            ceiling_percentile=ceiling_percentile, grid_cell=grid_cell,
+            solid_opacity=solid_opacity, spawn_height_fraction=spawn_height_fraction,
+        )
+    if grid is None:
+        return []
+
+    # Local maxima of clearance ≈ room / hallway / alcove centers. A ~1.2 m
+    # neighborhood keeps one peak per furniture-scale gap, not per grid cell.
+    neigh = max(3, int(round(1.2 / grid.cell)))
+    if neigh % 2 == 0:
+        neigh += 1
+    field = np.where(grid.valid, grid.clearance, -np.inf)
+    local_max = (
+        (field == ndimage.maximum_filter(field, size=neigh, mode="nearest"))
+        & grid.valid
+    )
+
+    floor_area = float(grid.valid.sum()) * grid.cell ** 2
+    nms_r = max(8.0 * grid.cell, 0.14 * min(grid.extent_x, grid.extent_y))
+    min_sep = max(
+        6.0 * grid.cell,
+        min(
+            0.22 * min(grid.extent_x, grid.extent_y),
+            0.80 * float(np.sqrt(floor_area / max(num_points, 1))),
+        ),
+    )
+
+    reps = _nms_clearance(grid, local_max, nms_r, limit=max(4 * num_points, 16))
+    if len(reps) < num_points:
+        for cand in _nms_clearance(grid, grid.valid, min_sep, limit=max(3 * num_points, 12)):
+            if all(np.hypot(cand[0] - r[0], cand[1] - r[1]) >= min_sep for r in reps):
+                reps.append(cand)
+    if not reps:
+        return []
+
+    positions = np.stack([grid.world_point(px, py) for px, py, _ in reps])
+    views = _view_distances(grid.world, positions, grid.up)
+    min_view = 0.7
+    kept = [
+        (px, py, clr, float(view), positions[i])
+        for i, ((px, py, clr), view) in enumerate(zip(reps, views))
+        if view >= min_view
+    ]
+    if not kept:
+        order = np.argsort(-views)[:num_points]
+        kept = [
+            (reps[i][0], reps[i][1], reps[i][2], float(views[i]), positions[i])
+            for i in order
+        ]
+
+    # Farthest-point sampling: first the most open vantage, then repeatedly
+    # the remaining peak farthest from already picked ones. That covers
+    # distant rooms before filling a second spot in the same open area.
+    kept.sort(key=lambda t: t[2], reverse=True)
+    picked = [kept[0]]
+    rest = kept[1:]
+    while len(picked) < num_points and rest:
+        best_i = None
+        best_d = -1.0
+        for i, cand in enumerate(rest):
+            d = min(np.hypot(cand[0] - p[0], cand[1] - p[1]) for p in picked)
+            if d < min_sep:
+                continue
+            if d > best_d:
+                best_d = d
+                best_i = i
+        if best_i is None:
+            break
+        picked.append(rest.pop(best_i))
+
+    picked.sort(key=lambda t: (t[1], t[0]))
+    waypoints = [
+        Waypoint(
+            index=i,
+            position=np.asarray(pos, dtype=np.float64),
+            clearance=clr,
+            view_distance=view,
+        )
+        for i, (_px, _py, clr, view, pos) in enumerate(picked)
+    ]
+    logger.info(
+        "Waypoint search: %d vantage(s) on a %dx%d grid (cell %.2f, sep %.2f): %s",
+        len(waypoints), grid.nx, grid.ny, grid.cell, min_sep,
+        [f"W{w.index} clr={w.clearance:.2f} view={w.view_distance:.1f}" for w in waypoints],
+    )
+    return waypoints
 
 
 class CollisionWorld:
@@ -367,11 +565,17 @@ class CollisionWorld:
 @dataclass
 class MotionContext:
     """What CameraRig.apply needs to resolve motion safely: the collision
-    world plus the camera/depth the current observation was rendered from."""
+    world plus the camera/depth the current observation was rendered from.
+
+    waypoints / pose_history are used by jump_to_waypoint to teleport to a
+    precomputed vantage or a past step's camera pose.
+    """
 
     world: CollisionWorld | None = None
     camera: Camera | None = None
     depth: np.ndarray | None = None
+    waypoints: list[Waypoint] | None = None
+    pose_history: list[dict] | None = None
 
 
 def resolve_move_toward(
@@ -465,6 +669,7 @@ class SpawnSelection:
 
     image: np.ndarray                     # (H, W, 3) uint8 annotated render
     points: list[SpawnPoint] = field(default_factory=list)
+    waypoints: list[Waypoint] = field(default_factory=list)
     base_image: np.ndarray | None = None  # unmarked bird's-eye (path-map backdrop)
     camera: Camera | None = None          # camera used for the bird's-eye render
 
@@ -476,6 +681,16 @@ class SpawnSelection:
                 f"Point {p.index}: world coordinates ({x:.2f}, {y:.2f}, {z:.2f}), "
                 f"~{p.clearance:.2f} units of open space around it, "
                 f"median sight-line {p.view_distance:.1f} units"
+            )
+        return "\n".join(lines)
+
+    def describe_waypoints(self) -> str:
+        lines = []
+        for w in self.waypoints:
+            x, y, z = w.position
+            lines.append(
+                f"Waypoint {w.index} (W{w.index}): world coordinates "
+                f"({x:.2f}, {y:.2f}, {z:.2f})"
             )
         return "\n".join(lines)
 
@@ -493,19 +708,32 @@ def prepare_spawn_selection(
     from .rendering.birdseye import render_birdseye
 
     nav = cfg.navigation
+    grid_kwargs = dict(
+        ceiling_percentile=float(nav.ceiling_percentile),
+        grid_cell=float(nav.grid_cell),
+        solid_opacity=float(nav.solid_opacity),
+        spawn_height_fraction=float(nav.spawn_height_fraction),
+    )
+    grid = _open_floor_grid(scene, cfg.camera.up_axis, world=world, **grid_kwargs)
     points = find_spawn_points(
         scene,
         up_axis=cfg.camera.up_axis,
         world=world,
         num_points=int(nav.num_spawn_points),
-        ceiling_percentile=float(nav.ceiling_percentile),
-        grid_cell=float(nav.grid_cell),
-        solid_opacity=float(nav.solid_opacity),
-        spawn_height_fraction=float(nav.spawn_height_fraction),
         centroid_pull=float(nav.centroid_pull),
+        grid=grid,
+        **grid_kwargs,
     )
     if not points:
         return None
+    waypoints = find_waypoints(
+        scene,
+        up_axis=cfg.camera.up_axis,
+        world=world,
+        num_points=int(nav.get("num_waypoints", 8)),
+        grid=grid,
+        **grid_kwargs,
+    )
 
     stripped, _ = strip_ceiling(scene, cfg.camera.up_axis, float(nav.ceiling_percentile))
     image, camera = render_birdseye(
@@ -517,4 +745,7 @@ def prepare_spawn_selection(
     )
     base_image = np.asarray(image).copy()
     image = draw_spawn_markers(image, camera, np.stack([p.position for p in points]))
-    return SpawnSelection(image=image, points=points, base_image=base_image, camera=camera)
+    return SpawnSelection(
+        image=image, points=points, waypoints=waypoints,
+        base_image=base_image, camera=camera,
+    )

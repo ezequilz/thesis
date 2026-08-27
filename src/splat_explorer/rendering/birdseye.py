@@ -116,6 +116,7 @@ class ExplorationMap:
         camera: Camera,
         fov_deg: float,
         up: np.ndarray,
+        waypoints: np.ndarray | None = None,
     ):
         from .annotate import scene_mask
 
@@ -124,6 +125,10 @@ class ExplorationMap:
         self.fov_deg = float(fov_deg)
         self.up = np.asarray(up, dtype=np.float64)
         self.poses: list[dict] = []
+        if waypoints is None or len(waypoints) == 0:
+            self.waypoints = None
+        else:
+            self.waypoints = np.asarray(waypoints, dtype=np.float64).reshape(-1, 3)
         h, w = self.base_image.shape[:2]
         self.coverage = np.zeros((h, w), dtype=np.float32)
         self._scene_mask = scene_mask(self.base_image)
@@ -158,6 +163,7 @@ class ExplorationMap:
         return draw_path_map(
             self.base_image, self.camera, self.poses,
             fov_deg=self.fov_deg, up=self.up,
+            waypoints=self.waypoints,
         )
 
     def render_coverage(self, max_side: int | None = None) -> np.ndarray:
@@ -173,4 +179,5 @@ class ExplorationMap:
             coverage_fraction=self.coverage_fraction,
             fov_deg=self.fov_deg, up=self.up,
             compact=max_side is not None,
+            waypoints=self.waypoints,
         )

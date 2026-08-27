@@ -24,7 +24,8 @@ their surroundings, holes as black pixels inside otherwise solid surfaces.
 _MAP_ATTACHED = """This turn also includes a BIRD'S-EYE MAP of the scene (ceiling \
 removed): the connected red line is the path you have walked, each numbered \
 marker is a past camera position, and each triangle is the camera frustum \
-(viewing direction) at that step. Cyan highlights your CURRENT pose. \
+(viewing direction) at that step. Cyan highlights your CURRENT pose. Pale \
+gold W# markers are jump_to_waypoint vantages covering the rooms. \
 move_toward pixel coordinates still refer to the RGB view, not the map.
 """
 
@@ -58,8 +59,10 @@ as you see them, then keep moving. Unusual objects are not artifacts. \
 {extras}\
 {_DEPTH_HELP if with_depth else ""}\
 Walk with move_toward toward a pixel in the RGB view (amount 0..1). Use \
-move for small steps, rotate to look around, and view_depth / view_map / \
-view_coverage_map when useful. Pixel coordinates always refer to RGB. \
+move for small steps, rotate to look around, jump_to_waypoint to teleport \
+to a gold W# vantage or a past step (e.g. "waypoint 2" / "step 3"), and \
+view_depth / view_map / view_coverage_map when useful. Pixel coordinates \
+always refer to RGB. \
 Call exactly one tool per turn. Keep exploring every accessible room. Explore methodically. \
 When you see an artifact in the current image, call report_artifact BEFORE moving on. \
 Re-check suspected artifacts from a second viewpoint if unsure -real objects stay consistent, artifacts often deform or become fuzzy.

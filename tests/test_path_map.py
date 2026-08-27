@@ -96,11 +96,15 @@ def test_parse_action_accepts_view_extras():
     assert "view_map" in names
     assert "view_coverage_map" in names
     assert "view_depth" in names
+    assert "jump_to_waypoint" in names
     for name in ("view_map", "view_coverage_map", "view_depth"):
         action = parse_action(f'{{"action": "{name}", "args": {{}}}}')
         assert action is not None and action.name == name
         action = parse_action(f'{{"action": "{name}"}}')
         assert action is not None and action.name == name
+    jump = parse_action('{"action": "jump_to_waypoint", "args": {"target": "step 3"}}')
+    assert jump is not None and jump.name == "jump_to_waypoint"
+    assert jump.args["target"] == "step 3"
 
 
 def test_system_prompt_mentions_extras_when_attached():
@@ -112,6 +116,7 @@ def test_system_prompt_mentions_extras_when_attached():
         with_coverage = system_prompt(with_depth=False, with_coverage=True)
         assert "view_map" in base and "view_depth" in base, name
         assert "view_coverage_map" in base, name
+        assert "jump_to_waypoint" in base, name
         assert "BIRD'S-EYE MAP" not in base, name
         assert "This turn also includes a COVERAGE MAP" not in base, name
         assert "BIRD'S-EYE MAP" in with_map, name
@@ -132,12 +137,13 @@ def test_prompt_variants_are_distinct_and_v3_is_default():
     v3 = load_prompt("v3").system_prompt(False)
     assert "quality-inspection agent walking" in v1
     assert "autonomous visual inspector" in v2
-    assert "Inspect this 3D Gaussian Splatting indoor scene" in v3
+    assert "Inspect this 3D Gaussian Splatting scene" in v3
     assert "done" not in v3.lower()
     assert load_prompt().system_prompt(False) == v3
     hidden = getattr(load_prompt("v3"), "HIDDEN_TOOLS", ())
     catalog = render_tool_catalog(filter_tools(hidden))
     assert "done" not in catalog
+    assert "jump_to_waypoint" in catalog
     assert parse_action('{"action": "done", "args": {"summary": "x"}}',
                         {t["function"]["name"] for t in filter_tools(hidden)}) is None
 

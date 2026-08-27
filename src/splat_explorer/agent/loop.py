@@ -5,12 +5,14 @@ Episode flow:
      is shown the annotated bird's-eye view (ceiling removed, numbered spawn
      markers) and picks the starting point; the rig teleports there.
   2. Each step: render RGB (+ depth for navigation), overlay the walked path
-     onto the cached bird's-eye map, hand the observation to the policy
+     and pale gold waypoints onto the cached bird's-eye map, hand the
+     observation to the policy
      (depth / path map / coverage map only if send_depth / send_map /
      send_coverage is on or the previous action was view_depth / view_map /
      view_coverage_map),
      clamp and apply the returned action (optionally path-clamped through the
-     MotionContext when navigation.collision is full or low), and
+     MotionContext when navigation.collision is full or low; jump_to_waypoint
+     teleports to a W# vantage or a past step pose), and
      log everything to outputs/episodes/<timestamp>/ as frames plus an
      actions.jsonl trace. The outcome of the previous motion (e.g. "move cut
      short by an obstacle") is fed back to the policy with the next prompt.
@@ -98,6 +100,9 @@ def _motion_note(outcome: dict | None) -> str | None:
             "previous action requested the depth map — this observation includes "
             "the depth map next to the RGB view"
         )
+    if kind == "jump_to_waypoint":
+        dest = outcome.get("destination", "the requested target")
+        return f"previous jump_to_waypoint teleported to {dest}"
     return None
 
 
@@ -133,6 +138,11 @@ def _select_start(
             {"index": p.index, "position": np.asarray(p.position).tolist(),
              "clearance": p.clearance}
             for p in spawn.points
+        ],
+        "waypoints": [
+            {"index": w.index, "position": np.asarray(w.position).tolist(),
+             "clearance": w.clearance, "view_distance": w.view_distance}
+            for w in getattr(spawn, "waypoints", [])
         ],
         "vlm": getattr(policy, "last_debug", None),
     }
@@ -197,13 +207,18 @@ def run_episode(
     send_map_once = False
     send_coverage_once = False
     send_depth_once = False
+    pose_history: list[dict] = []
     expl_map: ExplorationMap | None = None
     if (
         spawn is not None
         and getattr(spawn, "base_image", None) is not None
         and getattr(spawn, "camera", None) is not None
     ):
-        expl_map = ExplorationMap(spawn.base_image, spawn.camera, fov_deg, rig.up)
+        wp = getattr(spawn, "waypoints", None) or []
+        wp_xyz = np.stack([w.position for w in wp]) if wp else None
+        expl_map = ExplorationMap(
+            spawn.base_image, spawn.camera, fov_deg, rig.up, waypoints=wp_xyz,
+        )
 
     meta = {
         "episode": episode_dir.name,
@@ -218,6 +233,11 @@ def run_episode(
         "send_coverage": send_coverage,
         "artifact_count": 0,
         "summary": None,
+        "waypoints": [
+            {"index": w.index, "position": np.asarray(w.position).tolist(),
+             "clearance": w.clearance, "view_distance": w.view_distance}
+            for w in (getattr(spawn, "waypoints", None) or [])
+        ],
         **(run_meta or {}),
     }
     _write_meta(episode_dir, meta)
@@ -271,6 +291,14 @@ def run_episode(
                     pose = rig.state_description()
                     if coverage_frac is not None:
                         pose += f" | viewed-area coverage {coverage_frac:.0%}"
+                    waypoints = list(getattr(spawn, "waypoints", None) or [])
+                    if waypoints:
+                        pose += (
+                            f" | jump_to_waypoint: W0-W{waypoints[-1].index} "
+                            f"or step 0-{step}"
+                        )
+                    elif step > 0:
+                        pose += f" | jump_to_waypoint: step 0-{step}"
                     if motion_note:
                         pose += f" | {motion_note}"
 
@@ -337,7 +365,17 @@ def run_episode(
                         summary = action.args.get("summary")
                     outcome = None
                     if not done:
-                        ctx = MotionContext(world=nav, camera=camera, depth=depth)
+                        pose_history.append({
+                            "step": step,
+                            "position": rig.position.copy(),
+                            "yaw_deg": rig.yaw_deg,
+                            "pitch_deg": rig.pitch_deg,
+                        })
+                        ctx = MotionContext(
+                            world=nav, camera=camera, depth=depth,
+                            waypoints=getattr(spawn, "waypoints", None),
+                            pose_history=pose_history,
+                        )
                         outcome = rig.apply(action, ctx)
                     motion_note = _motion_note(outcome)
                     if outcome is not None:

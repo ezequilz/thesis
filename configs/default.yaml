@@ -77,6 +77,10 @@ navigation:
   # Pull of spawn candidates toward the scene's center of mass: score =
   # clearance - centroid_pull * distance_to_center. Higher = more central spots.
   centroid_pull: 0.35
+  # Precomputed vantage-point waypoints for jump_to_waypoint. Spread across
+  # rooms (clearance local-maxima + covering) rather than clustered near the
+  # scene centroid like spawn points. 0 disables waypoint search.
+  num_waypoints: 8
 
 agent:
   # "scripted"  — canned action sequence, no API needed (for testing the loop).

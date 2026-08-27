@@ -7,6 +7,8 @@ Movement model:
     distance toward the surface (eye height is held, so a floor pixel walks
     you there instead of diving into it). amount = 1 lands a margin short of
     the picked surface.
+  - jump_to_waypoint teleports to a precomputed vantage (gold W# on the
+    bird's-eye map) or to a past step's camera pose (e.g. "step 3").
   - move remains for small body-relative correction steps.
   - view_map / view_coverage_map / view_depth request an extra image on the
     next observation (RGB stays in the prompt). Depth is always rendered for
@@ -18,6 +20,7 @@ Path collision-clamping is optional (navigation.collision: full / low / off).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,6 +54,47 @@ class Action:
                     max(-MAX_PITCH_DEGREES, min(args["pitch_degrees"], MAX_PITCH_DEGREES))
                 )
         return Action(self.name, args)
+
+
+_STEP_TARGET = re.compile(r"^\s*(?:step|s)\s*[:#\-]?\s*(\d+)\s*$", re.IGNORECASE)
+_WAYPOINT_TARGET = re.compile(
+    r"^\s*(?:waypoint|way\s*point|wp|w)\s*[:#\-]?\s*(\d+)\s*$", re.IGNORECASE,
+)
+_BARE_INDEX = re.compile(r"^\s*(\d+)\s*$")
+
+
+def parse_jump_target(args: dict[str, Any] | None) -> tuple[str, int] | None:
+    """Parse jump_to_waypoint args into ('waypoint'|'step', index).
+
+    Accepts target='waypoint 2' / 'W2' / '2', target='step 3', or the
+    alternate keys waypoint= / step=. Bare numbers default to a waypoint.
+    """
+    args = args or {}
+    if args.get("step") is not None and args.get("waypoint") is None:
+        try:
+            return "step", int(args["step"])
+        except (TypeError, ValueError):
+            return None
+    if args.get("waypoint") is not None:
+        try:
+            return "waypoint", int(args["waypoint"])
+        except (TypeError, ValueError):
+            return None
+    target = args.get("target", args.get("to", args.get("name")))
+    if target is None:
+        return None
+    if isinstance(target, bool):
+        return None
+    if isinstance(target, (int, float)):
+        return "waypoint", int(target)
+    text = str(target).strip()
+    match = _STEP_TARGET.match(text)
+    if match:
+        return "step", int(match.group(1))
+    match = _WAYPOINT_TARGET.match(text) or _BARE_INDEX.match(text)
+    if match:
+        return "waypoint", int(match.group(1))
+    return None
 
 
 # OpenAI chat-completions tool definitions. Kept as plain data so any
@@ -103,6 +147,33 @@ ACTION_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "jump_to_waypoint",
+            "description": (
+                "Teleport to a numbered vantage waypoint or a past camera pose. "
+                "target is 'waypoint N' / 'W N' / just 'N' for a gold W# marker "
+                "on the bird's-eye map (precomputed open-space vantages covering "
+                "the rooms), or 'step N' to return to the camera pose of that "
+                "earlier step. Heading is kept when jumping to a waypoint; a "
+                "past step restores that step's yaw and pitch. Use this to reach "
+                "another room or revisit a previous view without walking there."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": (
+                            "Where to jump: 'waypoint 2' / 'W2' / '2', or 'step 3'."
+                        ),
+                    },
+                },
+                "required": ["target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "rotate",
             "description": (
                 "Rotate the camera. yaw_degrees turns around the vertical axis (positive = "
@@ -126,11 +197,12 @@ ACTION_TOOLS: list[dict] = [
             "name": "view_map",
             "description": (
                 "Look at a top-down bird's-eye MAP of the scene (ceiling removed) showing "
-                "the path you have walked, every past camera position, and a small camera "
-                "frustum at each step for viewing direction. Does not move the camera. The "
+                "the path you have walked, every past camera position, a small camera "
+                "frustum at each step for viewing direction, and pale gold W# markers "
+                "for jump_to_waypoint vantages. Does not move the camera. The "
                 "NEXT observation will include that map alongside the usual RGB view "
                 "(move_toward pixel coordinates still refer to RGB, not the map). Use this "
-                "to check where you have walked and avoid retracing."
+                "to check where you have walked, pick a waypoint, and avoid retracing."
             ),
             "parameters": {
                 "type": "object",
