@@ -67,8 +67,8 @@ look= north or "3 o'clock" on the map, 12=top), and \
 view_depth / view_map / view_coverage_map when useful. Pixel coordinates \
 always refer to RGB. \
 Call exactly one tool per turn. Keep exploring every accessible room. Explore methodically. \
-When you see an artifact in the current image, call report_artifact BEFORE moving on. \
-Re-check suspected artifacts from a second viewpoint if unsure -real objects stay consistent, artifacts often deform or become fuzzy.
+When you see an artifact in the current image, call report_artifact BEFORE moving on. If your last action has been report_artifact, do not report again until you have changed your position or viewpoint.\
+Re-check suspected artifacts from a second viewpoint if unsure - real objects stay consistent, artifacts often deform or become blurry.
 """
 
 
