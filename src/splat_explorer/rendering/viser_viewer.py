@@ -163,10 +163,70 @@ def _frustum_image(state: dict, max_width: int = 200) -> np.ndarray | None:
     return None
 
 
-def _start_render_api(host: str, port: int, capture, viewer_url: str) -> ThreadingHTTPServer:
+def _view_pose(scene: GaussianScene, up_axis: str, fov_deg: float) -> dict:
+    """Gravity-aligned start pose inside the reconstructed volume."""
+    from .base import up_vector
+
+    up = up_vector(up_axis).astype(np.float64)
+    center = scene.robust_centroid().astype(np.float64)
+    seed = np.array([0.0, 0.0, -1.0]) if abs(up[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+    forward = seed - up * np.dot(seed, up)
+    norm = float(np.linalg.norm(forward))
+    forward = forward / norm if norm > 1e-9 else np.array([0.0, 0.0, 1.0])
+    hfov = np.radians(float(fov_deg))
+    vfov = float(2.0 * np.arctan(np.tan(hfov / 2.0) * 3.0 / 4.0))
+    return {"up": up, "center": center, "forward": forward, "vfov": vfov, "up_axis": up_axis}
+
+
+def _splat_index(scene: GaussianScene, max_splats: int) -> np.ndarray:
+    n = scene.num_gaussians
+    if max_splats and n > max_splats:
+        logger.info("Subsampling %d -> %d splats for the browser", n, max_splats)
+        return np.random.default_rng(0).choice(n, size=max_splats, replace=False)
+    logger.info("Serving all %d splats to the browser", n)
+    return np.arange(n)
+
+
+def _install_splats(server, scene: GaussianScene, max_splats: int) -> None:
+    try:
+        server.scene.remove_by_name("/splat")
+    except Exception:
+        pass
+    idx = _splat_index(scene, max_splats)
+    server.scene.add_gaussian_splats(
+        "/splat",
+        centers=scene.means[idx],
+        rgbs=scene.colors[idx],
+        opacities=scene.opacities[idx, None],
+        covariances=quats_to_covariances(scene.quats[idx], scene.scales[idx]),
+    )
+
+
+def _apply_view(server, view: dict) -> None:
+    try:
+        clients = server.get_clients().values()
+    except Exception:
+        return
+    for client in clients:
+        client.camera.up_direction = view["up"]
+        client.camera.position = view["center"]
+        client.camera.look_at = view["center"] + view["forward"]
+        try:
+            client.camera.fov = view["vfov"]
+        except Exception:
+            pass
+
+
+def _start_render_api(
+    host: str,
+    port: int,
+    capture,
+    viewer_url: str,
+    health_extra=None,
+) -> ThreadingHTTPServer:
     """HTTP API the harness uses to grab a visor frame.
 
-    GET  /health  -> {clients, capture_ready, viewports, viewer_url}
+    GET  /health  -> {clients, capture_ready, viewports, viewer_url, scene?}
     POST /render  -> JPEG of the WebGL view at the requested camera
     """
 
@@ -191,13 +251,19 @@ def _start_render_api(host: str, port: int, capture, viewer_url: str) -> Threadi
                 return
             n, err, viewports = capture.client_info()
             ready = sum(1 for v in viewports if v.get("usable"))
-            self._send_json({
+            payload = {
                 "clients": n,
                 "capture_ready": ready,
                 "viewports": viewports,
                 "viewer_url": viewer_url,
                 "error": err,
-            })
+            }
+            if health_extra is not None:
+                try:
+                    payload.update(health_extra())
+                except Exception:
+                    logger.exception("health_extra failed")
+            self._send_json(payload)
 
         def do_POST(self) -> None:  # noqa: N802
             if self.path.split("?", 1)[0] != "/render":
@@ -482,30 +548,17 @@ def serve_viewer(
     up_axis: str = "-y",
     render_port: int = 8081,
     fov_deg: float = 75.0,
+    min_opacity: float = 0.0,
+    initial_spec=None,
+    generation: int = 0,
 ):
     try:
         import viser
     except ImportError as exc:
         raise RuntimeError("viser is not installed — pip install '.[viewer]'") from exc
 
-    from .base import up_vector
-
-    n = scene.num_gaussians
-    if max_splats and n > max_splats:
-        idx = np.random.default_rng(0).choice(n, size=max_splats, replace=False)
-        logger.info("Subsampling %d -> %d splats for the browser", n, max_splats)
-    else:
-        idx = np.arange(n)
-        logger.info("Serving all %d splats to the browser", n)
-
     server = viser.ViserServer(host=host, port=port)
-    server.scene.add_gaussian_splats(
-        "/splat",
-        centers=scene.means[idx],
-        rgbs=scene.colors[idx],
-        opacities=scene.opacities[idx, None],
-        covariances=quats_to_covariances(scene.quats[idx], scene.scales[idx]),
-    )
+    _install_splats(server, scene, max_splats)
     origin = server.scene.add_frame("/origin", axes_length=0.5, axes_radius=0.01)
     try:
         server.scene.world_axes.visible = False
@@ -513,25 +566,17 @@ def serve_viewer(
         pass
 
     # Start clients inside the room, gravity-aligned, instead of viser's
-    # default exterior orbit pose.
-    up = up_vector(up_axis).astype(np.float64)
-    center = scene.robust_centroid().astype(np.float64)
-    seed = np.array([0.0, 0.0, -1.0]) if abs(up[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
-    forward = seed - up * np.dot(seed, up)
-    forward /= np.linalg.norm(forward)
-
-    # viser's fov is vertical. Match the agent's vertical FOV at 4:3 so the
-    # dashboard capture visor (sized to the VLM resolution) lines up.
-    hfov = np.radians(float(fov_deg))
-    vfov = float(2.0 * np.arctan(np.tan(hfov / 2.0) * 3.0 / 4.0))
+    # default exterior orbit pose. Mutated in place when the dashboard
+    # switches scenes (outputs/live/scene.json).
+    view = _view_pose(scene, up_axis, fov_deg)
 
     @server.on_client_connect
     def _(client: "viser.ClientHandle") -> None:
-        client.camera.up_direction = up
-        client.camera.position = center
-        client.camera.look_at = center + forward
+        client.camera.up_direction = view["up"]
+        client.camera.position = view["center"]
+        client.camera.look_at = view["center"] + view["forward"]
         try:
-            client.camera.fov = vfov
+            client.camera.fov = view["vfov"]
         except Exception:
             pass
 
@@ -577,15 +622,89 @@ def serve_viewer(
     overlay_lock = threading.Lock()
     overlay_handles: list = [origin]
     viewer_url = f"http://localhost:{port}"
-    _start_render_api(host, render_port, _VisorCapture(server, overlay_lock, overlay_handles), viewer_url)
+    scene_state = {
+        "id": getattr(initial_spec, "id", None),
+        "label": getattr(initial_spec, "label", None),
+        "path": str(initial_spec.path) if initial_spec is not None else "",
+        "up_axis": up_axis,
+        "lod_level": int(getattr(initial_spec, "lod_level", 0) or 0),
+        "generation": int(generation or 0),
+        "num_gaussians": scene.num_gaussians,
+        "status": "ready",
+        "error": None,
+    }
+
+    def health_extra() -> dict:
+        return {"scene": dict(scene_state)}
+
+    _start_render_api(
+        host, render_port,
+        _VisorCapture(server, overlay_lock, overlay_handles),
+        viewer_url,
+        health_extra=health_extra,
+    )
 
     logger.info(
         "Viser at %s. Agent frames are captured at VLM size from the dashboard visor.",
         viewer_url,
     )
+
+    def _maybe_reload_scene() -> None:
+        from ..scene import load_scene
+        from ..scene.catalog import read_live_scene
+
+        req = read_live_scene()
+        if not req or not req.get("path"):
+            return
+        gen = int(req.get("generation") or 0)
+        path = str(req["path"])
+        if gen < scene_state["generation"]:
+            return
+        # Same asset: just ack a newer generation so the dashboard can proceed.
+        if path == scene_state["path"] and scene_state["status"] == "ready":
+            scene_state["generation"] = max(scene_state["generation"], gen)
+            scene_state["id"] = req.get("id", scene_state["id"])
+            scene_state["label"] = req.get("label", scene_state["label"])
+            return
+        if scene_state["status"] == "loading":
+            return
+
+        scene_state.update(status="loading", error=None, id=req.get("id"), label=req.get("label"))
+        lod = int(req.get("lod_level") or 0)
+        up_ax = str(req.get("up_axis") or view["up_axis"])
+        logger.info("Viser loading scene %s (generation %s)", path, gen)
+        try:
+            new_scene = load_scene(path, min_opacity=min_opacity, lod_level=lod)
+        except Exception as exc:
+            logger.exception("Viser scene reload failed")
+            scene_state["status"] = "error"
+            scene_state["error"] = f"{type(exc).__name__}: {exc}"
+            return
+        new_view = _view_pose(new_scene, up_ax, fov_deg)
+        with overlay_lock:
+            _install_splats(server, new_scene, max_splats)
+            view.update(new_view)
+            try:
+                server.scene.remove_by_name("/agent")
+            except Exception:
+                pass
+            overlay_handles[:] = [origin]
+        _apply_view(server, view)
+        scene_state.update(
+            path=path,
+            up_axis=up_ax,
+            lod_level=lod,
+            generation=gen,
+            num_gaussians=new_scene.num_gaussians,
+            status="ready",
+            error=None,
+        )
+        logger.info("Viser scene ready: %d gaussians", new_scene.num_gaussians)
+
     last_key: tuple | None = None
     while True:
         time.sleep(0.5)
+        _maybe_reload_scene()
         state = _load_live_state(LIVE_STATE_PATH)
         if state is None:
             continue
@@ -627,7 +746,7 @@ def serve_viewer(
             f"{state.get('pose', '')}"
         )
         if follow_agent.value:
-            look_at = position + np.asarray(state.get("view_dir", forward), dtype=np.float64)
+            look_at = position + np.asarray(state.get("view_dir", view["forward"]), dtype=np.float64)
             for client in server.get_clients().values():
                 client.camera.position = position
                 client.camera.look_at = look_at

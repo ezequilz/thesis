@@ -48,28 +48,40 @@
   #msg { font-size: 12px; color: var(--warn); padding: 6px 16px; flex: none; }
   #msg:empty { display: none; padding: 0; }
   .btn-row { display: flex; gap: 8px; align-items: center; align-self: end; }
-  .settings-wrap {
+  .menu-wrap, .settings-wrap {
     position: relative; display: flex; flex-direction: column; gap: 3px;
     font-size: 11px; color: var(--dim); align-self: end;
   }
-  #btn-settings {
+  .menu-wrap > button, #btn-settings, #btn-scene {
     background: var(--panel2); color: var(--text);
     border: 1px solid var(--border) !important;
     border-radius: 6px; padding: 6px 10px; font-size: 13px; font-weight: 400;
     min-width: 110px; text-align: left;
     display: inline-flex; align-items: center; justify-content: space-between; gap: 10px;
   }
-  #btn-settings:hover { color: var(--text); background: #243044; }
-  #btn-settings[aria-expanded="true"] { outline: 1px solid var(--accent); }
-  #btn-settings .caret { font-size: 10px; color: var(--dim); transition: transform .12s ease; }
-  .settings-wrap.open #btn-settings .caret { transform: rotate(180deg); }
+  #btn-scene { min-width: 200px; max-width: 280px; }
+  #scene-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .menu-wrap > button:hover, #btn-settings:hover, #btn-scene:hover {
+    color: var(--text); background: #243044;
+  }
+  .menu-wrap > button[aria-expanded="true"],
+  #btn-settings[aria-expanded="true"], #btn-scene[aria-expanded="true"] {
+    outline: 1px solid var(--accent);
+  }
+  .menu-wrap .caret, #btn-settings .caret, #btn-scene .caret {
+    font-size: 10px; color: var(--dim); transition: transform .12s ease; flex: none;
+  }
+  .menu-wrap.open > button .caret,
+  .settings-wrap.open #btn-settings .caret, .menu-wrap.open #btn-scene .caret {
+    transform: rotate(180deg);
+  }
   .settings-menu {
     display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 50;
     min-width: 228px; background: var(--panel); border: 1px solid var(--border);
     border-radius: 8px; padding: 6px;
     box-shadow: 0 10px 28px rgba(0,0,0,.45);
   }
-  .settings-wrap.open .settings-menu { display: block; }
+  .menu-wrap.open .settings-menu, .settings-wrap.open .settings-menu { display: block; }
   .settings-menu .chk {
     margin: 0; padding: 6px 8px; border-radius: 6px; width: 100%;
     color: var(--text) !important;
@@ -80,6 +92,15 @@
     letter-spacing: .06em; text-transform: uppercase;
   }
   .settings-menu .hint:first-child { margin-top: 2px; }
+  .menu-opt {
+    display: block; width: 100%; text-align: left;
+    background: transparent; color: var(--text);
+    font-weight: 400; padding: 7px 10px; border-radius: 6px;
+    border: 0 !important;
+  }
+  .menu-opt:hover:not(:disabled) { background: var(--panel2); }
+  .menu-opt[aria-selected="true"] { background: var(--panel2); color: var(--accent); }
+  .menu-opt .sub { display: block; font-size: 10px; color: var(--dim); font-weight: 400; margin-top: 1px; }
   .icon-btn {
     background: transparent; color: var(--dim);
     border: 1px solid var(--border) !important;
@@ -235,6 +256,13 @@
   <label>max steps
     <input id="in-steps" type="number" value="10" min="1" max="200" style="min-width:70px">
   </label>
+  <div class="menu-wrap" id="scene-wrap">
+    <span>scene</span>
+    <button type="button" id="btn-scene" aria-expanded="false" aria-haspopup="listbox">
+      <span id="scene-label">loading…</span> <span class="caret">▾</span>
+    </button>
+    <div class="settings-menu" id="scene-menu" role="listbox"></div>
+  </div>
   <label>VLM resolution
     <select id="in-res">
       <option value="320x240">320 × 240 (fast debug)</option>
@@ -343,12 +371,16 @@ function render() {
   const { scene, run, defaults } = state;
 
   const ps = $("pill-scene");
+  const sceneName = scene.label || scene.id || "";
   if (scene.status === "ready") {
-    ps.textContent = `scene: ${scene.num_gaussians.toLocaleString()} splats (${scene.load_seconds}s load)`;
+    const n = scene.num_gaussians != null ? scene.num_gaussians.toLocaleString() + " splats" : "";
+    const load = scene.load_seconds != null ? ` (${scene.load_seconds}s load)` : "";
+    ps.textContent = `scene: ${sceneName}${n ? " · " + n : ""}${load}`;
     ps.className = "pill ok";
   } else if (scene.status === "error") {
-    ps.textContent = "scene: " + scene.error; ps.className = "pill err";
-  } else { ps.textContent = "scene: loading…"; ps.className = "pill busy"; }
+    ps.textContent = "scene: " + (scene.error || "error"); ps.className = "pill err";
+  } else { ps.textContent = sceneName ? `scene: loading ${sceneName}…` : "scene: loading…"; ps.className = "pill busy"; }
+  renderSceneMenu();
 
   if (!$("in-model").value && defaults.model) $("in-model").placeholder = defaults.model;
   if (!$("in-backend").dataset.init) {
@@ -619,6 +651,58 @@ $("btn-video").onclick = () => {
   pair("in-depth", "in-compute-depth");
   pair("in-coverage", "in-compute-coverage");
 })();
+
+(function sceneDropdown() {
+  const wrap = $("scene-wrap"), btn = $("btn-scene");
+  function setOpen(open) {
+    wrap.classList.toggle("open", open);
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  btn.onclick = e => {
+    e.stopPropagation();
+    if (btn.disabled) return;
+    setOpen(!wrap.classList.contains("open"));
+  };
+  document.addEventListener("click", e => { if (!wrap.contains(e.target)) setOpen(false); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape") setOpen(false); });
+  window._closeSceneMenu = () => setOpen(false);
+})();
+
+function renderSceneMenu() {
+  if (!state) return;
+  const scenes = state.scenes || [];
+  const current = state.scene || {};
+  const run = state.run;
+  const running = run && (run.status === "running" || run.status === "stopping");
+  const loading = current.status === "loading";
+  const label = current.label || current.id || (loading ? "loading…" : "scene");
+  $("scene-label").textContent = label;
+  $("btn-scene").disabled = running || loading || !scenes.length;
+  $("btn-scene").title = running
+    ? "Stop the episode before switching scenes"
+    : (loading ? "Scene is loading" : "Switch the splat loaded in the visor");
+  const menu = $("scene-menu");
+  const key = scenes.map(s => s.id).join(",") + "|" + (current.id || "") + "|" + (current.status || "");
+  if (menu.dataset.key === key) return;
+  menu.dataset.key = key;
+  if (!scenes.length) {
+    menu.innerHTML = '<div class="hint">no scenes in 3dgs_rooms/</div>';
+    return;
+  }
+  menu.innerHTML = scenes.map(s => {
+    const sel = s.id === current.id ? ' aria-selected="true"' : "";
+    const sub = s.up_axis ? `<span class="sub">${esc(s.up_axis)} up</span>` : "";
+    return `<button type="button" class="menu-opt" role="option" data-id="${esc(s.id)}"${sel}>${esc(s.label)}${sub}</button>`;
+  }).join("");
+  menu.querySelectorAll(".menu-opt").forEach(opt => {
+    opt.onclick = e => {
+      e.stopPropagation();
+      if (window._closeSceneMenu) window._closeSceneMenu();
+      if (opt.dataset.id === current.id) return;
+      post("/api/scene", { id: opt.dataset.id });
+    };
+  });
+}
 
 // --- past-run history --------------------------------------------------------
 async function loadHistory() {

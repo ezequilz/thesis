@@ -3,11 +3,32 @@
 
 scene:
   # Path to the Gaussian splat asset. Supported: SOG v2 .sog bundles
-  # (compressed/quantized — compact, default) and standard 3DGS .ply exports
-  # (uncompressed full precision; big files, keep them out of git).
+  # (compressed/quantized — compact, default), unbundled SOG folders,
+  # streamed SOG directories (lod-meta.json + per-LOD chunks), and
+  # standard 3DGS .ply exports (uncompressed; keep them out of git).
   path: 3dgs_rooms/ArchInteriors_for_UE2_Atlux.sog
   # Drop gaussians with opacity below this when building the working set (0 disables).
   min_opacity: 0.05
+  # For streamed SOG directories: which LOD to decode (0 = finest). Ignored
+  # for bundled .sog / .ply. Per-entry lod_level in catalog overrides this.
+  lod_level: 0
+  # Dashboard scene dropdown. Missing files are skipped. Extra .sog / streamed
+  # SOG folders in 3dgs_rooms/ are appended automatically. up_axis: SOG spec
+  # is +y; Arch Interiors is a COLMAP-trained asset and is y-down.
+  catalog:
+    - id: arch-interiors
+      label: Arch Interiors
+      path: 3dgs_rooms/ArchInteriors_for_UE2_Atlux.sog
+      up_axis: "-y"
+    - id: pond-shelter
+      label: Pond shelter
+      path: "3dgs_rooms/Pond shelter.sog"
+      up_axis: "+y"
+    - id: calico-basin
+      label: Calico Basin at sunrise
+      path: "3dgs_rooms/Calico Basin at sunrise"
+      up_axis: "+y"
+      lod_level: 0
 
 renderer:
   # "viser"      — capture RGB from the dashboard visor iframe, sized to the

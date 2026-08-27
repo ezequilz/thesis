@@ -42,7 +42,11 @@ def cmd_render_test(cfg, args) -> None:
     from .agent.camera_rig import CameraRig
     from .rendering import make_renderer
 
-    scene = load_scene(cfg.scene.path, min_opacity=cfg.scene.min_opacity)
+    scene = load_scene(
+        cfg.scene.path,
+        min_opacity=cfg.scene.min_opacity,
+        lod_level=int(cfg.scene.get("lod_level", 0) or 0),
+    )
     logger.info("Scene loaded: %d gaussians (after opacity filter)", scene.num_gaussians)
     mins, maxs = scene.robust_bounds()
     logger.info("Robust bounds: mins=%s maxs=%s", np.round(mins, 2), np.round(maxs, 2))
@@ -117,7 +121,11 @@ def cmd_explore(cfg, args) -> None:
     from .agent.vlm import make_policy
     from .rendering import make_renderer
 
-    scene = load_scene(cfg.scene.path, min_opacity=cfg.scene.min_opacity)
+    scene = load_scene(
+        cfg.scene.path,
+        min_opacity=cfg.scene.min_opacity,
+        lod_level=int(cfg.scene.get("lod_level", 0) or 0),
+    )
     renderer = make_renderer(scene, cfg.renderer)
     policy = make_policy(cfg.agent)
 
@@ -210,17 +218,34 @@ def _stop_stale_viewers() -> None:
 
 def cmd_viewer(cfg, args) -> None:
     from .rendering.viser_viewer import serve_viewer
+    from .scene.catalog import apply_spec, current_spec, read_live_scene, spec_by_id
 
     _stop_stale_viewers()
-    scene = load_scene(cfg.scene.path, min_opacity=cfg.scene.min_opacity)
+    # Honour a scene the dashboard already selected so a viewer restart
+    # (or a late docker start) lands on the same asset, not the YAML default.
+    live = read_live_scene()
+    spec = None
+    if live and live.get("id"):
+        spec = spec_by_id(cfg, live["id"])
+    if spec is None:
+        spec = current_spec(cfg)
+    apply_spec(cfg, spec)
+    scene = load_scene(
+        spec.path,
+        min_opacity=cfg.scene.min_opacity,
+        lod_level=spec.lod_level,
+    )
     serve_viewer(
         scene,
         host=cfg.viewer.host,
         port=cfg.viewer.port,
         max_splats=cfg.viewer.max_splats,
-        up_axis=cfg.camera.up_axis,
+        up_axis=spec.up_axis,
         render_port=int(cfg.viewer.get("render_port", 8081)),
         fov_deg=float(cfg.renderer.fov_deg),
+        min_opacity=float(cfg.scene.min_opacity),
+        initial_spec=spec,
+        generation=int((live or {}).get("generation") or 0),
     )
 
 

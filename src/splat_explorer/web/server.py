@@ -23,6 +23,7 @@ Endpoints:
   GET  /api/episodes/<id>/video  RGB|map video (renders once, then cached on disk)
   POST /api/run           start an episode  {backend, model, max_steps, width, height, send_depth, send_map, send_coverage, compute_depth, compute_coverage, image_regeneration}
   POST /api/stop          request cooperative stop of the running episode
+  POST /api/scene         switch the loaded splat  {id}
   POST /api/select        pin the viser overlay to a step {step: int} / back to live {step: null}
   GET  /frames/<ep>/<png> step screenshots from outputs/episodes/
 """
@@ -136,7 +137,9 @@ class DashboardApp:
         self.nav_world = None
         self.spawn = None
         self.scene_status = "loading"
-        self.scene_info: dict = {"path": str(cfg.scene.path)}
+        self._scene_spec = None
+        self._scene_generation = 0
+        self.scene_info: dict = {}
         self.run: dict | None = None
         self._stop = threading.Event()
         self._run_thread: threading.Thread | None = None
@@ -148,18 +151,72 @@ class DashboardApp:
         threading.Thread(target=self._load_scene, daemon=True).start()
 
     # --- scene ----------------------------------------------------------------
-    def _load_scene(self) -> None:
+    def _startup_spec(self):
+        from ..scene.catalog import current_spec, read_live_scene, spec_by_id
+
+        live = read_live_scene()
+        if live and live.get("id"):
+            spec = spec_by_id(self.cfg, live["id"])
+            if spec is not None:
+                self._scene_generation = int(live.get("generation") or 0)
+                return spec
+        return current_spec(self.cfg)
+
+    def select_scene(self, scene_id: str) -> tuple[bool, str]:
+        from ..scene.catalog import spec_by_id
+
+        spec = spec_by_id(self.cfg, str(scene_id).strip())
+        if spec is None:
+            return False, f"Unknown scene {scene_id!r}."
+        with self.lock:
+            if self.run and self.run["status"] in ("running", "stopping"):
+                return False, "Stop the episode before switching scenes."
+            current = self._scene_spec
+            if (
+                current is not None
+                and current.id == spec.id
+                and self.scene_status == "ready"
+            ):
+                return True, f"Already on {spec.label}."
+            self.scene_status = "loading"
+            self.scene_info = {**spec.to_json()}
+        threading.Thread(target=self._load_scene, args=(spec,), daemon=True).start()
+        return True, f"Loading {spec.label}…"
+
+    def _load_scene(self, spec=None) -> None:
         from ..cli import _build_navigation
         from ..rendering import make_renderer
         from ..scene import load_scene
+        from ..scene.catalog import apply_spec, publish_live_scene
 
+        spec = spec or self._startup_spec()
+        apply_spec(self.cfg, spec)
+        with self.lock:
+            self._scene_generation += 1
+            generation = self._scene_generation
+            self._scene_spec = spec
+            self.scene_status = "loading"
+            self.scene_info = {**spec.to_json(), "generation": generation}
+            self._pinned = None
+        publish_live_scene(spec, generation)
+        try:
+            LIVE_STATE_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
         try:
             t0 = time.perf_counter()
-            scene = load_scene(self.cfg.scene.path, min_opacity=self.cfg.scene.min_opacity)
+            scene = load_scene(
+                spec.path,
+                min_opacity=self.cfg.scene.min_opacity,
+                lod_level=spec.lod_level,
+            )
             renderer = make_renderer(scene, self.cfg.renderer)
-            # Collision world + bird's-eye spawn selection, shared by all runs.
             nav_world, spawn = _build_navigation(self.cfg, scene)
+            self._wait_for_viewer(generation, spec)
             with self.lock:
+                if generation != self._scene_generation:
+                    logger.info("Discarding superseded load of %s", spec.id)
+                    return
                 self.scene, self.renderer = scene, renderer
                 self.nav_world, self.spawn = nav_world, spawn
                 self.scene_status = "ready"
@@ -167,14 +224,54 @@ class DashboardApp:
                     num_gaussians=scene.num_gaussians,
                     load_seconds=round(time.perf_counter() - t0, 1),
                     renderer=self.cfg.renderer.backend,
+                    error=None,
                 )
-            logger.info("Scene ready: %d gaussians in %.1fs",
-                        scene.num_gaussians, time.perf_counter() - t0)
+            logger.info("Scene ready: %s (%d gaussians in %.1fs)",
+                        spec.label, scene.num_gaussians, time.perf_counter() - t0)
         except Exception as exc:
             logger.exception("Scene load failed")
             with self.lock:
+                if generation != self._scene_generation:
+                    return
                 self.scene_status = "error"
                 self.scene_info["error"] = f"{type(exc).__name__}: {exc}"
+
+    def _wait_for_viewer(self, generation: int, spec, timeout_s: float = 300.0) -> None:
+        """Block until the visor process has the same splat (captures would be wrong otherwise)."""
+        if self.cfg.renderer.backend != "viser":
+            return
+        url = (
+            self.cfg.renderer.get("viser_url")
+            or os.environ.get("VISER_RENDER_URL")
+            or "http://localhost:8081"
+        ).rstrip("/") + "/health"
+        deadline = time.time() + timeout_s
+        give_up_unreached = time.time() + 8.0
+        reached = False
+        last = "viewer not reached"
+        while time.time() <= deadline:
+            try:
+                import urllib.request
+
+                with urllib.request.urlopen(url, timeout=2.0) as resp:
+                    health = json.loads(resp.read().decode())
+                reached = True
+                if "scene" not in health:
+                    return  # older viewer without hot-swap
+                vs = health.get("scene") or {}
+                if vs.get("status") == "error":
+                    logger.warning("Viser failed to load %s: %s", spec.path, vs.get("error"))
+                    return
+                if int(vs.get("generation") or 0) >= generation and vs.get("status") == "ready":
+                    return
+                last = f"viser status={vs.get('status')} gen={vs.get('generation')}"
+            except Exception as exc:
+                last = str(exc)
+                if not reached and time.time() > give_up_unreached:
+                    logger.info("Viser capture API not up yet; continuing without it")
+                    return
+            time.sleep(0.5)
+        logger.warning("Timed out waiting for viser to load %s (%s)", spec.path, last)
 
     # --- run control ------------------------------------------------------------
     def start_run(self, params: dict) -> tuple[bool, str]:
@@ -254,6 +351,11 @@ class DashboardApp:
             meta_params = dict(params)
             if self.nav_world is not None:
                 meta_params["collision"] = self.nav_world.collision
+            spec = self._scene_spec
+            if spec is not None:
+                meta_params["scene"] = spec.id
+                meta_params["scene_label"] = spec.label
+                meta_params["scene_path"] = str(spec.path)
             run_episode(
                 renderer=self.renderer,
                 rig=rig,
@@ -475,6 +577,8 @@ class DashboardApp:
 
     # --- state snapshot --------------------------------------------------------
     def snapshot(self) -> dict:
+        from ..scene.catalog import list_scenes
+
         with self.lock:
             run = self.run
             episode = run.get("episode") if run else None
@@ -487,6 +591,7 @@ class DashboardApp:
                     )
             return {
                 "scene": {"status": self.scene_status, **self.scene_info},
+                "scenes": [s.to_json() for s in list_scenes(self.cfg)],
                 "run": run,
                 "defaults": {
                     **RUN_DEFAULTS,
@@ -571,6 +676,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ok, message = self.app.start_run(body)
         elif path == "/api/stop":
             ok, message = self.app.stop_run()
+        elif path == "/api/scene":
+            scene_id = body.get("id") or body.get("scene")
+            if not scene_id:
+                self._send_json({"ok": False, "message": "Missing scene id."}, 400)
+                return
+            ok, message = self.app.select_scene(str(scene_id))
         elif path == "/api/select":
             ok, message = self.app.select_step(body.get("step"))
         else:
