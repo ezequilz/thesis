@@ -363,7 +363,7 @@ function render() {
     $("in-coverage").dataset.init = "1";
   }
   if (!$("in-map").dataset.init) {
-    $("in-map").checked = true;
+    $("in-map").checked = !!defaults.send_map;
     $("in-map").dataset.init = "1";
   }
   if (!$("in-compute-depth").dataset.init) {

@@ -431,7 +431,7 @@ class DashboardApp:
                     **RUN_DEFAULTS,
                     "model": self.cfg.agent.model,
                     "send_depth": bool(self.cfg.agent.get("send_depth", False)),
-                    "send_map": True,
+                    "send_map": bool(self.cfg.agent.get("send_map", True)),
                     "send_coverage": bool(self.cfg.agent.get("send_coverage", False)),
                     "compute_depth": bool(self.cfg.agent.get("compute_depth", False)),
                     "compute_coverage": bool(self.cfg.agent.get("compute_coverage", False)),

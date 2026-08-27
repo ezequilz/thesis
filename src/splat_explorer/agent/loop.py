@@ -202,7 +202,7 @@ def run_episode(
     nav: CollisionWorld | None = None,
     spawn: SpawnSelection | None = None,
     send_depth: bool = False,
-    send_map: bool = False,
+    send_map: bool = True,
     send_coverage: bool = False,
     compute_depth: bool = False,
     compute_coverage: bool = False,
@@ -219,7 +219,8 @@ def run_episode(
     attaches it to every VLM prompt. Otherwise depth is attached only after
     a view_depth action, and is rendered lazily when move_toward needs it.
     send_map forces the full-resolution bird's-eye path map onto every VLM
-    prompt (no downsize); otherwise it is attached only after view_map.
+    prompt (no downsize, default on); set false to attach it only after
+    view_map.
     compute_coverage renders and saves the coverage PNG every step;
     send_coverage also attaches a low-res coverage map (redrawn from the
     original buffers) onto every VLM prompt after RGB. Otherwise the
