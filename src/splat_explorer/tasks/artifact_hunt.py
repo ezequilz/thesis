@@ -136,8 +136,10 @@ Rules:
   steps of 45-90 degrees), then visit each part of the area with move_toward.
   Adjacent rooms you have not walked into are not covered — go there.
 - When you see an artifact in the current image, call report_artifact BEFORE
-  moving on. Re-check suspected artifacts from a second viewpoint if unsure —
-  real objects stay consistent, artifacts often deform or become blurry.
+  moving on. Optional regenerate=yes queues a background repair of this RGB
+  view; keep exploring immediately. Re-check suspected artifacts from a second
+  viewpoint if unsure — real objects stay consistent, artifacts often deform
+  or become blurry.
 - Call done only when viewed-area coverage is high and no whole rooms remain
   unshaded on the coverage map. If you have only looked around the first room,
   keep exploring.

@@ -144,6 +144,7 @@ def cmd_explore(cfg, args) -> None:
         send_coverage=bool(cfg.agent.get("send_coverage", False)),
         compute_depth=bool(cfg.agent.get("compute_depth", False)),
         compute_coverage=bool(cfg.agent.get("compute_coverage", False)),
+        image_regeneration=bool(cfg.agent.get("image_regeneration", False)),
         run_meta={"params": {
             "backend": cfg.agent.vlm_backend,
             "model": cfg.agent.model,
@@ -155,6 +156,7 @@ def cmd_explore(cfg, args) -> None:
             "send_coverage": bool(cfg.agent.get("send_coverage", False)),
             "compute_depth": bool(cfg.agent.get("compute_depth", False)),
             "compute_coverage": bool(cfg.agent.get("compute_coverage", False)),
+            "image_regeneration": bool(cfg.agent.get("image_regeneration", False)),
             "prompt": cfg.agent.get("prompt", ""),
             "collision": world.collision,
         }},

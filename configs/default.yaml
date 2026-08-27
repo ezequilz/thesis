@@ -129,6 +129,10 @@ agent:
   # the map). Implies compute_coverage. When false (default) the model can
   # still call view_coverage_map to see it on the next observation.
   send_coverage: false
+  # Paid gpt-image-2 repair (~4¢/call) when the inspector sets regenerate=yes.
+  # Off (default): the model can still request it; the decision is logged and
+  # the pipeline stops before the CliRelay image prompt.
+  image_regeneration: false
   # Hard limits the harness enforces on tool call parameters.
   max_move_distance: 2.0
   max_rotate_degrees: 90.0

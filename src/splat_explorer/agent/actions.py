@@ -147,6 +147,31 @@ def _compass_label(degrees_cw: float) -> str:
     return f"{degrees_cw:.0f} deg"
 
 
+_REGENERATE_KEYS = ("regenerate", "fix")
+_REGENERATE_YES = frozenset({"yes", "y", "true", "on", "1"})
+
+
+def wants_regenerate(args: dict[str, Any] | None) -> bool:
+    """True when report_artifact asked to regenerate/fix the current RGB view.
+
+    Accepts regenerate= or fix=, with yes/no, 1/0, or booleans. Omitted or
+    unrecognised values mean no (report only).
+    """
+    args = args or {}
+    raw = None
+    for key in _REGENERATE_KEYS:
+        if key in args and args[key] is not None:
+            raw = args[key]
+            break
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return raw != 0
+    return str(raw).strip().lower() in _REGENERATE_YES
+
+
 def parse_look_direction(args: dict[str, Any] | None) -> tuple[LookDirection | None, str | None]:
     """Parse an optional jump facing into a map-aligned look direction.
 
@@ -370,13 +395,27 @@ ACTION_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "report_artifact",
-            "description": "Report a rendering artifact visible in the CURRENT view (floaters, holes, blur blobs, stretched gaussians, ghosting).",
+            "description": (
+                "Report a rendering artifact visible in the CURRENT view (floaters, "
+                "holes, blur blobs, stretched gaussians, ghosting). Optional "
+                "regenerate=yes queues a background image-to-image repair of this "
+                "RGB view; exploration continues immediately. Default is no."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "description": {"type": "string", "description": "What the artifact looks like and where it is in the image."},
                     "image_region": {"type": "string", "description": "Rough location, e.g. 'upper-left', 'center'."},
                     "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "regenerate": {
+                        "type": "string",
+                        "enum": ["yes", "no"],
+                        "description": (
+                            "Optional. 'yes' (or 1) to regenerate/fix the current RGB "
+                            "view in the background; 'no' (or 0, default) only reports "
+                            "the artifact."
+                        ),
+                    },
                 },
                 "required": ["description", "image_region", "severity"],
             },

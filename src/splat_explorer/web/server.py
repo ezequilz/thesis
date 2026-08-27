@@ -21,7 +21,7 @@ Endpoints:
   GET  /api/episodes/<id>      full trace of one past run (steps + artifacts)
   GET  /api/episodes/<id>/log  that run's episode.log
   GET  /api/episodes/<id>/video  RGB|map video (renders once, then cached on disk)
-  POST /api/run           start an episode  {backend, model, max_steps, width, height, send_depth, send_map, send_coverage, compute_depth, compute_coverage}
+  POST /api/run           start an episode  {backend, model, max_steps, width, height, send_depth, send_map, send_coverage, compute_depth, compute_coverage, image_regeneration}
   POST /api/stop          request cooperative stop of the running episode
   POST /api/select        pin the viser overlay to a step {step: int} / back to live {step: null}
   GET  /frames/<ep>/<png> step screenshots from outputs/episodes/
@@ -52,8 +52,56 @@ LIVE_STATE_PATH = Path("outputs/live/agent_state.json")
 RUN_DEFAULTS = {"backend": "cli_relay", "model": "", "max_steps": 10,
                 "width": 960, "height": 720, "send_depth": False,
                 "send_map": True, "send_coverage": False,
-                "compute_depth": False, "compute_coverage": False}
+                "compute_depth": False, "compute_coverage": False,
+                "image_regeneration": False}
 RUN_LIMITS = {"max_steps": 200, "width": 1920, "height": 1440}
+
+
+def _attach_regen_files(
+    episode: str,
+    steps: list[dict],
+    episode_dir: Path,
+    artifacts: list[dict] | None = None,
+) -> None:
+    """Add regen image URLs / status from sidecar files written by background jobs."""
+    from ..agent.regenerate import regenerate_frame_name, regenerate_meta_name
+
+    for rec in steps:
+        step = rec.get("step")
+        try:
+            step_i = int(step)
+        except (TypeError, ValueError):
+            continue
+        if step_i < 0:
+            continue
+        png_name = rec.get("regenerate_frame") or regenerate_frame_name(step_i)
+        png_path = episode_dir / png_name
+        meta_path = episode_dir / regenerate_meta_name(step_i)
+        if meta_path.is_file():
+            try:
+                meta = json.loads(meta_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                meta = {}
+            rec["regen_status"] = meta.get("status")
+            rec["regen_error"] = meta.get("error")
+            if meta.get("image_name"):
+                png_name = meta["image_name"]
+                png_path = episode_dir / png_name
+        if png_path.is_file():
+            rec["regenerate_frame"] = png_name
+            rec["regen_frame_url"] = f"/frames/{episode}/{png_name}"
+            rec["regen_status"] = rec.get("regen_status") or "ok"
+    if artifacts:
+        by_step = {rec.get("step"): rec for rec in steps}
+        for art in artifacts:
+            rec = by_step.get(art.get("step"))
+            if rec is None:
+                continue
+            if rec.get("regen_status"):
+                art["regenerate_status"] = rec["regen_status"]
+            if rec.get("regenerate_frame"):
+                art["regenerate_frame"] = rec["regenerate_frame"]
+
 
 
 def load_dotenv(path: Path = Path(".env")) -> list[str]:
@@ -141,6 +189,7 @@ class DashboardApp:
         clean["send_coverage"] = bool(clean["send_coverage"])
         clean["compute_depth"] = bool(clean["compute_depth"])
         clean["compute_coverage"] = bool(clean["compute_coverage"])
+        clean["image_regeneration"] = bool(clean["image_regeneration"])
         # Sending a view implies computing it.
         if clean["send_depth"]:
             clean["compute_depth"] = True
@@ -223,6 +272,7 @@ class DashboardApp:
                 send_coverage=params["send_coverage"],
                 compute_depth=params["compute_depth"],
                 compute_coverage=params["compute_coverage"],
+                image_regeneration=params["image_regeneration"],
                 run_meta={"params": meta_params},
                 on_step=self._on_step,
                 should_stop=self._stop.is_set,
@@ -394,11 +444,13 @@ class DashboardApp:
                     steps.append(rec)
         except (OSError, json.JSONDecodeError):
             pass
+        artifacts = self._read_json(d / "artifacts.json") or []
+        _attach_regen_files(d.name, steps, d, artifacts=artifacts)
         return {
             "id": d.name,
             "meta": self._read_json(d / "meta.json") or {},
             "steps": steps,
-            "artifacts": self._read_json(d / "artifacts.json") or [],
+            "artifacts": artifacts,
             "has_log": (d / "episode.log").is_file(),
         }
 
@@ -424,9 +476,18 @@ class DashboardApp:
     # --- state snapshot --------------------------------------------------------
     def snapshot(self) -> dict:
         with self.lock:
+            run = self.run
+            episode = run.get("episode") if run else None
+            steps = run.get("steps") if run else None
+            if episode and steps:
+                d = Path(self.cfg.output.dir) / "episodes" / episode
+                if d.is_dir():
+                    _attach_regen_files(
+                        episode, steps, d, artifacts=run.get("artifacts"),
+                    )
             return {
                 "scene": {"status": self.scene_status, **self.scene_info},
-                "run": self.run,
+                "run": run,
                 "defaults": {
                     **RUN_DEFAULTS,
                     "model": self.cfg.agent.model,
@@ -435,6 +496,7 @@ class DashboardApp:
                     "send_coverage": bool(self.cfg.agent.get("send_coverage", False)),
                     "compute_depth": bool(self.cfg.agent.get("compute_depth", False)),
                     "compute_coverage": bool(self.cfg.agent.get("compute_coverage", False)),
+                    "image_regeneration": bool(self.cfg.agent.get("image_regeneration", False)),
                     "viewer_url": f"http://localhost:{self.cfg.viewer.port}",
                     "spectator_path": "/spectator",
                 },

@@ -137,6 +137,8 @@ object or surface
 affecting an object or surface, and high for a large missing region or \
 major structural failure
 - report each physical defect only once
+- optional regenerate=yes queues a background repair of the current RGB \
+view; keep inspecting immediately (do not wait for it)
 
 If several distinct artifacts are clearly visible, report them one at a \
 time before moving. Do not report the same defect again from another \

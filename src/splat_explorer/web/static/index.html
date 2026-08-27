@@ -108,6 +108,7 @@
   .badge.art { background: var(--warn); color: #22180a; }
   .badge.map { background: var(--accent); color: #0b1220; }
   .badge.done { background: var(--ok); color: #0a2417; }
+  .badge.regen { background: #6b8cff; color: #0b1220; }
 
   #detail { overflow-y: auto; padding: 14px 18px; }
   #detail img.frame { max-width: 100%; max-height: 58vh; width: auto; height: auto;
@@ -259,6 +260,10 @@
       <label class="chk" title="Render and save the coverage map every step. Not sent to the model unless 'coverage map' is also on.">
         <input type="checkbox" id="in-compute-coverage">compute coverage map
       </label>
+      <div class="hint">repairs</div>
+      <label class="chk" title="When the inspector sets regenerate=yes, send the RGB view to gpt-image-2 (~4¢/call). Off: record the decision only — no paid request.">
+        <input type="checkbox" id="in-regen">image regeneration (4ct)
+      </label>
     </div>
   </div>
   <div class="btn-row">
@@ -310,7 +315,7 @@
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-let state = null, selectedStep = null, renderedSteps = -1, renderedRunId = null;
+let state = null, selectedStep = null, renderedSteps = -1, renderedRunId = null, renderedRegen = "";
 // When set, a past run loaded from /api/episodes/<id> is shown instead of
 // the live run (same shape as state.run).
 let hist = null;
@@ -374,6 +379,10 @@ function render() {
     $("in-compute-coverage").checked = !!defaults.compute_coverage || !!defaults.send_coverage;
     $("in-compute-coverage").dataset.init = "1";
   }
+  if (!$("in-regen").dataset.init) {
+    $("in-regen").checked = !!defaults.image_regeneration;
+    $("in-regen").dataset.init = "1";
+  }
   $("spectator-link").href = "/spectator";
   const frame = $("viser-frame");
   if (!frame.dataset.url) frame.dataset.url = defaults.viewer_url;
@@ -413,11 +422,12 @@ function render() {
   videoBtn.title = epId ? `Episode video (${epId})` : "No episode to render";
   if (!hist && run?.error) { $("msg").textContent = run.error; }
 
-  // steps list: rebuild only when the shown run or its step count changes
-  if (view && (view.id !== renderedRunId || steps.length !== renderedSteps)) {
+  // steps list: rebuild when the shown run, step count, or regen files change
+  const regenKey = steps.map(s => `${s.regen_frame_url || ""}:${s.regen_status || ""}`).join("|");
+  if (view && (view.id !== renderedRunId || steps.length !== renderedSteps || regenKey !== renderedRegen)) {
     if (view.id !== renderedRunId && (selectedStep == null || selectedStep >= steps.length))
       selectedStep = steps.length ? steps.length - 1 : null;
-    renderedRunId = view.id; renderedSteps = steps.length;
+    renderedRunId = view.id; renderedSteps = steps.length; renderedRegen = regenKey;
     renderSteps(steps);
     renderDetail();
   }
@@ -437,6 +447,7 @@ function renderSteps(steps) {
     let badge = "";
     if (s.vlm?.fallback) badge = '<span class="badge fb">FALLBACK</span>';
     if (a.name === "report_artifact") badge += '<span class="badge art">ARTIFACT</span>';
+    if (s.regen_frame_url || s.regen_status) badge += '<span class="badge regen">REGEN</span>';
     if (a.name === "view_map") badge += '<span class="badge map">MAP</span>';
     if (a.name === "view_coverage_map") badge += '<span class="badge map">COVERAGE</span>';
     if (a.name === "view_depth") badge += '<span class="badge map">DEPTH</span>';
@@ -477,9 +488,16 @@ function renderDetail() {
         ${a.parsed_ok ? "parsed OK" : (a.error ? "error" : "unparseable")}</span>
       <pre>${esc(a.error || a.reply || "(empty reply)")}</pre>
     </div>`).join("");
-  const artifacts = (run.artifacts || []).map(a => `
-    <div class="artifact">step ${a.step} · <b>${esc(a.severity ?? "?")}</b> ·
-      ${esc(a.image_region ?? "")}<br>${esc(a.description ?? "")}</div>`).join("");
+  const artifacts = (run.artifacts || []).map(a => {
+    const regen = a.regenerate_requested || a.regenerate === "yes" || a.regenerate === 1
+      || a.regenerate === true || a.fix === "yes" || a.fix === 1;
+    const regenNote = regen
+      ? ` · regen ${esc(a.regenerate_status || "queued")}`
+      : "";
+    return `
+    <div class="artifact">step ${a.step} · <b>${esc(a.severity ?? "?")}</b>${regenNote} ·
+      ${esc(a.image_region ?? "")}<br>${esc(a.description ?? "")}</div>`;
+  }).join("");
   const depthCaption = s.depth_sent
     ? "DEPTH MAP — sent to the VLM this step (bright = near, black = nothing)"
     : "DEPTH MAP — computed for the dashboard (sent to the VLM after view_depth, or if always-send is on)";
@@ -502,12 +520,24 @@ function renderDetail() {
       <img class="frame" src="${url}" alt="${alt}">
     </figure>`;
   const rgbFig = fig(`RGB — sent to the VLM (${vlmSize}, aspect preserved)`, s.frame_url, `step ${s.step} RGB`);
+  const regenCaption = s.regen_frame_url
+    ? "REGENERATED RGB — gpt-image-2 repair of this view"
+    : (s.regen_status === "queued"
+        ? "REGENERATED RGB — queued (gpt-image-2, still running)"
+        : (s.regen_status === "disabled"
+            ? "REGENERATED RGB — inspector asked to regenerate; setting off (no paid call)"
+            : (s.regen_status && s.regen_status !== "ok"
+                ? `REGENERATED RGB — ${s.regen_status}${s.regen_error ? ": " + s.regen_error : ""}`
+                : "")));
+  const regenFig = s.regen_frame_url
+    ? fig(regenCaption, s.regen_frame_url, `step ${s.step} regenerated`)
+    : "";
   const mapFig = s.map_frame_url ? fig(mapCaption, s.map_frame_url, `step ${s.step} map`) : "";
   const coverageFig = s.coverage_frame_url
     ? fig(coverageCaption, s.coverage_frame_url, `step ${s.step} coverage`)
     : "";
   const depthFig = s.depth_frame_url ? fig(depthCaption, s.depth_frame_url, `step ${s.step} depth`) : "";
-  const panes = [rgbFig, depthFig, mapFig, coverageFig].filter(Boolean);
+  const panes = [rgbFig, regenFig, depthFig, mapFig, coverageFig].filter(Boolean);
   const frames = `<div class="frames n${panes.length}">${panes.join("")}</div>`;
   d.innerHTML = `
     ${frames}
@@ -518,6 +548,7 @@ function renderDetail() {
       ${s.coverage != null ? `<span class="k">coverage</span><span class="v">${Math.round(s.coverage * 100)}% viewed area</span>` : ""}
       <span class="k">timing</span><span class="v">render ${fmtSecs(s.timing?.render_s)} · vlm decide ${fmtSecs(s.timing?.decide_s)}</span>
       ${s.render_backend ? `<span class="k">renderer</span><span class="v">${esc(s.render_backend)}</span>` : ""}
+      ${s.regen_status ? `<span class="k">regenerate</span><span class="v">${esc(s.regen_status)}${s.regen_error ? " — " + esc(s.regen_error) : ""}</span>` : ""}
       ${vlm.backend ? `<span class="k">vlm</span><span class="v">${esc(vlm.backend)}${vlm.model ? " · " + esc(vlm.model) : ""}${vlm.fallback ? ' · <b style="color:var(--err)">fallback action used</b>' : ""}</span>` : ""}
       ${run.episode ? `<span class="k">logs</span><span class="v"><a href="/api/episodes/${encodeURIComponent(run.episode)}/log" target="_blank">episode.log ↗</a></span>` : ""}
     </div>
@@ -558,6 +589,7 @@ $("btn-start").onclick = () => {
     send_map: $("in-map").checked,
     compute_depth: $("in-compute-depth").checked,
     compute_coverage: $("in-compute-coverage").checked,
+    image_regeneration: $("in-regen").checked,
   });
 };
 $("btn-stop").onclick = () => post("/api/stop");

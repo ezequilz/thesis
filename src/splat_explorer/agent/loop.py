@@ -48,8 +48,13 @@ from ..navigation import CollisionWorld, MotionContext, SpawnSelection
 from ..rendering import Renderer
 from ..rendering.annotate import depth_to_image
 from ..rendering.birdseye import COVERAGE_PROMPT_MAX_SIDE, ExplorationMap
-from .actions import Action
+from .actions import Action, wants_regenerate
 from .camera_rig import CameraRig
+from .regenerate import (
+    regenerate_frame_name,
+    regenerator_from_policy,
+    record_disabled,
+)
 from .vlm import VLMPolicy
 
 logger = logging.getLogger(__name__)
@@ -206,9 +211,11 @@ def run_episode(
     send_coverage: bool = False,
     compute_depth: bool = False,
     compute_coverage: bool = False,
+    image_regeneration: bool = False,
     run_meta: dict | None = None,
     on_step: Callable[[dict, Path, CameraRig], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    regenerator=None,
 ) -> Path:
     """Run one episode. Returns the episode output directory.
 
@@ -226,6 +233,11 @@ def run_episode(
     original buffers) onto every VLM prompt after RGB. Otherwise the
     coverage map is attached only after view_coverage_map. RGB and the path
     map are always saved. RGB is always in the prompt.
+    image_regeneration (default off) actually sends regenerate=yes views to
+    gpt-image-2; when false the inspector can still request it and the
+    decision is logged, but the paid prompt is not sent.
+    regenerator, if omitted, is built from the policy when image_regeneration
+    is on and the policy has a CliRelay-compatible client.
     run_meta is merged into the episode's meta.json.
 
     on_step(record, frame_path, rig) fires after each decision — `record`
@@ -240,6 +252,9 @@ def run_episode(
     episode_dir = output_dir / "episodes" / time.strftime("%Y%m%d_%H%M%S")
     episode_dir.mkdir(parents=True, exist_ok=True)
     artifacts: list[dict] = []
+    regen = regenerator if regenerator is not None else (
+        regenerator_from_policy(policy) if image_regeneration else None
+    )
     status = "completed"
     summary: str | None = None
     steps_done = 0
@@ -273,6 +288,7 @@ def run_episode(
         "send_coverage": send_coverage,
         "compute_depth": compute_depth,
         "compute_coverage": compute_coverage,
+        "image_regeneration": image_regeneration,
         "artifact_count": 0,
         "summary": None,
         "waypoints": [
@@ -400,7 +416,31 @@ def run_episode(
                     }
 
                     if action.name == "report_artifact":
-                        artifacts.append({"step": step, **action.args})
+                        entry = {"step": step, **action.args}
+                        if wants_regenerate(action.args):
+                            entry["regenerate_requested"] = True
+                            if not image_regeneration:
+                                record_disabled(episode_dir, step)
+                                entry["regenerate_status"] = "disabled"
+                                record["regen_status"] = "disabled"
+                                logger.info(
+                                    "step %03d | regenerate=yes held "
+                                    "(image regeneration off — no gpt-image-2 call)",
+                                    step,
+                                )
+                            elif regen is None:
+                                entry["regenerate_status"] = "skipped"
+                                record["regen_status"] = "skipped"
+                                logger.warning(
+                                    "step %03d | regenerate=yes ignored (no CliRelay client)",
+                                    step,
+                                )
+                            else:
+                                regen.submit(frame_path, episode_dir, step)
+                                entry["regenerate_status"] = "queued"
+                                record["regenerate_frame"] = regenerate_frame_name(step)
+                                record["regen_status"] = "queued"
+                        artifacts.append(entry)
                     # Some prompts hide `done`; the run still ends at max_steps.
                     done = action.name == "done" and getattr(policy, "allow_done", True)
                     if action.name == "done" and not done:
@@ -449,6 +489,16 @@ def run_episode(
             logger.exception("Episode crashed at step %d", steps_done)
             raise
         finally:
+            if regen is not None:
+                for result in regen.wait():
+                    for entry in artifacts:
+                        if entry.get("step") != result.step:
+                            continue
+                        entry["regenerate_status"] = result.status
+                        if result.image_name:
+                            entry["regenerate_frame"] = result.image_name
+                        if result.error:
+                            entry["regenerate_error"] = result.error
             meta.update(
                 status=status,
                 finished_at=time.time(),
