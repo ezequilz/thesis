@@ -17,6 +17,7 @@ as an image part, and parses a single JSON action object from the reply.
 Configuration (configs/*.yaml, agent section):
   vlm_backend: cli_relay
   model:          model ID the relay routes, e.g. gpt-5.3-codex
+  prompt:         task prompt variant (v1 / v2); see tasks.registry
   relay_base_url: relay endpoint; falls back to the CLIRELAY_BASE_URL env var
                   (used in Docker to reach a host-local relay), then to
                   http://localhost:8317/v1
@@ -37,7 +38,7 @@ import time
 
 import numpy as np
 
-from ..tasks.artifact_hunt import SPAWN_PROMPT, system_prompt
+from ..tasks.registry import load_prompt
 from .actions import ACTION_TOOLS, Action
 
 logger = logging.getLogger(__name__)
@@ -151,7 +152,8 @@ class CliRelayPolicy:
     # Hard cap per request, seconds.
     REQUEST_TIMEOUT_S = 150
 
-    def __init__(self, model: str, base_url: str = "", api_key: str = ""):
+    def __init__(self, model: str, base_url: str = "", api_key: str = "",
+                 prompt: str = ""):
         try:
             from openai import OpenAI
         except ImportError as exc:
@@ -167,17 +169,19 @@ class CliRelayPolicy:
             timeout=self.REQUEST_TIMEOUT_S,
         )
         self._history: list[str] = []
+        self._task = load_prompt(prompt or None)
         # Full record of the most recent decide(): prompt, per-attempt raw
         # replies + latencies, parse outcome. Consumed by the episode loop for
         # traces and by the debug dashboard.
         self.last_debug: dict | None = None
-        logger.info("CliRelay backend: %s via %s", self.model, self.base_url)
+        logger.info("CliRelay backend: %s via %s (prompt %s)",
+                    self.model, self.base_url, prompt or "default")
 
     def choose_start(self, birdseye_image: np.ndarray, spawn) -> int:
         """Initial prompt: bird's-eye view + numbered spawn points, returns the
         index the model picked (falls back to the top-ranked point 0)."""
         prompt = (
-            f"{SPAWN_PROMPT}\n"
+            f"{self._task.SPAWN_PROMPT}\n"
             f"Candidate starting points:\n{spawn.describe_points()}\n\n"
             f"{CHOOSE_START_FORMAT}"
         )
@@ -363,7 +367,7 @@ class CliRelayPolicy:
                 + (f", not {' or '.join(extras)}." if extras else ".")
             )
         return (
-            f"{system_prompt(with_depth, with_map, with_coverage)}\n"
+            f"{self._task.system_prompt(with_depth, with_map, with_coverage)}\n"
             f"Available tools:\n{render_tool_catalog()}\n\n"
             f"{history_block}\n\n"
             f"Step {step}. Current pose: {pose_description}. "

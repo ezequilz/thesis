@@ -18,7 +18,7 @@ from typing import Protocol
 
 import numpy as np
 
-from ..tasks.artifact_hunt import SYSTEM_PROMPT
+from ..tasks.registry import load_prompt
 from .actions import ACTION_TOOLS, Action
 
 logger = logging.getLogger(__name__)
@@ -125,7 +125,7 @@ class OpenAIVLMPolicy:
     # Keep only the most recent N images in context to bound token usage.
     MAX_IMAGES_IN_CONTEXT = 6
 
-    def __init__(self, model: str, base_url: str = ""):
+    def __init__(self, model: str, base_url: str = "", prompt: str = ""):
         try:
             from openai import OpenAI
         except ImportError as exc:
@@ -134,7 +134,8 @@ class OpenAIVLMPolicy:
             raise RuntimeError("Set OPENAI_API_KEY to use the openai VLM backend.")
         self.client = OpenAI(base_url=base_url or None)
         self.model = model
-        self.messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        task = load_prompt(prompt or None)
+        self.messages: list[dict] = [{"role": "system", "content": task.SYSTEM_PROMPT}]
 
     def decide(
         self,
@@ -200,6 +201,7 @@ class OpenAIVLMPolicy:
 
 def make_policy(agent_cfg) -> VLMPolicy:
     backend = agent_cfg.vlm_backend
+    prompt = agent_cfg.get("prompt", "")
     if backend == "scripted":
         return ScriptedPolicy()
     if backend == "cli_relay":
@@ -209,7 +211,12 @@ def make_policy(agent_cfg) -> VLMPolicy:
             model=agent_cfg.model,
             base_url=agent_cfg.get("relay_base_url", ""),
             api_key=agent_cfg.get("relay_api_key", ""),
+            prompt=prompt,
         )
     if backend == "openai":
-        return OpenAIVLMPolicy(model=agent_cfg.model, base_url=agent_cfg.get("base_url", ""))
+        return OpenAIVLMPolicy(
+            model=agent_cfg.model,
+            base_url=agent_cfg.get("base_url", ""),
+            prompt=prompt,
+        )
     raise ValueError(f"Unknown vlm_backend: {backend!r}")

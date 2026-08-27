@@ -146,6 +146,7 @@ def cmd_explore(cfg, args) -> None:
             "width": cfg.renderer.width,
             "height": cfg.renderer.height,
             "send_depth": bool(cfg.agent.get("send_depth", False)),
+            "prompt": cfg.agent.get("prompt", ""),
         }},
     )
 

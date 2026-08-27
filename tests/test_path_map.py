@@ -11,7 +11,7 @@ from splat_explorer.navigation import ground_basis
 from splat_explorer.rendering.annotate import draw_path_map, project_to_pixels
 from splat_explorer.rendering.base import Camera, up_vector
 from splat_explorer.rendering.birdseye import ExplorationMap
-from splat_explorer.tasks.artifact_hunt import system_prompt
+from splat_explorer.tasks.registry import canonical_names, load_prompt
 
 
 def _topdown_camera(width: int = 240, height: int = 240) -> Camera:
@@ -104,16 +104,30 @@ def test_parse_action_accepts_view_extras():
 
 
 def test_system_prompt_mentions_extras_when_attached():
-    base = system_prompt(with_depth=False, with_map=False, with_coverage=False)
-    with_map = system_prompt(with_depth=False, with_map=True)
-    with_depth = system_prompt(with_depth=True, with_map=False)
-    with_coverage = system_prompt(with_depth=False, with_coverage=True)
-    assert "view_map" in base and "view_depth" in base
-    assert "view_coverage_map" in base
-    assert "BIRD'S-EYE MAP" not in base
-    assert "This turn also includes a COVERAGE MAP" not in base
-    assert "BIRD'S-EYE MAP" in with_map
-    assert "DEPTH MAP" in with_depth
-    assert "This turn also includes a COVERAGE MAP" in with_coverage
-    assert "RGB view" in with_map and "RGB view" in with_depth
-    assert "RGB view" in with_coverage
+    for name in canonical_names():
+        system_prompt = load_prompt(name).system_prompt
+        base = system_prompt(with_depth=False, with_map=False, with_coverage=False)
+        with_map = system_prompt(with_depth=False, with_map=True)
+        with_depth = system_prompt(with_depth=True, with_map=False)
+        with_coverage = system_prompt(with_depth=False, with_coverage=True)
+        assert "view_map" in base and "view_depth" in base, name
+        assert "view_coverage_map" in base, name
+        assert "BIRD'S-EYE MAP" not in base, name
+        assert "This turn also includes a COVERAGE MAP" not in base, name
+        assert "BIRD'S-EYE MAP" in with_map, name
+        assert "DEPTH MAP" in with_depth, name
+        assert "This turn also includes a COVERAGE MAP" in with_coverage, name
+        assert "RGB view" in with_map and "RGB view" in with_depth, name
+        assert "RGB view" in with_coverage, name
+
+
+def test_prompt_variants_are_distinct_and_v2_is_default():
+    from splat_explorer.tasks.registry import DEFAULT_PROMPT
+
+    assert DEFAULT_PROMPT == "v2"
+    v1 = load_prompt("v1").system_prompt(False)
+    v2 = load_prompt("v2").system_prompt(False)
+    assert "quality-inspection agent walking" in v1
+    assert "autonomous visual inspector" in v2
+    assert "How to move:" in v1 and "How to move:" in v2
+    assert load_prompt().system_prompt(False) == v2

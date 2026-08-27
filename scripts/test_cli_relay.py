@@ -65,6 +65,7 @@ def main() -> int:
         model=cfg.agent.model,
         base_url=cfg.agent.get("relay_base_url", ""),
         api_key=cfg.agent.get("relay_api_key", ""),
+        prompt=cfg.agent.get("prompt", ""),
     )
 
     send_depth = bool(cfg.agent.get("send_depth", False))
