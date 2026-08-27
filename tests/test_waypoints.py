@@ -297,8 +297,9 @@ def test_interior_luma_rejects_black_void():
 
 def test_interior_luma_rejects_grey_halo():
     camera = _topdown_camera()
-    image = np.full((camera.height, camera.width, 3), 32, dtype=np.uint8)
-    image[90:150, 90:150] = 140
+    image = np.zeros((camera.height, camera.width, 3), dtype=np.uint8)
+    image[20:80, 20:80] = 32    # grey reconstruction halo
+    image[90:150, 90:150] = 140  # indoor floor
     inside = np.array([[0.0, 1.5, 0.0]])
     halo = np.array([[-3.5, 1.5, 3.5]])
     assert _on_reconstructed_interior(image, camera, inside)[0]

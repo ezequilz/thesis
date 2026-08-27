@@ -298,7 +298,7 @@ def _on_reconstructed_interior(
     renders as dark grey and would still pass that cutoff, so also require the
     patch luma to sit toward typical indoor brightness rather than the void.
     """
-    from .rendering.annotate import _SCENE_LUMA_MIN, project_to_pixels, scene_mask
+    from .rendering.annotate import project_to_pixels, scene_mask
 
     luma = np.asarray(image, dtype=np.float64).mean(axis=-1)
     mask = scene_mask(image)
@@ -307,8 +307,11 @@ def _on_reconstructed_interior(
     keep = np.zeros(len(positions), dtype=bool)
     if not mask.any():
         return keep
-    indoor_luma = float(np.percentile(luma[mask], 50))
-    min_luma = 0.45 * indoor_luma + 0.55 * float(_SCENE_LUMA_MIN)
+    indoor_luma = float(np.percentile(luma[mask], 60))
+    # Absolute floor catches grey reconstruction halo even when it covers a
+    # lot of the frame (and would pull the percentile down). Relative term
+    # scales with bright indoor parquet/walls. Dark bathrooms still sit above.
+    min_luma = max(36.0, 0.50 * indoor_luma)
     for i, (u, v) in enumerate(uv):
         if not np.isfinite(u) or not np.isfinite(v):
             continue
