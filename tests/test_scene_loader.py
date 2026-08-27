@@ -73,6 +73,7 @@ def write_sog_zip(path: Path, count: int = 3) -> Path:
 def test_slugify():
     assert slugify("Pond shelter") == "pond-shelter"
     assert slugify("Calico Basin at sunrise") == "calico-basin-at-sunrise"
+    assert slugify("Venetian Balcony") == "venetian-balcony"
     assert slugify("ArchInteriors_for_UE2_Atlux") == "archinteriors-for-ue2-atlux"
 
 
@@ -203,3 +204,117 @@ def test_list_scenes_catalog_and_discovery(tmp_path: Path):
 
     discovered = discover_scenes(rooms)
     assert {s.id for s in discovered} >= {"pond-shelter", "extra-hall", "calico-basin-at-sunrise"}
+
+
+def test_apply_spec_overlays_and_restores_navigation(tmp_path: Path):
+    rooms = tmp_path / "3dgs_rooms"
+    write_sog_zip(rooms / "Starter.sog", count=2)
+    write_sog_zip(rooms / "Pond shelter.sog", count=2)
+    cfg = Config({
+        "scene": {
+            "path": str(rooms / "Starter.sog"),
+            "lod_level": 0,
+            "catalog": [
+                {"id": "arch-interiors", "label": "Starter Scene",
+                 "path": str(rooms / "Starter.sog"), "up_axis": "-y"},
+                {"id": "pond-shelter", "label": "Pond shelter",
+                 "path": str(rooms / "Pond shelter.sog"), "up_axis": "-y",
+                 "navigation": {
+                     "spawn_eye_height": 0.55,
+                     "birdseye_frame": "core",
+                     "birdseye_max_splat_radius_px": 28,
+                     "reconstruction_pull": 2.5,
+                 }},
+            ],
+        },
+        "camera": {"up_axis": "-y"},
+        "navigation": {
+            "spawn_height_fraction": 0.5,
+            "centroid_pull": 0.35,
+            "max_splat_radius_px": 120,
+        },
+    })
+    starter = spec_by_id(cfg, "arch-interiors")
+    pond = spec_by_id(cfg, "pond-shelter")
+    assert starter is not None and pond is not None
+    assert starter.nav_overrides == {}
+    assert pond.nav_overrides["birdseye_frame"] == "core"
+
+    apply_spec(cfg, pond)
+    assert cfg["navigation"]["spawn_eye_height"] == 0.55
+    assert cfg["navigation"]["birdseye_frame"] == "core"
+    assert cfg["navigation"]["spawn_height_fraction"] == 0.5
+
+    apply_spec(cfg, starter)
+    assert "spawn_eye_height" not in cfg["navigation"]
+    assert "birdseye_frame" not in cfg["navigation"]
+    assert cfg["navigation"]["spawn_height_fraction"] == 0.5
+    assert cfg["navigation"]["centroid_pull"] == 0.35
+
+
+def test_indoor_catalog_has_no_overlay_outdoor_shares_one(tmp_path: Path):
+    rooms = tmp_path / "3dgs_rooms"
+    write_sog_zip(rooms / "Starter.sog", count=2)
+    write_sog_dir(rooms / "Venetian Balcony" / "0_0", count=2)
+    (rooms / "Venetian Balcony" / "lod-meta.json").write_text(json.dumps({
+        "version": 1, "count": 2, "counts": [2], "lodLevels": 1,
+        "filenames": ["0_0/meta.json"],
+        "tree": {"bound": {"min": [0, 0, 0], "max": [1, 1, 1]},
+                 "lods": {"0": {"file": 0, "offset": 0, "count": 2}}},
+    }))
+    write_sog_zip(rooms / "Pond shelter.sog", count=2)
+    write_sog_dir(rooms / "Calico Basin at sunrise" / "0_0", count=2)
+    (rooms / "Calico Basin at sunrise" / "lod-meta.json").write_text(json.dumps({
+        "version": 1, "count": 2, "counts": [2], "lodLevels": 1,
+        "filenames": ["0_0/meta.json"],
+        "tree": {"bound": {"min": [0, 0, 0], "max": [1, 1, 1]},
+                 "lods": {"0": {"file": 0, "offset": 0, "count": 2}}},
+    }))
+    outdoor = {
+        "spawn_eye_height": 0.55,
+        "birdseye_frame": "core",
+        "birdseye_max_splat_radius_px": 28,
+        "reconstruction_pull": 2.5,
+        "centroid_pull": 1.2,
+    }
+    cfg = Config({
+        "scene": {
+            "path": str(rooms / "Starter.sog"),
+            "lod_level": 0,
+            "catalog": [
+                {"id": "arch-interiors", "label": "Starter Scene",
+                 "path": str(rooms / "Starter.sog"), "up_axis": "-y"},
+                {"id": "venetian-balcony", "label": "Venetian Balcony",
+                 "path": str(rooms / "Venetian Balcony"), "up_axis": "-y",
+                 "lod_level": 0},
+                {"id": "pond-shelter", "label": "Pond shelter",
+                 "path": str(rooms / "Pond shelter.sog"), "up_axis": "-y",
+                 "navigation": outdoor},
+                {"id": "calico-basin", "label": "Calico Basin at sunrise",
+                 "path": str(rooms / "Calico Basin at sunrise"),
+                 "up_axis": "+y", "lod_level": 0, "navigation": outdoor},
+            ],
+        },
+        "camera": {"up_axis": "-y"},
+        "navigation": {"spawn_height_fraction": 0.5, "centroid_pull": 0.35},
+    })
+    venetian = spec_by_id(cfg, "venetian-balcony")
+    calico = spec_by_id(cfg, "calico-basin")
+    pond = spec_by_id(cfg, "pond-shelter")
+    assert venetian is not None and venetian.up_axis == "-y"
+    assert venetian.nav_overrides == {}
+    assert pond is not None and calico is not None
+    assert pond.nav_overrides == calico.nav_overrides
+    assert calico.nav_overrides["birdseye_frame"] == "core"
+
+    apply_spec(cfg, venetian)
+    assert "birdseye_frame" not in cfg["navigation"]
+    assert cfg["camera"]["up_axis"] == "-y"
+
+    apply_spec(cfg, calico)
+    assert cfg["navigation"]["birdseye_frame"] == "core"
+    assert cfg["camera"]["up_axis"] == "+y"
+
+    apply_spec(cfg, venetian)
+    assert "birdseye_frame" not in cfg["navigation"]
+    assert cfg["navigation"]["centroid_pull"] == 0.35

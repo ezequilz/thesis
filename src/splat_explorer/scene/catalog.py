@@ -13,12 +13,15 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 LIVE_SCENE_PATH = Path("outputs/live/scene.json")
+# Snapshot of configs/default.yaml navigation, restored on every scene switch
+# before applying that entry's catalog overlay. Starter Scene has no overlay.
+_NAV_DEFAULTS_KEY = "_navigation_defaults"
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -35,15 +38,22 @@ class SceneSpec:
     path: Path
     up_axis: str = "+y"
     lod_level: int = 0
+    # Optional per-scene overlay on cfg.navigation (spawn height, bird's-eye
+    # framing, …). Empty for indoor scenes (Starter, Venetian) so those keep
+    # the original defaults.
+    nav_overrides: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
-        return {
+        payload = {
             "id": self.id,
             "label": self.label,
             "path": str(self.path),
             "up_axis": self.up_axis,
             "lod_level": self.lod_level,
         }
+        if self.nav_overrides:
+            payload["navigation"] = dict(self.nav_overrides)
+        return payload
 
 
 def _label_from_path(path: Path) -> str:
@@ -55,12 +65,14 @@ def _label_from_path(path: Path) -> str:
 
 def _spec_from_mapping(raw: dict, default_up: str, default_lod: int) -> SceneSpec:
     path = Path(raw["path"])
+    raw_nav = raw.get("navigation")
     return SceneSpec(
         id=str(raw.get("id") or slugify(path.stem if path.suffix else path.name)),
         label=str(raw.get("label") or _label_from_path(path)),
         path=path,
         up_axis=str(raw.get("up_axis") or default_up),
         lod_level=int(raw.get("lod_level", default_lod)),
+        nav_overrides=dict(raw_nav) if isinstance(raw_nav, dict) else {},
     )
 
 
@@ -203,10 +215,22 @@ def current_spec(cfg) -> SceneSpec:
 
 
 def apply_spec(cfg, spec: SceneSpec) -> None:
-    """Point the live config at this catalog entry (path + up axis + LOD)."""
+    """Point the live config at this catalog entry (path + up axis + LOD).
+
+    Navigation is restored to the YAML defaults, then this entry's optional
+    `navigation:` overlay is applied. Switching back to Starter Scene therefore
+    gets the original indoor spawn / bird's-eye settings, not leftover outdoor
+    overrides.
+    """
     cfg["scene"]["path"] = str(spec.path)
     cfg["scene"]["lod_level"] = int(spec.lod_level)
     cfg["camera"]["up_axis"] = spec.up_axis
+    nav = cfg.setdefault("navigation", {})
+    if _NAV_DEFAULTS_KEY not in cfg:
+        cfg[_NAV_DEFAULTS_KEY] = dict(nav)
+    nav.clear()
+    nav.update(cfg[_NAV_DEFAULTS_KEY])
+    nav.update(spec.nav_overrides)
 
 
 def publish_live_scene(spec: SceneSpec, generation: int) -> None:

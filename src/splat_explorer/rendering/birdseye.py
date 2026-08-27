@@ -4,6 +4,10 @@ Places a pinhole camera above the scene looking straight down along the up
 axis, at an altitude chosen so the robust ground-plane bounds fit in the
 frame. The caller strips the ceiling first (navigation.strip_ceiling) so the
 render shows the room interior instead of the roof.
+
+`frame="percentile"` is the original indoor path (Starter Scene). `frame="core"`
+is an outdoor overlay: frame the dense reconstructed island and cap giant
+edge-on splat footprints so water/veg needles do not paint 120px streaks.
 """
 
 from __future__ import annotations
@@ -14,16 +18,67 @@ from .base import Camera, up_vector
 from .cpu_splat_renderer import CpuSplatRenderer
 
 
-def render_birdseye(
+def _percentile_extents(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float, float]:
+    x0, x1 = np.percentile(x, [1.0, 99.0])
+    y0, y1 = np.percentile(y, [1.0, 99.0])
+    return float(x0), float(x1), float(y0), float(y1)
+
+
+def _core_extents(x: np.ndarray, y: np.ndarray, bins: int = 48) -> tuple[float, float, float, float]:
+    """Axis-aligned box of the dense reconstructed core on the ground plane.
+
+    Outdoor reconstructions have a sparse floater/water halo that 1–99%
+    percentiles still include; a density histogram keeps the camera over the
+    island / building instead of zooming out to fit that halo.
+    """
+    x0, x1 = np.percentile(x, [2.0, 98.0])
+    y0, y1 = np.percentile(y, [2.0, 98.0])
+    if not np.isfinite([x0, x1, y0, y1]).all() or x1 <= x0 or y1 <= y0:
+        return _percentile_extents(x, y)
+    hist, xedges, yedges = np.histogram2d(
+        x, y, bins=bins, range=[[x0, x1], [y0, y1]],
+    )
+    occupied = hist > 0
+    if occupied.sum() < 4:
+        return _percentile_extents(x, y)
+    thresh = float(np.percentile(hist[occupied], 60.0))
+    core = hist >= max(thresh, 1.0)
+    if not core.any():
+        return _percentile_extents(x, y)
+    ix, iy = np.nonzero(core)
+    pad = 1
+    i0 = max(int(ix.min()) - pad, 0)
+    i1 = min(int(ix.max()) + pad, hist.shape[0] - 1)
+    j0 = max(int(iy.min()) - pad, 0)
+    j1 = min(int(iy.max()) + pad, hist.shape[1] - 1)
+    return (
+        float(xedges[i0]), float(xedges[i1 + 1]),
+        float(yedges[j0]), float(yedges[j1 + 1]),
+    )
+
+
+def _drop_giant_scales(scene, percentile: float = 98.0):
+    """Drop the most extreme anisotropic / huge splats (outdoor water needles)."""
+    max_s = np.asarray(scene.scales).max(axis=1)
+    if len(max_s) < 50:
+        return scene
+    cap = float(np.percentile(max_s, percentile))
+    keep = max_s <= cap
+    if int(keep.sum()) < 50 or bool(keep.all()):
+        return scene
+    return scene.filtered(keep)
+
+
+def birdseye_camera(
     scene,
     up_axis: str,
     width: int,
     height: int,
     fov_deg: float = 55.0,
     margin: float = 1.15,
-    max_splat_radius_px: int = 120,
-) -> tuple[np.ndarray, Camera]:
-    """Render the scene from above. Returns (RGB uint8 image, camera used)."""
+    frame: str = "percentile",
+) -> Camera:
+    """Look-down camera that frames the scene. Does not rasterize."""
     from ..navigation import ground_basis  # local import to avoid a cycle
 
     up = up_vector(up_axis).astype(np.float64)
@@ -31,8 +86,10 @@ def render_birdseye(
 
     means = scene.means.astype(np.float64)
     x, y, h = means @ e0, means @ e1, means @ up
-    x0, x1 = np.percentile(x, [1.0, 99.0])
-    y0, y1 = np.percentile(y, [1.0, 99.0])
+    if str(frame).strip().lower() == "core":
+        x0, x1, y0, y1 = _core_extents(x, y)
+    else:
+        x0, x1, y0, y1 = _percentile_extents(x, y)
     h_top = float(np.percentile(h, 99.0))
     h_mid = float(np.percentile(h, 50.0))
 
@@ -46,13 +103,35 @@ def render_birdseye(
         extent_x / (2.0 * tan_half),
         extent_y / (2.0 * tan_half * height / width),
     )
+    if str(frame).strip().lower() == "core" and len(scene.scales):
+        p95 = float(np.percentile(np.asarray(scene.scales).max(axis=1), 95.0))
+        altitude += 4.0 * max(p95, 0.0)
 
     center = cx * e0 + cy * e1 + h_mid * up
     position = cx * e0 + cy * e1 + (h_top + altitude) * up
-    camera = Camera.look_at(position, center, up=e1,
-                            width=width, height=height, fov_deg=fov_deg)
+    return Camera.look_at(position, center, up=e1,
+                          width=width, height=height, fov_deg=fov_deg)
 
-    renderer = CpuSplatRenderer(scene, max_splat_radius_px=max_splat_radius_px)
+
+def render_birdseye(
+    scene,
+    up_axis: str,
+    width: int,
+    height: int,
+    fov_deg: float = 55.0,
+    margin: float = 1.15,
+    max_splat_radius_px: int = 120,
+    frame: str = "percentile",
+) -> tuple[np.ndarray, Camera]:
+    """Render the scene from above. Returns (RGB uint8 image, camera used)."""
+    work = scene
+    if str(frame).strip().lower() == "core":
+        work = _drop_giant_scales(scene)
+    camera = birdseye_camera(
+        work, up_axis, width, height,
+        fov_deg=fov_deg, margin=margin, frame=frame,
+    )
+    renderer = CpuSplatRenderer(work, max_splat_radius_px=max_splat_radius_px)
     return renderer.render(camera), camera
 
 

@@ -178,6 +178,7 @@ class DashboardApp:
                 and current.up_axis == spec.up_axis
                 and current.lod_level == spec.lod_level
                 and current.path == spec.path
+                and current.nav_overrides == spec.nav_overrides
                 and self.scene_status == "ready"
             ):
                 return True, f"Already on {spec.label}."

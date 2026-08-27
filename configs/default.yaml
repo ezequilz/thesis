@@ -14,21 +14,36 @@ scene:
   lod_level: 0
   # Dashboard scene dropdown. Missing files are skipped. Extra .sog / streamed
   # SOG folders in 3dgs_rooms/ are appended automatically. up_axis: SOG spec
-  # is +y; Starter Scene and Pond shelter are COLMAP-style y-down.
+  # is +y; Starter Scene, Pond shelter, and Venetian Balcony are COLMAP-style
+  # y-down. Auto-discovered extras default to +y.
   catalog:
     - id: arch-interiors
       label: Starter Scene
       path: 3dgs_rooms/ArchInteriors_for_UE2_Atlux.sog
       up_axis: "-y"
+    - id: venetian-balcony
+      label: Venetian Balcony
+      path: "3dgs_rooms/Venetian Balcony"
+      up_axis: "-y"
+      lod_level: 0
     - id: pond-shelter
       label: Pond shelter
       path: "3dgs_rooms/Pond shelter.sog"
       up_axis: "-y"
+      # Outdoor overlay. Switching to Starter / Venetian restores the indoor
+      # YAML navigation defaults (including the original 120px bird's-eye).
+      navigation: &outdoor_nav
+        spawn_eye_height: 0.55
+        centroid_pull: 1.2
+        reconstruction_pull: 2.5
+        birdseye_frame: core
+        birdseye_max_splat_radius_px: 28
     - id: calico-basin
       label: Calico Basin at sunrise
       path: "3dgs_rooms/Calico Basin at sunrise"
       up_axis: "+y"
       lod_level: 0
+      navigation: *outdoor_nav
 
 renderer:
   # "viser"      — capture RGB from the dashboard visor iframe, sized to the
@@ -98,6 +113,13 @@ navigation:
   # Pull of spawn candidates toward the scene's center of mass: score =
   # clearance - centroid_pull * distance_to_center. Higher = more central spots.
   centroid_pull: 0.35
+  # Per-catalog-entry overlays (see pond-shelter / calico-basin) restore when you switch
+  # scenes. Do not set them here — Starter Scene uses this indoor path as-is:
+  #   spawn_eye_height — metres above the floor; replaces the fraction above
+  #   reconstruction_pull — reward reconstructed mass (path/island vs open water)
+  #   birdseye_frame: core — frame the dense island, not the outdoor halo
+  #   birdseye_max_splat_radius_px — shorter than renderer 120 so top-down
+  #     water/veg needles do not paint 120px streaks
   # Precomputed vantage-point waypoints for jump_to_waypoint. Spread across
   # rooms (clearance local-maxima + covering) rather than clustered near the
   # scene centroid like spawn points. 0 disables waypoint search.

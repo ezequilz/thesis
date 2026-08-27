@@ -481,3 +481,56 @@ def test_loop_jump_restores_step_zero_pose(tmp_path):
     )
     np.testing.assert_allclose(rig.position, start, atol=1e-6)
     assert rig.yaw_deg == 0.0
+
+
+def _island_and_water_scene() -> GaussianScene:
+    """Dense reconstructed path/island on -x, open water plane on +x."""
+    chunks = [
+        _grid_points(np.linspace(-2.5, 0.2, 22), [0.0], np.linspace(-1.2, 1.2, 18)),
+        _grid_points(
+            np.linspace(-0.45, 0.45, 8), np.linspace(0.1, 1.3, 8),
+            np.linspace(-0.45, 0.45, 8),
+        ),
+        _grid_points(np.linspace(1.5, 8.0, 24), [0.0], np.linspace(-3.5, 3.5, 20)),
+        _grid_points(np.linspace(-2.5, 8.0, 16), [2.4], np.linspace(-3.5, 3.5, 12)),
+    ]
+    means = np.concatenate(chunks).astype(np.float32)
+    n = len(means)
+    return GaussianScene(
+        means=means,
+        scales=np.full((n, 3), 0.06, np.float32),
+        quats=np.tile(np.array([1.0, 0.0, 0.0, 0.0], np.float32), (n, 1)),
+        opacities=np.ones(n, np.float32),
+        colors=np.ones((n, 3), np.float32),
+    )
+
+
+def test_spawn_eye_height_is_an_overlay_not_the_indoor_default():
+    scene = _apartment_scene()
+    world = CollisionWorld(scene, solid_opacity=0.1, collision="off")
+    kwargs = dict(
+        up_axis="+y", world=world, ceiling_percentile=25.0,
+        grid_cell=0.2, num_points=3, centroid_pull=0.35,
+    )
+    indoor = find_spawn_points(scene, spawn_height_fraction=0.5, **kwargs)
+    overlay = find_spawn_points(
+        scene, spawn_height_fraction=0.5, spawn_eye_height=0.45, **kwargs,
+    )
+    assert indoor and overlay
+    assert indoor[0].position[1] > overlay[0].position[1] + 0.4
+
+
+def test_reconstruction_pull_prefers_path_over_open_water():
+    scene = _island_and_water_scene()
+    world = CollisionWorld(scene, solid_opacity=0.1, collision="off")
+    kwargs = dict(
+        up_axis="+y", world=world, ceiling_percentile=25.0,
+        grid_cell=0.2, num_points=3, centroid_pull=0.35,
+        spawn_height_fraction=0.5,
+    )
+    pulled = find_spawn_points(scene, reconstruction_pull=2.5, **kwargs)
+    assert pulled, "expected a spawn on the reconstructed island"
+    assert pulled[0].position[0] < 1.0, (
+        f"reconstruction_pull should land on the path/island, got {pulled[0].position}"
+    )
+

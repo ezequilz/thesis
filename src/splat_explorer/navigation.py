@@ -163,6 +163,9 @@ class OpenFloorGrid:
     dist_to_com: np.ndarray
     extent_x: float
     extent_y: float
+    # Smoothed reconstructed-splat mass per cell. Spawn scoring only uses this
+    # when reconstruction_pull > 0 (outdoor overlay); indoor default is 0.
+    mass: np.ndarray
 
     def world_point(self, px: float, py: float) -> np.ndarray:
         return px * self.e0 + py * self.e1 + self.spawn_h * self.up
@@ -338,6 +341,7 @@ def _open_floor_grid(
     grid_cell: float = 0.15,
     solid_opacity: float = 0.1,
     spawn_height_fraction: float = 0.5,
+    spawn_eye_height: float | None = None,
 ) -> OpenFloorGrid | None:
     """Eye-height clearance grid over cells that sit above solid floor."""
     up = up_vector(up_axis).astype(np.float64)
@@ -372,7 +376,10 @@ def _open_floor_grid(
     cy_cells = 0.5 * (y_edges[:-1] + y_edges[1:])
     CX, CY = np.meshgrid(cx_cells, cy_cells, indexing="ij")
 
-    spawn_h = floor + spawn_height_fraction * interior
+    if spawn_eye_height is not None:
+        spawn_h = floor + float(spawn_eye_height)
+    else:
+        spawn_h = floor + spawn_height_fraction * interior
     cell_points = (CX.ravel()[:, None] * e0[None, :]
                    + CY.ravel()[:, None] * e1[None, :]
                    + spawn_h * up[None, :])
@@ -385,6 +392,7 @@ def _open_floor_grid(
     # reconstruction halo outside the shell is not.
     body_hist, _, _ = np.histogram2d(x[inside], y[inside], bins=(x_edges, y_edges))
     has_floor = _dense_floor_mask(floor_hist, cell, body_hist=body_hist)
+    mass = _smoothed_density(body_hist, cell, radius=1.0)
 
     dist_to_com = np.hypot(CX - float(x.mean()), CY - float(y.mean()))
     valid = has_floor & (clearance >= max(2.0 * cell, 0.35))
@@ -395,7 +403,7 @@ def _open_floor_grid(
         world=world, up=up, e0=e0, e1=e1, spawn_h=spawn_h, cell=cell,
         nx=nx, ny=ny, CX=CX, CY=CY, cx_cells=cx_cells, cy_cells=cy_cells,
         clearance=clearance, valid=valid, dist_to_com=dist_to_com,
-        extent_x=extent_x, extent_y=extent_y,
+        extent_x=extent_x, extent_y=extent_y, mass=mass,
     )
 
 
@@ -425,7 +433,9 @@ def find_spawn_points(
     grid_cell: float = 0.15,
     solid_opacity: float = 0.1,
     spawn_height_fraction: float = 0.5,
+    spawn_eye_height: float | None = None,
     centroid_pull: float = 0.35,
+    reconstruction_pull: float = 0.0,
     grid: OpenFloorGrid | None = None,
 ) -> list[SpawnPoint]:
     """Candidate start positions in open space with good vantage points.
@@ -433,24 +443,37 @@ def find_spawn_points(
     Pass an existing CollisionWorld to reuse its KD-tree; otherwise one is
     built here with the same solid_opacity. Pass `grid` to reuse an occupancy
     grid already built for waypoint search.
+
+    `reconstruction_pull` is an outdoor overlay (0 for Starter Scene): reward
+    cells that sit on reconstructed splat mass (path, island) so open water
+    next to the reconstruction cannot win on clearance + long sight-lines.
     """
     if grid is None:
         grid = _open_floor_grid(
             scene, up_axis, world=world,
             ceiling_percentile=ceiling_percentile, grid_cell=grid_cell,
             solid_opacity=solid_opacity, spawn_height_fraction=spawn_height_fraction,
+            spawn_eye_height=spawn_eye_height,
         )
     if grid is None:
         return []
 
-    score = grid.clearance - centroid_pull * grid.dist_to_com
+    dist = grid.dist_to_com
+    pull = float(reconstruction_pull)
+    if pull > 0.0 and float(grid.mass.sum()) > 0.0:
+        com_x = float((grid.CX * grid.mass).sum() / grid.mass.sum())
+        com_y = float((grid.CY * grid.mass).sum() / grid.mass.sum())
+        dist = np.hypot(grid.CX - com_x, grid.CY - com_y)
+
+    score = grid.clearance - centroid_pull * dist + pull * np.log1p(np.maximum(grid.mass, 0.0))
     score = np.where(grid.valid, score, -np.inf)
 
     # Stage 1: shortlist spatially-separated candidates by clearance score
     # (greedy non-max suppression so they spread across the room).
     separation = max(4.0 * grid.cell, 0.15 * min(grid.extent_x, grid.extent_y))
     num_candidates = max(3 * num_points, 12)
-    shortlist: list[tuple[float, float, float, float]] = []  # px, py, clearance, dist_to_com
+    # px, py, clearance, dist_to_com, mass
+    shortlist: list[tuple[float, float, float, float, float]] = []
     for _ in range(num_candidates):
         flat = int(np.argmax(score))
         gi, gj = np.unravel_index(flat, score.shape)
@@ -458,7 +481,7 @@ def find_spawn_points(
             break
         px, py = float(grid.cx_cells[gi]), float(grid.cy_cells[gj])
         shortlist.append((px, py, float(grid.clearance[gi, gj]),
-                          float(grid.dist_to_com[gi, gj])))
+                          float(dist[gi, gj]), float(grid.mass[gi, gj])))
         score[np.hypot(grid.CX - px, grid.CY - py) < separation] = -np.inf
     if not shortlist:
         return []
@@ -468,12 +491,13 @@ def find_spawn_points(
     # (curtained alcoves, gaps between furniture) that clearance alone scores
     # the same. The centroid pull is deliberately weakened here: visibility is
     # the better centrality signal, and a full pull would let a central but
-    # enclosed pocket outrank open floor.
-    positions = np.stack([grid.world_point(px, py) for px, py, _, _ in shortlist])
+    # enclosed pocket outrank open floor. reconstruction_pull (when set) stops
+    # unbounded outdoor sight-lines over water from beating the path.
+    positions = np.stack([grid.world_point(px, py) for px, py, _, _, _ in shortlist])
     views = _view_distances(grid.world, positions, grid.up)
     ranking = np.array([
-        view + 0.5 * clr - 0.3 * centroid_pull * dcom
-        for view, (_, _, clr, dcom) in zip(views, shortlist)
+        view + 0.5 * clr - 0.3 * centroid_pull * dcom + pull * np.log1p(max(mass, 0.0))
+        for view, (_, _, clr, dcom, mass) in zip(views, shortlist)
     ])
     order = np.argsort(-ranking)[:num_points]
 
@@ -497,6 +521,7 @@ def find_waypoints(
     grid_cell: float = 0.15,
     solid_opacity: float = 0.1,
     spawn_height_fraction: float = 0.5,
+    spawn_eye_height: float | None = None,
     grid: OpenFloorGrid | None = None,
     interior_image: np.ndarray | None = None,
     interior_camera=None,
@@ -519,6 +544,7 @@ def find_waypoints(
             scene, up_axis, world=world,
             ceiling_percentile=ceiling_percentile, grid_cell=grid_cell,
             solid_opacity=solid_opacity, spawn_height_fraction=spawn_height_fraction,
+            spawn_eye_height=spawn_eye_height,
         )
     if grid is None:
         return []
@@ -867,6 +893,9 @@ def prepare_spawn_selection(
         solid_opacity=float(nav.solid_opacity),
         spawn_height_fraction=float(nav.spawn_height_fraction),
     )
+    eye = nav.get("spawn_eye_height")
+    if eye is not None:
+        grid_kwargs["spawn_eye_height"] = float(eye)
     grid = _open_floor_grid(scene, cfg.camera.up_axis, world=world, **grid_kwargs)
     points = find_spawn_points(
         scene,
@@ -874,6 +903,7 @@ def prepare_spawn_selection(
         world=world,
         num_points=int(nav.num_spawn_points),
         centroid_pull=float(nav.centroid_pull),
+        reconstruction_pull=float(nav.get("reconstruction_pull", 0.0) or 0.0),
         grid=grid,
         **grid_kwargs,
     )
@@ -881,13 +911,19 @@ def prepare_spawn_selection(
         return None
 
     stripped, _ = strip_ceiling(scene, cfg.camera.up_axis, float(nav.ceiling_percentile))
-    image, camera = render_birdseye(
-        stripped,
+    be_kwargs: dict = dict(
         up_axis=cfg.camera.up_axis,
         width=int(cfg.renderer.width),
         height=int(cfg.renderer.height),
         max_splat_radius_px=int(cfg.renderer.get("max_splat_radius_px", 120)),
     )
+    frame = nav.get("birdseye_frame")
+    if frame:
+        be_kwargs["frame"] = str(frame)
+    radius = nav.get("birdseye_max_splat_radius_px")
+    if radius is not None:
+        be_kwargs["max_splat_radius_px"] = int(radius)
+    image, camera = render_birdseye(stripped, **be_kwargs)
     base_image = np.asarray(image).copy()
     waypoints = find_waypoints(
         scene,
