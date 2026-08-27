@@ -106,9 +106,14 @@ agent:
   # Task prompt variant: v3 = short inspector, no done (artifact_hunt_3.py),
   # v2 = precision-first, v1 = original. Add more names in tasks/registry.py.
   prompt: v3
-  # Force-attach the depth map to every VLM prompt. Depth is always rendered,
-  # saved per step, and used for move_toward regardless. When false (default)
-  # the model can still call view_depth to see it on the next observation.
+  # Render and save a depth PNG every step for the dashboard. Off by default —
+  # the CPU depth pass is the slow part of visor-backed runs. send_depth
+  # implies this. When both are false, depth is still rendered after a
+  # view_depth action (next observation) and lazily for move_toward.
+  compute_depth: false
+  # Force-attach the depth map to every VLM prompt. Implies compute_depth.
+  # When false (default) the model can still call view_depth to see it on
+  # the next observation.
   send_depth: false
   # Force-attach the full-resolution bird's-eye path map (ceiling removed,
   # path + frustums) to every VLM prompt. Same size as the saved dashboard
@@ -116,10 +121,13 @@ agent:
   # When false (default) the model can still call view_map to see it on the
   # next observation.
   send_map: false
+  # Render and save a coverage PNG every step for the dashboard. Off by
+  # default. send_coverage implies this. When both are false, the coverage
+  # map is still rendered after a view_coverage_map action.
+  compute_coverage: false
   # Force-attach a compact coverage map to every VLM prompt (RGB first, then
-  # the map). The full-res coverage PNG is always saved for the dashboard.
-  # When false (default) the model can still call view_coverage_map to see it
-  # on the next observation.
+  # the map). Implies compute_coverage. When false (default) the model can
+  # still call view_coverage_map to see it on the next observation.
   send_coverage: false
   # Hard limits the harness enforces on tool call parameters.
   max_move_distance: 2.0

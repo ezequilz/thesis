@@ -1,10 +1,11 @@
-"""Harness RGB from visor WebGL; depth from the CPU EWA rasterizer.
+"""Harness RGB from visor WebGL; depth from the CPU EWA rasterizer (on demand).
 
 RGB is captured from the dashboard's always-on visor iframe, which is sized
 to the selected VLM resolution (default 960x720). Depth uses
 CpuSplatRenderer.render_depth() — the same anisotropic footprints as the
-old CPU images, without compositing RGB (that path stays on
-CpuSplatRenderer.render() for the cpu_splats backend).
+old CPU images — but only when the episode loop asks for it (compute_depth,
+send_depth, view_depth, or a lazy move_toward). render() is RGB-only so
+default runs skip the slow CPU depth pass.
 """
 
 from __future__ import annotations
@@ -62,13 +63,19 @@ class ViserCaptureRenderer:
         )
 
     def render(self, camera: Camera) -> np.ndarray:
-        return self.render_with_depth(camera)[0]
-
-    def render_with_depth(self, camera: Camera) -> tuple[np.ndarray, np.ndarray]:
+        """RGB from the visor only — no CPU depth pass."""
         self._wait_for_visor(camera.width, camera.height)
         rgb = self._capture(camera)
-        depth = self._cpu.render_depth(camera)
         self.last_backend = "viser"
+        return rgb
+
+    def render_depth(self, camera: Camera) -> np.ndarray:
+        """CPU front-surface depth only (used lazily by move_toward)."""
+        return self._cpu.render_depth(camera)
+
+    def render_with_depth(self, camera: Camera) -> tuple[np.ndarray, np.ndarray]:
+        rgb = self.render(camera)
+        depth = self.render_depth(camera)
         return rgb, depth
 
     def _wait_for_visor(self, width: int, height: int) -> None:

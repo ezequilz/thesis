@@ -199,6 +199,94 @@ def _view_distances(
     return np.median(np.minimum(t, max_dist).reshape(M, num_rays), axis=1)
 
 
+def _view_hit_fraction(
+    world: CollisionWorld,
+    origins: np.ndarray,
+    up: np.ndarray,
+    num_rays: int = 16,
+    max_dist: float = 6.0,
+    max_iters: int = 24,
+    hit_dist: float = 5.4,
+) -> np.ndarray:
+    """Fraction of horizontal rays that hit geometry before `hit_dist`.
+
+    Indoor vantages see walls/furniture on several sides. A void island next
+    to a lone floater has almost every ray run out to max_dist.
+    """
+    e0, e1 = ground_basis(up)
+    angles = np.linspace(0.0, 2.0 * np.pi, num_rays, endpoint=False)
+    dirs = np.cos(angles)[:, None] * e0[None, :] + np.sin(angles)[:, None] * e1[None, :]
+    M = len(origins)
+    P = np.repeat(origins, num_rays, axis=0)
+    D = np.tile(dirs, (M, 1))
+    t = np.zeros(len(P))
+    active = np.ones(len(P), dtype=bool)
+    for _ in range(max_iters):
+        if not active.any():
+            break
+        c = np.asarray(world.clearance(P[active] + t[active, None] * D[active]))
+        t[active] += np.maximum(c, 0.0)
+        still = (c > 0.05) & (t[active] < max_dist)
+        active[np.flatnonzero(active)] = still
+    hits = np.minimum(t, max_dist).reshape(M, num_rays) < hit_dist
+    return hits.mean(axis=1)
+
+
+def _dense_floor_mask(floor_hist: np.ndarray, cell: float) -> np.ndarray:
+    """Keep floor cells that belong to a real interior, not lone outlier splats.
+
+    A single floater used to become a valid island after dilation (`>= 1`
+    plus two dilate steps). Drop tiny connected components first, dilate the
+    remaining rooms to fill holes, then require a modest neighborhood of
+    other floor so sparse void trails stay invalid.
+    """
+    occupied = np.asarray(floor_hist) >= 1
+    if not occupied.any():
+        return occupied
+    labeled, n_labels = ndimage.label(occupied)
+    # Lenient: keep anything covering ~0.35 m² (small alcove / closet) and
+    # drop 1–few cell floater clumps. cell=0.15 → ~16 cells.
+    min_cells = max(8, int(round(0.35 / max(cell * cell, 1e-6))))
+    sizes = ndimage.sum(occupied, labeled, index=np.arange(1, n_labels + 1))
+    keep_ids = np.flatnonzero(np.asarray(sizes) >= min_cells) + 1
+    keep = np.isin(labeled, keep_ids) if len(keep_ids) else np.zeros_like(occupied)
+    keep = ndimage.binary_dilation(keep, iterations=2)
+    win = max(3, int(round(0.9 / cell)))
+    if win % 2 == 0:
+        win += 1
+    support = ndimage.uniform_filter(keep.astype(np.float64), size=win, mode="constant")
+    # ~18% of a 0.9 m window is still floor — rooms pass, thin void trails don't.
+    return keep & (support >= 0.18)
+
+
+def _on_reconstructed_interior(
+    image: np.ndarray,
+    camera,
+    positions: np.ndarray,
+    frac: float = 0.30,
+    radius_px: int = 8,
+) -> np.ndarray:
+    """True where a point projects onto reconstructed interior, not the black void."""
+    from .rendering.annotate import project_to_pixels, scene_mask
+
+    mask = scene_mask(image)
+    uv = project_to_pixels(camera, np.asarray(positions, dtype=np.float64))
+    H, W = mask.shape
+    keep = np.zeros(len(positions), dtype=bool)
+    for i, (u, v) in enumerate(uv):
+        if not np.isfinite(u) or not np.isfinite(v):
+            continue
+        x, y = int(round(u)), int(round(v))
+        if not (0 <= x < W and 0 <= y < H):
+            continue
+        y0, y1 = max(0, y - radius_px), min(H, y + radius_px + 1)
+        x0, x1 = max(0, x - radius_px), min(W, x + radius_px + 1)
+        patch = mask[y0:y1, x0:x1]
+        if patch.size and float(patch.mean()) >= frac:
+            keep[i] = True
+    return keep
+
+
 def _open_floor_grid(
     scene: GaussianScene,
     up_axis: str,
@@ -250,7 +338,7 @@ def _open_floor_grid(
     body_lo = floor + 0.15 * interior
     floor_band = (h >= floor - 0.05 * interior) & (h < body_lo)
     floor_hist, _, _ = np.histogram2d(x[floor_band], y[floor_band], bins=(x_edges, y_edges))
-    has_floor = ndimage.binary_dilation(floor_hist >= 1, iterations=2)
+    has_floor = _dense_floor_mask(floor_hist, cell)
 
     dist_to_com = np.hypot(CX - float(x.mean()), CY - float(y.mean()))
     valid = has_floor & (clearance >= max(2.0 * cell, 0.35))
@@ -364,6 +452,8 @@ def find_waypoints(
     solid_opacity: float = 0.1,
     spawn_height_fraction: float = 0.5,
     grid: OpenFloorGrid | None = None,
+    interior_image: np.ndarray | None = None,
+    interior_camera=None,
 ) -> list[Waypoint]:
     """Spread vantage-point waypoints across reachable indoor floor.
 
@@ -371,7 +461,8 @@ def find_waypoints(
     splat volumes) but the selection maximises *coverage*: local maxima of
     clearance (centers of open clusters / rooms) are farthest-point sampled
     so picks land in different rooms rather than clustering near the scene
-    centroid. Enclosed pockets with short sight-lines are dropped.
+    centroid. Void islands (lone outlier splats, black bird's-eye) and
+    enclosed pockets with short sight-lines are dropped.
     """
     if num_points <= 0:
         return []
@@ -415,18 +506,30 @@ def find_waypoints(
 
     positions = np.stack([grid.world_point(px, py) for px, py, _ in reps])
     views = _view_distances(grid.world, positions, grid.up)
+    hit_frac = _view_hit_fraction(grid.world, positions, grid.up)
     min_view = 0.7
+    # Indoor: at least ~4 of 16 rays hit something. Void-next-to-a-floater
+    # has almost every ray run out to max distance.
+    min_hits = 0.25
+    interior = np.ones(len(reps), dtype=bool)
+    if interior_image is not None and interior_camera is not None:
+        interior = _on_reconstructed_interior(
+            interior_image, interior_camera, positions,
+        )
     kept = [
         (px, py, clr, float(view), positions[i])
         for i, ((px, py, clr), view) in enumerate(zip(reps, views))
-        if view >= min_view
+        if view >= min_view and hit_frac[i] >= min_hits and interior[i]
     ]
     if not kept:
         order = np.argsort(-views)[:num_points]
         kept = [
             (reps[i][0], reps[i][1], reps[i][2], float(views[i]), positions[i])
             for i in order
+            if interior[i]
         ]
+    if not kept:
+        return []
 
     # Farthest-point sampling: first the most open vantage, then repeatedly
     # the remaining peak farthest from already picked ones. That covers
@@ -726,14 +829,6 @@ def prepare_spawn_selection(
     )
     if not points:
         return None
-    waypoints = find_waypoints(
-        scene,
-        up_axis=cfg.camera.up_axis,
-        world=world,
-        num_points=int(nav.get("num_waypoints", 8)),
-        grid=grid,
-        **grid_kwargs,
-    )
 
     stripped, _ = strip_ceiling(scene, cfg.camera.up_axis, float(nav.ceiling_percentile))
     image, camera = render_birdseye(
@@ -744,6 +839,16 @@ def prepare_spawn_selection(
         max_splat_radius_px=int(cfg.renderer.get("max_splat_radius_px", 120)),
     )
     base_image = np.asarray(image).copy()
+    waypoints = find_waypoints(
+        scene,
+        up_axis=cfg.camera.up_axis,
+        world=world,
+        num_points=int(nav.get("num_waypoints", 8)),
+        grid=grid,
+        interior_image=base_image,
+        interior_camera=camera,
+        **grid_kwargs,
+    )
     image = draw_spawn_markers(image, camera, np.stack([p.position for p in points]))
     return SpawnSelection(
         image=image, points=points, waypoints=waypoints,

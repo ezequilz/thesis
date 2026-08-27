@@ -21,7 +21,7 @@ Endpoints:
   GET  /api/episodes/<id>      full trace of one past run (steps + artifacts)
   GET  /api/episodes/<id>/log  that run's episode.log
   GET  /api/episodes/<id>/video  RGB|map video (renders once, then cached on disk)
-  POST /api/run           start an episode  {backend, model, max_steps, width, height, send_depth, send_map, send_coverage}
+  POST /api/run           start an episode  {backend, model, max_steps, width, height, send_depth, send_map, send_coverage, compute_depth, compute_coverage}
   POST /api/stop          request cooperative stop of the running episode
   POST /api/select        pin the viser overlay to a step {step: int} / back to live {step: null}
   GET  /frames/<ep>/<png> step screenshots from outputs/episodes/
@@ -51,7 +51,8 @@ LIVE_STATE_PATH = Path("outputs/live/agent_state.json")
 
 RUN_DEFAULTS = {"backend": "cli_relay", "model": "", "max_steps": 10,
                 "width": 960, "height": 720, "send_depth": False,
-                "send_map": False, "send_coverage": False}
+                "send_map": False, "send_coverage": False,
+                "compute_depth": False, "compute_coverage": False}
 RUN_LIMITS = {"max_steps": 200, "width": 1920, "height": 1440}
 
 
@@ -138,6 +139,13 @@ class DashboardApp:
         clean["send_depth"] = bool(clean["send_depth"])
         clean["send_map"] = bool(clean["send_map"])
         clean["send_coverage"] = bool(clean["send_coverage"])
+        clean["compute_depth"] = bool(clean["compute_depth"])
+        clean["compute_coverage"] = bool(clean["compute_coverage"])
+        # Sending a view implies computing it.
+        if clean["send_depth"]:
+            clean["compute_depth"] = True
+        if clean["send_coverage"]:
+            clean["compute_coverage"] = True
 
         with self.lock:
             if self.scene_status != "ready":
@@ -213,6 +221,8 @@ class DashboardApp:
                 send_depth=params["send_depth"],
                 send_map=params["send_map"],
                 send_coverage=params["send_coverage"],
+                compute_depth=params["compute_depth"],
+                compute_coverage=params["compute_coverage"],
                 run_meta={"params": meta_params},
                 on_step=self._on_step,
                 should_stop=self._stop.is_set,
@@ -423,6 +433,8 @@ class DashboardApp:
                     "send_depth": bool(self.cfg.agent.get("send_depth", False)),
                     "send_map": bool(self.cfg.agent.get("send_map", False)),
                     "send_coverage": bool(self.cfg.agent.get("send_coverage", False)),
+                    "compute_depth": bool(self.cfg.agent.get("compute_depth", False)),
+                    "compute_coverage": bool(self.cfg.agent.get("compute_coverage", False)),
                     "viewer_url": f"http://localhost:{self.cfg.viewer.port}",
                     "spectator_path": "/spectator",
                 },

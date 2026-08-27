@@ -19,13 +19,16 @@ Episode flow:
 
 Every step record includes render/decide wall times and, when the policy
 exposes a `last_debug` dict (see CliRelayPolicy), the raw VLM exchange —
-so traces double as debugging material for the dashboard. Depth, path-map,
-and coverage-map PNGs are always written (dashboard tiles). Depth is attached
-after view_depth or when send_depth is on; the bird's-eye path map after
-view_map or, when send_map is on, at full resolution on every prompt; the
-coverage map after view_coverage_map or, when send_coverage is on, as a
-freshly rendered low-res overview on every prompt (RGB first). RGB is always
-in the prompt.
+so traces double as debugging material for the dashboard. RGB and the
+bird's-eye path map are always written. Depth is rendered/saved only when
+compute_depth or send_depth is on, or the previous action was view_depth
+(it is still produced lazily for move_toward). The coverage map is
+rendered/saved only when compute_coverage or send_coverage is on, or the
+previous action was view_coverage_map. Depth is attached after view_depth
+or when send_depth is on; the bird's-eye path map after view_map or, when
+send_map is on, at full resolution on every prompt; the coverage map after
+view_coverage_map or, when send_coverage is on, as a freshly rendered
+low-res overview on every prompt (RGB first). RGB is always in the prompt.
 """
 
 from __future__ import annotations
@@ -106,6 +109,31 @@ def _motion_note(outcome: dict | None) -> str | None:
     return None
 
 
+def _render_observation(renderer: Renderer, camera, want_depth: bool):
+    """RGB always; CPU/GPU depth only when the dashboard or prompt needs it."""
+    if want_depth:
+        render_both = getattr(renderer, "render_with_depth", None)
+        if render_both is not None:
+            return render_both(camera)
+    render_rgb = getattr(renderer, "render", None)
+    if render_rgb is not None:
+        return render_rgb(camera), None
+    return renderer.render_with_depth(camera)[0], None
+
+
+def _ensure_depth(renderer: Renderer, camera, depth):
+    """Lazy depth for move_toward when the per-step depth pass was skipped."""
+    if depth is not None:
+        return depth
+    render_depth = getattr(renderer, "render_depth", None)
+    if render_depth is not None:
+        return render_depth(camera)
+    render_both = getattr(renderer, "render_with_depth", None)
+    if render_both is not None:
+        return render_both(camera)[1]
+    return None
+
+
 def _select_start(
     policy: VLMPolicy,
     spawn: SpawnSelection,
@@ -168,6 +196,8 @@ def run_episode(
     send_depth: bool = False,
     send_map: bool = False,
     send_coverage: bool = False,
+    compute_depth: bool = False,
+    compute_coverage: bool = False,
     run_meta: dict | None = None,
     on_step: Callable[[dict, Path, CameraRig], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
@@ -176,16 +206,17 @@ def run_episode(
 
     nav is the collision world (path clamp follows navigation.collision);
     spawn triggers the
-    bird's-eye start-selection prompt before the first step. send_depth
-    forces the depth map onto every VLM prompt; otherwise it is attached
-    only on the observation after a view_depth action (it is always
-    rendered, saved, and used for move_toward). send_map forces the
-    full-resolution bird's-eye path map onto every VLM prompt (no downsize);
-    otherwise it is attached only after view_map. send_coverage forces a
-    low-res coverage map (redrawn from the original buffers) onto every
-    VLM prompt after RGB; otherwise the coverage map is attached only after
-    view_coverage_map. The path map and full-res coverage map are always
-    updated and saved. RGB is always in the prompt.
+    bird's-eye start-selection prompt before the first step. compute_depth
+    renders and saves a depth PNG every step (dashboard); send_depth also
+    attaches it to every VLM prompt. Otherwise depth is attached only after
+    a view_depth action, and is rendered lazily when move_toward needs it.
+    send_map forces the full-resolution bird's-eye path map onto every VLM
+    prompt (no downsize); otherwise it is attached only after view_map.
+    compute_coverage renders and saves the coverage PNG every step;
+    send_coverage also attaches a low-res coverage map (redrawn from the
+    original buffers) onto every VLM prompt after RGB. Otherwise the
+    coverage map is attached only after view_coverage_map. RGB and the path
+    map are always saved. RGB is always in the prompt.
     run_meta is merged into the episode's meta.json.
 
     on_step(record, frame_path, rig) fires after each decision — `record`
@@ -231,6 +262,8 @@ def run_episode(
         "send_depth": send_depth,
         "send_map": send_map,
         "send_coverage": send_coverage,
+        "compute_depth": compute_depth,
+        "compute_coverage": compute_coverage,
         "artifact_count": 0,
         "summary": None,
         "waypoints": [
@@ -256,11 +289,9 @@ def run_episode(
 
                     t0 = time.perf_counter()
                     camera = rig.camera(width, height, fov_deg)
-                    render_depth = getattr(renderer, "render_with_depth", None)
-                    if render_depth is not None:
-                        observation, depth = render_depth(camera)
-                    else:
-                        observation, depth = renderer.render(camera), None
+                    want_depth = send_depth or compute_depth or send_depth_once
+                    want_coverage = send_coverage or compute_coverage or send_coverage_once
+                    observation, depth = _render_observation(renderer, camera, want_depth)
                     render_s = time.perf_counter() - t0
                     render_backend = getattr(renderer, "last_backend", None)
 
@@ -268,7 +299,7 @@ def run_episode(
                     Image.fromarray(observation).save(frame_path)
                     depth_image = None
                     depth_frame_name = None
-                    if depth is not None:
+                    if want_depth and depth is not None:
                         depth_image = depth_to_image(depth)
                         depth_frame_name = f"step_{step:03d}_depth.png"
                         Image.fromarray(depth_image).save(episode_dir / depth_frame_name)
@@ -283,10 +314,13 @@ def run_episode(
                         map_image = expl_map.render()
                         map_frame_name = f"step_{step:03d}_map.png"
                         Image.fromarray(map_image).save(episode_dir / map_frame_name)
-                        coverage_image = expl_map.render_coverage()
-                        coverage_frame_name = f"step_{step:03d}_coverage.png"
-                        Image.fromarray(coverage_image).save(episode_dir / coverage_frame_name)
                         coverage_frac = expl_map.coverage_fraction
+                        if want_coverage:
+                            coverage_image = expl_map.render_coverage()
+                            coverage_frame_name = f"step_{step:03d}_coverage.png"
+                            Image.fromarray(coverage_image).save(
+                                episode_dir / coverage_frame_name
+                            )
 
                     pose = rig.state_description()
                     if coverage_frac is not None:
@@ -371,6 +405,11 @@ def run_episode(
                             "yaw_deg": rig.yaw_deg,
                             "pitch_deg": rig.pitch_deg,
                         })
+                        if action.name == "move_toward" and depth is None:
+                            t_depth = time.perf_counter()
+                            depth = _ensure_depth(renderer, camera, depth)
+                            render_s += time.perf_counter() - t_depth
+                            record["timing"]["render_s"] = round(render_s, 3)
                         ctx = MotionContext(
                             world=nav, camera=camera, depth=depth,
                             waypoints=getattr(spawn, "waypoints", None),

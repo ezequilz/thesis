@@ -131,8 +131,11 @@ def test_render_coverage_max_side_redraws_compact_from_original():
 
 
 class _BlankRenderer:
+    def render(self, camera):
+        return np.full((camera.height, camera.width, 3), 30, dtype=np.uint8)
+
     def render_with_depth(self, camera):
-        rgb = np.full((camera.height, camera.width, 3), 30, dtype=np.uint8)
+        rgb = self.render(camera)
         depth = np.full((camera.height, camera.width), np.inf, dtype=np.float32)
         return rgb, depth
 

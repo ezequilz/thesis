@@ -6,7 +6,7 @@
   positions onto the bird's-eye render.
 - draw_path_map: paint the agent's walked path and per-step camera frustums
   onto the same bird's-eye render (used as the on-demand map action), plus
-  pale gold W# markers for jump_to_waypoint vantages.
+  gold W# markers for jump_to_waypoint vantages.
 - coverage overlay: accumulate large, distance-faded view cones on a duplicate
   of that bird's-eye so the VLM can see which floor area has been looked at.
 """
@@ -23,10 +23,10 @@ _MARKER_OUTLINE = (255, 255, 255)
 # Match the viser overlay: red trajectory + frustum, cyan for the live pose.
 _PATH_COLOR = (255, 80, 80)
 _CURRENT_COLOR = (90, 190, 255)
-# Waypoints: muted gold, kept translucent so they don't compete with the path.
-_WAYPOINT_FILL = (210, 175, 70, 110)
-_WAYPOINT_OUTLINE = (230, 200, 100, 160)
-_WAYPOINT_LABEL = (210, 175, 80)
+# Waypoints: gold disks, readable on parquet without matching the path's yellow.
+_WAYPOINT_FILL = (255, 196, 48, 220)
+_WAYPOINT_OUTLINE = (50, 32, 8, 255)
+_WAYPOINT_LABEL = (255, 224, 96)
 # Coverage cones: saturated lime. One close view is ~25% opaque (readable on
 # parquet); 4 overlapping looks saturate to solid lime. Full strength holds
 # out to ~1.5 m (curtain distance), then fades.
@@ -156,9 +156,9 @@ def _draw_waypoint_overlay(
     waypoints: np.ndarray,
     image_width: int,
 ) -> list[tuple[int, tuple[float, float], int]]:
-    """Pale gold disks under the path. Returns (index, uv, radius) for labels."""
+    """Gold W# disks under the path. Returns (index, uv, radius) for labels."""
     draw = ImageDraw.Draw(overlay)
-    r = max(3, image_width // 160)
+    r = max(5, image_width // 120)
     placed: list[tuple[int, tuple[float, float], int]] = []
     uv = project_to_pixels(camera, np.asarray(waypoints, dtype=np.float64))
     for i, (u, v) in enumerate(uv):
@@ -166,7 +166,7 @@ def _draw_waypoint_overlay(
             continue
         draw.ellipse(
             (u - r, v - r, u + r, v + r),
-            fill=_WAYPOINT_FILL, outline=_WAYPOINT_OUTLINE, width=1,
+            fill=_WAYPOINT_FILL, outline=_WAYPOINT_OUTLINE, width=2,
         )
         placed.append((i, (float(u), float(v)), r))
     return placed
@@ -253,12 +253,12 @@ def draw_path_map(
 
     img = Image.alpha_composite(img, overlay).convert("RGB")
     ink = ImageDraw.Draw(img)
-    wp_font = _font(max(9, image.shape[1] // 90))
+    wp_font = _font(max(11, image.shape[1] // 80))
     for idx, uv, wr in waypoint_marks:
         text = f"W{idx}"
         tx, ty = uv[0] + wr + 2, uv[1] - wr - 1
-        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            ink.text((tx + dx, ty + dy), text, fill=(40, 30, 10), font=wp_font)
+        for dx, dy in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
+            ink.text((tx + dx, ty + dy), text, fill=(0, 0, 0), font=wp_font)
         ink.text((tx, ty), text, fill=_WAYPOINT_LABEL, font=wp_font)
     font = _font(max(12, 2 * r - 6))
     for i, (pose, uv, _) in enumerate(prepared):

@@ -214,8 +214,11 @@ def test_loop_jump_restores_step_zero_pose(tmp_path):
             return Action("done", {"summary": "ok"})
 
     class _Renderer:
+        def render(self, camera):
+            return np.full((camera.height, camera.width, 3), 30, dtype=np.uint8)
+
         def render_with_depth(self, camera):
-            rgb = np.full((camera.height, camera.width, 3), 30, dtype=np.uint8)
+            rgb = self.render(camera)
             depth = np.full((camera.height, camera.width), np.inf, dtype=np.float32)
             return rgb, depth
 

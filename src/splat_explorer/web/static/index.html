@@ -32,10 +32,10 @@
               background: var(--panel); border-bottom: 1px solid var(--border);
               flex: none; flex-wrap: wrap; }
   #controls label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--dim); }
-  #controls input, #controls select {
+  #controls input:not([type="checkbox"]), #controls select {
     background: var(--panel2); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 6px 8px; font-size: 13px; min-width: 90px; }
-  #controls input:focus, #controls select:focus { outline: 1px solid var(--accent); }
+  #controls input:not([type="checkbox"]):focus, #controls select:focus { outline: 1px solid var(--accent); }
   button { border: 0; border-radius: 6px; padding: 7px 16px; font-size: 13px;
            font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .45; cursor: default; }
@@ -47,8 +47,39 @@
   #stats b { color: var(--text); font-family: var(--mono); font-weight: 600; }
   #msg { font-size: 12px; color: var(--warn); padding: 6px 16px; flex: none; }
   #msg:empty { display: none; padding: 0; }
-  .chk-group { display: flex; flex-direction: column; gap: 4px; align-self: center; }
   .btn-row { display: flex; gap: 8px; align-items: center; align-self: end; }
+  .settings-wrap {
+    position: relative; display: flex; flex-direction: column; gap: 3px;
+    font-size: 11px; color: var(--dim); align-self: end;
+  }
+  #btn-settings {
+    background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border) !important;
+    border-radius: 6px; padding: 6px 10px; font-size: 13px; font-weight: 400;
+    min-width: 110px; text-align: left;
+    display: inline-flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  #btn-settings:hover { color: var(--text); background: #243044; }
+  #btn-settings[aria-expanded="true"] { outline: 1px solid var(--accent); }
+  #btn-settings .caret { font-size: 10px; color: var(--dim); transition: transform .12s ease; }
+  .settings-wrap.open #btn-settings .caret { transform: rotate(180deg); }
+  .settings-menu {
+    display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 50;
+    min-width: 228px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.45);
+  }
+  .settings-wrap.open .settings-menu { display: block; }
+  .settings-menu .chk {
+    margin: 0; padding: 6px 8px; border-radius: 6px; width: 100%;
+    color: var(--text) !important;
+  }
+  .settings-menu .chk:hover { background: var(--panel2); }
+  .settings-menu .hint {
+    font-size: 10px; color: var(--dim); margin: 8px 8px 3px;
+    letter-spacing: .06em; text-transform: uppercase;
+  }
+  .settings-menu .hint:first-child { margin-top: 2px; }
   .icon-btn {
     background: transparent; color: var(--dim);
     border: 1px solid var(--border) !important;
@@ -82,18 +113,16 @@
   #detail img.frame { max-width: 100%; max-height: 58vh; width: auto; height: auto;
                       object-fit: contain; border-radius: 6px;
                       border: 1px solid var(--border); background: #000; display: block; }
-  .frames { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  .frames.single { grid-template-columns: 1fr; }
-  @media (max-width: 1100px) { .frames { grid-template-columns: 1fr; } }
+  .frames { display: grid; gap: 10px; grid-template-columns: 1fr 1fr; }
+  .frames.n1 { grid-template-columns: 1fr; }
+  .frames.n2 { grid-template-columns: 1fr 1fr; }
+  .frames.n3, .frames.n4 { grid-template-columns: 1fr 1fr; }
+  @media (max-width: 1100px) { .frames, .frames.n2, .frames.n3, .frames.n4 { grid-template-columns: 1fr; } }
   .frames figure { margin: 0; }
   .frames figcaption { font-size: 11px; color: var(--dim); margin: 0 0 5px; letter-spacing: .02em; }
   .frames img.frame { max-height: 46vh; width: 100%; height: auto; object-fit: contain; }
-  .frames.has-map img.frame { max-height: 34vh; }
-  .frames .missing {
-    min-height: 20vh; border: 1px dashed var(--border); border-radius: 6px;
-    color: var(--dim); display: flex; align-items: center; justify-content: center;
-    font-size: 12px; text-align: center; padding: 16px; background: #000;
-  }
+  .frames.n2 img.frame { max-height: 52vh; }
+  .frames.n3 img.frame, .frames.n4 img.frame { max-height: 34vh; }
   .step img.depth-thumb { width: 48px; opacity: .9; }
   .kv { display: grid; grid-template-columns: 110px 1fr; gap: 3px 12px;
         font-size: 13px; margin: 12px 0; }
@@ -154,8 +183,30 @@
   @media (max-width: 900px) {
     #viser-pip { right: 12px; bottom: 12px; }
   }
-  label.chk { flex-direction: row !important; align-items: center; gap: 6px !important;
-              font-size: 12px !important; color: var(--dim); white-space: nowrap; }
+  label.chk {
+    flex-direction: row !important; align-items: center; gap: 8px !important;
+    font-size: 12.5px !important; color: var(--dim); white-space: nowrap;
+    cursor: pointer; user-select: none;
+  }
+  label.chk input[type="checkbox"] {
+    appearance: none; -webkit-appearance: none;
+    width: 14px; height: 14px; min-width: 14px; margin: 0; padding: 0;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: var(--panel2); cursor: pointer; flex: none;
+    display: grid; place-content: center;
+  }
+  label.chk input[type="checkbox"]:hover { border-color: var(--accent); }
+  label.chk input[type="checkbox"]:checked {
+    background: var(--accent); border-color: var(--accent);
+  }
+  label.chk input[type="checkbox"]:checked::after {
+    content: ""; width: 7px; height: 4px;
+    border: 1.6px solid #0b1220; border-top: 0; border-right: 0;
+    transform: rotate(-45deg) translate(0.5px, -1px);
+  }
+  label.chk input[type="checkbox"]:focus-visible {
+    outline: 1px solid var(--accent); outline-offset: 2px;
+  }
 </style>
 </head>
 <body>
@@ -191,10 +242,24 @@
       <option value="960x720" selected>960 × 720 (default)</option>
     </select>
   </label>
-  <div class="chk-group">
-    <label class="chk"><input type="checkbox" id="in-depth">depth map</label>
-    <label class="chk"><input type="checkbox" id="in-map">bird's-eye map</label>
-    <label class="chk"><input type="checkbox" id="in-coverage">coverage map</label>
+  <div class="settings-wrap" id="settings-wrap">
+    <span>settings</span>
+    <button type="button" id="btn-settings" aria-expanded="false" aria-haspopup="true">
+      Settings <span class="caret">▾</span>
+    </button>
+    <div class="settings-menu" id="settings-menu" role="menu">
+      <div class="hint">send to VLM</div>
+      <label class="chk"><input type="checkbox" id="in-depth">depth map</label>
+      <label class="chk"><input type="checkbox" id="in-map">bird's-eye map</label>
+      <label class="chk"><input type="checkbox" id="in-coverage">coverage map</label>
+      <div class="hint">compute (dashboard only)</div>
+      <label class="chk" title="Render and save the depth map every step. Slow. Not sent to the model unless 'depth map' is also on.">
+        <input type="checkbox" id="in-compute-depth">compute depth-map
+      </label>
+      <label class="chk" title="Render and save the coverage map every step. Not sent to the model unless 'coverage map' is also on.">
+        <input type="checkbox" id="in-compute-coverage">compute coverage map
+      </label>
+    </div>
   </div>
   <div class="btn-row">
     <button id="btn-start">▶ Start episode</button>
@@ -300,6 +365,14 @@ function render() {
   if (!$("in-map").dataset.init) {
     $("in-map").checked = !!defaults.send_map;
     $("in-map").dataset.init = "1";
+  }
+  if (!$("in-compute-depth").dataset.init) {
+    $("in-compute-depth").checked = !!defaults.compute_depth || !!defaults.send_depth;
+    $("in-compute-depth").dataset.init = "1";
+  }
+  if (!$("in-compute-coverage").dataset.init) {
+    $("in-compute-coverage").checked = !!defaults.compute_coverage || !!defaults.send_coverage;
+    $("in-compute-coverage").dataset.init = "1";
   }
   $("spectator-link").href = "/spectator";
   const frame = $("viser-frame");
@@ -409,7 +482,7 @@ function renderDetail() {
       ${esc(a.image_region ?? "")}<br>${esc(a.description ?? "")}</div>`).join("");
   const depthCaption = s.depth_sent
     ? "DEPTH MAP — sent to the VLM this step (bright = near, black = nothing)"
-    : "DEPTH MAP — navigation only (sent to the VLM after view_depth, or if always-send is on)";
+    : "DEPTH MAP — computed for the dashboard (sent to the VLM after view_depth, or if always-send is on)";
   const mapCaption = s.map_sent
     ? "MAP — bird's-eye path + gold W# jump waypoints, sent to the VLM this step (full resolution)"
     : "MAP — bird's-eye path + gold W# jump waypoints (updated every step; sent to the VLM after view_map, or if always-send is on)";
@@ -418,7 +491,7 @@ function renderDetail() {
         ? "COVERAGE MAP — low-res overview sent to the VLM this step (yellow-green cones)"
         : "COVERAGE MAP — viewed area (yellow-green cones), sent to the VLM this step")
       + (s.coverage != null ? ` · ${Math.round(s.coverage * 100)}%` : "")
-    : "COVERAGE MAP — viewed area (updated every step; sent to the VLM after view_coverage_map, or if always-send is on)"
+    : "COVERAGE MAP — computed for the dashboard (sent to the VLM after view_coverage_map, or if always-send is on)"
       + (s.coverage != null ? ` · ${Math.round(s.coverage * 100)}%` : "");
   const vlmSize = run?.params
     ? `${run.params.width}×${run.params.height}`
@@ -434,19 +507,8 @@ function renderDetail() {
     ? fig(coverageCaption, s.coverage_frame_url, `step ${s.step} coverage`)
     : "";
   const depthFig = s.depth_frame_url ? fig(depthCaption, s.depth_frame_url, `step ${s.step} depth`) : "";
-  const coverageSlot = coverageFig || (mapFig ? `
-    <figure>
-      <figcaption>COVERAGE MAP — viewed area (sent to the VLM after view_coverage_map)</figcaption>
-      <div class="missing">No coverage frame for this step.<br>Start a new episode to record it.</div>
-    </figure>` : "");
-  let frames;
-  if (mapFig || coverageFig || depthFig) {
-    const cls = "frames has-map" + (depthFig || coverageSlot ? "" : " single");
-    // 2×2 reading order: RGB | depth / path map | coverage
-    frames = `<div class="${cls}">${rgbFig}${depthFig}${mapFig}${coverageSlot}</div>`;
-  } else {
-    frames = `<img class="frame" src="${s.frame_url}" alt="step ${s.step}">`;
-  }
+  const panes = [rgbFig, depthFig, mapFig, coverageFig].filter(Boolean);
+  const frames = `<div class="frames n${panes.length}">${panes.join("")}</div>`;
   d.innerHTML = `
     ${frames}
     <div class="kv">
@@ -494,6 +556,8 @@ $("btn-start").onclick = () => {
     send_depth: $("in-depth").checked,
     send_coverage: $("in-coverage").checked,
     send_map: $("in-map").checked,
+    compute_depth: $("in-compute-depth").checked,
+    compute_coverage: $("in-compute-coverage").checked,
   });
 };
 $("btn-stop").onclick = () => post("/api/stop");
@@ -502,6 +566,27 @@ $("btn-video").onclick = () => {
   if (!ep) return;
   window.open("/video/" + encodeURIComponent(ep), "_blank", "noopener");
 };
+
+(function settingsDropdown() {
+  const wrap = $("settings-wrap"), btn = $("btn-settings");
+  function setOpen(open) {
+    wrap.classList.toggle("open", open);
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  btn.onclick = e => { e.stopPropagation(); setOpen(!wrap.classList.contains("open")); };
+  document.addEventListener("click", e => { if (!wrap.contains(e.target)) setOpen(false); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape") setOpen(false); });
+  function pair(sendId, computeId) {
+    $(sendId).addEventListener("change", () => {
+      if ($(sendId).checked) $(computeId).checked = true;
+    });
+    $(computeId).addEventListener("change", () => {
+      if (!$(computeId).checked) $(sendId).checked = false;
+    });
+  }
+  pair("in-depth", "in-compute-depth");
+  pair("in-coverage", "in-compute-coverage");
+})();
 
 // --- past-run history --------------------------------------------------------
 async function loadHistory() {
