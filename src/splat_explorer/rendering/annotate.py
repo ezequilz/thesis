@@ -179,7 +179,7 @@ def draw_path_map(
     fov_deg: float = 75.0,
     up: np.ndarray | None = None,
     title: str = (
-        "BIRD'S-EYE MAP (ceiling removed) | red = path | cyan = now | gold W# = jump"
+        "BIRD'S-EYE MAP (ceiling removed) | red = path | cyan = now | gold W# = jump | 12/N = top"
     ),
     waypoints: np.ndarray | None = None,
 ) -> np.ndarray:
@@ -271,7 +271,29 @@ def draw_path_map(
         ink.text((tx, ty), text, fill=fill, font=font)
 
     _draw_label(ink, (8, 6), title)
+    _draw_look_compass(ink, image.shape[1], image.shape[0])
     return np.asarray(img)
+
+
+def _draw_look_compass(draw: ImageDraw.ImageDraw, width: int, height: int) -> None:
+    """Small N-up compass: 12/north is the top of this image (jump look=)."""
+    r = max(12, min(width, height) // 24)
+    cx = width - r - 12
+    cy = height - r - 14
+    font = _font(max(10, r // 2 + 3))
+    label = "N"
+    draw.ellipse(
+        (cx - r - 2, cy - r - 2, cx + r + 2, cy + r + 2),
+        fill=(0, 0, 0),
+        outline=(220, 220, 220),
+        width=2,
+    )
+    draw.polygon(
+        [(cx, cy - r + 3), (cx - 5, cy + 3), (cx + 5, cy + 3)],
+        fill=(255, 80, 80),
+    )
+    tw = draw.textlength(label, font=font) if hasattr(draw, "textlength") else 6
+    draw.text((cx - tw / 2, cy - r - 1), label, fill=(255, 255, 255), font=font)
 
 
 def scene_mask(image: np.ndarray) -> np.ndarray:

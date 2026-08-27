@@ -105,6 +105,13 @@ def test_parse_action_accepts_view_extras():
     jump = parse_action('{"action": "jump_to_waypoint", "args": {"target": "step 3"}}')
     assert jump is not None and jump.name == "jump_to_waypoint"
     assert jump.args["target"] == "step 3"
+    jump = parse_action(
+        '{"action": "jump_to_waypoint", "args": {"target": "W2", "look": "north"}}'
+    )
+    assert jump is not None and jump.args["look"] == "north"
+    spec = next(t for t in ACTION_TOOLS if t["function"]["name"] == "jump_to_waypoint")
+    assert "look" in spec["function"]["parameters"]["properties"]
+    assert "look" not in spec["function"]["parameters"]["required"]
 
 
 def test_system_prompt_mentions_extras_when_attached():
@@ -120,6 +127,7 @@ def test_system_prompt_mentions_extras_when_attached():
         assert "BIRD'S-EYE MAP" not in base, name
         assert "This turn also includes a COVERAGE MAP" not in base, name
         assert "BIRD'S-EYE MAP" in with_map, name
+        assert "12 / north" in with_map, name
         assert "DEPTH MAP" in with_depth, name
         assert "This turn also includes a COVERAGE MAP" in with_coverage, name
         assert "RGB view" in with_map and "RGB view" in with_depth, name

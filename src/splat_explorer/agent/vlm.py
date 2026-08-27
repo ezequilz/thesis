@@ -164,7 +164,8 @@ class OpenAIVLMPolicy:
             content += [
                 {"type": "text", "text": (
                     f"Image {n} — bird's-eye MAP (ceiling removed; red line = path, "
-                    "triangles = camera view, cyan = current pose, pale gold W# = jump waypoints):"
+                    "triangles = camera view, cyan = current pose, pale gold W# = jump waypoints; "
+                    "12/north = top of the map for jump look):"
                 )},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_encode_png_b64(map_image)}"}},
             ]

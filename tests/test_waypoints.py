@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from splat_explorer.agent.actions import Action, parse_jump_target
+from splat_explorer.agent.actions import Action, parse_jump_target, parse_look_direction
 from splat_explorer.agent.camera_rig import CameraRig
 from splat_explorer.navigation import (
     CollisionWorld,
@@ -157,6 +157,37 @@ def test_parse_jump_target_accepts_step_and_waypoint_forms():
     assert parse_jump_target({}) is None
 
 
+def test_parse_look_direction_clock_and_compass():
+    parsed, err = parse_look_direction({})
+    assert parsed is None and err is None
+    parsed, err = parse_look_direction({"target": "W2"})
+    assert parsed is None and err is None
+    parsed, err = parse_look_direction({"look": "keep"})
+    assert parsed is None and err is None
+
+    north, err = parse_look_direction({"look": "north"})
+    assert err is None and north is not None
+    assert north.degrees_cw == 0.0
+    assert north.label == "north"
+    for value in ("N", "12", 12, "12 o'clock", "12pm", "top"):
+        got, err = parse_look_direction({"look": value})
+        assert err is None and got is not None, value
+        assert got.degrees_cw == 0.0, value
+
+    east, err = parse_look_direction({"facing": "3 o'clock"})
+    assert err is None and east is not None
+    assert east.degrees_cw == 90.0
+    west, err = parse_look_direction({"look_direction": "west"})
+    assert err is None and west is not None
+    assert west.degrees_cw == 270.0
+    ne, err = parse_look_direction({"look": "NE"})
+    assert err is None and ne is not None
+    assert ne.degrees_cw == 45.0
+
+    bad, err = parse_look_direction({"look": "kitchen"})
+    assert bad is None and err
+
+
 def test_jump_to_waypoint_teleports_and_keeps_heading():
     rig = CameraRig(np.array([0.0, 1.2, 0.0]), up_axis="+y", yaw_deg=40.0, pitch_deg=-8.0)
     dest = np.array([3.0, 1.2, -1.5])
@@ -168,6 +199,77 @@ def test_jump_to_waypoint_teleports_and_keeps_heading():
     assert outcome is not None and not outcome.get("error")
     assert outcome["destination"] == "waypoint 2 (W2)"
     np.testing.assert_allclose(rig.position, dest)
+    assert rig.yaw_deg == 40.0
+    assert rig.pitch_deg == -8.0
+    assert "look" not in outcome
+
+
+def test_jump_look_sets_map_aligned_yaw_and_levels_pitch():
+    dest = np.array([3.0, 1.2, -1.5])
+    ctx = MotionContext(waypoints=[
+        Waypoint(index=2, position=dest, clearance=1.2, view_distance=2.5),
+    ])
+    rig = CameraRig(np.array([0.0, 1.2, 0.0]), up_axis="+y", yaw_deg=40.0, pitch_deg=-8.0)
+    outcome = rig.apply(
+        Action("jump_to_waypoint", {"target": "W2", "look": "north"}), ctx,
+    )
+    assert outcome is not None and not outcome.get("error")
+    np.testing.assert_allclose(rig.position, dest)
+    assert outcome["look"] == "north"
+    assert rig.pitch_deg == 0.0
+    # Map north = top of the bird's-eye image = -X for +y-up scenes.
+    np.testing.assert_allclose(rig.heading(), [-1.0, 0.0, 0.0], atol=1e-6)
+
+    rig.apply(Action("jump_to_waypoint", {"target": "W2", "look": "east"}), ctx)
+    np.testing.assert_allclose(rig.heading(), [0.0, 0.0, -1.0], atol=1e-6)
+    rig.apply(Action("jump_to_waypoint", {"target": "W2", "look": "6"}), ctx)
+    np.testing.assert_allclose(rig.heading(), [1.0, 0.0, 0.0], atol=1e-6)
+    rig.apply(Action("jump_to_waypoint", {"target": "W2", "look": "west"}), ctx)
+    np.testing.assert_allclose(rig.heading(), [0.0, 0.0, 1.0], atol=1e-6)
+
+
+def test_jump_look_north_points_up_on_birdseye_map():
+    dest = np.array([0.0, 1.2, 0.0])
+    ctx = MotionContext(waypoints=[
+        Waypoint(index=0, position=dest, clearance=1.0, view_distance=2.0),
+    ])
+    rig = CameraRig(np.array([1.0, 1.2, 1.0]), up_axis="+y", yaw_deg=10.0)
+    rig.apply(Action("jump_to_waypoint", {"target": "W0", "look": "north"}), ctx)
+    camera = _topdown_camera()
+    here = project_to_pixels(camera, dest[None])[0]
+    ahead = project_to_pixels(camera, (dest + rig.heading())[None])[0]
+    assert here[1] > ahead[1], "north should move toward the top of the map (smaller y)"
+    east = CameraRig(dest.copy(), up_axis="+y")
+    east.apply(Action("jump_to_waypoint", {"target": "W0", "look": "east"}), ctx)
+    right = project_to_pixels(camera, (dest + east.heading())[None])[0]
+    assert right[0] > here[0], "east should move toward the right of the map"
+
+
+def test_jump_look_overrides_restored_step_heading():
+    rig = CameraRig(np.array([5.0, 1.2, 5.0]), up_axis="+y", yaw_deg=10.0, pitch_deg=5.0)
+    ctx = MotionContext(pose_history=[
+        {"step": 3, "position": np.array([2.0, 1.1, -1.0]), "yaw_deg": 90.0, "pitch_deg": -15.0},
+    ])
+    outcome = rig.apply(
+        Action("jump_to_waypoint", {"target": "step 3", "look": "south"}), ctx,
+    )
+    np.testing.assert_allclose(rig.position, [2.0, 1.1, -1.0])
+    assert outcome["look"] == "south"
+    assert rig.pitch_deg == 0.0
+    np.testing.assert_allclose(rig.heading(), [1.0, 0.0, 0.0], atol=1e-6)
+
+
+def test_jump_keeps_heading_when_look_is_invalid():
+    rig = CameraRig(np.array([0.0, 1.2, 0.0]), up_axis="+y", yaw_deg=40.0, pitch_deg=-8.0)
+    dest = np.array([3.0, 1.2, -1.5])
+    ctx = MotionContext(waypoints=[
+        Waypoint(index=2, position=dest, clearance=1.2, view_distance=2.5),
+    ])
+    outcome = rig.apply(
+        Action("jump_to_waypoint", {"target": "W2", "look": "kitchen"}), ctx,
+    )
+    np.testing.assert_allclose(rig.position, dest)
+    assert outcome.get("look_error")
     assert rig.yaw_deg == 40.0
     assert rig.pitch_deg == -8.0
 

@@ -260,6 +260,8 @@ class CliRelayPolicy:
                 f"Image {n} - BIRD'S-EYE MAP (ceiling removed; red line = path, "
                 "triangles = camera view at each step, cyan = current pose, "
                 "pale gold W# = jump_to_waypoint vantages). "
+                "For jump look: 12/north is the TOP of this map, 3/east the right, "
+                "6/south the bottom, 9/west the left. "
                 "move_toward pixels still refer to the RGB view:",
                 _png_data_url(map_image),
             ))
@@ -349,7 +351,8 @@ class CliRelayPolicy:
         if with_map:
             attached.append(
                 "a bird's-eye MAP of your path so far (ceiling removed; "
-                "frustums = viewing direction, pale gold W# = jump waypoints)"
+                "frustums = viewing direction, pale gold W# = jump waypoints; "
+                "12/north = top of the map for jump look)"
             )
         if with_coverage:
             attached.append(

@@ -12,7 +12,8 @@ Episode flow:
      view_coverage_map),
      clamp and apply the returned action (optionally path-clamped through the
      MotionContext when navigation.collision is full or low; jump_to_waypoint
-     teleports to a W# vantage or a past step pose), and
+     teleports to a W# vantage or a past step pose, optionally facing a
+     map-clock / compass look direction), and
      log everything to outputs/episodes/<timestamp>/ as frames plus an
      actions.jsonl trace. The outcome of the previous motion (e.g. "move cut
      short by an obstacle") is fed back to the policy with the next prompt.
@@ -105,7 +106,14 @@ def _motion_note(outcome: dict | None) -> str | None:
         )
     if kind == "jump_to_waypoint":
         dest = outcome.get("destination", "the requested target")
-        return f"previous jump_to_waypoint teleported to {dest}"
+        note = f"previous jump_to_waypoint teleported to {dest}"
+        if outcome.get("look"):
+            note += f", facing {outcome['look']}"
+        elif outcome.get("look_error"):
+            note += (
+                f" (look {outcome['look_error']}; kept previous heading)"
+            )
+        return note
     return None
 
 
@@ -326,13 +334,14 @@ def run_episode(
                     if coverage_frac is not None:
                         pose += f" | viewed-area coverage {coverage_frac:.0%}"
                     waypoints = list(getattr(spawn, "waypoints", None) or [])
+                    look_hint = " (optional look= north/3 o'clock/...; 12=top of map)"
                     if waypoints:
                         pose += (
                             f" | jump_to_waypoint: W0-W{waypoints[-1].index} "
-                            f"or step 0-{step}"
+                            f"or step 0-{step}{look_hint}"
                         )
                     elif step > 0:
-                        pose += f" | jump_to_waypoint: step 0-{step}"
+                        pose += f" | jump_to_waypoint: step 0-{step}{look_hint}"
                     if motion_note:
                         pose += f" | {motion_note}"
 

@@ -1,4 +1,4 @@
-"""Task prompt v2: precision-first inspector (static text) + original harness extras.
+"""Task prompt v2: OUTDATED!!! precision-first inspector (static text) + original harness extras.
 
 Drop-in sibling of artifact_hunt.py (v1). Same public surface: system_prompt,
 SYSTEM_PROMPT, SPAWN_PROMPT, score_episode. Dynamic image/tool paragraphs are
@@ -50,6 +50,8 @@ removed): the connected red line is the path you have walked, each numbered \
 marker is a past camera position, and each triangle is the camera frustum \
 (viewing direction) at that step. Cyan highlights your CURRENT pose. Pale \
 gold W# markers are jump_to_waypoint vantages covering the rooms. \
+Clock/compass for jump look: 12 / north is the TOP of this map, 3 / east \
+the right, 6 / south the bottom, 9 / west the left. \
 move_toward pixel coordinates still refer to the RGB view, not the map.
 """
 
@@ -154,8 +156,11 @@ How to move:
   (RGB is still attached). Does not move you.
 - view_map() shows a top-down map of your path and past viewing directions
   on the next observation (RGB is still attached). Does not move you.
-- jump_to_waypoint(target) teleports to a gold W# vantage on the map
+- jump_to_waypoint(target, look?) teleports to a gold W# vantage on the map
   (target "waypoint 2" / "W2" / "2") or back to a past pose ("step 3").
+  Optional look faces a clock hour or compass direction on that map
+  (12 / north = top, 3 / east = right, 6 / south = bottom, 9 / west = left);
+  omit it to keep your current heading. The view stays level.
 - view_coverage_map() shows which floor has been looked at (yellow-green cones,
   coverage %) on the next observation. Does not move you. Call it before done.
 - Prefer move_toward toward open floor or a doorway. If a move is cut short,

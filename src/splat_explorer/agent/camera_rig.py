@@ -20,7 +20,7 @@ import numpy as np
 
 from ..navigation import MotionContext, resolve_move_toward
 from ..rendering.base import Camera, up_vector
-from .actions import Action, parse_jump_target
+from .actions import Action, parse_jump_target, parse_look_direction
 
 
 class CameraRig:
@@ -108,12 +108,14 @@ class CameraRig:
                     "error": f"waypoint {index} out of range (available {available})",
                 }
             self.position = np.asarray(match.position, dtype=np.float64).copy()
-            return {
+            outcome = {
                 "kind": "jump_to_waypoint",
                 "target_kind": "waypoint",
                 "index": index,
                 "destination": f"waypoint {index} (W{index})",
             }
+            outcome.update(self._apply_optional_look(action))
+            return outcome
         history = list(ctx.pose_history) if ctx is not None and ctx.pose_history else []
         pose = next((p for p in history if int(p.get("step", -999)) == index), None)
         if pose is None:
@@ -129,12 +131,42 @@ class CameraRig:
             self.yaw_deg = float(pose["yaw_deg"])
         if "pitch_deg" in pose:
             self.pitch_deg = float(pose["pitch_deg"])
-        return {
+        outcome = {
             "kind": "jump_to_waypoint",
             "target_kind": "step",
             "index": index,
             "destination": f"step {index}",
         }
+        outcome.update(self._apply_optional_look(action))
+        return outcome
+
+    def _apply_optional_look(self, action: Action) -> dict:
+        """Set yaw from a map-clock / compass look; pitch is leveled to 0.
+
+        12 / north is the top of the bird's-eye map (same ground basis as
+        the map renderer). Omitted or unparseable look leaves heading as-is.
+        """
+        parsed, error = parse_look_direction(action.args)
+        if error:
+            return {"look_error": error}
+        if parsed is None:
+            return {}
+        theta = np.radians(parsed.degrees_cw)
+        # Map north = top of image = -_right0; map east = right of image = _fwd0.
+        world_dir = np.sin(theta) * self._fwd0 - np.cos(theta) * self._right0
+        self._set_horizontal_look(world_dir)
+        return {"look": parsed.label, "look_degrees_cw": parsed.degrees_cw}
+
+    def _set_horizontal_look(self, world_dir: np.ndarray) -> None:
+        d = np.asarray(world_dir, dtype=np.float64)
+        d = d - self.up * np.dot(d, self.up)
+        n = float(np.linalg.norm(d))
+        if n < 1e-8:
+            return
+        d /= n
+        yaw = np.degrees(np.arctan2(np.dot(d, self._right0), np.dot(d, self._fwd0)))
+        self.yaw_deg = float(yaw % 360.0)
+        self.pitch_deg = 0.0
 
     def _apply_move(self, action: Action, ctx: MotionContext | None) -> dict:
         forward, right = self._heading()

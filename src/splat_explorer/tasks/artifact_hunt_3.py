@@ -1,4 +1,4 @@
-"""Task prompt v3: short inspector. The harness ends the run at max_steps.
+"""Task prompt v3: IN USE!!! short inspector. The harness ends the run at max_steps.
 
 `done` is omitted from the tool list so the model cannot finish early.
 Same public surface as v1/v2 plus HIDDEN_TOOLS. Switch via agent.prompt.
@@ -26,6 +26,8 @@ removed): the connected red line is the path you have walked, each numbered \
 marker is a past camera position, and each triangle is the camera frustum \
 (viewing direction) at that step. Cyan highlights your CURRENT pose. Pale \
 gold W# markers are jump_to_waypoint vantages covering the rooms. \
+Clock/compass for jump look: 12 / north is the TOP of this map, 3 / east \
+the right, 6 / south the bottom, 9 / west the left. \
 move_toward pixel coordinates still refer to the RGB view, not the map.
 """
 
@@ -60,7 +62,8 @@ as you see them, then keep moving. Unusual objects are not artifacts. \
 {_DEPTH_HELP if with_depth else ""}\
 Walk with move_toward toward a pixel in the RGB view (amount 0..1). Use \
 move for small steps, rotate to look around, jump_to_waypoint to teleport \
-to a gold W# vantage or a past step (e.g. "waypoint 2" / "step 3"), and \
+to a gold W# vantage or a past step (e.g. "waypoint 2" / "step 3"; optional \
+look= north or "3 o'clock" on the map, 12=top), and \
 view_depth / view_map / view_coverage_map when useful. Pixel coordinates \
 always refer to RGB. \
 Call exactly one tool per turn. Keep exploring every accessible room. Explore methodically. \
