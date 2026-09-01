@@ -665,13 +665,11 @@ def serve_viewer(
         path = str(req["path"])
         if gen < scene_state["generation"]:
             return
-        # Same asset: ack the new generation. Re-pose if only the up axis changed.
-        # `reload` is set when a repaired PLY is overwritten in place.
-        if (
-            path == scene_state["path"]
-            and scene_state["status"] == "ready"
-            and not req.get("reload")
-        ):
+        # Same file: ack. `reload` in scene.json is sticky, so only a strictly
+        # newer generation may re-decode (overwritten scene_repaired.ply).
+        same = path == scene_state["path"] and scene_state["status"] == "ready"
+        force = bool(req.get("reload")) and gen > scene_state["generation"]
+        if same and not force:
             scene_state["generation"] = max(scene_state["generation"], gen)
             scene_state["id"] = req.get("id", scene_state["id"])
             scene_state["label"] = req.get("label", scene_state["label"])

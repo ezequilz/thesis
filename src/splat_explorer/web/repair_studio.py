@@ -158,7 +158,7 @@ class RepairStudio:
         self._stop.set()
         return True, "Stop requested."
 
-    def show(self, episode_id: str, which: str) -> tuple[bool, str]:
+    def show(self, episode_id: str, which: str, *, force: bool = False) -> tuple[bool, str]:
         which = str(which or "").strip().lower()
         if which not in ("original", "repaired"):
             return False, "which must be 'original' or 'repaired'."
@@ -174,6 +174,9 @@ class RepairStudio:
         ply = d / (ORIGINAL_PLY if which == "original" else REPAIRED_PLY)
         if not ply.is_file():
             return False, f"{ply.name} is not on disk yet — run a replay first."
+        with self._lock:
+            if self.showing == which and not force:
+                return True, f"Viser already showing {which}."
         with self.app.lock:
             spec = self.app._scene_spec
             up_axis = spec.up_axis if spec is not None else "+y"
@@ -262,7 +265,7 @@ class RepairStudio:
                         f"(step {view.get('step')}) {body.get('status')}"
                     )
                 if result.status == "ok" and self.showing == "repaired":
-                    self.show(episode_id, "repaired")
+                    self.show(episode_id, "repaired", force=True)
 
             replay(
                 source,
