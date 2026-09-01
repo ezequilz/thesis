@@ -219,6 +219,7 @@ class RepairStudio:
             record, frame,
             {"width": view["width"], "height": view["height"]},
             [view["position"]],
+            snap_camera=True,
         )
         return True, f"Viewer camera set to step {step}."
 

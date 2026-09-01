@@ -478,14 +478,21 @@ class DashboardApp:
             episode = run["episode"]
             trajectory = [s["position"] for s in run["steps"]]
         frame_path = Path(self.cfg.output.dir) / "episodes" / episode / record["frame"]
-        self._publish_pose(record, frame_path, params, trajectory)
+        self._publish_pose(
+            record, frame_path, params, trajectory, snap_camera=True,
+        )
         if step is None:
             return True, "Viewer back to live agent."
         return True, f"Viewer camera set to step {step}."
 
     def _publish_pose(self, record: dict, frame_path: Path, params: dict,
-                      trajectory: list) -> None:
-        """Publish a step's camera pose for the viser viewer overlay (atomic write)."""
+                      trajectory: list, *, snap_camera: bool = False) -> None:
+        """Publish a step's camera pose for the viser viewer overlay (atomic write).
+
+        `snap_camera` asks connected visor browsers to jump to this pose once.
+        Live episode steps leave it false so fly/orbit is not yanked unless
+        the viewer "Follow agent" checkbox is on.
+        """
         from ..agent.camera_rig import CameraRig
 
         try:
@@ -508,6 +515,7 @@ class DashboardApp:
                 "frame": str(frame_path.resolve()),
                 "frame_rel": str(frame_path),
                 "trajectory": trajectory,
+                "snap_camera": bool(snap_camera),
                 "updated_at": time.time(),
             }
             LIVE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)

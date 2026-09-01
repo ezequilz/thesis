@@ -222,6 +222,81 @@ def _apply_view(server, view: dict) -> None:
             pass
 
 
+def _apply_up(server, view: dict) -> None:
+    """Gravity axis only — do not yank connected cameras back to the centroid."""
+    try:
+        clients = server.get_clients().values()
+    except Exception:
+        return
+    for client in clients:
+        try:
+            client.camera.up_direction = view["up"]
+        except Exception:
+            pass
+
+
+def _step_look_target(state: dict, fallback_forward) -> tuple[np.ndarray, np.ndarray]:
+    position = np.asarray(state["position"], dtype=np.float64)
+    view_dir = np.asarray(state.get("view_dir", fallback_forward), dtype=np.float64)
+    if view_dir.shape != (3,) or not np.isfinite(view_dir).all() or float(np.linalg.norm(view_dir)) < 1e-8:
+        view_dir = np.asarray(fallback_forward, dtype=np.float64)
+    return position, position + view_dir
+
+
+def _set_client_step_camera(client, state: dict, fallback_forward, view: dict | None = None) -> None:
+    position, look_at = _step_look_target(state, fallback_forward)
+    if view is not None:
+        client.camera.up_direction = view["up"]
+    client.camera.position = position
+    client.camera.look_at = look_at
+    if view is not None:
+        try:
+            client.camera.fov = view["vfov"]
+        except Exception:
+            pass
+
+
+def _snap_clients_to_step(server, state: dict, fallback_forward, view: dict | None = None) -> None:
+    try:
+        clients = server.get_clients().values()
+    except Exception:
+        return
+    for client in clients:
+        try:
+            _set_client_step_camera(client, state, fallback_forward, view)
+        except Exception:
+            pass
+
+
+def _snapshot_client_cameras(server) -> list[tuple]:
+    saved = []
+    try:
+        clients = server.get_clients().values()
+    except Exception:
+        return saved
+    for client in clients:
+        try:
+            saved.append((
+                client,
+                np.asarray(client.camera.position, dtype=np.float64).copy(),
+                np.asarray(client.camera.look_at, dtype=np.float64).copy(),
+                np.asarray(client.camera.up_direction, dtype=np.float64).copy(),
+            ))
+        except Exception:
+            pass
+    return saved
+
+
+def _restore_client_cameras(saved: list[tuple]) -> None:
+    for client, position, look_at, up in saved:
+        try:
+            client.camera.up_direction = up
+            client.camera.position = position
+            client.camera.look_at = look_at
+        except Exception:
+            pass
+
+
 def _start_render_api(
     host: str,
     port: int,
@@ -574,9 +649,17 @@ def serve_viewer(
     # default exterior orbit pose. Mutated in place when the dashboard
     # switches scenes (outputs/live/scene.json).
     view = _view_pose(scene, up_axis, fov_deg)
+    live: dict = {"state": _load_live_state(LIVE_STATE_PATH)}
 
     @server.on_client_connect
     def _(client: "viser.ClientHandle") -> None:
+        state = live["state"]
+        if state is not None and state.get("position") is not None:
+            try:
+                _set_client_step_camera(client, state, view["forward"], view)
+                return
+            except Exception:
+                pass
         client.camera.up_direction = view["up"]
         client.camera.position = view["center"]
         client.camera.look_at = view["center"] + view["forward"]
@@ -654,17 +737,17 @@ def serve_viewer(
         viewer_url,
     )
 
-    def _maybe_reload_scene() -> None:
+    def _maybe_reload_scene() -> bool:
         from ..scene import load_scene
         from ..scene.catalog import read_live_scene
 
         req = read_live_scene()
         if not req or not req.get("path"):
-            return
+            return False
         gen = int(req.get("generation") or 0)
         path = str(req["path"])
         if gen < scene_state["generation"]:
-            return
+            return False
         # Same file: ack. `reload` in scene.json is sticky, so only a strictly
         # newer generation may re-decode (overwritten scene_repaired.ply).
         same = path == scene_state["path"] and scene_state["status"] == "ready"
@@ -677,11 +760,11 @@ def serve_viewer(
             if up_ax != scene_state.get("up_axis"):
                 logger.info("Viser flipping up axis %s -> %s", scene_state.get("up_axis"), up_ax)
                 view.update(_view_from_center(view["center"], up_ax, fov_deg))
-                _apply_view(server, view)
+                _apply_up(server, view)
                 scene_state["up_axis"] = up_ax
-            return
+            return False
         if scene_state["status"] == "loading":
-            return
+            return False
 
         scene_state.update(status="loading", error=None, id=req.get("id"), label=req.get("label"))
         lod = int(req.get("lod_level") or 0)
@@ -693,8 +776,9 @@ def serve_viewer(
             logger.exception("Viser scene reload failed")
             scene_state["status"] = "error"
             scene_state["error"] = f"{type(exc).__name__}: {exc}"
-            return
+            return False
         new_view = _view_pose(new_scene, up_ax, fov_deg)
+        saved = _snapshot_client_cameras(server)
         with overlay_lock:
             _install_splats(server, new_scene, max_splats)
             view.update(new_view)
@@ -703,7 +787,16 @@ def serve_viewer(
             except Exception:
                 pass
             overlay_handles[:] = [origin]
-        _apply_view(server, view)
+        # Never snap to the scene centroid on reload — that kills fly/orbit.
+        # Keep the cameras the clients already had. If viser dropped them
+        # (new websocket), fall back to the last inspected step.
+        if saved:
+            _restore_client_cameras(saved)
+            _apply_up(server, view)
+        else:
+            state = live["state"]
+            if state is not None and state.get("position") is not None:
+                _snap_clients_to_step(server, state, view["forward"], view)
         scene_state.update(
             path=path,
             up_axis=up_ax,
@@ -714,18 +807,21 @@ def serve_viewer(
             error=None,
         )
         logger.info("Viser scene ready: %d gaussians", new_scene.num_gaussians)
+        return True
 
     last_key: tuple | None = None
     while True:
         time.sleep(0.5)
-        _maybe_reload_scene()
+        reloaded = _maybe_reload_scene()
         state = _load_live_state(LIVE_STATE_PATH)
         if state is None:
             continue
+        live["state"] = state
         # updated_at changes on every publish (new live step OR a step pinned
         # from the dashboard), so clicked steps re-pose the frustum too.
         key = (state.get("episode"), state.get("step"), state.get("updated_at"), show_frame.value)
-        if key == last_key:
+        key_changed = key != last_key
+        if not key_changed and not reloaded:
             continue
         last_key = key
 
@@ -759,8 +855,5 @@ def serve_viewer(
             f"**Agent**: episode `{state.get('episode', '?')}` step {state.get('step', '?')}  \n"
             f"{state.get('pose', '')}"
         )
-        if follow_agent.value:
-            look_at = position + np.asarray(state.get("view_dir", view["forward"]), dtype=np.float64)
-            for client in server.get_clients().values():
-                client.camera.position = position
-                client.camera.look_at = look_at
+        if follow_agent.value or (state.get("snap_camera") and key_changed):
+            _snap_clients_to_step(server, state, view["forward"], view)
