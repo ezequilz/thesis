@@ -177,7 +177,7 @@
     <button type="button" data-which="original">Original</button>
     <button type="button" data-which="repaired">Repaired</button>
   </div>
-  <span class="hint">Replays the photometric lift on each regenerated RGB, in order, from a fresh copy of the loaded scene. Original asset stays untouched.</span>
+  <span class="hint">Replay lifts each regen PNG into 3D. Needs CUDA+gsplat for a real GSFix refine; otherwise a CPU stand-in runs and original/repaired splats look the same. ‹ › cycles original render, diffusion RGB, and 3D-after when that PNG exists.</span>
 </div>
 
 <div id="stats">
@@ -313,6 +313,14 @@ function currentView() {
   return views.find(x => x.step === selectedStep) || views[0] || null;
 }
 
+function availableKinds(v) {
+  const kinds = [];
+  if (v?.rendered_url) kinds.push("original");
+  if (v?.repaired_url) kinds.push("repaired");
+  if (v?.lifted_url) kinds.push("lifted");
+  return kinds;
+}
+
 function renderCompare() {
   const v = currentView();
   const img = $("compare-img");
@@ -327,41 +335,64 @@ function renderCompare() {
     return;
   }
   if (selectedStep == null) selectedStep = v.step;
+  const kinds = availableKinds(v);
+  if (!kinds.includes(compareKind)) compareKind = kinds[0] || "original";
   empty.hidden = true;
   img.hidden = false;
   caption.hidden = false;
-  const src = compareKind === "repaired" ? v.repaired_url : v.rendered_url;
+  const src = compareKind === "repaired" ? v.repaired_url
+    : compareKind === "lifted" ? v.lifted_url
+    : v.rendered_url;
   if (img.dataset.key !== src) {
     img.src = src;
     img.dataset.key = src;
   }
-  const label = compareKind === "repaired" ? "repaired RGB" : "original render";
-  caption.textContent = `${label} · step ${v.step}`;
+  const labels = {
+    original: "original render",
+    repaired: "diffusion-fixed RGB",
+    lifted: "3D after (GSFix lift)",
+  };
+  caption.textContent = `${labels[compareKind] || compareKind} · step ${v.step}`;
   $("btn-img-orig").classList.toggle("on", compareKind === "original");
-  $("btn-img-rep").classList.toggle("on", compareKind === "repaired");
-  $("btn-img-orig").disabled = !v.rendered_url;
-  $("btn-img-rep").disabled = !v.repaired_url;
+  $("btn-img-rep").classList.toggle("on", compareKind === "repaired" || compareKind === "lifted");
+  $("btn-img-orig").disabled = kinds.length < 2;
+  $("btn-img-rep").disabled = kinds.length < 2;
   $("compare-nav").hidden = false;
   const r = (snapshot?.job?.results || []).find(x => x.step === v.step) || v.repair || {};
   $("compare-kv").innerHTML = `
       <span class="k">pose</span><span class="v">${esc(v.pose || "")}</span>
       <span class="k">3D repair</span><span class="v">${esc(r.status || "not run")}</span>
+      <span class="k">backend</span><span class="v">${esc(r.backend || "–")}</span>
+      <span class="k">iters</span><span class="v">${r.n_iters ?? "–"}</span>
       <span class="k">visible</span><span class="v">${r.n_visible ?? "–"}</span>
       <span class="k">spawned</span><span class="v">${r.n_spawned ?? "–"}</span>
       <span class="k">L1 before</span><span class="v">${r.l1_before ?? "–"}</span>
+      <span class="k">L1 after</span><span class="v">${r.l1_after ?? "–"}</span>
       <span class="k">seconds</span><span class="v">${r.seconds ?? "–"}</span>
       <span class="k">gaussians</span><span class="v">${r.n_gaussians ?? "–"}</span>
       ${r.error ? `<span class="k">error</span><span class="v">${esc(r.error)}</span>` : ""}`;
 }
 
+function shiftKind(dir) {
+  const v = currentView();
+  const kinds = availableKinds(v);
+  if (kinds.length < 2) return;
+  let i = kinds.indexOf(compareKind);
+  if (i < 0) i = 0;
+  setCompareKind(kinds[(i + dir + kinds.length) % kinds.length]);
+}
+
 function setCompareKind(which, { syncViser = true } = {}) {
-  compareKind = which === "repaired" ? "repaired" : "original";
+  if (which === "lifted") compareKind = "lifted";
+  else if (which === "repaired") compareKind = "repaired";
+  else compareKind = "original";
   renderCompare();
   renderShow();
   if (!syncViser || !selectedEp) return;
   const ep = snapshot?.episode;
-  const hasPly = compareKind === "repaired" ? ep?.repaired_ply : ep?.original_ply;
-  if (hasPly) post("/api/repair/show", { episode: selectedEp, which: compareKind });
+  const plyWhich = compareKind === "original" ? "original" : "repaired";
+  const hasPly = plyWhich === "repaired" ? ep?.repaired_ply : ep?.original_ply;
+  if (hasPly) post("/api/repair/show", { episode: selectedEp, which: plyWhich });
 }
 
 function maybeLook() {
@@ -460,12 +491,12 @@ document.querySelectorAll("#show-toggle button").forEach(btn => {
     setCompareKind(btn.dataset.which);
   };
 });
-$("btn-img-orig").onclick = () => setCompareKind("original");
-$("btn-img-rep").onclick = () => setCompareKind("repaired");
+$("btn-img-orig").onclick = () => shiftKind(-1);
+$("btn-img-rep").onclick = () => shiftKind(1);
 document.addEventListener("keydown", e => {
   if (e.target && /input|select|textarea/i.test(e.target.tagName)) return;
-  if (e.key === "ArrowLeft") setCompareKind("original");
-  if (e.key === "ArrowRight") setCompareKind("repaired");
+  if (e.key === "ArrowLeft") shiftKind(-1);
+  if (e.key === "ArrowRight") shiftKind(1);
 });
 
 fetch("/api/state").then(r => r.json()).then(s => {

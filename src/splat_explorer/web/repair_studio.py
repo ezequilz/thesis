@@ -115,6 +115,8 @@ class RepairStudio:
             step = view["step"]
             view["rendered_url"] = f"/frames/{ep_id}/{view['rendered_name']}"
             view["repaired_url"] = f"/frames/{ep_id}/{view['repaired_name']}"
+            lift = view.get("lift_name")
+            view["lifted_url"] = f"/frames/{ep_id}/{lift}" if lift else None
             del view["rendered_path"]
             del view["repaired_path"]
         log = self.app._read_json(d / "repair_log.json")
@@ -257,7 +259,12 @@ class RepairStudio:
         try:
             module = reload_repair_module() if reload_code else None
             replay = replay_episode_repairs if module is None else module.replay_episode_repairs
+            make_backend = (
+                module.make_repair_backend if module is not None else None
+            )
+            from ..repair import make_repair_backend as _default_backend
             source = self._source_for_episode(meta)
+            backend = (make_backend or _default_backend)()
             params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
             with self.app.lock:
                 spec = self.app._scene_spec
@@ -278,6 +285,7 @@ class RepairStudio:
                     self.job["message"] = (
                         f"View {index + 1}/{self.job['n_views']} "
                         f"(step {view.get('step')}) {body.get('status')}"
+                        + (f" · {body['backend']}" if body.get("backend") else "")
                     )
                 if result.status == "ok" and self.showing == "repaired":
                     self.show(episode_id, "repaired", force=True)
@@ -288,6 +296,7 @@ class RepairStudio:
                 views,
                 up_axis=up_axis,
                 fov_deg=fov,
+                backend=backend,
                 on_view=on_view,
                 should_stop=self._stop.is_set,
             )

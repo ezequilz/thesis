@@ -5,14 +5,10 @@ repair copies that scene into the episode directory as `scene_original.ply`
 (never written again) and a working `scene_repaired.ply` that accumulates
 later views.
 
-Only gaussians visible in the repaired camera are updated. The default
-backend is a CPU stand-in for GSFix3D §3.3 (photometric lift of the
-diffusion-fixed image back into 3DGS) that does not need CUDA / gsplat:
-
-  Lpho = (1 − λ) ||I_fixed − I_gs||_1 + λ L_local-mean(I_fixed, I_gs)
-
-plus a sparse adaptive-density pass that spawns small gaussians in holes.
-Swap the backend by passing any `RepairBackend` to `SceneRepairer`.
+`make_repair_backend()` picks the lift: on CUDA+gsplat it runs the GSFix3D
+refine loop (differentiable rasterize, L1+SSIM, Adam on all gaussian params).
+Otherwise it uses a CPU color stand-in that will not change the 3D look.
+No extra depth or diffusion model is required for the lift.
 """
 
 from __future__ import annotations
@@ -45,6 +41,27 @@ _IDENTITY_QUAT = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
 def repair_meta_name(step: int) -> str:
     return f"step_{int(step):03d}_repair.json"
+
+
+def repaired_render_name(step: int) -> str:
+    return f"step_{int(step):03d}_repaired_render.png"
+
+
+def make_repair_backend():
+    """Prefer GSFix-style gsplat refine; fall back to the CPU color stand-in."""
+    try:
+        from .repair_gsfix import GsplatPhotometricRepair, gsplat_refine_available
+
+        if gsplat_refine_available():
+            logger.info("3D repair backend: GSFix refine (gsplat / CUDA)")
+            return GsplatPhotometricRepair()
+    except Exception:
+        logger.exception("GSFix refine backend unavailable")
+    logger.warning(
+        "3D repair backend: CPU photometric stand-in (no CUDA+gsplat). "
+        "Original vs repaired splats will look almost identical."
+    )
+    return PhotometricViewRepair()
 
 
 def copy_camera(camera: Camera) -> Camera:
@@ -194,6 +211,7 @@ class PhotometricViewRepair:
             n_spawned = self._densify(scene, camera, idx, uf, vf, z, rendered, repaired)
 
         return {
+            "backend": "cpu-photometric",
             "n_visible": n_visible,
             "n_updated": n_updated,
             "n_spawned": n_spawned,
@@ -288,6 +306,10 @@ class RepairResult:
     n_spawned: int = 0
     n_gaussians: int = 0
     l1_before: float = 0.0
+    l1_after: float | None = None
+    n_iters: int = 0
+    backend: str | None = None
+    render_name: str | None = None
     original_ply: str | None = None
     repaired_ply: str | None = None
     error: str | None = None
@@ -302,7 +324,11 @@ class RepairResult:
             "n_updated_gaussians": self.n_updated,
             "n_spawned": self.n_spawned,
             "n_gaussians": self.n_gaussians,
+            "n_iters": self.n_iters,
             "l1_before": self.l1_before,
+            "l1_after": self.l1_after,
+            "backend": self.backend,
+            "render_name": self.render_name,
             "original_ply": self.original_ply,
             "repaired_ply": self.repaired_ply,
             "error": self.error,
@@ -335,7 +361,7 @@ class SceneRepairer:
 
     def __post_init__(self) -> None:
         if self.backend is None:
-            self.backend = PhotometricViewRepair()
+            self.backend = make_repair_backend()
 
     def make_callback(self, step: int, camera: Camera, source_rgb: Path, episode_dir: Path):
         """Snapshot the view now; return an `on_done` for Regenerator.submit."""
@@ -394,18 +420,32 @@ class SceneRepairer:
                 repaired_path_out = Path(episode_dir) / REPAIRED_PLY
                 save_ply(working, repaired_path_out)
                 self.repaired_ply = repaired_path_out
+                render_rgb = stats.get("render_rgb")
+                render_name = None
+                if render_rgb is not None:
+                    render_name = repaired_render_name(step)
+                    Image.fromarray(np.asarray(render_rgb, dtype=np.uint8)).save(
+                        Path(episode_dir) / render_name,
+                    )
                 out.status = "ok"
                 out.n_visible = int(stats.get("n_visible", 0))
                 out.n_updated = int(stats.get("n_updated", 0))
                 out.n_spawned = int(stats.get("n_spawned", 0))
                 out.n_gaussians = int(stats.get("n_gaussians", working.num_gaussians))
+                out.n_iters = int(stats.get("n_iters") or 0)
                 out.l1_before = float(stats.get("l1_before", 0.0))
+                after = stats.get("l1_after")
+                out.l1_after = None if after is None else float(after)
+                out.backend = stats.get("backend")
+                out.render_name = render_name
                 out.original_ply = ORIGINAL_PLY
                 out.repaired_ply = REPAIRED_PLY
             out.seconds = time.perf_counter() - t0
             logger.info(
-                "Repair step %d: %d visible, %d spawned, L1=%.4f -> %s (%.1fs)",
-                step, out.n_visible, out.n_spawned, out.l1_before, REPAIRED_PLY, out.seconds,
+                "Repair step %d [%s]: %d visible, %d spawned, L1=%.4f%s -> %s (%.1fs)",
+                step, out.backend or "?", out.n_visible, out.n_spawned, out.l1_before,
+                f"/{out.l1_after:.4f}" if out.l1_after is not None else "",
+                REPAIRED_PLY, out.seconds,
             )
         except Exception as exc:
             out.seconds = time.perf_counter() - t0
@@ -553,6 +593,7 @@ def discover_repair_views(episode_dir: Path, meta: dict | None = None) -> list[d
             "fov_deg": fov_deg,
             "repair_status": repair_meta.get("status"),
             "repair": repair_meta or None,
+            "lift_name": repaired_render_name(step) if (episode_dir / repaired_render_name(step)).is_file() else None,
         })
     return views
 
@@ -562,6 +603,9 @@ def reload_repair_module():
     import importlib
     import sys
 
+    gsfix_name = "splat_explorer.repair_gsfix"
+    if gsfix_name in sys.modules:
+        importlib.reload(sys.modules[gsfix_name])
     name = __name__
     mod = sys.modules[name]
     return importlib.reload(mod)
@@ -586,6 +630,8 @@ def replay_episode_repairs(
     episode_dir = Path(episode_dir)
     if views is None:
         views = discover_repair_views(episode_dir)
+    if backend is None:
+        backend = make_repair_backend()
     repairer = SceneRepairer(source, backend=backend)
     results: list[RepairResult] = []
     for i, view in enumerate(views):

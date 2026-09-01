@@ -267,7 +267,9 @@ def run_episode(
 
             src_scene = scene_from_renderer(renderer)
             if src_scene is not None:
-                repairer = SceneRepairer(src_scene)
+                from ..repair import make_repair_backend
+
+                repairer = SceneRepairer(src_scene, backend=make_repair_backend())
         except Exception:
             logger.exception(
                 "3DGS repair pipeline unavailable; episode continues without it"
