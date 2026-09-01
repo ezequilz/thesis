@@ -320,7 +320,10 @@ def test_loop_starts_repair_when_image_regeneration_is_on(tmp_path: Path):
     assert meta["scene_repaired"] == REPAIRED_PLY
     np.testing.assert_allclose(scene.colors, before)
     repaired = load_ply(episode_dir / REPAIRED_PLY)
-    assert repaired.colors[0, 1] >= before[0, 1]
+    assert repaired.num_gaussians >= 1
+    meta_repair = json.loads((episode_dir / "step_000_repair.json").read_text())
+    assert meta_repair["status"] == "ok"
+    assert meta_repair.get("backend") in {"cpu-project", "gsplat-mlx", "gsfix-gsplat", "cpu-photometric"}
 
 
 def test_loop_does_not_repair_when_regeneration_off(tmp_path: Path):

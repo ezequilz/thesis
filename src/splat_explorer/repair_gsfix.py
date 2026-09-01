@@ -9,8 +9,8 @@ Ports the loop in GSFix3D ``scripts/gsfix3d/refine_gs.py`` onto our
       backward; densify every 5 steps; Adam step
 
 No GSFixer diffusion, no mesh, no depth network. The regen PNG is I_fixed.
-Requires NVIDIA CUDA + ``gsplat``. ``make_repair_backend()`` falls back to the
-CPU color stand-in when that stack is missing.
+Requires NVIDIA CUDA + ``gsplat``. ``make_repair_backend()`` then tries
+gsplat-mlx on Apple Silicon, and otherwise falls back to the CPU color stamp.
 """
 
 from __future__ import annotations

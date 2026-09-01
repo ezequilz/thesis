@@ -219,7 +219,7 @@ let snapshot = null;
 let selectedStep = null;
 let selectedEp = "";
 let compareKind = "original";
-let visorEp = "";
+let plyPreview = false;
 let looked = { ep: "", step: null };
 
 function esc(s) {
@@ -277,7 +277,8 @@ function renderViews() {
   $("st-views").textContent = views.length || "–";
   $("st-orig").textContent = ep?.original_ply ? fmtBytes(ep.original_ply.bytes) : "–";
   $("st-rep").textContent = ep?.repaired_ply ? fmtBytes(ep.repaired_ply.bytes) : "–";
-  $("st-scene").textContent = snapshot?.episode_scene || snapshot?.scene_id || "–";
+  $("st-scene").textContent = snapshot?.episode_scene_label
+    || snapshot?.episode_scene || snapshot?.scene_id || "–";
   $("st-done").textContent = snapshot?.job?.n_done != null
     ? `${snapshot.job.n_done}/${snapshot.job.n_views || 0}` : "–";
   if (!views.length) {
@@ -392,7 +393,10 @@ function setCompareKind(which, { syncViser = true } = {}) {
   const ep = snapshot?.episode;
   const plyWhich = compareKind === "original" ? "original" : "repaired";
   const hasPly = plyWhich === "repaired" ? ep?.repaired_ply : ep?.original_ply;
-  if (hasPly) post("/api/repair/show", { episode: selectedEp, which: plyWhich });
+  if (hasPly) {
+    plyPreview = true;
+    post("/api/repair/show", { episode: selectedEp, which: plyWhich });
+  }
 }
 
 function maybeLook() {
@@ -406,25 +410,26 @@ async function syncEpisodeScene() {
   const ep = snapshot?.episode;
   if (!selectedEp || !ep) return;
   const showingThis = snapshot.showing_episode === selectedEp && snapshot.showing;
-  const catalogMatches = Boolean(
-    snapshot.episode_scene
-    && snapshot.episode_scene === snapshot.scene_id
+  if (plyPreview && showingThis) {
+    maybeLook();
+    return;
+  }
+  const want = snapshot.episode_scene;
+  const loadingWanted = Boolean(
+    want && snapshot.scene_id === want && snapshot.scene_status === "loading",
+  );
+  const catalogOk = Boolean(
+    want
+    && snapshot.scene_id === want
+    && snapshot.scene_status === "ready"
     && !snapshot.showing
   );
-  if (visorEp !== selectedEp) {
-    if (showingThis || catalogMatches) {
-      visorEp = selectedEp;
-    } else if (ep.original_ply) {
-      const which = compareKind === "repaired" && ep.repaired_ply ? "repaired" : "original";
-      compareKind = which;
-      const data = await post("/api/repair/show", { episode: selectedEp, which });
-      if (data && data.ok !== false) visorEp = selectedEp;
-    } else if (snapshot.episode_scene && snapshot.episode_scene !== snapshot.scene_id) {
-      const data = await post("/api/scene", { id: snapshot.episode_scene });
-      if (data && data.ok !== false) visorEp = selectedEp;
-    } else {
-      visorEp = selectedEp;
-    }
+  if (catalogOk || loadingWanted) {
+    maybeLook();
+    return;
+  }
+  if (want) {
+    await post("/api/repair/focus", { episode: selectedEp });
   }
   maybeLook();
 }
@@ -432,8 +437,20 @@ async function syncEpisodeScene() {
 function renderShow() {
   const which = snapshot?.showing;
   const sameEp = snapshot?.showing_episode === selectedEp;
-  $("pill-show").textContent = which && sameEp ? `viser: ${which}` : (which ? `viser: ${which}` : "viser: catalog");
-  $("pill-show").className = "pill" + (which && sameEp ? " ok" : "");
+  const catalogOk = snapshot?.scene_id === snapshot?.episode_scene
+    && snapshot?.scene_status === "ready"
+    && !which;
+  const label = snapshot?.episode_scene_label || snapshot?.episode_scene;
+  $("pill-show").textContent = which && sameEp
+    ? `viser: ${which}`
+    : (label ? `viser: ${label}` : "viser: catalog");
+  $("pill-show").className = "pill" + ((which && sameEp) || catalogOk ? " ok" : "");
+  const hint = $("viser-hint");
+  if (hint) {
+    hint.textContent = which && sameEp
+      ? `${which} ply · click Original / Repaired`
+      : (label ? `catalog: ${label}` : "original / repaired toggle");
+  }
   document.querySelectorAll("#show-toggle button").forEach(btn => {
     btn.classList.toggle("on", btn.dataset.which === compareKind);
   });
@@ -470,7 +487,7 @@ async function tick() {
 
 $("in-ep").onchange = () => {
   selectedStep = null;
-  visorEp = "";
+  plyPreview = false;
   looked = { ep: "", step: null };
   compareKind = "original";
   $("msg").textContent = "";

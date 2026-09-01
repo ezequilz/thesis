@@ -22,10 +22,14 @@ def test_repaired_render_name():
 def test_make_repair_backend_falls_back_without_cuda():
     backend = make_repair_backend()
     from splat_explorer.repair_gsfix import gsplat_refine_available
+    from splat_explorer.repair_mlx import mlx_refine_available
 
     if gsplat_refine_available():
         from splat_explorer.repair_gsfix import GsplatPhotometricRepair
         assert isinstance(backend, GsplatPhotometricRepair)
+    elif mlx_refine_available():
+        from splat_explorer.repair_mlx import MlxPhotometricRepair
+        assert isinstance(backend, MlxPhotometricRepair)
     else:
         assert isinstance(backend, ProjectedViewRepair)
 

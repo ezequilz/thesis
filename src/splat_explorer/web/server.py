@@ -22,6 +22,7 @@ Endpoints:
   POST /api/repair/start   replay 3D lift {episode, reload_code}
   POST /api/repair/stop   stop a replay
   POST /api/repair/show   point viser at {episode, which: original|repaired}
+  POST /api/repair/focus  load that episode's catalog scene into the shared visor
   POST /api/repair/look   point viser frustum at a regenerated step
   GET  /api/episodes      list all past runs on disk (meta.json summaries)
   GET  /api/episodes/<id>      full trace of one past run (steps + artifacts)
@@ -194,22 +195,29 @@ class DashboardApp:
             if self.run and self.run["status"] in ("running", "stopping"):
                 return False, "Stop the episode before switching scenes."
             current = self._scene_spec
-            if (
+            same = (
                 current is not None
                 and current.id == spec.id
                 and current.up_axis == spec.up_axis
                 and current.lod_level == spec.lod_level
                 and current.path == spec.path
                 and current.nav_overrides == spec.nav_overrides
-                and self.scene_status == "ready"
-            ):
+            )
+            if same and self.scene_status == "ready":
                 return True, f"Already on {spec.label}."
+            if same and self.scene_status == "loading":
+                return True, f"Loading {spec.label}…"
+            self._scene_spec = spec
             self.scene_status = "loading"
             self.scene_info = {**spec.to_json()}
-        threading.Thread(target=self._load_scene, args=(spec,), daemon=True).start()
+            self._scene_generation += 1
+            generation = self._scene_generation
+        threading.Thread(
+            target=self._load_scene, args=(spec, generation), daemon=True,
+        ).start()
         return True, f"Loading {spec.label}…"
 
-    def _load_scene(self, spec=None) -> None:
+    def _load_scene(self, spec=None, generation: int | None = None) -> None:
         from ..cli import _build_navigation
         from ..rendering import make_renderer
         from ..scene import load_scene
@@ -218,10 +226,21 @@ class DashboardApp:
         spec = spec or self._startup_spec()
         apply_spec(self.cfg, spec)
         with self.lock:
-            self._scene_generation += 1
-            generation = self._scene_generation
-            self._scene_spec = spec
-            self.scene_status = "loading"
+            if generation is None:
+                # Dashboard boot: don't overwrite a scene the repair page already chose.
+                if self._scene_spec is not None and self._scene_spec.id != spec.id:
+                    logger.info(
+                        "Skipping startup load of %s; visor targeting %s",
+                        spec.id, self._scene_spec.id,
+                    )
+                    return
+                self._scene_generation += 1
+                generation = self._scene_generation
+                self._scene_spec = spec
+                self.scene_status = "loading"
+            elif generation != self._scene_generation:
+                logger.info("Skipping superseded load of %s", spec.id)
+                return
             self.scene_info = {**spec.to_json(), "generation": generation}
             self._pinned = None
         publish_live_scene(spec, generation)
@@ -754,6 +773,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "message": "Missing episode id."}, 400)
                 return
             ok, message = studio.show(str(ep), str(body.get("which") or ""))
+        elif path == "/api/repair/focus":
+            ep = body.get("episode") or body.get("id")
+            if not ep:
+                self._send_json({"ok": False, "message": "Missing episode id."}, 400)
+                return
+            ok, message = studio.ensure_catalog_scene(str(ep))
         elif path == "/api/repair/look":
             ep = body.get("episode") or body.get("id")
             if not ep or body.get("step") is None:

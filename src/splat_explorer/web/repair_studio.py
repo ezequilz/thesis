@@ -73,10 +73,12 @@ class RepairStudio:
         ep = episode_id or job.get("episode") or live_ep
         detail = self.episode_review(ep) if ep else None
         episode_scene = None
+        episode_scene_label = None
         if detail and isinstance(detail.get("meta"), dict):
             params = detail["meta"].get("params")
             if isinstance(params, dict):
                 episode_scene = params.get("scene")
+                episode_scene_label = params.get("scene_label") or episode_scene
         return {
             "job": job,
             "showing": showing,
@@ -86,6 +88,7 @@ class RepairStudio:
             "scene_status": scene_status,
             "scene_id": scene_id,
             "episode_scene": episode_scene,
+            "episode_scene_label": episode_scene_label,
             "up_axis": up_axis,
             "episode": detail,
             "viewer_url": f"http://localhost:{self.app.cfg.viewer.port}",
@@ -169,6 +172,46 @@ class RepairStudio:
         self._stop.set()
         return True, "Stop requested."
 
+    def ensure_catalog_scene(self, episode_id: str) -> tuple[bool, str]:
+        """Load the episode's catalog scene into the shared visor (one 3DGS)."""
+        d = self.app.episode_path(episode_id)
+        if d is None:
+            return False, f"Episode {episode_id} not found."
+        meta = self.app._read_json(d / "meta.json") or {}
+        params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
+        scene_id = str(params.get("scene") or "").strip()
+        if not scene_id:
+            return False, "Episode has no scene id in meta.json."
+        with self.app.lock:
+            if self.app.run and self.app.run["status"] in ("running", "stopping"):
+                return False, "Episode is using the visor."
+            spec = self.app._scene_spec
+            current = spec.id if spec is not None else None
+            status = self.app.scene_status
+        with self._lock:
+            previewing = self.showing is not None
+        if current == scene_id and status == "loading":
+            return True, f"Loading {scene_id}…"
+        if current == scene_id and status == "ready" and not previewing:
+            return True, f"Viser already on {scene_id}."
+        if current == scene_id and status == "ready" and previewing:
+            return self._republish_catalog()
+        return self.app.select_scene(scene_id)
+
+    def _republish_catalog(self) -> tuple[bool, str]:
+        """Put the catalog splat back in viser after an original/repaired PLY preview."""
+        with self.app.lock:
+            spec = self.app._scene_spec
+            if spec is None:
+                return False, "No catalog scene loaded."
+            self.app._scene_generation += 1
+            generation = self.app._scene_generation
+        publish_live_scene(spec, generation, reload=True)
+        with self._lock:
+            self.showing = None
+            self.showing_episode = None
+        return True, f"Viser restored to {spec.id}."
+
     def show(self, episode_id: str, which: str, *, force: bool = False) -> tuple[bool, str]:
         which = str(which or "").strip().lower()
         if which not in ("original", "repaired"):
@@ -197,6 +240,9 @@ class RepairStudio:
             up_axis = spec.up_axis if spec is not None else "+y"
             self.app._scene_generation += 1
             generation = self.app._scene_generation
+        meta = self.app._read_json(d / "meta.json") or {}
+        params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
+        up_axis = str(params.get("up_axis") or up_axis)
         preview = SceneSpec(
             id=f"repair-{which}",
             label=f"{episode_id} ({which})",
@@ -245,12 +291,13 @@ class RepairStudio:
         with self.app.lock:
             spec = self.app._scene_spec
             scene = self.app.scene
-        if scene is None:
-            raise RuntimeError("No Gaussian scene loaded in the dashboard.")
+            status = self.app.scene_status
+        if scene is None or status != "ready":
+            raise RuntimeError("Catalog scene is still loading — wait until the visor is ready.")
         if scene_id and spec is not None and spec.id != scene_id:
-            logger.warning(
-                "Episode scene %s differs from dashboard %s; repairing the loaded scene",
-                scene_id, spec.id,
+            raise RuntimeError(
+                f"Visor is on {spec.id}, not episode scene {scene_id}. "
+                "Wait for the catalog room to load before replaying."
             )
         return scene
 

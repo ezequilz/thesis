@@ -20,6 +20,11 @@ viewer = ["viser>=0.2.7"]
 # Real 3DGS rasterization. Requires an NVIDIA GPU + CUDA toolchain.
 # torch must be installed first (gsplat compiles CUDA kernels against it).
 gpu = ["torch>=2.1", "gsplat>=1.4"]
+# Differentiable 3DGS refine on Apple Silicon (Metal via MLX). No CUDA.
+apple = [
+    "mlx>=0.31.0",
+    "gsplat-mlx @ git+https://github.com/RobotFlow-Labs/gsplat-mlx.git@9e53709a94e9c56fb66db2708d7d728832176713",
+]
 # VLM API access (openai client is also used for the CliRelay backend)
 vlm = ["openai>=1.40"]
 

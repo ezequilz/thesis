@@ -5,10 +5,9 @@ repair copies that scene into the episode directory as `scene_original.ply`
 (never written again) and a working `scene_repaired.ply` that accumulates
 later views.
 
-`make_repair_backend()` picks the lift: on CUDA+gsplat it runs the GSFix3D
-refine loop. Otherwise it uses `ProjectedViewRepair`: stamp the diffusion
-image onto the splat at existing depths (CPU, visible Original vs Repaired).
-No extra depth or diffusion model is required for the lift.
+`make_repair_backend()` picks the lift: CUDA+gsplat (GSFix3D refine), else
+Apple Silicon gsplat-mlx (same photometric loop on Metal), else
+`ProjectedViewRepair` (CPU color stamp at existing depths).
 """
 
 from __future__ import annotations
@@ -48,7 +47,7 @@ def repaired_render_name(step: int) -> str:
 
 
 def make_repair_backend():
-    """Prefer GSFix-style gsplat refine; fall back to the CPU color stand-in."""
+    """CUDA gsplat refine, else Apple Silicon gsplat-mlx, else CPU color stamp."""
     try:
         from .repair_gsfix import GsplatPhotometricRepair, gsplat_refine_available
 
@@ -57,8 +56,16 @@ def make_repair_backend():
             return GsplatPhotometricRepair()
     except Exception:
         logger.exception("GSFix refine backend unavailable")
+    try:
+        from .repair_mlx import MlxPhotometricRepair, mlx_refine_available
+
+        if mlx_refine_available():
+            logger.info("3D repair backend: GSFix refine (gsplat-mlx / Apple Silicon)")
+            return MlxPhotometricRepair()
+    except Exception:
+        logger.exception("gsplat-mlx refine backend unavailable")
     logger.info(
-        "3D repair backend: CPU projection lift (no CUDA). "
+        "3D repair backend: CPU projection lift (no CUDA / gsplat-mlx). "
         "Stamps the diffusion image onto the splat at existing depths."
     )
     return ProjectedViewRepair()
@@ -748,9 +755,9 @@ def reload_repair_module():
     import importlib
     import sys
 
-    gsfix_name = "splat_explorer.repair_gsfix"
-    if gsfix_name in sys.modules:
-        importlib.reload(sys.modules[gsfix_name])
+    for extra in ("splat_explorer.repair_gsfix", "splat_explorer.repair_mlx"):
+        if extra in sys.modules:
+            importlib.reload(sys.modules[extra])
     name = __name__
     mod = sys.modules[name]
     return importlib.reload(mod)

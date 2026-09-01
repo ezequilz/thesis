@@ -42,6 +42,10 @@ src/splat_explorer/
     vlm.py                        Policies: scripted (works) / OpenAI-compatible [STUB]
     cli_relay.py                  CliRelay backend: Gemini/Claude/OpenAI via one proxy
     loop.py                       observe → decide → act episode loop + logging
+    regenerate.py                 gpt-image-2 repair of reported artifact frames
+  repair.py                     3DGS view-local lift after a regen PNG
+  repair_gsfix.py               CUDA/gsplat photometric refine (GSFix3D)
+  repair_mlx.py                 Apple Silicon refine via gsplat-mlx (Metal)
   tasks/
     registry.py                   Prompt variant switch (agent.prompt: v1 / v2 / v3)
     artifact_hunt.py              Task prompt v1 + scoring placeholder [STUB]
@@ -196,6 +200,22 @@ not yet exercised live (see `agent/vlm.py` TODOs on history management).
 
 The renderer is behind a small `Renderer` protocol (`rendering/base.py`), so
 backends are swappable via `renderer.backend` in the config.
+
+## 3D repair backends
+
+After the VLM marks a view for regeneration, the repaired RGB is lifted back
+into the 3D Gaussian scene. `make_repair_backend()` picks the first stack that
+works on this machine:
+
+| Backend | What it does | Requirements |
+|---------|--------------|--------------|
+| `gsfix-gsplat` | Differentiable photometric refine (GSFix3D loop) | NVIDIA GPU, `pip install -e ".[gpu]"` |
+| `gsplat-mlx` | Same refine loop on Apple Silicon via [gsplat-mlx](https://github.com/RobotFlow-Labs/gsplat-mlx) (Metal, no CUDA) | M1/M2/M3/M4, `pip install -e ".[apple]"` |
+| `cpu-project` | Color stamp at existing depths (no backprop) | none (default fallback) |
+
+```bash
+pip install -e ".[apple]"   # local Mac testing of the 3D refine loop
+```
 
 ## Scene assets
 
