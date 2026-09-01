@@ -26,6 +26,17 @@ class GaussianScene:
     def num_gaussians(self) -> int:
         return len(self.means)
 
+    def copy(self) -> "GaussianScene":
+        """Independent array copy (original file / live renderer stay untouched)."""
+        return replace(
+            self,
+            means=self.means.copy(),
+            scales=self.scales.copy(),
+            quats=self.quats.copy(),
+            opacities=self.opacities.copy(),
+            colors=self.colors.copy(),
+        )
+
     def filtered(self, mask: np.ndarray) -> "GaussianScene":
         """New scene keeping only the gaussians where `mask` is True."""
         return replace(

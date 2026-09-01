@@ -212,6 +212,7 @@ def run_episode(
     compute_depth: bool = False,
     compute_coverage: bool = False,
     image_regeneration: bool = False,
+    scene_repairer=None,
     run_meta: dict | None = None,
     on_step: Callable[[dict, Path, CameraRig], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
@@ -238,6 +239,10 @@ def run_episode(
     decision is logged, but the paid prompt is not sent.
     regenerator, if omitted, is built from the policy when image_regeneration
     is on and the policy has a CliRelay-compatible client.
+    scene_repairer, if omitted, is built from the renderer's GaussianScene when
+    image_regeneration is on so each repaired PNG is lifted back into a
+    copy of the 3DGS (original asset untouched). Pass an explicit
+    SceneRepairer to swap the photometric backend.
     run_meta is merged into the episode's meta.json.
 
     on_step(record, frame_path, rig) fires after each decision — `record`
@@ -255,6 +260,18 @@ def run_episode(
     regen = regenerator if regenerator is not None else (
         regenerator_from_policy(policy) if image_regeneration else None
     )
+    repairer = scene_repairer
+    if image_regeneration and repairer is None:
+        try:
+            from ..repair import SceneRepairer, scene_from_renderer
+
+            src_scene = scene_from_renderer(renderer)
+            if src_scene is not None:
+                repairer = SceneRepairer(src_scene)
+        except Exception:
+            logger.exception(
+                "3DGS repair pipeline unavailable; episode continues without it"
+            )
     status = "completed"
     summary: str | None = None
     steps_done = 0
@@ -436,7 +453,14 @@ def run_episode(
                                     step,
                                 )
                             else:
-                                regen.submit(frame_path, episode_dir, step)
+                                on_done = None
+                                if repairer is not None:
+                                    on_done = repairer.make_callback(
+                                        step, camera, frame_path, episode_dir,
+                                    )
+                                regen.submit(
+                                    frame_path, episode_dir, step, on_done=on_done,
+                                )
                                 entry["regenerate_status"] = "queued"
                                 record["regenerate_frame"] = regenerate_frame_name(step)
                                 record["regen_status"] = "queued"
@@ -499,6 +523,20 @@ def run_episode(
                             entry["regenerate_frame"] = result.image_name
                         if result.error:
                             entry["regenerate_error"] = result.error
+            if repairer is not None:
+                for result in repairer.results:
+                    for entry in artifacts:
+                        if entry.get("step") != result.step:
+                            continue
+                        entry["repair_status"] = result.status
+                        if result.repaired_ply:
+                            entry["repair_ply"] = result.repaired_ply
+                        if result.error:
+                            entry["repair_error"] = result.error
+                if repairer.original_ply is not None:
+                    meta["scene_original"] = repairer.original_ply.name
+                if repairer.repaired_ply is not None:
+                    meta["scene_repaired"] = repairer.repaired_ply.name
             meta.update(
                 status=status,
                 finished_at=time.time(),

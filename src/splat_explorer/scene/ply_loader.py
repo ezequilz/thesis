@@ -101,3 +101,62 @@ def load_ply(path: str | Path) -> GaussianScene:
     return GaussianScene(
         means=means, scales=scales, quats=quats, opacities=opacities, colors=colors
     )
+
+
+_PLY_VERTEX = np.dtype([
+    ("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+    ("f_dc_0", "<f4"), ("f_dc_1", "<f4"), ("f_dc_2", "<f4"),
+    ("opacity", "<f4"),
+    ("scale_0", "<f4"), ("scale_1", "<f4"), ("scale_2", "<f4"),
+    ("rot_0", "<f4"), ("rot_1", "<f4"), ("rot_2", "<f4"), ("rot_3", "<f4"),
+])
+
+_PLY_HEADER = (
+    "ply\n"
+    "format binary_little_endian 1.0\n"
+    "element vertex {n}\n"
+    "property float x\n"
+    "property float y\n"
+    "property float z\n"
+    "property float f_dc_0\n"
+    "property float f_dc_1\n"
+    "property float f_dc_2\n"
+    "property float opacity\n"
+    "property float scale_0\n"
+    "property float scale_1\n"
+    "property float scale_2\n"
+    "property float rot_0\n"
+    "property float rot_1\n"
+    "property float rot_2\n"
+    "property float rot_3\n"
+    "end_header\n"
+)
+
+
+def save_ply(scene: GaussianScene, path: str | Path) -> None:
+    """Write a standard 3DGS PLY (inverse of `load_ply`: log-scales, logit opacity, SH DC).
+
+    Only the decoded working-set fields are stored (no higher-order SH). Atomic:
+    the file is replaced only after the full write succeeds.
+    """
+    path = Path(path)
+    n = scene.num_gaussians
+    opacities = np.clip(scene.opacities.astype(np.float64), 1e-6, 1.0 - 1e-6)
+    scales = np.clip(scene.scales.astype(np.float64), 1e-8, None)
+    colors = np.clip(scene.colors.astype(np.float64), 0.0, 1.0)
+    data = np.empty(n, dtype=_PLY_VERTEX)
+    data["x"], data["y"], data["z"] = scene.means.T
+    f_dc = ((colors - 0.5) / SH_C0).astype(np.float32)
+    data["f_dc_0"], data["f_dc_1"], data["f_dc_2"] = f_dc.T
+    data["opacity"] = np.log(opacities / (1.0 - opacities)).astype(np.float32)
+    log_s = np.log(scales).astype(np.float32)
+    data["scale_0"], data["scale_1"], data["scale_2"] = log_s.T
+    data["rot_0"], data["rot_1"], data["rot_2"], data["rot_3"] = scene.quats.T
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        f.write(_PLY_HEADER.format(n=n).encode("ascii"))
+        data.tofile(f)
+    tmp.replace(path)
+    logger.info("Wrote 3DGS PLY %s (%d gaussians)", path.name, n)

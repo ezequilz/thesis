@@ -1,5 +1,5 @@
 from .catalog import SceneSpec, list_scenes
-from .ply_loader import load_ply
+from .ply_loader import load_ply, save_ply
 from .sog_loader import load_sog, load_sog_lod
 from .types import GaussianScene
 
@@ -10,6 +10,7 @@ __all__ = [
     "load_sog",
     "load_sog_lod",
     "load_ply",
+    "save_ply",
     "load_scene",
 ]
 

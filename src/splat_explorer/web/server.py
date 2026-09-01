@@ -92,6 +92,15 @@ def _attach_regen_files(
             rec["regenerate_frame"] = png_name
             rec["regen_frame_url"] = f"/frames/{episode}/{png_name}"
             rec["regen_status"] = rec.get("regen_status") or "ok"
+        repair_path = episode_dir / f"step_{step_i:03d}_repair.json"
+        if repair_path.is_file():
+            try:
+                repair = json.loads(repair_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                repair = {}
+            rec["repair_status"] = repair.get("status")
+            rec["repair_ply"] = repair.get("repaired_ply")
+            rec["repair_error"] = repair.get("error")
     if artifacts:
         by_step = {rec.get("step"): rec for rec in steps}
         for art in artifacts:
@@ -102,6 +111,10 @@ def _attach_regen_files(
                 art["regenerate_status"] = rec["regen_status"]
             if rec.get("regenerate_frame"):
                 art["regenerate_frame"] = rec["regenerate_frame"]
+            if rec.get("repair_status"):
+                art["repair_status"] = rec["repair_status"]
+            if rec.get("repair_ply"):
+                art["repair_ply"] = rec["repair_ply"]
 
 
 
@@ -300,7 +313,19 @@ class DashboardApp:
         with self.lock:
             if self.scene_status != "ready":
                 return False, f"Scene not ready (status: {self.scene_status})."
-            if self.run and self.run["status"] in ("running", "stopping"):
+            thread = self._run_thread
+            stale = (
+                self.run
+                and self.run["status"] in ("running", "stopping")
+                and thread is not None
+                and not thread.is_alive()
+            )
+            if stale:
+                self.run["status"] = "error"
+                self.run["error"] = self.run.get("error") or "episode thread died"
+                self.run["finished_at"] = time.time()
+                logger.warning("Clearing stale episode (thread died without finishing)")
+            elif self.run and self.run["status"] in ("running", "stopping"):
                 return False, "An episode is already running."
             self._stop.clear()
             self._pinned = None
@@ -338,11 +363,11 @@ class DashboardApp:
         return make_policy(Config(agent_cfg))
 
     def _run_episode(self, params: dict) -> None:
-        from ..agent.camera_rig import CameraRig
-        from ..agent.loop import run_episode
-        from ..cli import _resolve_start
-
         try:
+            from ..agent.camera_rig import CameraRig
+            from ..agent.loop import run_episode
+            from ..cli import _resolve_start
+
             policy = self._make_policy(params)
             start = (self.spawn.points[0].position if self.spawn
                      else _resolve_start(self.cfg, self.scene))

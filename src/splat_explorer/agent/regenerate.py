@@ -11,9 +11,13 @@ CliRelay (`/v1/images/edits`):
 If the tick is off (default), the decision is recorded and the pipeline
 stops before the paid request.
 
+On success the Regenerator `on_done` hook (wired by the episode loop)
+starts the 3DGS view-local repair in `splat_explorer.repair`.
+
 Outputs (next to the episode's step_NNN.png):
   step_NNN_regen.png   repaired pixels, if any were extracted
   step_NNN_regen.json  status, timing, model, reply excerpt (no giant b64)
+  scene_original.ply / scene_repaired.ply  (written by the 3D repair pass)
 """
 
 from __future__ import annotations
