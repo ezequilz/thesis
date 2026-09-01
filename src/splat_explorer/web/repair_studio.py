@@ -7,6 +7,7 @@ the photometric lift after code edits — no live VLM / image-model run needed.
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -59,6 +60,7 @@ class RepairStudio:
             "backend": "auto",
             "mode": "episode",
             "max_seconds": None,
+            "resume": None,
         }
 
     def snapshot(self, episode_id: str | None = None) -> dict:
@@ -146,6 +148,7 @@ class RepairStudio:
         backend: str = "auto",
         step: int | None = None,
         max_seconds: float = 3600.0,
+        resume: bool = True,
     ) -> tuple[bool, str]:
         d = self.app.episode_path(episode_id)
         if d is None:
@@ -159,11 +162,17 @@ class RepairStudio:
             views = [v for v in views if int(v["step"]) == int(step)]
             if not views:
                 return False, f"No regenerated view at step {step}."
+        has_ply = (d / REPAIRED_PLY).is_file() or (d / ORIGINAL_PLY).is_file()
         with self.app.lock:
-            if self.app.scene_status != "ready" or self.app.scene is None:
-                return False, "Dashboard scene is not ready."
+            catalog_ready = self.app.scene_status == "ready" and self.app.scene is not None
+        if not has_ply and not catalog_ready:
+            return False, (
+                "Dashboard scene is not ready. Wait for the catalog to finish "
+                "loading, or run scripts/start.sh and try again."
+            )
         backend_name = str(backend or "auto").strip() or "auto"
         cap = max(30.0, float(max_seconds or 3600.0))
+        resume = bool(resume)
         with self._lock:
             if self.job["status"] == "running":
                 return False, "A repair replay is already running."
@@ -177,8 +186,10 @@ class RepairStudio:
                 "backend": backend_name,
                 "mode": "view" if focused else "episode",
                 "max_seconds": cap if focused else None,
+                "resume": resume,
                 "message": (
-                    f"Repairing step {int(step)} until Stop (max {int(cap)}s)…"
+                    f"{'Continuing' if resume and (d / REPAIRED_PLY).is_file() else 'Repairing'} "
+                    f"step {int(step)} until Stop (max {int(cap)}s)…"
                     if focused
                     else f"Replaying {len(views)} view(s) with {backend_name}…"
                 ),
@@ -187,7 +198,7 @@ class RepairStudio:
             target=self._run,
             args=(
                 episode_id, d, meta, views, bool(reload_code), backend_name,
-                focused, cap,
+                focused, cap, resume,
             ),
             daemon=True,
         )
@@ -204,6 +215,25 @@ class RepairStudio:
             self.job["message"] = "Stop requested…"
         self._stop.set()
         return True, "Stop requested."
+
+    def reset_repair(self, episode_id: str) -> tuple[bool, str]:
+        """Copy scene_original.ply back over scene_repaired.ply."""
+        with self._lock:
+            if self.job["status"] == "running":
+                return False, "Stop the current repair before resetting."
+        d = self.app.episode_path(episode_id)
+        if d is None:
+            return False, f"Episode {episode_id} not found."
+        original = d / ORIGINAL_PLY
+        repaired = d / REPAIRED_PLY
+        if not original.is_file():
+            return False, "No scene_original.ply yet — run a repair once to snapshot the catalog."
+        shutil.copy2(original, repaired)
+        logger.info("Reset %s from %s", repaired.name, original.name)
+        ok, message = self.show(episode_id, "original", force=True)
+        if not ok:
+            return True, f"Restored {repaired.name} from original. {message}"
+        return True, f"Restored {repaired.name} from original."
 
     def ensure_catalog_scene(self, episode_id: str) -> tuple[bool, str]:
         """Load the episode's catalog scene into the shared visor (one 3DGS)."""
@@ -322,7 +352,17 @@ class RepairStudio:
         )
         return True, f"Viewer camera set to step {step}."
 
-    def _source_for_episode(self, meta: dict):
+    def _source_for_episode(self, meta: dict, episode_dir: Path, *, resume: bool):
+        from ..scene import load_ply
+
+        repaired = Path(episode_dir) / REPAIRED_PLY
+        original = Path(episode_dir) / ORIGINAL_PLY
+        if resume and repaired.is_file():
+            logger.info("Continuing 3D repair from %s", repaired)
+            return load_ply(repaired)
+        if original.is_file():
+            logger.info("Starting 3D repair from %s", original)
+            return load_ply(original)
         params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
         scene_id = params.get("scene")
         with self.app.lock:
@@ -330,7 +370,10 @@ class RepairStudio:
             scene = self.app.scene
             status = self.app.scene_status
         if scene is None or status != "ready":
-            raise RuntimeError("Catalog scene is still loading — wait until the visor is ready.")
+            raise RuntimeError(
+                "No episode PLY and catalog scene is still loading. "
+                "Wait until the visor is ready, or run scripts/start.sh."
+            )
         if scene_id and spec is not None and spec.id != scene_id:
             raise RuntimeError(
                 f"Visor is on {spec.id}, not episode scene {scene_id}. "
@@ -340,7 +383,8 @@ class RepairStudio:
 
     def _run(self, episode_id: str, episode_dir: Path, meta: dict,
              views: list[dict], reload_code: bool, backend_name: str = "auto",
-             focused: bool = False, max_seconds: float = 3600.0) -> None:
+             focused: bool = False, max_seconds: float = 3600.0,
+             resume: bool = True) -> None:
         try:
             module = reload_repair_module() if reload_code else None
             replay = replay_episode_repairs if module is None else module.replay_episode_repairs
@@ -348,7 +392,7 @@ class RepairStudio:
                 module.make_repair_backend if module is not None else None
             )
             from ..repair import make_repair_backend as _default_backend
-            source = self._source_for_episode(meta)
+            source = self._source_for_episode(meta, episode_dir, resume=resume)
             factory = make_backend or _default_backend
             try:
                 backend = factory(backend_name, studio=True, focused=focused)

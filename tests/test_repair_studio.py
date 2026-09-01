@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 from PIL import Image
 
 from splat_explorer.web.repair_studio import RepairStudio
@@ -28,7 +29,11 @@ class _FakeApp:
         self.scene = object()
         self.selected: list[str] = []
         self._episodes = {episode_dir.name: episode_dir}
-        self.cfg = SimpleNamespace(viewer=SimpleNamespace(port=8080))
+        self.cfg = SimpleNamespace(
+            viewer=SimpleNamespace(port=8080),
+            camera=SimpleNamespace(up_axis="+y"),
+            renderer=SimpleNamespace(fov_deg=75.0),
+        )
 
     @staticmethod
     def _read_json(path: Path):
@@ -137,6 +142,80 @@ def test_start_replay_focused_requires_that_step(tmp_path: Path):
     ok, message = studio.start_replay(ep.name, step=2)
     assert ok is False
     assert "step 2" in message.lower()
+
+
+def _tiny_ply(path: Path, color=(0.2, 0.4, 0.8)) -> None:
+    from splat_explorer.scene import GaussianScene, save_ply
+
+    n = 2
+    save_ply(
+        GaussianScene(
+            means=np.zeros((n, 3), np.float32),
+            scales=np.full((n, 3), 0.05, np.float32),
+            quats=np.tile(np.array([1, 0, 0, 0], np.float32), (n, 1)),
+            opacities=np.full((n,), 0.8, np.float32),
+            colors=np.full((n, 3), color, np.float32),
+        ),
+        path,
+    )
+
+
+def _regen_view(ep: Path, step: int = 4) -> None:
+    Image.new("RGB", (16, 12), (20, 20, 20)).save(ep / f"step_{step:03d}.png")
+    Image.new("RGB", (16, 12), (200, 180, 40)).save(ep / f"step_{step:03d}_regen.png")
+    (ep / "actions.jsonl").write_text(json.dumps({
+        "step": step,
+        "position": [0.0, 0.0, 0.0],
+        "yaw_deg": 0.0,
+        "pitch_deg": 0.0,
+        "frame": f"step_{step:03d}.png",
+        "regenerate_frame": f"step_{step:03d}_regen.png",
+    }) + "\n")
+
+
+def test_start_replay_without_ply_needs_catalog(tmp_path: Path):
+    ep = _episode(tmp_path)
+    _regen_view(ep)
+    app = _FakeApp(ep, scene_id="venetian-balcony")
+    app.scene_status = "loading"
+    app.scene = None
+    studio = RepairStudio(app)
+    ok, message = studio.start_replay(ep.name, step=4)
+    assert ok is False
+    assert "not ready" in message.lower()
+
+
+def test_start_replay_continues_from_episode_ply_while_catalog_loads(tmp_path: Path):
+    ep = _episode(tmp_path)
+    _regen_view(ep)
+    _tiny_ply(ep / "scene_original.ply", (0.1, 0.1, 0.1))
+    _tiny_ply(ep / "scene_repaired.ply", (0.9, 0.2, 0.1))
+    app = _FakeApp(ep, scene_id="venetian-balcony")
+    app.scene_status = "loading"
+    app.scene = None
+    studio = RepairStudio(app)
+    ok, message = studio.start_replay(ep.name, step=4, resume=True)
+    assert ok, message
+    studio.stop_replay()
+
+
+def test_reset_repair_restores_original_ply(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    ep = tmp_path / "outputs" / "episodes" / "20260901_190223"
+    ep.mkdir(parents=True)
+    (ep / "meta.json").write_text(json.dumps({
+        "params": {"scene": "venetian-balcony", "scene_label": "Venetian Balcony"},
+    }))
+    _tiny_ply(ep / "scene_original.ply", (0.2, 0.4, 0.8))
+    _tiny_ply(ep / "scene_repaired.ply", (0.9, 0.1, 0.1))
+    app = _FakeApp(ep, scene_id="venetian-balcony")
+    studio = RepairStudio(app)
+    ok, message = studio.reset_repair(ep.name)
+    assert ok, message
+    from splat_explorer.scene import load_ply
+    restored = load_ply(ep / "scene_repaired.ply")
+    np.testing.assert_allclose(restored.colors[0], [0.2, 0.4, 0.8], atol=1e-4)
+    assert studio.showing == "original"
 
 
 def test_catalog_id_from_live_ignores_repair_preview():

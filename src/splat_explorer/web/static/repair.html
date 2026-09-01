@@ -32,6 +32,7 @@
   button:disabled { opacity: .45; cursor: default; }
   #btn-replay { background: var(--accent); color: #0b1220; }
   #btn-view { background: #2d6a4f; color: #fff; }
+  #btn-reset { background: var(--panel2); color: var(--text); border: 1px solid var(--border) !important; }
   #btn-stop { background: var(--err); color: #fff; }
   .ghost { background: var(--panel2); color: var(--text); border: 1px solid var(--border) !important; }
   .toggle { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
@@ -181,7 +182,8 @@
   </label>
   <div style="display:flex;gap:8px;align-self:end">
     <button id="btn-replay">Replay all views</button>
-    <button id="btn-view" title="Paint this regenerated view onto the splat, then keep a geometry-only refine until you press Stop (max 1 hour). Colors stay locked to the regen so they cannot clip to neon.">Repair this view</button>
+    <button id="btn-view" title="Paint this regenerated view onto the splat, then keep a geometry-only refine until you press Stop (max 1 hour). Continues from scene_repaired.ply when it exists.">Repair this view</button>
+    <button id="btn-reset" title="Copy scene_original.ply over scene_repaired.ply and show the original splat.">Reset repair</button>
     <button id="btn-stop" disabled>Stop</button>
   </div>
   <div class="toggle" id="show-toggle" title="Swap the 3D visor between the frozen original copy and the repaired PLY. Blocked while an episode is capturing.">
@@ -522,6 +524,8 @@ function renderShow() {
   $("btn-replay").disabled = busy || !selectedEp;
   const viewBtn = $("btn-view");
   if (viewBtn) viewBtn.disabled = busy || !selectedEp || selectedStep == null;
+  const resetBtn = $("btn-reset");
+  if (resetBtn) resetBtn.disabled = busy || !selectedEp || !ep?.original_ply;
   $("btn-stop").disabled = !busy;
 }
 
@@ -569,6 +573,7 @@ $("btn-replay").onclick = async () => {
     episode: selectedEp,
     reload_code: $("in-reload").checked,
     backend: $("in-backend").value || "auto",
+    resume: true,
   });
   tick();
 };
@@ -582,7 +587,15 @@ $("btn-view").onclick = async () => {
     max_seconds: 3600,
     reload_code: $("in-reload").checked,
     backend: $("in-backend").value || "auto",
+    resume: true,
   });
+  tick();
+};
+$("btn-reset").onclick = async () => {
+  if (!selectedEp) return;
+  visorPly = "original";
+  compareKind = "original";
+  await post("/api/repair/reset", { episode: selectedEp });
   tick();
 };
 $("btn-stop").onclick = () => post("/api/repair/stop");

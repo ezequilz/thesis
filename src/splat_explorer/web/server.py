@@ -19,8 +19,9 @@ Endpoints:
   GET  /repair            3D repair review: original vs repaired splat, replay past runs
   GET  /api/repair        repair-studio snapshot (optional ?episode=)
   GET  /api/repair/episodes     past runs with regen counts / ply flags
-  POST /api/repair/start   replay 3D lift {episode, reload_code, backend}
+  POST /api/repair/start   replay 3D lift {episode, reload_code, backend, step, resume}
   POST /api/repair/stop   stop a replay
+  POST /api/repair/reset  copy scene_original.ply over scene_repaired.ply
   POST /api/repair/show   point viser at {episode, which: original|repaired}
   POST /api/repair/focus  load that episode's catalog scene into the shared visor
   POST /api/repair/look   point viser frustum at a regenerated step
@@ -771,15 +772,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
             backend = body.get("backend") or "auto"
             step = body.get("step")
             max_seconds = body.get("max_seconds", 3600)
+            resume = body.get("resume", True)
             ok, message = studio.start_replay(
                 str(ep),
                 reload_code=bool(reload_code),
                 backend=str(backend),
                 step=None if step is None or step == "" else int(step),
                 max_seconds=float(max_seconds or 3600),
+                resume=bool(resume if resume is not None else True),
             )
         elif path == "/api/repair/stop":
             ok, message = studio.stop_replay()
+        elif path == "/api/repair/reset":
+            ep = body.get("episode") or body.get("id")
+            if not ep:
+                self._send_json({"ok": False, "message": "Missing episode id."}, 400)
+                return
+            ok, message = studio.reset_repair(str(ep))
         elif path == "/api/repair/show":
             ep = body.get("episode") or body.get("id")
             if not ep:

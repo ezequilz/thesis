@@ -867,12 +867,13 @@ class SceneRepairer:
         if self._working is None:
             self._working = self.source.copy()
             original = episode_dir / ORIGINAL_PLY
-            save_ply(self._working, original)
+            if not original.is_file():
+                save_ply(self._working, original)
+                logger.info(
+                    "Copied %d gaussians to %s (original asset left untouched)",
+                    self._working.num_gaussians, original,
+                )
             self.original_ply = original
-            logger.info(
-                "Copied %d gaussians to %s (original asset left untouched)",
-                self._working.num_gaussians, original,
-            )
         return self._working
 
     def _record(self, episode_dir: Path | None, result: RepairResult) -> None:

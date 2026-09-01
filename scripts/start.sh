@@ -19,6 +19,24 @@ CLIRELAY_DIR="${CLIRELAY_DIR:-$HOME/CliRelay}"
 CLIRELAY_REPO="https://github.com/kittors/CliRelay.git"
 CLIRELAY_URL="http://localhost:8317"
 
+stop_host_dashboard() {
+  if [ -f outputs/dashboard.pid ]; then
+    pid=$(cat outputs/dashboard.pid 2>/dev/null || true)
+    if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
+      echo "    Stopping host dashboard (pid $pid)"
+      kill "$pid" || true
+    fi
+    rm -f outputs/dashboard.pid
+  fi
+  local leftover
+  leftover=$(pgrep -f "[.]venv/bin/splat-explorer dashboard" || true)
+  for pid in $leftover; do
+    echo "    Stopping leftover dashboard (pid $pid)"
+    kill "$pid" || true
+  done
+  sleep 0.4
+}
+
 RENDER_TEST=0 EPISODE=0
 for arg in "$@"; do
   case "$arg" in
@@ -26,14 +44,7 @@ for arg in "$@"; do
     --episode)     EPISODE=1 ;;
     --stop)
       echo "==> Stopping splat-explorer stack"
-      if [ -f outputs/dashboard.pid ]; then
-        pid=$(cat outputs/dashboard.pid 2>/dev/null || true)
-        if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
-          echo "    Stopping host dashboard (pid $pid)"
-          kill "$pid" || true
-        fi
-        rm -f outputs/dashboard.pid
-      fi
+      stop_host_dashboard
       docker compose down --remove-orphans
       if [ -d "$CLIRELAY_DIR" ]; then
         echo "==> Stopping CliRelay"
@@ -108,6 +119,9 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
 fi
 
 echo "==> [3/4] (Re)starting viser viewer (:8080) + episode dashboard (:8090)"
+stop_host_dashboard
+# Drop the last visor pointer so a restart loads the catalog room, not a leftover repair PLY.
+rm -f outputs/live/scene.json
 docker compose down --remove-orphans
 # Ports may be held by stale locally-run instances ("splat-explorer viewer" /
 # "splat-explorer dashboard" outside Docker) — kill our own, warn about others.
@@ -150,7 +164,15 @@ if [ "$HOST_DASHBOARD" = 1 ] && [ "$DASH_FREE" = 1 ]; then
   echo "    Host dashboard pid $(cat outputs/dashboard.pid)  (logs: outputs/dashboard.log)"
   printf "    Waiting for host dashboard"
   for _ in $(seq 1 40); do
-    if curl -s -o /dev/null "http://localhost:8090"; then echo "  ready"; break; fi
+    if curl -s -o /dev/null "http://127.0.0.1:8090"; then echo "  up"; break; fi
+    printf "."
+    sleep 0.5
+  done
+  printf "    Waiting for catalog scene"
+  for _ in $(seq 1 60); do
+    status=$(curl -s "http://127.0.0.1:8090/api/state" | python3 -c "import json,sys; print((json.load(sys.stdin).get('scene') or {}).get('status') or '')" 2>/dev/null || true)
+    if [ "$status" = "ready" ]; then echo "  ready"; break; fi
+    if [ "$status" = "error" ]; then echo "  ERROR"; break; fi
     printf "."
     sleep 0.5
   done
