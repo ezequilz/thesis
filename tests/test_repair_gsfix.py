@@ -7,6 +7,7 @@ import pytest
 
 from splat_explorer.repair import (
     PhotometricViewRepair,
+    ProjectedViewRepair,
     SceneRepairer,
     make_repair_backend,
     repaired_render_name,
@@ -26,7 +27,7 @@ def test_make_repair_backend_falls_back_without_cuda():
         from splat_explorer.repair_gsfix import GsplatPhotometricRepair
         assert isinstance(backend, GsplatPhotometricRepair)
     else:
-        assert isinstance(backend, PhotometricViewRepair)
+        assert isinstance(backend, ProjectedViewRepair)
 
 
 def test_ssim_and_l1_on_cpu():

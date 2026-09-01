@@ -17,11 +17,13 @@ from splat_explorer.repair import (
     ORIGINAL_PLY,
     REPAIRED_PLY,
     PhotometricViewRepair,
+    ProjectedViewRepair,
     SceneRepairer,
     camera_from_record,
     copy_camera,
     discover_repair_views,
     replay_episode_repairs,
+    repaired_render_name,
     scene_from_renderer,
     visible_gaussians,
 )
@@ -157,6 +159,37 @@ def test_densify_fills_empty_pixels(tmp_path: Path):
     assert result.n_spawned > 0
     assert repairer._working is not None
     assert repairer._working.num_gaussians == n0 + result.n_spawned
+    assert scene.num_gaussians == n0
+
+
+def test_projected_view_stamps_repair_into_splat(tmp_path: Path):
+    scene = _scene([[0.0, 0.0, 0.0]], colors=[[0.2, 0.2, 0.2]])
+    n0 = scene.num_gaussians
+    camera = _front_camera()
+    rendered = np.full((camera.height, camera.width, 3), 40, dtype=np.uint8)
+    repaired = np.zeros((camera.height, camera.width, 3), dtype=np.uint8)
+    repaired[..., 1] = 255
+    Image.fromarray(rendered).save(tmp_path / "src.png")
+    Image.fromarray(repaired).save(tmp_path / "fix.png")
+    repairer = SceneRepairer(
+        scene,
+        backend=ProjectedViewRepair(stride=4, max_new=64, error_floor=0.02),
+    )
+    result = repairer.apply_view(
+        step=0, camera=camera,
+        rendered_path=tmp_path / "src.png",
+        repaired_path=tmp_path / "fix.png",
+        episode_dir=tmp_path,
+    )
+    assert result.status == "ok"
+    assert result.backend == "cpu-project"
+    assert result.n_spawned > 0
+    working = repairer._working
+    assert working is not None
+    assert working.num_gaussians == n0 + result.n_spawned
+    assert working.colors[0, 1] > working.colors[0, 0]
+    assert working.colors[-1, 1] > 0.8
+    assert (tmp_path / repaired_render_name(0)).is_file()
     assert scene.num_gaussians == n0
 
 

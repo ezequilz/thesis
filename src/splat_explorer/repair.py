@@ -6,8 +6,8 @@ repair copies that scene into the episode directory as `scene_original.ply`
 later views.
 
 `make_repair_backend()` picks the lift: on CUDA+gsplat it runs the GSFix3D
-refine loop (differentiable rasterize, L1+SSIM, Adam on all gaussian params).
-Otherwise it uses a CPU color stand-in that will not change the 3D look.
+refine loop. Otherwise it uses `ProjectedViewRepair`: stamp the diffusion
+image onto the splat at existing depths (CPU, visible Original vs Repaired).
 No extra depth or diffusion model is required for the lift.
 """
 
@@ -23,7 +23,7 @@ from typing import Any, Protocol
 
 import numpy as np
 from PIL import Image
-from scipy.ndimage import binary_dilation, uniform_filter
+from scipy.ndimage import binary_dilation, distance_transform_edt, uniform_filter
 
 from .rendering.base import Camera
 from .scene import GaussianScene, save_ply
@@ -57,11 +57,11 @@ def make_repair_backend():
             return GsplatPhotometricRepair()
     except Exception:
         logger.exception("GSFix refine backend unavailable")
-    logger.warning(
-        "3D repair backend: CPU photometric stand-in (no CUDA+gsplat). "
-        "Original vs repaired splats will look almost identical."
+    logger.info(
+        "3D repair backend: CPU projection lift (no CUDA). "
+        "Stamps the diffusion image onto the splat at existing depths."
     )
-    return PhotometricViewRepair()
+    return ProjectedViewRepair()
 
 
 def copy_camera(camera: Camera) -> Camera:
@@ -284,6 +284,151 @@ class PhotometricViewRepair:
         colors = repaired[ys, xs].astype(np.float32)
         n = len(xs)
         scales = np.full((n, 3), self.new_scale, dtype=np.float32)
+        quats = np.tile(_IDENTITY_QUAT, (n, 1))
+        opacities = np.full((n,), self.new_opacity, dtype=np.float32)
+        scene.means = np.concatenate([scene.means, means], axis=0)
+        scene.scales = np.concatenate([scene.scales, scales], axis=0)
+        scene.quats = np.concatenate([scene.quats, quats], axis=0)
+        scene.opacities = np.concatenate([scene.opacities, opacities], axis=0)
+        scene.colors = np.concatenate([scene.colors, colors], axis=0)
+        return n
+
+
+def _scatter_depth(
+    height: int,
+    width: int,
+    uf: np.ndarray,
+    vf: np.ndarray,
+    z: np.ndarray,
+) -> np.ndarray:
+    """Nearest-neighbor depth from projected gaussian centers (closer wins)."""
+    depth = np.full((height, width), np.inf, dtype=np.float32)
+    if len(z) == 0:
+        return depth
+    order = np.argsort(-z.astype(np.float64))
+    u_i = np.clip(np.round(uf[order]).astype(np.int32), 0, width - 1)
+    v_i = np.clip(np.round(vf[order]).astype(np.int32), 0, height - 1)
+    depth[v_i, u_i] = z[order].astype(np.float32)
+    missing = ~np.isfinite(depth)
+    if np.any(~missing) and np.any(missing):
+        _, (iy, ix) = distance_transform_edt(missing, return_indices=True)
+        depth[missing] = depth[iy[missing], ix[missing]]
+    return depth
+
+
+def _point_preview(scene: GaussianScene, camera: Camera, near: float = 0.05) -> np.ndarray:
+    """Cheap z-buffer of gaussian centers — the 3D-after still for the compare UI."""
+    h, w = int(camera.height), int(camera.width)
+    img = np.zeros((h, w, 3), dtype=np.float32)
+    depth = np.full((h, w), np.inf, dtype=np.float32)
+    idx, uf, vf, z = visible_gaussians(scene, camera, near=near)
+    if len(idx) == 0:
+        return (img * 255).astype(np.uint8)
+    order = np.argsort(-z.astype(np.float64))
+    u_i = np.clip(np.round(uf[order]).astype(np.int32), 0, w - 1)
+    v_i = np.clip(np.round(vf[order]).astype(np.int32), 0, h - 1)
+    z_o = z[order]
+    col = scene.colors[idx[order]]
+    closer = z_o < depth[v_i, u_i]
+    depth[v_i[closer], u_i[closer]] = z_o[closer]
+    img[v_i[closer], u_i[closer]] = col[closer]
+    return np.clip(img * 255.0, 0, 255).astype(np.uint8)
+
+
+@dataclass
+class ProjectedViewRepair:
+    """CPU substitute for GSFix refine: paint the diffusion image into the splat.
+
+    No backprop. Uses the current splat as a depth map, overwrites colors of
+    gaussians whose centers fall in the view, fades those that disagree with
+    the repair, and injects a dense layer of small gaussians at the repaired
+    pixels so Original vs Repaired is a real 3D change.
+    """
+
+    near: float = 0.05
+    color_lr: float = 1.0
+    fade: float = 0.75
+    stride: int = 3
+    max_new: int = 12000
+    error_floor: float = 0.04
+    new_opacity: float = 0.9
+    seed: int = 0
+
+    def apply(
+        self,
+        scene: GaussianScene,
+        camera: Camera,
+        rendered_rgb: np.ndarray,
+        repaired_rgb: np.ndarray,
+    ) -> dict[str, Any]:
+        h, w = int(camera.height), int(camera.width)
+        rendered = _to_float(_resize_rgb(rendered_rgb, w, h))
+        repaired = _to_float(_resize_rgb(repaired_rgb, w, h))
+        l1_before = float(np.mean(np.abs(repaired - rendered)))
+        err = np.mean(np.abs(repaired - rendered), axis=2)
+
+        idx, uf, vf, z = visible_gaussians(scene, camera, near=self.near)
+        n_visible = int(len(idx))
+        n_updated = 0
+        if n_visible:
+            n_updated = self._paint_centers(scene, idx, uf, vf, repaired, err)
+
+        n_spawned = self._inject_layer(scene, camera, idx, uf, vf, z, repaired, err)
+        preview = _point_preview(scene, camera, near=self.near)
+        l1_after = float(np.mean(np.abs(_to_float(preview) - repaired)))
+
+        return {
+            "backend": "cpu-project",
+            "n_visible": n_visible,
+            "n_updated": n_updated,
+            "n_spawned": n_spawned,
+            "n_gaussians": scene.num_gaussians,
+            "n_iters": 1,
+            "l1_before": round(l1_before, 6),
+            "l1_after": round(l1_after, 6),
+            "render_rgb": preview,
+        }
+
+    def _paint_centers(self, scene, idx, uf, vf, repaired, err) -> int:
+        target = _sample_rgb(repaired, uf, vf)
+        scene.colors[idx] = (1.0 - self.color_lr) * scene.colors[idx] + self.color_lr * target
+        scene.colors[idx] = np.clip(scene.colors[idx], 0.0, 1.0)
+        err_i = np.clip(_sample_rgb(err[:, :, None], uf, vf)[:, 0], 0.0, 1.0)
+        scene.opacities[idx] = np.clip(
+            scene.opacities[idx] * (1.0 - self.fade * err_i), 0.02, 0.995,
+        )
+        return int(len(idx))
+
+    def _inject_layer(
+        self, scene, camera, idx, uf, vf, z, repaired, err,
+    ) -> int:
+        h, w = repaired.shape[:2]
+        depth = _scatter_depth(h, w, uf, vf, z)
+        if not np.any(np.isfinite(depth)):
+            depth[:] = 2.0
+        stride = max(1, int(self.stride))
+        ys, xs = np.mgrid[0:h:stride, 0:w:stride]
+        ys, xs = ys.ravel(), xs.ravel()
+        keep = err[ys, xs] >= float(self.error_floor)
+        ys, xs = ys[keep], xs[keep]
+        if len(xs) == 0:
+            return 0
+        scores = err[ys, xs]
+        if len(xs) > int(self.max_new):
+            pick = np.argpartition(scores, -int(self.max_new))[-int(self.max_new):]
+            ys, xs = ys[pick], xs[pick]
+        z_pix = depth[ys, xs]
+        valid = np.isfinite(z_pix) & (z_pix > float(self.near))
+        ys, xs, z_pix = ys[valid], xs[valid], z_pix[valid]
+        if len(xs) == 0:
+            return 0
+        u_new = xs.astype(np.float32)
+        v_new = ys.astype(np.float32)
+        means = _unproject(camera, u_new, v_new, z_pix)
+        colors = repaired[ys, xs].astype(np.float32)
+        pixel_m = (float(stride) * z_pix / max(camera.fx, 1e-6)).astype(np.float32)
+        scales = np.clip(pixel_m, 0.008, 0.12)[:, None] * np.ones((len(xs), 3), np.float32)
+        n = len(xs)
         quats = np.tile(_IDENTITY_QUAT, (n, 1))
         opacities = np.full((n,), self.new_opacity, dtype=np.float32)
         scene.means = np.concatenate([scene.means, means], axis=0)

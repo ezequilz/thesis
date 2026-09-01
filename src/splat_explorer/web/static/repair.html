@@ -177,7 +177,7 @@
     <button type="button" data-which="original">Original</button>
     <button type="button" data-which="repaired">Repaired</button>
   </div>
-  <span class="hint">Replay lifts each regen PNG into 3D. Needs CUDA+gsplat for a real GSFix refine; otherwise a CPU stand-in runs and original/repaired splats look the same. ‹ › cycles original render, diffusion RGB, and 3D-after when that PNG exists.</span>
+  <span class="hint">Replay paints each regen PNG into the splat (CPU projection now; GSFix/gsplat when a GPU is available). ‹ › cycles original render, diffusion RGB, and 3D-after. Original/Repaired on the visor is the 3D before/after.</span>
 </div>
 
 <div id="stats">
