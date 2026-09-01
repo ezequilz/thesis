@@ -31,6 +31,8 @@ services:
   # start/stop runs, watch frames + raw VLM replies + timings per step, and
   # sync the viser viewer camera to any clicked step. Holds its own decoded
   # copy of the scene (like the viewer) — budget Docker RAM accordingly.
+  # On Apple Silicon, scripts/start.sh runs this on the host instead so
+  # gsplat-mlx / Metal can refine 3DGS (Linux Docker has no Metal GPU).
   dashboard:
     <<: *base
     command: ["dashboard"]

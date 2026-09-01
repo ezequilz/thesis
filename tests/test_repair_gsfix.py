@@ -19,6 +19,46 @@ def test_repaired_render_name():
     assert repaired_render_name(2) == "step_002_repaired_render.png"
 
 
+def test_make_repair_backend_explicit_cpu_photometric():
+    from splat_explorer.repair import PhotometricViewRepair
+
+    backend = make_repair_backend("cpu-photometric")
+    assert isinstance(backend, PhotometricViewRepair)
+    backend = make_repair_backend("cpu-project")
+    assert isinstance(backend, ProjectedViewRepair)
+
+
+def test_make_repair_backend_rejects_unknown_name():
+    with pytest.raises(ValueError, match="Unknown repair backend"):
+        make_repair_backend("not-a-backend")
+
+
+def test_explicit_backend_requires_availability():
+    from splat_explorer.repair_gsfix import gsplat_refine_available
+    from splat_explorer.repair_mlx import mlx_refine_available
+
+    if not gsplat_refine_available():
+        with pytest.raises(RuntimeError, match="CUDA"):
+            make_repair_backend("gsfix-gsplat")
+    if mlx_refine_available():
+        from splat_explorer.repair_mlx import MlxPhotometricRepair
+        assert isinstance(make_repair_backend("gsplat-mlx"), MlxPhotometricRepair)
+    else:
+        with pytest.raises(RuntimeError, match="gsplat-mlx"):
+            make_repair_backend("gsplat-mlx")
+
+
+def test_list_repair_backends_includes_auto_and_mlx():
+    from splat_explorer.repair import list_repair_backends
+
+    info = list_repair_backends()
+    ids = [b["id"] for b in info["backends"]]
+    assert info["detected"] in {"gsfix-gsplat", "gsplat-mlx", "cpu-project"}
+    assert ids[:3] == ["auto", "gsplat-mlx", "gsfix-gsplat"]
+    auto = info["backends"][0]
+    assert auto["available"] is True
+
+
 def test_make_repair_backend_falls_back_without_cuda():
     backend = make_repair_backend()
     from splat_explorer.repair_gsfix import gsplat_refine_available

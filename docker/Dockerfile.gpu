@@ -23,5 +23,7 @@ RUN pip install --no-cache-dir --no-deps .
 
 # Select the gsplat backend at runtime:
 #   splat-explorer --config configs/gpu.yaml render-test   (renderer.backend: gsplat)
+# 3D repair uses the same gsplat stack (backend gsfix-gsplat) when this image
+# is the one running the dashboard/harness.
 ENTRYPOINT ["splat-explorer"]
 CMD ["render-test"]

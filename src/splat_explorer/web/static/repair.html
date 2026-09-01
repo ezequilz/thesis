@@ -165,6 +165,15 @@
   <label>episode
     <select id="in-ep"></select>
   </label>
+  <label>backend
+    <select id="in-backend" title="Which 3D lift to run. Auto picks CUDA, then gsplat-mlx, then the CPU stamp.">
+      <option value="auto">Auto (best available)</option>
+      <option value="gsplat-mlx">gsplat-mlx (Apple Silicon / Metal)</option>
+      <option value="gsfix-gsplat">gsplat CUDA (GSFix3D)</option>
+      <option value="cpu-project">CPU color stamp</option>
+      <option value="cpu-photometric">CPU photometric (no rasterizer)</option>
+    </select>
+  </label>
   <label class="chk" title="Re-import splat_explorer.repair so code edits apply without restarting the dashboard process.">
     <input type="checkbox" id="in-reload" checked>
     reload repair.py
@@ -177,7 +186,7 @@
     <button type="button" data-which="original">Original</button>
     <button type="button" data-which="repaired">Repaired</button>
   </div>
-  <span class="hint">Replay paints each regen PNG into the splat (CPU projection now; GSFix/gsplat when a GPU is available). ‹ › cycles original render, diffusion RGB, and 3D-after. Original/Repaired on the visor is the 3D before/after.</span>
+  <span class="hint"></span>
 </div>
 
 <div id="stats">
@@ -186,6 +195,7 @@
   <span>original ply <b id="st-orig">–</b></span>
   <span>repaired ply <b id="st-rep">–</b></span>
   <span>scene <b id="st-scene">–</b></span>
+  <span>lift <b id="st-backend">–</b></span>
 </div>
 <div id="msg"></div>
 
@@ -252,6 +262,31 @@ function jobPill(job) {
     : st === "error" ? " err" : st === "completed" ? " ok" : "");
 }
 
+function renderBackends() {
+  const sel = $("in-backend");
+  if (!sel) return;
+  const info = snapshot?.backends;
+  const list = info?.backends || [];
+  const prev = sel.value || "auto";
+  if (!list.length) {
+    if (!sel.options.length) {
+      sel.innerHTML = '<option value="auto">Auto</option>';
+    }
+    return;
+  }
+  const signature = list.map(b => `${b.id}:${b.available}`).join("|");
+  if (sel.dataset.sig === signature && sel.options.length) return;
+  sel.dataset.sig = signature;
+  sel.innerHTML = list.map(b => {
+    const mark = b.available ? "" : " — unavailable";
+    return `<option value="${esc(b.id)}" title="${esc(b.detail || "")}">${esc(b.label)}${mark}</option>`;
+  }).join("");
+  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  else sel.value = "auto";
+  const chosen = list.find(b => b.id === sel.value);
+  sel.title = chosen?.detail || "";
+}
+
 function renderEpisodes() {
   const sel = $("in-ep");
   const live = snapshot?.live_episode;
@@ -279,6 +314,11 @@ function renderViews() {
   $("st-rep").textContent = ep?.repaired_ply ? fmtBytes(ep.repaired_ply.bytes) : "–";
   $("st-scene").textContent = snapshot?.episode_scene_label
     || snapshot?.episode_scene || snapshot?.scene_id || "–";
+  const detected = snapshot?.backends?.detected;
+  const jobBackend = snapshot?.job?.backend;
+  $("st-backend").textContent = jobBackend && jobBackend !== "auto"
+    ? jobBackend
+    : (detected || "–");
   $("st-done").textContent = snapshot?.job?.n_done != null
     ? `${snapshot.job.n_done}/${snapshot.job.n_views || 0}` : "–";
   if (!views.length) {
@@ -365,6 +405,7 @@ function renderCompare() {
       <span class="k">3D repair</span><span class="v">${esc(r.status || "not run")}</span>
       <span class="k">backend</span><span class="v">${esc(r.backend || "–")}</span>
       <span class="k">iters</span><span class="v">${r.n_iters ?? "–"}</span>
+      <span class="k">train res</span><span class="v">${r.train_width && r.train_height ? `${r.train_width}×${r.train_height}` : "–"}</span>
       <span class="k">visible</span><span class="v">${r.n_visible ?? "–"}</span>
       <span class="k">spawned</span><span class="v">${r.n_spawned ?? "–"}</span>
       <span class="k">L1 before</span><span class="v">${r.l1_before ?? "–"}</span>
@@ -475,6 +516,7 @@ async function tick() {
     selectedStep = snapshot.episode.views[0].step;
   }
   jobPill(snapshot.job);
+  renderBackends();
   $("msg").textContent = snapshot?.job?.message || $("msg").textContent;
   if (snapshot?.job?.status === "idle") {
     /* keep last operator message */
@@ -498,6 +540,7 @@ $("btn-replay").onclick = async () => {
   await post("/api/repair/start", {
     episode: selectedEp,
     reload_code: $("in-reload").checked,
+    backend: $("in-backend").value || "auto",
   });
   tick();
 };

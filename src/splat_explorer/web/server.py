@@ -19,7 +19,7 @@ Endpoints:
   GET  /repair            3D repair review: original vs repaired splat, replay past runs
   GET  /api/repair        repair-studio snapshot (optional ?episode=)
   GET  /api/repair/episodes     past runs with regen counts / ply flags
-  POST /api/repair/start   replay 3D lift {episode, reload_code}
+  POST /api/repair/start   replay 3D lift {episode, reload_code, backend}
   POST /api/repair/stop   stop a replay
   POST /api/repair/show   point viser at {episode, which: original|repaired}
   POST /api/repair/focus  load that episode's catalog scene into the shared visor
@@ -764,7 +764,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "message": "Missing episode id."}, 400)
                 return
             reload_code = body.get("reload_code", True)
-            ok, message = studio.start_replay(str(ep), reload_code=bool(reload_code))
+            backend = body.get("backend") or "auto"
+            ok, message = studio.start_replay(
+                str(ep), reload_code=bool(reload_code), backend=str(backend),
+            )
         elif path == "/api/repair/stop":
             ok, message = studio.stop_replay()
         elif path == "/api/repair/show":

@@ -46,26 +46,180 @@ def repaired_render_name(step: int) -> str:
     return f"step_{int(step):03d}_repaired_render.png"
 
 
-def make_repair_backend():
-    """CUDA gsplat refine, else Apple Silicon gsplat-mlx, else CPU color stamp."""
+_BACKEND_ALIASES = {
+    "auto": "auto",
+    "detect": "auto",
+    "mlx": "gsplat-mlx",
+    "gsplat-mlx": "gsplat-mlx",
+    "apple": "gsplat-mlx",
+    "cuda": "gsfix-gsplat",
+    "gsplat": "gsfix-gsplat",
+    "gsfix": "gsfix-gsplat",
+    "gsfix-gsplat": "gsfix-gsplat",
+    "cpu": "cpu-project",
+    "cpu-project": "cpu-project",
+    "project": "cpu-project",
+    "cpu-photometric": "cpu-photometric",
+    "photometric": "cpu-photometric",
+}
+
+
+def _in_docker() -> bool:
+    return Path("/.dockerenv").is_file()
+
+
+def _cuda_available() -> bool:
     try:
+        from .repair_gsfix import gsplat_refine_available
+        return bool(gsplat_refine_available())
+    except Exception:
+        return False
+
+
+def _mlx_available() -> bool:
+    try:
+        from .repair_mlx import mlx_refine_available
+        return bool(mlx_refine_available())
+    except Exception:
+        return False
+
+
+def detect_repair_backend() -> str:
+    """Id that `auto` would pick in this process."""
+    if _cuda_available():
+        return "gsfix-gsplat"
+    if _mlx_available():
+        return "gsplat-mlx"
+    return "cpu-project"
+
+
+def list_repair_backends() -> dict:
+    """Catalog for the repair-studio dropdown (availability is process-local)."""
+    cuda = _cuda_available()
+    mlx = _mlx_available()
+    docker = _in_docker()
+    if mlx:
+        mlx_detail = "Metal / MLX differentiable refine"
+    elif docker:
+        mlx_detail = (
+            "Not visible in Linux Docker (no Metal). "
+            "scripts/start.sh runs the dashboard on the Mac host for gsplat-mlx."
+        )
+    else:
+        mlx_detail = "Install with: pip install -e '.[apple]' (Apple Silicon + MLX)"
+    cuda_detail = (
+        "CUDA + gsplat photometric refine"
+        if cuda
+        else "Needs an NVIDIA GPU and pip install -e '.[gpu]'"
+    )
+    detected = detect_repair_backend()
+    return {
+        "detected": detected,
+        "docker": docker,
+        "backends": [
+            {
+                "id": "auto",
+                "label": f"Auto ({detected})",
+                "available": True,
+                "detail": f"Picks the best stack in this process: {detected}",
+            },
+            {
+                "id": "gsplat-mlx",
+                "label": "gsplat-mlx (Apple Silicon / Metal)",
+                "available": mlx,
+                "detail": mlx_detail,
+            },
+            {
+                "id": "gsfix-gsplat",
+                "label": "gsplat CUDA (GSFix3D)",
+                "available": cuda,
+                "detail": cuda_detail,
+            },
+            {
+                "id": "cpu-project",
+                "label": "CPU color stamp",
+                "available": True,
+                "detail": "Fast stand-in: paint the regen PNG onto existing depths. No backprop.",
+            },
+            {
+                "id": "cpu-photometric",
+                "label": "CPU photometric (no rasterizer)",
+                "available": True,
+                "detail": "Residual-weighted color step at gaussian centers. No 3DGS rasterizer.",
+            },
+        ],
+    }
+
+
+def _normalize_backend_name(name: str | None) -> str:
+    key = str(name or "auto").strip().lower()
+    if key not in _BACKEND_ALIASES:
+        known = ", ".join(sorted(set(_BACKEND_ALIASES.values())))
+        raise ValueError(f"Unknown repair backend {name!r}. Choose one of: {known}")
+    return _BACKEND_ALIASES[key]
+
+
+def make_repair_backend(name: str | None = "auto", *, studio: bool = False):
+    """Build a lift backend.
+
+    `name='auto'` detects CUDA gsplat, then Apple Silicon gsplat-mlx, then the
+    CPU color stamp. An explicit name must be available here — it will not
+    silently fall back (the dashboard uses that to show a real error).
+
+    `studio=True` uses a heavier gsplat-mlx preset (higher training resolution
+    / more gaussians) for dashboard replays. Live episodes keep the lighter
+    defaults so the harness is not blocked for minutes per view.
+    """
+    key = _normalize_backend_name(name)
+    if key == "auto":
+        key = detect_repair_backend()
+        logger.info("3D repair backend (auto): %s", key)
+        return _build_repair_backend(key, studio=studio, required=False)
+    return _build_repair_backend(key, studio=studio, required=True)
+
+
+def _build_repair_backend(key: str, *, studio: bool, required: bool):
+    if key == "gsfix-gsplat":
         from .repair_gsfix import GsplatPhotometricRepair, gsplat_refine_available
 
-        if gsplat_refine_available():
+        if not gsplat_refine_available():
+            msg = (
+                "gsplat CUDA refine is not available in this process "
+                "(needs NVIDIA GPU + pip install -e '.[gpu]')."
+            )
+            if required:
+                raise RuntimeError(msg)
+            logger.info(msg)
+        else:
             logger.info("3D repair backend: GSFix refine (gsplat / CUDA)")
             return GsplatPhotometricRepair()
-    except Exception:
-        logger.exception("GSFix refine backend unavailable")
-    try:
+    if key == "gsplat-mlx":
         from .repair_mlx import MlxPhotometricRepair, mlx_refine_available
 
-        if mlx_refine_available():
-            logger.info("3D repair backend: GSFix refine (gsplat-mlx / Apple Silicon)")
-            return MlxPhotometricRepair()
-    except Exception:
-        logger.exception("gsplat-mlx refine backend unavailable")
+        if not mlx_refine_available():
+            extra = (
+                " Linux Docker cannot use Metal — run the host dashboard via scripts/start.sh."
+                if _in_docker()
+                else " Install with: pip install -e '.[apple]'."
+            )
+            msg = "gsplat-mlx is not available in this process." + extra
+            if required:
+                raise RuntimeError(msg)
+            logger.info(msg)
+        else:
+            kwargs = {}
+            if studio:
+                kwargs = dict(iters=20, max_train_side=256, max_opt_gaussians=8192)
+            logger.info(
+                "3D repair backend: GSFix refine (gsplat-mlx / Apple Silicon)%s",
+                " [studio]" if studio else "",
+            )
+            return MlxPhotometricRepair(**kwargs)
+    if key == "cpu-photometric":
+        logger.info("3D repair backend: CPU photometric (no rasterizer)")
+        return PhotometricViewRepair()
     logger.info(
-        "3D repair backend: CPU projection lift (no CUDA / gsplat-mlx). "
+        "3D repair backend: CPU projection lift. "
         "Stamps the diffusion image onto the splat at existing depths."
     )
     return ProjectedViewRepair()
@@ -461,6 +615,8 @@ class RepairResult:
     l1_after: float | None = None
     n_iters: int = 0
     backend: str | None = None
+    train_width: int | None = None
+    train_height: int | None = None
     render_name: str | None = None
     original_ply: str | None = None
     repaired_ply: str | None = None
@@ -480,6 +636,8 @@ class RepairResult:
             "l1_before": self.l1_before,
             "l1_after": self.l1_after,
             "backend": self.backend,
+            "train_width": self.train_width,
+            "train_height": self.train_height,
             "render_name": self.render_name,
             "original_ply": self.original_ply,
             "repaired_ply": self.repaired_ply,
@@ -589,6 +747,9 @@ class SceneRepairer:
                 after = stats.get("l1_after")
                 out.l1_after = None if after is None else float(after)
                 out.backend = stats.get("backend")
+                tw, th = stats.get("train_width"), stats.get("train_height")
+                out.train_width = None if tw is None else int(tw)
+                out.train_height = None if th is None else int(th)
                 out.render_name = render_name
                 out.original_ply = ORIGINAL_PLY
                 out.repaired_ply = REPAIRED_PLY

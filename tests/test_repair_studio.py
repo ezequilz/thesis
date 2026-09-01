@@ -80,3 +80,5 @@ def test_snapshot_reports_episode_scene(tmp_path: Path):
     assert snap["episode_scene"] == "venetian-balcony"
     assert snap["episode_scene_label"] == "Venetian Balcony"
     assert snap["scene_id"] == "arch-interiors"
+    assert "backends" in snap
+    assert snap["backends"]["detected"] in {"gsfix-gsplat", "gsplat-mlx", "cpu-project"}

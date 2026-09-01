@@ -26,6 +26,14 @@ for arg in "$@"; do
     --episode)     EPISODE=1 ;;
     --stop)
       echo "==> Stopping splat-explorer stack"
+      if [ -f outputs/dashboard.pid ]; then
+        pid=$(cat outputs/dashboard.pid 2>/dev/null || true)
+        if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
+          echo "    Stopping host dashboard (pid $pid)"
+          kill "$pid" || true
+        fi
+        rm -f outputs/dashboard.pid
+      fi
       docker compose down --remove-orphans
       if [ -d "$CLIRELAY_DIR" ]; then
         echo "==> Stopping CliRelay"
@@ -86,8 +94,18 @@ if [ -f "$CLIRELAY_DIR/.env" ]; then
   [ -n "${ADMIN_PW:-}" ] && echo "    Admin password (from $CLIRELAY_DIR/.env): $ADMIN_PW"
 fi
 
-echo "==> [2/4] Building splat-explorer image"
+echo "==> [2/4] Building splat-explorer image + host extras"
 docker compose build
+
+HOST_DASHBOARD=0
+if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
+  HOST_DASHBOARD=1
+  echo "    Apple Silicon: installing [apple] extra (gsplat-mlx / MLX) into .venv"
+  if [ ! -x .venv/bin/python ]; then
+    python3 -m venv .venv
+  fi
+  .venv/bin/pip install -e ".[viewer,vlm,apple]"
+fi
 
 echo "==> [3/4] (Re)starting viser viewer (:8080) + episode dashboard (:8090)"
 docker compose down --remove-orphans
@@ -115,11 +133,30 @@ free_port() {  # free_port <port> <cmd substring> ; returns 1 if a foreign proce
 free_port 8080 "splat-explorer viewer"    && SERVICES="$SERVICES viewer" \
   || echo "    Skipping viewer (port busy)"
 free_port 8081 "splat-explorer viewer"    || true
-free_port 8090 "splat-explorer dashboard" && SERVICES="$SERVICES dashboard" \
-  || echo "    Skipping dashboard (port busy)"
+free_port 8090 "splat-explorer dashboard" && DASH_FREE=1 \
+  || { echo "    Skipping dashboard (port busy)"; DASH_FREE=0; }
 if [ -n "$SERVICES" ]; then
   # shellcheck disable=SC2086
   docker compose up -d $SERVICES
+fi
+if [ "$HOST_DASHBOARD" = 1 ] && [ "$DASH_FREE" = 1 ]; then
+  mkdir -p outputs
+  echo "    Starting host dashboard on :8090 (Metal / gsplat-mlx; not Docker)"
+  export CLIRELAY_BASE_URL="${CLIRELAY_BASE_URL:-http://localhost:8317/v1}"
+  export VISER_RENDER_URL="${VISER_RENDER_URL:-http://localhost:8081}"
+  export VISER_VIEWER_URL="${VISER_VIEWER_URL:-http://localhost:8080}"
+  nohup .venv/bin/splat-explorer dashboard >> outputs/dashboard.log 2>&1 &
+  echo $! > outputs/dashboard.pid
+  echo "    Host dashboard pid $(cat outputs/dashboard.pid)  (logs: outputs/dashboard.log)"
+  printf "    Waiting for host dashboard"
+  for _ in $(seq 1 40); do
+    if curl -s -o /dev/null "http://localhost:8090"; then echo "  ready"; break; fi
+    printf "."
+    sleep 0.5
+  done
+  echo ""
+elif [ "$HOST_DASHBOARD" != 1 ] && [ "$DASH_FREE" = 1 ]; then
+  docker compose up -d dashboard
 fi
 
 echo "==> [4/4] Optional one-off jobs"
@@ -137,7 +174,11 @@ echo ""
 echo "Done."
 echo "  CliRelay panel : $CLIRELAY_URL/manage   (create an API key here)"
 echo "  Debug viewer   : http://localhost:8080"
-echo "  Dashboard      : http://localhost:8090  (start/watch episodes, VLM debug)"
+if [ "${HOST_DASHBOARD:-0}" = 1 ]; then
+  echo "  Dashboard      : http://localhost:8090  (host process — gsplat-mlx / Metal)"
+else
+  echo "  Dashboard      : http://localhost:8090  (start/watch episodes, VLM debug)"
+fi
 echo "  Spectator (HD) : http://localhost:8090/spectator  (viewing only)"
 echo "  CLI episode    : export CLIRELAY_API_KEY=sk-... && \\"
 echo "                   splat-explorer --config configs/cli_relay.yaml explore"

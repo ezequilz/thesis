@@ -217,6 +217,8 @@ works on this machine:
 pip install -e ".[apple]"   # local Mac testing of the 3D refine loop
 ```
 
+`scripts/start.sh` on Apple Silicon installs that extra into `.venv` and runs the **dashboard on the host** (not in Linux Docker). Metal is not available inside the CPU Docker image, so a Docker-only replay silently used the CPU color stamp — that is why a run can finish in a fraction of a second with little 3D change. The repair page has a backend dropdown; pick `gsplat-mlx` to require the real refine (it errors instead of falling back).
+
 ## Scene assets
 
 Two formats are supported (`scene.path` dispatches on extension):

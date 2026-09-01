@@ -15,6 +15,7 @@ from ..repair import (
     ORIGINAL_PLY,
     REPAIRED_PLY,
     discover_repair_views,
+    list_repair_backends,
     reload_repair_module,
     replay_episode_repairs,
 )
@@ -55,6 +56,7 @@ class RepairStudio:
             "finished_at": None,
             "results": [],
             "reload_code": False,
+            "backend": "auto",
         }
 
     def snapshot(self, episode_id: str | None = None) -> dict:
@@ -90,6 +92,7 @@ class RepairStudio:
             "episode_scene": episode_scene,
             "episode_scene_label": episode_scene_label,
             "up_axis": up_axis,
+            "backends": list_repair_backends(),
             "episode": detail,
             "viewer_url": f"http://localhost:{self.app.cfg.viewer.port}",
         }
@@ -133,7 +136,13 @@ class RepairStudio:
             "repair_log": log,
         }
 
-    def start_replay(self, episode_id: str, *, reload_code: bool = True) -> tuple[bool, str]:
+    def start_replay(
+        self,
+        episode_id: str,
+        *,
+        reload_code: bool = True,
+        backend: str = "auto",
+    ) -> tuple[bool, str]:
         d = self.app.episode_path(episode_id)
         if d is None:
             return False, f"Episode {episode_id} not found."
@@ -144,6 +153,7 @@ class RepairStudio:
         with self.app.lock:
             if self.app.scene_status != "ready" or self.app.scene is None:
                 return False, "Dashboard scene is not ready."
+        backend_name = str(backend or "auto").strip() or "auto"
         with self._lock:
             if self.job["status"] == "running":
                 return False, "A repair replay is already running."
@@ -154,14 +164,16 @@ class RepairStudio:
                 "n_views": len(views),
                 "started_at": time.time(),
                 "reload_code": bool(reload_code),
-                "message": f"Replaying {len(views)} view(s)…",
+                "backend": backend_name,
+                "message": f"Replaying {len(views)} view(s) with {backend_name}…",
             }
         self._thread = threading.Thread(
-            target=self._run, args=(episode_id, d, meta, views, bool(reload_code)),
+            target=self._run,
+            args=(episode_id, d, meta, views, bool(reload_code), backend_name),
             daemon=True,
         )
         self._thread.start()
-        return True, f"Replaying 3D repair on {len(views)} view(s)."
+        return True, f"Replaying 3D repair on {len(views)} view(s) ({backend_name})."
 
     def stop_replay(self) -> tuple[bool, str]:
         with self._lock:
@@ -302,7 +314,7 @@ class RepairStudio:
         return scene
 
     def _run(self, episode_id: str, episode_dir: Path, meta: dict,
-             views: list[dict], reload_code: bool) -> None:
+             views: list[dict], reload_code: bool, backend_name: str = "auto") -> None:
         try:
             module = reload_repair_module() if reload_code else None
             replay = replay_episode_repairs if module is None else module.replay_episode_repairs
@@ -311,7 +323,11 @@ class RepairStudio:
             )
             from ..repair import make_repair_backend as _default_backend
             source = self._source_for_episode(meta)
-            backend = (make_backend or _default_backend)()
+            factory = make_backend or _default_backend
+            try:
+                backend = factory(backend_name, studio=True)
+            except TypeError:
+                backend = factory(backend_name)
             params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
             with self.app.lock:
                 spec = self.app._scene_spec
@@ -333,6 +349,12 @@ class RepairStudio:
                         f"View {index + 1}/{self.job['n_views']} "
                         f"(step {view.get('step')}) {body.get('status')}"
                         + (f" · {body['backend']}" if body.get("backend") else "")
+                        + (f" · {body['seconds']:.1f}s" if body.get("seconds") is not None else "")
+                        + (
+                            f" · train {body['train_width']}x{body['train_height']}"
+                            if body.get("train_width") and body.get("train_height")
+                            else ""
+                        )
                     )
                 if result.status == "ok" and self.showing == "repaired":
                     self.show(episode_id, "repaired", force=True)
