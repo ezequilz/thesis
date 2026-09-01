@@ -16,7 +16,13 @@ Endpoints:
   GET  /                  dashboard page
   GET  /spectator         HD visor for looking around (not used for VLM captures)
   GET  /video/<id>        player tab: loading, then the stitched episode video
-  GET  /api/state         full dashboard state (scene status + current run)
+  GET  /repair            3D repair review: original vs repaired splat, replay past runs
+  GET  /api/repair        repair-studio snapshot (optional ?episode=)
+  GET  /api/repair/episodes     past runs with regen counts / ply flags
+  POST /api/repair/start   replay 3D lift {episode, reload_code}
+  POST /api/repair/stop   stop a replay
+  POST /api/repair/show   point viser at {episode, which: original|repaired}
+  POST /api/repair/look   point viser frustum at a regenerated step
   GET  /api/episodes      list all past runs on disk (meta.json summaries)
   GET  /api/episodes/<id>      full trace of one past run (steps + artifacts)
   GET  /api/episodes/<id>/log  that run's episode.log
@@ -38,7 +44,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
 
@@ -161,6 +167,9 @@ class DashboardApp:
         # One lock per episode so two video-tab opens don't double-render.
         self._video_locks: dict[str, threading.Lock] = {}
         self._video_locks_guard = threading.Lock()
+        from .repair_studio import RepairStudio
+
+        self.repair = RepairStudio(self)
         threading.Thread(target=self._load_scene, daemon=True).start()
 
     # --- scene ----------------------------------------------------------------
@@ -216,6 +225,8 @@ class DashboardApp:
             self.scene_info = {**spec.to_json(), "generation": generation}
             self._pinned = None
         publish_live_scene(spec, generation)
+        with self.repair._lock:
+            self.repair.showing = None
         try:
             LIVE_STATE_PATH.unlink(missing_ok=True)
         except OSError:
@@ -658,6 +669,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(200, (STATIC_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
         elif path in ("/spectator", "/spectator.html"):
             self._send(200, (STATIC_DIR / "spectator.html").read_bytes(), "text/html; charset=utf-8")
+        elif path in ("/repair", "/repair.html"):
+            self._send(200, (STATIC_DIR / "repair.html").read_bytes(), "text/html; charset=utf-8")
         elif path.startswith("/video/"):
             ep = path[len("/video/"):]
             if not ep or "/" in ep:
@@ -668,6 +681,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(self.app.snapshot())
         elif path == "/api/episodes":
             self._send_json({"episodes": self.app.list_episodes()})
+        elif path.startswith("/api/repair"):
+            self._serve_repair_get(path)
         elif path.startswith("/api/episodes/"):
             self._serve_episode(path[len("/api/episodes/"):])
         elif path.startswith("/frames/"):
@@ -693,6 +708,54 @@ class DashboardHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(detail)
 
+    def _serve_repair_get(self, path: str) -> None:
+        studio = self.app.repair
+        if path == "/api/repair":
+            query = parse_qs(urlsplit(self.path).query)
+            episode = (query.get("episode") or [None])[0]
+            self._send_json(studio.snapshot(episode or None))
+            return
+        if path == "/api/repair/episodes":
+            self._send_json({"episodes": studio.list_episodes()})
+            return
+        if path.startswith("/api/repair/episodes/"):
+            ep = path[len("/api/repair/episodes/"):]
+            detail = studio.episode_review(ep)
+            if detail is None:
+                self._send_json({"error": "not found"}, 404)
+            else:
+                self._send_json(detail)
+            return
+        self._send_json({"error": "not found"}, 404)
+
+    def _serve_repair_post(self, path: str, body: dict) -> None:
+        studio = self.app.repair
+        if path == "/api/repair/start":
+            ep = body.get("episode") or body.get("id")
+            if not ep:
+                self._send_json({"ok": False, "message": "Missing episode id."}, 400)
+                return
+            reload_code = body.get("reload_code", True)
+            ok, message = studio.start_replay(str(ep), reload_code=bool(reload_code))
+        elif path == "/api/repair/stop":
+            ok, message = studio.stop_replay()
+        elif path == "/api/repair/show":
+            ep = body.get("episode") or body.get("id")
+            if not ep:
+                self._send_json({"ok": False, "message": "Missing episode id."}, 400)
+                return
+            ok, message = studio.show(str(ep), str(body.get("which") or ""))
+        elif path == "/api/repair/look":
+            ep = body.get("episode") or body.get("id")
+            if not ep or body.get("step") is None:
+                self._send_json({"ok": False, "message": "Missing episode or step."}, 400)
+                return
+            ok, message = studio.look_at(str(ep), int(body["step"]))
+        else:
+            self._send_json({"error": "not found"}, 404)
+            return
+        self._send_json({"ok": ok, "message": message}, 200 if ok else 409)
+
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
         length = int(self.headers.get("Content-Length") or 0)
@@ -713,6 +776,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ok, message = self.app.select_scene(str(scene_id))
         elif path == "/api/select":
             ok, message = self.app.select_step(body.get("step"))
+        elif path.startswith("/api/repair"):
+            self._serve_repair_post(path, body)
+            return
         else:
             self._send_json({"error": "not found"}, 404)
             return

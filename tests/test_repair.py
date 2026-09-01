@@ -18,7 +18,10 @@ from splat_explorer.repair import (
     REPAIRED_PLY,
     PhotometricViewRepair,
     SceneRepairer,
+    camera_from_record,
     copy_camera,
+    discover_repair_views,
+    replay_episode_repairs,
     scene_from_renderer,
     visible_gaussians,
 )
@@ -320,3 +323,83 @@ def test_scene_from_renderer_viser_twin():
     assert scene_from_renderer(_SceneRenderer(scene)) is scene
     assert scene_from_renderer(_Viser(scene)) is scene
     assert scene_from_renderer(object()) is None
+
+
+def _write_episode_with_regen(root: Path, *, green=True) -> Path:
+    ep = root / "20260901_120000"
+    ep.mkdir()
+    Image.fromarray(np.full((24, 32, 3), 60, dtype=np.uint8)).save(ep / "step_000.png")
+    Image.fromarray(np.full((48, 32, 3), 80, dtype=np.uint8)).save(ep / "step_001.png")
+    regen = np.zeros((24, 32, 3), dtype=np.uint8)
+    if green:
+        regen[..., 1] = 220
+    else:
+        regen[:] = 180
+    Image.fromarray(regen).save(ep / "step_000_regen.png")
+    rec0 = {
+        "step": 0, "position": [0.0, 1.5, 0.0], "yaw_deg": 0.0, "pitch_deg": 0.0,
+        "frame": "step_000.png", "pose": "origin",
+    }
+    rec1 = {
+        "step": 1, "position": [0.0, 1.5, 0.0], "yaw_deg": 15.0, "pitch_deg": 0.0,
+        "frame": "step_001.png",
+    }
+    (ep / "actions.jsonl").write_text(json.dumps(rec0) + "\n" + json.dumps(rec1) + "\n")
+    (ep / "meta.json").write_text(json.dumps({
+        "params": {"width": 32, "height": 24, "fov_deg": 75.0, "scene": "arch-interiors"},
+    }))
+    return ep
+
+
+def test_discover_repair_views_needs_regen_png(tmp_path: Path):
+    ep = _write_episode_with_regen(tmp_path)
+    views = discover_repair_views(ep)
+    assert len(views) == 1
+    assert views[0]["step"] == 0
+    assert views[0]["repaired_name"] == "step_000_regen.png"
+    assert views[0]["width"] == 32
+    assert views[0]["height"] == 24
+
+
+def test_camera_from_record_matches_rig():
+    rec = {"position": [0.0, 1.5, 0.0], "yaw_deg": 0.0, "pitch_deg": 0.0}
+    cam = camera_from_record(rec, up_axis="+y", width=32, height=24, fov_deg=75.0)
+    rig = CameraRig(np.array([0.0, 1.5, 0.0]), up_axis="+y")
+    expected = rig.camera(32, 24, 75.0)
+    np.testing.assert_allclose(cam.position, expected.position, atol=1e-5)
+    np.testing.assert_allclose(cam.rotation, expected.rotation, atol=1e-5)
+
+
+def test_replay_episode_repairs_writes_both_plys(tmp_path: Path):
+    ep = _write_episode_with_regen(tmp_path)
+    source = _scene([[0.0, 1.5, -2.0]], colors=[[0.4, 0.4, 0.4]])
+    before = source.colors.copy()
+    results = replay_episode_repairs(
+        source, ep, up_axis="+y",
+        backend=PhotometricViewRepair(densify=False),
+    )
+    assert len(results) == 1
+    assert results[0].status == "ok"
+    assert (ep / ORIGINAL_PLY).is_file()
+    assert (ep / REPAIRED_PLY).is_file()
+    np.testing.assert_allclose(source.colors, before)
+    repaired = load_ply(ep / REPAIRED_PLY)
+    assert repaired.colors[0, 1] > before[0, 1]
+
+
+def test_replay_again_resets_from_source(tmp_path: Path):
+    ep = _write_episode_with_regen(tmp_path)
+    source = _scene([[0.0, 1.5, -2.0]], colors=[[0.4, 0.4, 0.4]])
+    replay_episode_repairs(
+        source, ep, up_axis="+y",
+        backend=PhotometricViewRepair(densify=False),
+    )
+    first = load_ply(ep / REPAIRED_PLY).colors.copy()
+    replay_episode_repairs(
+        source, ep, up_axis="+y",
+        backend=PhotometricViewRepair(densify=False),
+    )
+    second = load_ply(ep / REPAIRED_PLY)
+    np.testing.assert_allclose(second.colors, first, atol=1e-4)
+    original = load_ply(ep / ORIGINAL_PLY)
+    np.testing.assert_allclose(original.colors[0], [0.4, 0.4, 0.4], atol=1e-4)

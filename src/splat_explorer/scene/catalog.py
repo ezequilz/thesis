@@ -233,10 +233,16 @@ def apply_spec(cfg, spec: SceneSpec) -> None:
     nav.update(spec.nav_overrides)
 
 
-def publish_live_scene(spec: SceneSpec, generation: int) -> None:
-    """Atomic write of the pointer the viser viewer polls."""
+def publish_live_scene(spec: SceneSpec, generation: int, reload: bool = False) -> None:
+    """Atomic write of the pointer the viser viewer polls.
+
+    `reload=True` forces the viewer to re-decode even when the path is
+    unchanged (used after overwriting scene_repaired.ply in place).
+    """
     LIVE_SCENE_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {**spec.to_json(), "generation": int(generation), "updated_at": time.time()}
+    if reload:
+        payload["reload"] = True
     tmp = LIVE_SCENE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload))
     os.replace(tmp, LIVE_SCENE_PATH)

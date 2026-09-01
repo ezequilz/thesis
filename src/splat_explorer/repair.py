@@ -444,3 +444,167 @@ class SceneRepairer:
                 "repairs": snapshot,
             },
         )
+
+    def reset(self) -> None:
+        """Drop the working copy so the next apply starts from `source` again."""
+        with self._lock:
+            self._working = None
+            self.results.clear()
+            self.original_ply = None
+            self.repaired_ply = None
+            self._pending.clear()
+
+
+def regen_png_name(step: int) -> str:
+    return f"step_{int(step):03d}_regen.png"
+
+
+def camera_from_record(
+    record: dict,
+    *,
+    up_axis: str,
+    width: int,
+    height: int,
+    fov_deg: float,
+) -> Camera:
+    """Rebuild the OpenCV camera that produced this episode step."""
+    from .agent.camera_rig import CameraRig
+
+    rig = CameraRig(
+        np.asarray(record["position"], dtype=np.float64),
+        up_axis=up_axis,
+        yaw_deg=float(record.get("yaw_deg") or 0.0),
+        pitch_deg=float(record.get("pitch_deg") or 0.0),
+    )
+    return rig.camera(int(width), int(height), float(fov_deg))
+
+
+def _image_size(path: Path) -> tuple[int, int] | None:
+    try:
+        with Image.open(path) as img:
+            return int(img.size[0]), int(img.size[1])
+    except OSError:
+        return None
+
+
+def discover_repair_views(episode_dir: Path, meta: dict | None = None) -> list[dict]:
+    """Episode steps that have a regenerated RGB PNG plus a camera pose.
+
+    Does not require a live episode or an existing 3D repair — only the
+    diffusion-fixed image next to the original render.
+    """
+    episode_dir = Path(episode_dir)
+    meta = meta if meta is not None else {}
+    try:
+        meta = meta or json.loads((episode_dir / "meta.json").read_text())
+    except (OSError, json.JSONDecodeError, TypeError):
+        meta = meta or {}
+    params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
+    default_w = int(params.get("width") or 960)
+    default_h = int(params.get("height") or 720)
+    fov_deg = float(params.get("fov_deg") or 75.0)
+    views: list[dict] = []
+    actions_path = episode_dir / "actions.jsonl"
+    if not actions_path.is_file():
+        return views
+    try:
+        lines = actions_path.read_text().splitlines()
+    except OSError:
+        return views
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        try:
+            step = int(rec.get("step", -1))
+        except (TypeError, ValueError):
+            continue
+        if step < 0 or "position" not in rec:
+            continue
+        rendered_name = rec.get("frame") or f"step_{step:03d}.png"
+        rendered_path = episode_dir / rendered_name
+        repaired_name = rec.get("regenerate_frame") or regen_png_name(step)
+        repaired_path = episode_dir / repaired_name
+        if not repaired_path.is_file():
+            continue
+        size = _image_size(rendered_path) or (default_w, default_h)
+        repair_meta = {}
+        rp = episode_dir / repair_meta_name(step)
+        if rp.is_file():
+            try:
+                repair_meta = json.loads(rp.read_text())
+            except (OSError, json.JSONDecodeError):
+                repair_meta = {}
+        views.append({
+            "step": step,
+            "rendered_name": rendered_path.name,
+            "repaired_name": repaired_path.name,
+            "rendered_path": str(rendered_path),
+            "repaired_path": str(repaired_path),
+            "position": rec["position"],
+            "yaw_deg": float(rec.get("yaw_deg") or 0.0),
+            "pitch_deg": float(rec.get("pitch_deg") or 0.0),
+            "pose": rec.get("pose"),
+            "width": int(size[0]),
+            "height": int(size[1]),
+            "fov_deg": fov_deg,
+            "repair_status": repair_meta.get("status"),
+            "repair": repair_meta or None,
+        })
+    return views
+
+
+def reload_repair_module():
+    """Re-import this module so replay picks up in-place code edits."""
+    import importlib
+    import sys
+
+    name = __name__
+    mod = sys.modules[name]
+    return importlib.reload(mod)
+
+
+def replay_episode_repairs(
+    source: GaussianScene,
+    episode_dir: Path,
+    views: list[dict] | None = None,
+    *,
+    up_axis: str = "+y",
+    fov_deg: float | None = None,
+    backend: RepairBackend | None = None,
+    on_view=None,
+    should_stop=None,
+) -> list[RepairResult]:
+    """Run 3D repair on each regenerated view, in order, from a fresh copy.
+
+    `source` is not mutated. Each successful view updates `scene_repaired.ply`.
+    `on_view(index, view, result)` fires after every view (including failures).
+    """
+    episode_dir = Path(episode_dir)
+    if views is None:
+        views = discover_repair_views(episode_dir)
+    repairer = SceneRepairer(source, backend=backend)
+    results: list[RepairResult] = []
+    for i, view in enumerate(views):
+        if should_stop is not None and should_stop():
+            break
+        width = int(view.get("width") or 960)
+        height = int(view.get("height") or 720)
+        fov = float(fov_deg if fov_deg is not None else view.get("fov_deg") or 75.0)
+        camera = camera_from_record(
+            view, up_axis=up_axis, width=width, height=height, fov_deg=fov,
+        )
+        result = repairer.apply_view(
+            step=int(view["step"]),
+            camera=camera,
+            rendered_path=Path(view["rendered_path"]),
+            repaired_path=Path(view["repaired_path"]),
+            episode_dir=episode_dir,
+        )
+        results.append(result)
+        if on_view is not None:
+            on_view(i, view, result)
+    return results
