@@ -227,6 +227,7 @@ class DashboardApp:
         publish_live_scene(spec, generation)
         with self.repair._lock:
             self.repair.showing = None
+            self.repair.showing_episode = None
         try:
             LIVE_STATE_PATH.unlink(missing_ok=True)
         except OSError:

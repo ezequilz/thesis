@@ -38,6 +38,7 @@ class RepairStudio:
         self._thread: threading.Thread | None = None
         self.job: dict = self._idle_job()
         self.showing: str | None = None  # original | repaired | None (catalog)
+        self.showing_episode: str | None = None
 
     @staticmethod
     def _idle_job(episode: str | None = None) -> dict:
@@ -68,15 +69,23 @@ class RepairStudio:
         with self._lock:
             job = dict(self.job)
             showing = self.showing
+            showing_episode = self.showing_episode
         ep = episode_id or job.get("episode") or live_ep
         detail = self.episode_review(ep) if ep else None
+        episode_scene = None
+        if detail and isinstance(detail.get("meta"), dict):
+            params = detail["meta"].get("params")
+            if isinstance(params, dict):
+                episode_scene = params.get("scene")
         return {
             "job": job,
             "showing": showing,
+            "showing_episode": showing_episode,
             "live_episode": live_ep,
             "run_status": run_status,
             "scene_status": scene_status,
             "scene_id": scene_id,
+            "episode_scene": episode_scene,
             "up_axis": up_axis,
             "episode": detail,
             "viewer_url": f"http://localhost:{self.app.cfg.viewer.port}",
@@ -175,7 +184,11 @@ class RepairStudio:
         if not ply.is_file():
             return False, f"{ply.name} is not on disk yet — run a replay first."
         with self._lock:
-            if self.showing == which and not force:
+            if (
+                self.showing == which
+                and self.showing_episode == episode_id
+                and not force
+            ):
                 return True, f"Viser already showing {which}."
         with self.app.lock:
             spec = self.app._scene_spec
@@ -191,6 +204,7 @@ class RepairStudio:
         publish_live_scene(preview, generation, reload=True)
         with self._lock:
             self.showing = which
+            self.showing_episode = episode_id
         logger.info("Viser preview %s -> %s", which, ply)
         return True, f"Viser showing {which} splat."
 

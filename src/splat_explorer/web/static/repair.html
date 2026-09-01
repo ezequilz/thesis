@@ -69,7 +69,7 @@
     border: 1.6px solid #0b1220; border-top: 0; border-right: 0;
     transform: rotate(-45deg) translate(0.5px, -1px);
   }
-  #layout { display: grid; grid-template-columns: 280px 1fr minmax(280px, 42%);
+  #layout { display: grid; grid-template-columns: 260px 1fr 1fr;
             flex: 1; min-height: 0; }
   #views { overflow-y: auto; border-right: 1px solid var(--border); }
   .view { display: flex; gap: 10px; padding: 8px 10px; cursor: pointer;
@@ -81,20 +81,62 @@
   .view .info { min-width: 0; font-size: 12px; }
   .view .act { font-family: var(--mono); font-size: 12px; }
   .view .times { color: var(--dim); font-size: 11px; }
-  #compare { overflow-y: auto; padding: 14px 16px; }
-  .frames { display: grid; gap: 10px; grid-template-columns: 1fr 1fr; }
-  .frames figure { margin: 0; }
-  .frames figcaption { font-size: 11px; color: var(--dim); margin: 0 0 5px; }
-  .frames img { width: 100%; height: auto; max-height: 42vh; object-fit: contain;
-               border-radius: 6px; border: 1px solid var(--border); background: #000; display: block; }
+  #compare {
+    display: flex; flex-direction: column; min-width: 0; min-height: 0;
+    overflow-y: auto; background: #000;
+  }
+  #compare-stage {
+    position: relative; flex: 1 0 100%; min-height: 100%; background: #000;
+  }
+  #compare-img {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: contain; background: #000; display: block;
+  }
+  #compare-img[hidden], #compare-empty[hidden] { display: none; }
+  #compare-empty {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  }
+  #compare-caption {
+    position: absolute; left: 12px; bottom: 12px;
+    font-size: 11px; color: var(--dim); letter-spacing: .02em;
+    background: rgba(16, 19, 24, .78); border: 1px solid var(--border);
+    padding: 4px 9px; border-radius: 6px; pointer-events: none;
+  }
+  #compare-nav {
+    position: absolute; right: 12px; bottom: 12px;
+    display: flex; gap: 6px;
+  }
+  #compare-nav button {
+    width: 34px; height: 34px; padding: 0; border-radius: 8px;
+    background: rgba(16, 19, 24, .78); color: var(--text);
+    border: 1px solid var(--border) !important; font-size: 18px; font-weight: 500;
+    line-height: 1;
+  }
+  #compare-nav button:hover:not(:disabled) { background: #243044; color: #fff; }
+  #compare-nav button.on { color: var(--accent); border-color: var(--accent) !important; }
+  #compare-nav[hidden] { display: none; }
+  #compare-meta {
+    flex: none; margin: 0; border: 0; border-top: 1px solid var(--border);
+    border-radius: 0; background: var(--panel);
+  }
+  #compare-meta summary {
+    padding: 8px 14px; cursor: pointer; font-size: 12px; color: var(--dim);
+    list-style: none; display: flex; align-items: center; gap: 8px;
+  }
+  #compare-meta summary::-webkit-details-marker { display: none; }
+  #compare-meta summary::before { content: "▸"; font-size: 10px; color: var(--dim); }
+  #compare-meta[open] summary::before { content: "▾"; }
   .kv { display: grid; grid-template-columns: 110px 1fr; gap: 3px 12px;
-        font-size: 13px; margin: 12px 0; }
+        font-size: 13px; margin: 0; padding: 4px 14px 14px; }
   .kv .k { color: var(--dim); }
   .kv .v { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
-  #viser-wrap { display: flex; flex-direction: column; min-width: 0; border-left: 1px solid var(--border); }
+  #viser-wrap { display: flex; flex-direction: column; min-width: 0; position: relative;
+                border-left: 1px solid var(--border); }
   #viser-wrap .bar {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 2;
     display: flex; align-items: center; gap: 8px; padding: 6px 10px;
-    background: var(--panel); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--dim);
+    background: linear-gradient(to bottom, rgba(16,19,24,.82), transparent);
+    font-size: 11px; color: var(--dim); pointer-events: none;
   }
   #viser-wrap iframe { flex: 1; width: 100%; border: 0; background: #000; }
   .empty { color: var(--dim); padding: 30px; text-align: center; }
@@ -149,7 +191,21 @@
 
 <div id="layout">
   <div id="views"><div class="empty">Pick an episode that has regenerated RGB frames.</div></div>
-  <div id="compare"><div class="empty">Select a view to compare the original render with the diffusion-fixed image.</div></div>
+  <div id="compare">
+    <div id="compare-stage">
+      <div id="compare-empty" class="empty">Select a regenerated view.</div>
+      <img id="compare-img" alt="repair compare" hidden>
+      <div id="compare-caption" hidden></div>
+      <div id="compare-nav">
+        <button type="button" id="btn-img-orig" title="Original render">‹</button>
+        <button type="button" id="btn-img-rep" title="Repaired RGB">›</button>
+      </div>
+    </div>
+    <details id="compare-meta">
+      <summary>step details</summary>
+      <div class="kv" id="compare-kv"></div>
+    </details>
+  </div>
   <div id="viser-wrap">
     <div class="bar"><b>3D visor</b><span class="spacer"></span><span id="viser-hint">original / repaired toggle</span></div>
     <iframe id="viser" title="Viser splat view" allow="autoplay"></iframe>
@@ -162,6 +218,9 @@ let episodes = [];
 let snapshot = null;
 let selectedStep = null;
 let selectedEp = "";
+let compareKind = "original";
+let visorEp = "";
+let looked = { ep: "", step: null };
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -218,7 +277,7 @@ function renderViews() {
   $("st-views").textContent = views.length || "–";
   $("st-orig").textContent = ep?.original_ply ? fmtBytes(ep.original_ply.bytes) : "–";
   $("st-rep").textContent = ep?.repaired_ply ? fmtBytes(ep.repaired_ply.bytes) : "–";
-  $("st-scene").textContent = snapshot?.scene_id || "–";
+  $("st-scene").textContent = snapshot?.episode_scene || snapshot?.scene_id || "–";
   $("st-done").textContent = snapshot?.job?.n_done != null
     ? `${snapshot.job.n_done}/${snapshot.job.n_views || 0}` : "–";
   if (!views.length) {
@@ -241,36 +300,50 @@ function renderViews() {
   box.querySelectorAll(".view").forEach(el => {
     el.onclick = () => {
       selectedStep = Number(el.dataset.step);
+      looked = { ep: "", step: null };
       renderViews();
       renderCompare();
-      if (selectedEp) post("/api/repair/look", { episode: selectedEp, step: selectedStep });
+      maybeLook();
     };
   });
 }
 
+function currentView() {
+  const views = snapshot?.episode?.views || [];
+  return views.find(x => x.step === selectedStep) || views[0] || null;
+}
+
 function renderCompare() {
-  const ep = snapshot?.episode;
-  const views = ep?.views || [];
-  const v = views.find(x => x.step === selectedStep) || views[0];
-  const box = $("compare");
+  const v = currentView();
+  const img = $("compare-img");
+  const empty = $("compare-empty");
+  const caption = $("compare-caption");
   if (!v) {
-    box.innerHTML = '<div class="empty">Select a regenerated view.</div>';
+    img.hidden = true;
+    caption.hidden = true;
+    empty.hidden = false;
+    $("compare-nav").hidden = true;
+    $("compare-kv").innerHTML = "";
     return;
   }
   if (selectedStep == null) selectedStep = v.step;
+  empty.hidden = true;
+  img.hidden = false;
+  caption.hidden = false;
+  const src = compareKind === "repaired" ? v.repaired_url : v.rendered_url;
+  if (img.dataset.key !== src) {
+    img.src = src;
+    img.dataset.key = src;
+  }
+  const label = compareKind === "repaired" ? "repaired RGB" : "original render";
+  caption.textContent = `${label} · step ${v.step}`;
+  $("btn-img-orig").classList.toggle("on", compareKind === "original");
+  $("btn-img-rep").classList.toggle("on", compareKind === "repaired");
+  $("btn-img-orig").disabled = !v.rendered_url;
+  $("btn-img-rep").disabled = !v.repaired_url;
+  $("compare-nav").hidden = false;
   const r = (snapshot?.job?.results || []).find(x => x.step === v.step) || v.repair || {};
-  box.innerHTML = `
-    <div class="frames">
-      <figure>
-        <figcaption>Original render (step ${v.step})</figcaption>
-        <img src="${esc(v.rendered_url)}" alt="original">
-      </figure>
-      <figure>
-        <figcaption>Diffusion-fixed RGB</figcaption>
-        <img src="${esc(v.repaired_url)}" alt="repaired rgb">
-      </figure>
-    </div>
-    <div class="kv">
+  $("compare-kv").innerHTML = `
       <span class="k">pose</span><span class="v">${esc(v.pose || "")}</span>
       <span class="k">3D repair</span><span class="v">${esc(r.status || "not run")}</span>
       <span class="k">visible</span><span class="v">${r.n_visible ?? "–"}</span>
@@ -278,16 +351,60 @@ function renderCompare() {
       <span class="k">L1 before</span><span class="v">${r.l1_before ?? "–"}</span>
       <span class="k">seconds</span><span class="v">${r.seconds ?? "–"}</span>
       <span class="k">gaussians</span><span class="v">${r.n_gaussians ?? "–"}</span>
-      ${r.error ? `<span class="k">error</span><span class="v">${esc(r.error)}</span>` : ""}
-    </div>`;
+      ${r.error ? `<span class="k">error</span><span class="v">${esc(r.error)}</span>` : ""}`;
+}
+
+function setCompareKind(which, { syncViser = true } = {}) {
+  compareKind = which === "repaired" ? "repaired" : "original";
+  renderCompare();
+  renderShow();
+  if (!syncViser || !selectedEp) return;
+  const ep = snapshot?.episode;
+  const hasPly = compareKind === "repaired" ? ep?.repaired_ply : ep?.original_ply;
+  if (hasPly) post("/api/repair/show", { episode: selectedEp, which: compareKind });
+}
+
+function maybeLook() {
+  if (!selectedEp || selectedStep == null) return;
+  if (looked.ep === selectedEp && looked.step === selectedStep) return;
+  looked = { ep: selectedEp, step: selectedStep };
+  post("/api/repair/look", { episode: selectedEp, step: selectedStep });
+}
+
+async function syncEpisodeScene() {
+  const ep = snapshot?.episode;
+  if (!selectedEp || !ep) return;
+  const showingThis = snapshot.showing_episode === selectedEp && snapshot.showing;
+  const catalogMatches = Boolean(
+    snapshot.episode_scene
+    && snapshot.episode_scene === snapshot.scene_id
+    && !snapshot.showing
+  );
+  if (visorEp !== selectedEp) {
+    if (showingThis || catalogMatches) {
+      visorEp = selectedEp;
+    } else if (ep.original_ply) {
+      const which = compareKind === "repaired" && ep.repaired_ply ? "repaired" : "original";
+      compareKind = which;
+      const data = await post("/api/repair/show", { episode: selectedEp, which });
+      if (data && data.ok !== false) visorEp = selectedEp;
+    } else if (snapshot.episode_scene && snapshot.episode_scene !== snapshot.scene_id) {
+      const data = await post("/api/scene", { id: snapshot.episode_scene });
+      if (data && data.ok !== false) visorEp = selectedEp;
+    } else {
+      visorEp = selectedEp;
+    }
+  }
+  maybeLook();
 }
 
 function renderShow() {
   const which = snapshot?.showing;
-  $("pill-show").textContent = which ? `viser: ${which}` : "viser: catalog";
-  $("pill-show").className = "pill" + (which ? " ok" : "");
+  const sameEp = snapshot?.showing_episode === selectedEp;
+  $("pill-show").textContent = which && sameEp ? `viser: ${which}` : (which ? `viser: ${which}` : "viser: catalog");
+  $("pill-show").className = "pill" + (which && sameEp ? " ok" : "");
   document.querySelectorAll("#show-toggle button").forEach(btn => {
-    btn.classList.toggle("on", btn.dataset.which === which);
+    btn.classList.toggle("on", btn.dataset.which === compareKind);
   });
   const busy = snapshot?.job?.status === "running" || snapshot?.job?.status === "stopping";
   $("btn-replay").disabled = busy || !selectedEp;
@@ -317,10 +434,14 @@ async function tick() {
   renderShow();
   renderViews();
   renderCompare();
+  await syncEpisodeScene();
 }
 
 $("in-ep").onchange = () => {
   selectedStep = null;
+  visorEp = "";
+  looked = { ep: "", step: null };
+  compareKind = "original";
   $("msg").textContent = "";
   tick();
 };
@@ -336,8 +457,15 @@ $("btn-stop").onclick = () => post("/api/repair/stop");
 document.querySelectorAll("#show-toggle button").forEach(btn => {
   btn.onclick = () => {
     if (!selectedEp) return;
-    post("/api/repair/show", { episode: selectedEp, which: btn.dataset.which });
+    setCompareKind(btn.dataset.which);
   };
+});
+$("btn-img-orig").onclick = () => setCompareKind("original");
+$("btn-img-rep").onclick = () => setCompareKind("repaired");
+document.addEventListener("keydown", e => {
+  if (e.target && /input|select|textarea/i.test(e.target.tagName)) return;
+  if (e.key === "ArrowLeft") setCompareKind("original");
+  if (e.key === "ArrowRight") setCompareKind("repaired");
 });
 
 fetch("/api/state").then(r => r.json()).then(s => {
