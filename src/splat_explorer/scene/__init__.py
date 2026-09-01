@@ -24,9 +24,9 @@ def load_scene(path, min_opacity: float = 0.0, lod_level: int = 0) -> GaussianSc
       - streamed SOG (directory with ``lod-meta.json``, or the file itself)
       - standard 3DGS ``.ply``
     """
-    from pathlib import Path
+    from .catalog import openable_scene_path
 
-    path = Path(path)
+    path = openable_scene_path(path)
     if path.is_file() and path.name == "lod-meta.json":
         scene = load_sog_lod(path.parent, lod_level=lod_level)
     elif path.is_file() and path.name == "meta.json":

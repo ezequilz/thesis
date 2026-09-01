@@ -31,6 +31,45 @@ def slugify(name: str) -> str:
     return slug or "scene"
 
 
+def portable_scene_path(path: Path | str) -> str:
+    """Repo-relative path both the host dashboard and Docker visor can open.
+
+    The visor runs in Linux Docker with ``./outputs`` and ``./3dgs_rooms``
+    mounted at ``/app``. Absolute Mac paths from a host dashboard are
+    invisible inside that container, so live-scene pointers must stay
+    relative (``outputs/episodes/.../scene_repaired.ply``).
+    """
+    raw = Path(path)
+    search = [raw]
+    try:
+        search.append(raw.expanduser().resolve())
+    except (OSError, RuntimeError):
+        pass
+    cwd = Path.cwd().resolve()
+    for candidate in search:
+        try:
+            return str(candidate.relative_to(cwd))
+        except ValueError:
+            pass
+        parts = candidate.parts
+        for marker in ("outputs", "3dgs_rooms"):
+            if marker in parts:
+                index = parts.index(marker)
+                return str(Path(*parts[index:]))
+    return str(raw)
+
+
+def openable_scene_path(path: Path | str) -> Path:
+    """Resolve a live-scene path, rewriting host-absolute prefixes for Docker."""
+    raw = Path(path)
+    if raw.exists():
+        return raw
+    rewritten = Path(portable_scene_path(raw))
+    if rewritten.exists():
+        return rewritten
+    return raw
+
+
 @dataclass(frozen=True)
 class SceneSpec:
     id: str
@@ -181,6 +220,71 @@ def spec_by_id(cfg, scene_id: str) -> SceneSpec | None:
     return None
 
 
+def catalog_id_from_live(live: dict | None) -> str | None:
+    """Catalog room id from a live pointer, ignoring repair-original/repaired previews."""
+    if not live:
+        return None
+    for key in ("catalog_id", "id"):
+        value = str(live.get(key) or "").strip()
+        if value and not value.startswith("repair-"):
+            return value
+    return None
+
+
+def live_display_spec(cfg, live: dict) -> SceneSpec:
+    """Splat the visor should decode: episode PLY preview if present, else catalog."""
+    catalog = None
+    cid = catalog_id_from_live(live)
+    if cid:
+        catalog = spec_by_id(cfg, cid)
+    path = live.get("path")
+    if path:
+        opened = openable_scene_path(path)
+        if opened.exists():
+            up = live.get("up_axis") or (catalog.up_axis if catalog is not None else "+y")
+            lod = int(live.get("lod_level") or (catalog.lod_level if catalog is not None else 0) or 0)
+            return SceneSpec(
+                id=str(live.get("id") or (catalog.id if catalog is not None else "live")),
+                label=str(live.get("label") or (catalog.label if catalog is not None else opened.name)),
+                path=opened,
+                up_axis=str(up),
+                lod_level=lod,
+            )
+    if catalog is not None:
+        return catalog
+    return current_spec(cfg)
+
+
+def live_scene_reload_action(req: dict, state: dict) -> str:
+    """Decide whether the visor should decode a live pointer.
+
+    Returns ``load``, ``ack-same``, or ``skip``. A dashboard restart resets
+    generation to 0; a newer ``updated_at`` on a different path still loads
+    so we do not stay stuck on Starter Scene.
+    """
+    if not req or not req.get("path"):
+        return "skip"
+    gen = int(req.get("generation") or 0)
+    path = str(req["path"])
+    prev_path = str(state.get("path") or "")
+    updated_at = float(req.get("updated_at") or 0.0)
+    last_updated = float(state.get("updated_at") or 0.0)
+    path_changed = path != prev_path
+    if path_changed and updated_at + 1e-9 >= last_updated:
+        return "load"
+    if gen < int(state.get("generation") or 0):
+        return "skip"
+    same = (not path_changed) and state.get("status") == "ready"
+    mtime = float(req.get("mtime") or 0.0)
+    newer_file = mtime > float(state.get("mtime") or 0.0) + 1e-6
+    force = bool(req.get("reload")) and (
+        gen > int(state.get("generation") or 0) or newer_file
+    )
+    if same and not force:
+        return "ack-same"
+    return "load"
+
+
 def spec_for_path(cfg, path: str | Path) -> SceneSpec | None:
     target = Path(path)
     try:
@@ -233,14 +337,33 @@ def apply_spec(cfg, spec: SceneSpec) -> None:
     nav.update(spec.nav_overrides)
 
 
-def publish_live_scene(spec: SceneSpec, generation: int, reload: bool = False) -> None:
+def publish_live_scene(
+    spec: SceneSpec,
+    generation: int,
+    reload: bool = False,
+    catalog_id: str | None = None,
+) -> None:
     """Atomic write of the pointer the viser viewer polls.
 
     `reload=True` forces the viewer to re-decode even when the path is
     unchanged (used after overwriting scene_repaired.ply in place).
+    `catalog_id` is the dropdown room (venetian-balcony, …). Preview ids
+    like ``repair-repaired`` must not be used as the catalog id — a visor
+    restart would otherwise fall back to Starter Scene.
     """
     LIVE_SCENE_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {**spec.to_json(), "generation": int(generation), "updated_at": time.time()}
+    payload["path"] = portable_scene_path(spec.path)
+    ply = Path(payload["path"])
+    try:
+        payload["mtime"] = ply.stat().st_mtime
+    except OSError:
+        payload["mtime"] = 0.0
+    cid = str(catalog_id or "").strip()
+    if not cid and not str(spec.id).startswith("repair-"):
+        cid = spec.id
+    if cid and not cid.startswith("repair-"):
+        payload["catalog_id"] = cid
     if reload:
         payload["reload"] = True
     tmp = LIVE_SCENE_PATH.with_suffix(".tmp")

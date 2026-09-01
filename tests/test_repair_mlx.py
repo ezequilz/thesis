@@ -13,6 +13,121 @@ def test_mlx_availability_is_boolean():
     assert mlx_refine_available() in (True, False)
 
 
+def test_apply_until_stops_after_stamp():
+    from splat_explorer.repair_mlx import MlxPhotometricRepair
+    from splat_explorer.rendering.base import Camera
+    from splat_explorer.scene import GaussianScene
+
+    scene = GaussianScene(
+        means=np.zeros((4, 3), np.float32),
+        scales=np.full((4, 3), 0.1, np.float32),
+        quats=np.tile(np.array([1, 0, 0, 0], np.float32), (4, 1)),
+        opacities=np.full((4,), 0.9, np.float32),
+        colors=np.full((4, 3), 0.1, np.float32),
+    )
+    camera = Camera.look_at(
+        np.array([0.0, 0.0, -2.0]),
+        np.array([0.0, 0.0, 0.0]),
+        np.array([0.0, 1.0, 0.0]),
+        width=16, height=12, fov_deg=75.0,
+    )
+    src = np.full((12, 16, 3), 30, np.uint8)
+    dst = np.full((12, 16, 3), 220, np.uint8)
+    backend = MlxPhotometricRepair(stamp_first=True)
+    stats = backend.apply_until(
+        scene, camera, src, dst, should_stop=lambda: True,
+    )
+    assert stats["n_stamped"] >= 1
+    assert stats["n_chunks"] == 0
+    assert stats["phase"] == "stamp"
+    assert scene.colors.mean() > 0.5
+
+
+def test_select_opt_gaussians_prefers_residual():
+    from splat_explorer.repair_mlx import _select_opt_gaussians
+
+    n = 8
+    idx = np.arange(n)
+    uf = np.array([0, 1, 2, 3, 0, 1, 2, 3], np.float32)
+    vf = np.zeros(n, np.float32)
+    z = np.linspace(1.0, 8.0, n).astype(np.float32)
+    opacities = np.ones(n, np.float32)
+    rendered = np.zeros((1, 4, 3), np.uint8)
+    repaired = np.zeros((1, 4, 3), np.uint8)
+    repaired[0, 3] = 255
+    keep = _select_opt_gaussians(idx, uf, vf, z, opacities, rendered, repaired, cap=3)
+    assert len(keep) == 3
+    assert 3 in set(keep.tolist())
+
+
+def test_select_opt_gaussians_depth_walks_near_to_far():
+    from splat_explorer.repair_mlx import _select_opt_gaussians
+
+    idx = np.arange(6)
+    uf = np.zeros(6, np.float32)
+    vf = np.zeros(6, np.float32)
+    z = np.array([6, 5, 4, 3, 2, 1], np.float32)
+    opacities = np.ones(6, np.float32)
+    rendered = np.zeros((1, 1, 3), np.uint8)
+    repaired = np.zeros((1, 1, 3), np.uint8)
+    keep = _select_opt_gaussians(
+        idx, uf, vf, z, opacities, rendered, repaired, cap=2, rank_mode="depth",
+    )
+    assert list(keep) == [5, 4]
+    keep2 = _select_opt_gaussians(
+        idx, uf, vf, z, opacities, rendered, repaired,
+        cap=2, rank_offset=2, rank_mode="depth",
+    )
+    assert list(keep2) == [3, 2]
+
+
+def test_metal_limit_detects_malloc_error():
+    from splat_explorer.repair_mlx import _is_metal_limit
+
+    assert _is_metal_limit(RuntimeError("[metal::malloc] Resource limit (499000) exceeded."))
+    assert not _is_metal_limit(RuntimeError("shape mismatch"))
+
+
+def test_mlx_apply_retries_after_metal_limit(monkeypatch):
+    from splat_explorer import repair_mlx as mod
+
+    monkeypatch.setattr(mod, "_require_mlx", lambda: (object(), None))
+    monkeypatch.setattr(mod, "_clear_metal", lambda mx: None)
+    seen = []
+
+    def fake_once(self, scene, camera, rendered_rgb, repaired_rgb, rank_offset=0, rank_mode="residual"):
+        seen.append((self.max_opt_gaussians, self.max_train_side, self.iters))
+        if self.max_opt_gaussians > 128:
+            raise RuntimeError("[metal::malloc] Resource limit (499000) exceeded.")
+        return {"backend": "gsplat-mlx", "n_visible": 4, "n_iters": self.iters}
+
+    monkeypatch.setattr(mod.MlxPhotometricRepair, "_apply_once", fake_once)
+    backend = mod.MlxPhotometricRepair(iters=8, max_opt_gaussians=256, max_train_side=64)
+    out = backend.apply(None, None, None, None)
+    assert out["n_visible"] == 4
+    assert seen[0] == (256, 64, 8)
+    assert seen[-1] == (128, 32, 6)
+
+
+@pytest.mark.skipif(not mlx_refine_available(), reason="gsplat-mlx / MLX not installed")
+def test_studio_mlx_caps_stay_under_metal_limit():
+    from splat_explorer.repair_mlx import MlxPhotometricRepair
+
+    backend = make_repair_backend("gsplat-mlx", studio=True)
+    assert isinstance(backend, MlxPhotometricRepair)
+    assert backend.max_opt_gaussians == 256
+    assert backend.max_train_side == 128
+    assert backend.iters == 20
+    assert backend.lambda_dssim == 0.0
+    assert backend.stamp_first is True
+    assert backend.freeze_colors is True
+    assert backend.lr_colors == 0.0
+    assert backend.mask_loss is True
+    focused = make_repair_backend("gsplat-mlx", studio=True, focused=True)
+    assert focused.freeze_colors is True
+    assert focused.lr_colors == 0.0
+
+
 def test_make_repair_backend_prefers_mlx_over_cpu_stamp():
     backend = make_repair_backend()
     from splat_explorer.repair import ProjectedViewRepair

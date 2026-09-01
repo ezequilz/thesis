@@ -218,18 +218,31 @@ def _stop_stale_viewers() -> None:
 
 def cmd_viewer(cfg, args) -> None:
     from .rendering.viser_viewer import serve_viewer
-    from .scene.catalog import apply_spec, current_spec, read_live_scene, spec_by_id
+    from .scene.catalog import (
+        apply_spec,
+        catalog_id_from_live,
+        current_spec,
+        live_display_spec,
+        read_live_scene,
+        spec_by_id,
+    )
 
     _stop_stale_viewers()
     # Honour a scene the dashboard already selected so a viewer restart
     # (or a late docker start) lands on the same asset, not the YAML default.
+    # Preview ids (repair-original / repair-repaired) are not catalog entries;
+    # load the live path (episode PLY) and keep navigation from catalog_id.
     live = read_live_scene()
     spec = None
-    if live and live.get("id"):
-        spec = spec_by_id(cfg, live["id"])
+    catalog = None
+    if live:
+        cid = catalog_id_from_live(live)
+        if cid:
+            catalog = spec_by_id(cfg, cid)
+        spec = live_display_spec(cfg, live)
     if spec is None:
         spec = current_spec(cfg)
-    apply_spec(cfg, spec)
+    apply_spec(cfg, catalog or spec)
     scene = load_scene(
         spec.path,
         min_opacity=cfg.scene.min_opacity,

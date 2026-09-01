@@ -175,13 +175,17 @@ class DashboardApp:
 
     # --- scene ----------------------------------------------------------------
     def _startup_spec(self):
-        from ..scene.catalog import current_spec, read_live_scene, spec_by_id
+        from ..scene.catalog import catalog_id_from_live, current_spec, read_live_scene, spec_by_id
 
         live = read_live_scene()
-        if live and live.get("id"):
-            spec = spec_by_id(self.cfg, live["id"])
+        cid = catalog_id_from_live(live)
+        if cid:
+            spec = spec_by_id(self.cfg, cid)
             if spec is not None:
-                self._scene_generation = int(live.get("generation") or 0)
+                self._scene_generation = max(
+                    int((live or {}).get("generation") or 0),
+                    int(self._scene_generation or 0),
+                )
                 return spec
         return current_spec(self.cfg)
 
@@ -765,8 +769,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             reload_code = body.get("reload_code", True)
             backend = body.get("backend") or "auto"
+            step = body.get("step")
+            max_seconds = body.get("max_seconds", 3600)
             ok, message = studio.start_replay(
-                str(ep), reload_code=bool(reload_code), backend=str(backend),
+                str(ep),
+                reload_code=bool(reload_code),
+                backend=str(backend),
+                step=None if step is None or step == "" else int(step),
+                max_seconds=float(max_seconds or 3600),
             )
         elif path == "/api/repair/stop":
             ok, message = studio.stop_replay()
@@ -775,7 +785,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not ep:
                 self._send_json({"ok": False, "message": "Missing episode id."}, 400)
                 return
-            ok, message = studio.show(str(ep), str(body.get("which") or ""))
+            ok, message = studio.show(
+                str(ep),
+                str(body.get("which") or ""),
+                force=bool(body.get("force", True)),
+            )
         elif path == "/api/repair/focus":
             ep = body.get("episode") or body.get("id")
             if not ep:

@@ -159,26 +159,35 @@ def _normalize_backend_name(name: str | None) -> str:
     return _BACKEND_ALIASES[key]
 
 
-def make_repair_backend(name: str | None = "auto", *, studio: bool = False):
+def make_repair_backend(
+    name: str | None = "auto",
+    *,
+    studio: bool = False,
+    focused: bool = False,
+):
     """Build a lift backend.
 
     `name='auto'` detects CUDA gsplat, then Apple Silicon gsplat-mlx, then the
     CPU color stamp. An explicit name must be available here — it will not
     silently fall back (the dashboard uses that to show a real error).
 
-    `studio=True` uses a heavier gsplat-mlx preset (higher training resolution
-    / more gaussians) for dashboard replays. Live episodes keep the lighter
-    defaults so the harness is not blocked for minutes per view.
+    `studio=True` is the dashboard replay preset. `focused=True` is the
+    single-view tester: stamp regenerated colors onto the whole frustum, then
+    keep refining until the operator stops (capped at one hour).
     """
     key = _normalize_backend_name(name)
     if key == "auto":
         key = detect_repair_backend()
         logger.info("3D repair backend (auto): %s", key)
-        return _build_repair_backend(key, studio=studio, required=False)
-    return _build_repair_backend(key, studio=studio, required=True)
+        return _build_repair_backend(
+            key, studio=studio, focused=focused, required=False,
+        )
+    return _build_repair_backend(
+        key, studio=studio, focused=focused, required=True,
+    )
 
 
-def _build_repair_backend(key: str, *, studio: bool, required: bool):
+def _build_repair_backend(key: str, *, studio: bool, focused: bool, required: bool):
     if key == "gsfix-gsplat":
         from .repair_gsfix import GsplatPhotometricRepair, gsplat_refine_available
 
@@ -208,11 +217,39 @@ def _build_repair_backend(key: str, *, studio: bool, required: bool):
             logger.info(msg)
         else:
             kwargs = {}
-            if studio:
-                kwargs = dict(iters=20, max_train_side=256, max_opt_gaussians=8192)
+            if focused:
+                # Stamp the frustum, then geometry-only Metal chunks. Color Adam
+                # on a 256-splat subset vs the full image clips to neon primaries.
+                kwargs = dict(
+                    iters=20,
+                    max_train_side=128,
+                    max_opt_gaussians=256,
+                    lambda_dssim=0.0,
+                    tile_size=32,
+                    lr_colors=0.0,
+                    lr_scales=0.001,
+                    stamp_first=True,
+                    freeze_colors=True,
+                    mask_loss=True,
+                    max_scale_ratio=1.5,
+                )
+            elif studio:
+                kwargs = dict(
+                    iters=20,
+                    max_train_side=128,
+                    max_opt_gaussians=256,
+                    lambda_dssim=0.0,
+                    tile_size=32,
+                    lr_colors=0.0,
+                    lr_scales=0.001,
+                    stamp_first=True,
+                    freeze_colors=True,
+                    mask_loss=True,
+                    max_scale_ratio=1.5,
+                )
             logger.info(
                 "3D repair backend: GSFix refine (gsplat-mlx / Apple Silicon)%s",
-                " [studio]" if studio else "",
+                " [focused]" if focused else (" [studio]" if studio else ""),
             )
             return MlxPhotometricRepair(**kwargs)
     if key == "cpu-photometric":
@@ -304,6 +341,43 @@ def _sample_rgb(image: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
     c10 = image[v1, u0]
     c11 = image[v1, u1]
     return (1.0 - sv) * ((1.0 - su) * c00 + su * c01) + sv * ((1.0 - su) * c10 + su * c11)
+
+
+def stamp_view_colors(
+    scene: GaussianScene,
+    camera: Camera,
+    repaired_rgb: np.ndarray,
+    *,
+    near: float = 0.05,
+    color_lr: float = 1.0,
+    front_only: bool = False,
+) -> int:
+    """Copy the regenerated RGB onto Gaussians whose centers are in view.
+
+    This is the visible 3D change: photometric refine at 64px only nudges a
+    few hundred splats. Stamping at camera resolution paints thousands.
+
+    `front_only=True` paints only the nearest Gaussian at each pixel so
+    overlapping splats do not all inherit the same RGB (which later
+    compositing turns into oversaturated edges).
+    """
+    h, w = int(camera.height), int(camera.width)
+    repaired = _to_float(_resize_rgb(repaired_rgb, w, h))
+    idx, uf, vf, z = visible_gaussians(scene, camera, near=near)
+    if len(idx) == 0:
+        return 0
+    if front_only and len(idx) > 1:
+        u = np.clip(np.rint(uf).astype(np.int32), 0, w - 1)
+        v = np.clip(np.rint(vf).astype(np.int32), 0, h - 1)
+        pix = v.astype(np.int64) * int(w) + u.astype(np.int64)
+        order = np.argsort(z, kind="mergesort")
+        _, first = np.unique(pix[order], return_index=True)
+        keep = order[first]
+        idx, uf, vf = idx[keep], uf[keep], vf[keep]
+    target = _sample_rgb(repaired, uf, vf)
+    lr = float(np.clip(color_lr, 0.0, 1.0))
+    scene.colors[idx] = np.clip((1.0 - lr) * scene.colors[idx] + lr * target, 0.0, 1.0)
+    return int(len(idx))
 
 
 def _unproject(camera: Camera, u: np.ndarray, v: np.ndarray, z: np.ndarray) -> np.ndarray:
@@ -717,6 +791,10 @@ class SceneRepairer:
         rendered_path: Path,
         repaired_path: Path,
         episode_dir: Path,
+        until_stop: bool = False,
+        should_stop=None,
+        deadline: float | None = None,
+        on_progress=None,
     ) -> RepairResult:
         t0 = time.perf_counter()
         out = RepairResult(step=step, status="error")
@@ -726,33 +804,50 @@ class SceneRepairer:
             with self._lock:
                 working = self._ensure_working(Path(episode_dir))
                 backend = self.backend or PhotometricViewRepair()
+            repaired_path_out = Path(episode_dir) / REPAIRED_PLY
+            render_name = None
+
+            def checkpoint(stats: dict) -> None:
+                nonlocal render_name
+                with self._lock:
+                    save_ply(working, repaired_path_out)
+                    self.repaired_ply = repaired_path_out
+                    render_rgb = stats.get("render_rgb")
+                    if render_rgb is not None:
+                        render_name = repaired_render_name(step)
+                        Image.fromarray(np.asarray(render_rgb, dtype=np.uint8)).save(
+                            Path(episode_dir) / render_name,
+                        )
+                if on_progress is not None:
+                    on_progress(stats)
+
+            if until_stop and hasattr(backend, "apply_until"):
+                stats = backend.apply_until(
+                    working, camera, rendered, repaired,
+                    should_stop=should_stop,
+                    deadline=deadline,
+                    on_checkpoint=checkpoint,
+                )
+            else:
                 stats = backend.apply(working, camera, rendered, repaired)
-                repaired_path_out = Path(episode_dir) / REPAIRED_PLY
-                save_ply(working, repaired_path_out)
-                self.repaired_ply = repaired_path_out
-                render_rgb = stats.get("render_rgb")
-                render_name = None
-                if render_rgb is not None:
-                    render_name = repaired_render_name(step)
-                    Image.fromarray(np.asarray(render_rgb, dtype=np.uint8)).save(
-                        Path(episode_dir) / render_name,
-                    )
-                out.status = "ok"
-                out.n_visible = int(stats.get("n_visible", 0))
-                out.n_updated = int(stats.get("n_updated", 0))
-                out.n_spawned = int(stats.get("n_spawned", 0))
-                out.n_gaussians = int(stats.get("n_gaussians", working.num_gaussians))
-                out.n_iters = int(stats.get("n_iters") or 0)
-                out.l1_before = float(stats.get("l1_before", 0.0))
-                after = stats.get("l1_after")
-                out.l1_after = None if after is None else float(after)
-                out.backend = stats.get("backend")
-                tw, th = stats.get("train_width"), stats.get("train_height")
-                out.train_width = None if tw is None else int(tw)
-                out.train_height = None if th is None else int(th)
-                out.render_name = render_name
-                out.original_ply = ORIGINAL_PLY
-                out.repaired_ply = REPAIRED_PLY
+                checkpoint(stats)
+
+            out.status = "ok"
+            out.n_visible = int(stats.get("n_visible", 0))
+            out.n_updated = int(stats.get("n_updated", 0))
+            out.n_spawned = int(stats.get("n_spawned", 0))
+            out.n_gaussians = int(stats.get("n_gaussians", working.num_gaussians))
+            out.n_iters = int(stats.get("n_iters") or 0)
+            out.l1_before = float(stats.get("l1_before") or 0.0)
+            after = stats.get("l1_after")
+            out.l1_after = None if after is None else float(after)
+            out.backend = stats.get("backend")
+            tw, th = stats.get("train_width"), stats.get("train_height")
+            out.train_width = None if tw is None else int(tw)
+            out.train_height = None if th is None else int(th)
+            out.render_name = render_name
+            out.original_ply = ORIGINAL_PLY
+            out.repaired_ply = REPAIRED_PLY
             out.seconds = time.perf_counter() - t0
             logger.info(
                 "Repair step %d [%s]: %d visible, %d spawned, L1=%.4f%s -> %s (%.1fs)",
@@ -934,6 +1029,9 @@ def replay_episode_repairs(
     backend: RepairBackend | None = None,
     on_view=None,
     should_stop=None,
+    until_stop: bool = False,
+    deadline: float | None = None,
+    on_progress=None,
 ) -> list[RepairResult]:
     """Run 3D repair on each regenerated view, in order, from a fresh copy.
 
@@ -962,6 +1060,10 @@ def replay_episode_repairs(
             rendered_path=Path(view["rendered_path"]),
             repaired_path=Path(view["repaired_path"]),
             episode_dir=episode_dir,
+            until_stop=until_stop,
+            should_stop=should_stop,
+            deadline=deadline,
+            on_progress=on_progress,
         )
         results.append(result)
         if on_view is not None:

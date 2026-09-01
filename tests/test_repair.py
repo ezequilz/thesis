@@ -25,6 +25,7 @@ from splat_explorer.repair import (
     replay_episode_repairs,
     repaired_render_name,
     scene_from_renderer,
+    stamp_view_colors,
     visible_gaussians,
 )
 from splat_explorer.scene import GaussianScene, load_ply, save_ply
@@ -68,6 +69,29 @@ def test_visible_gaussians_frustum():
     assert z[0] > 0
     assert 0 <= uf[0] < camera.width
     assert 0 <= vf[0] < camera.height
+
+
+def test_stamp_view_colors_paints_visible_centers():
+    scene = _scene([[0.0, 0.0, 0.0], [40.0, 0.0, 0.0]], colors=[[0.1, 0.1, 0.1], [0.1, 0.1, 0.1]])
+    camera = _front_camera()
+    target = np.full((48, 64, 3), 220, np.uint8)
+    n = stamp_view_colors(scene, camera, target, color_lr=1.0)
+    assert n == 1
+    np.testing.assert_allclose(scene.colors[0], [220 / 255.0] * 3, atol=0.02)
+    np.testing.assert_allclose(scene.colors[1], [0.1, 0.1, 0.1], atol=1e-5)
+
+
+def test_stamp_view_colors_front_only_skips_back_surface():
+    scene = _scene(
+        [[0.0, 0.0, 0.0], [0.0, 0.0, 1.5]],
+        colors=[[0.1, 0.1, 0.1], [0.1, 0.1, 0.1]],
+    )
+    camera = _front_camera()
+    target = np.full((48, 64, 3), 220, np.uint8)
+    n = stamp_view_colors(scene, camera, target, color_lr=1.0, front_only=True)
+    assert n == 1
+    np.testing.assert_allclose(scene.colors[0], [220 / 255.0] * 3, atol=0.02)
+    np.testing.assert_allclose(scene.colors[1], [0.1, 0.1, 0.1], atol=1e-5)
 
 
 def test_copy_camera_is_independent():

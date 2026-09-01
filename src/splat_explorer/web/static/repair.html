@@ -31,6 +31,7 @@
            font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .45; cursor: default; }
   #btn-replay { background: var(--accent); color: #0b1220; }
+  #btn-view { background: #2d6a4f; color: #fff; }
   #btn-stop { background: var(--err); color: #fff; }
   .ghost { background: var(--panel2); color: var(--text); border: 1px solid var(--border) !important; }
   .toggle { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
@@ -166,7 +167,7 @@
     <select id="in-ep"></select>
   </label>
   <label>backend
-    <select id="in-backend" title="Which 3D lift to run. Auto picks CUDA, then gsplat-mlx, then the CPU stamp.">
+    <select id="in-backend" title="Which 3D lift to run. Auto picks CUDA, then gsplat-mlx, then the CPU stamp. gsplat-mlx trains a small nearby subset so Metal does not hit its resource cap.">
       <option value="auto">Auto (best available)</option>
       <option value="gsplat-mlx">gsplat-mlx (Apple Silicon / Metal)</option>
       <option value="gsfix-gsplat">gsplat CUDA (GSFix3D)</option>
@@ -179,7 +180,8 @@
     reload repair.py
   </label>
   <div style="display:flex;gap:8px;align-self:end">
-    <button id="btn-replay">Replay 3D repair</button>
+    <button id="btn-replay">Replay all views</button>
+    <button id="btn-view" title="Paint this regenerated view onto the splat, then keep a geometry-only refine until you press Stop (max 1 hour). Colors stay locked to the regen so they cannot clip to neon.">Repair this view</button>
     <button id="btn-stop" disabled>Stop</button>
   </div>
   <div class="toggle" id="show-toggle" title="Swap the 3D visor between the frozen original copy and the repaired PLY. Blocked while an episode is capturing.">
@@ -229,7 +231,8 @@ let snapshot = null;
 let selectedStep = null;
 let selectedEp = "";
 let compareKind = "original";
-let plyPreview = false;
+let visorPly = null; // null = catalog, "original" | "repaired" = episode PLY
+let visorPublished = null;
 let looked = { ep: "", step: null };
 
 function esc(s) {
@@ -431,13 +434,26 @@ function setCompareKind(which, { syncViser = true } = {}) {
   renderCompare();
   renderShow();
   if (!syncViser || !selectedEp) return;
-  const ep = snapshot?.episode;
   const plyWhich = compareKind === "original" ? "original" : "repaired";
-  const hasPly = plyWhich === "repaired" ? ep?.repaired_ply : ep?.original_ply;
-  if (hasPly) {
-    plyPreview = true;
-    post("/api/repair/show", { episode: selectedEp, which: plyWhich });
+  showVisorPly(plyWhich);
+}
+
+async function showVisorPly(which) {
+  const ep = snapshot?.episode;
+  const hasPly = which === "repaired" ? ep?.repaired_ply : ep?.original_ply;
+  if (!selectedEp || !hasPly) {
+    $("msg").textContent = which === "repaired"
+      ? "No repaired PLY yet — run Replay 3D repair first."
+      : "No original PLY yet — run Replay 3D repair first.";
+    return;
   }
+  visorPly = which;
+  const data = await post("/api/repair/show", {
+    episode: selectedEp, which, force: true,
+  });
+  if (data && data.ok === false) visorPly = snapshot?.showing || visorPly;
+  else visorPublished = which;
+  renderShow();
 }
 
 function maybeLook() {
@@ -450,8 +466,11 @@ function maybeLook() {
 async function syncEpisodeScene() {
   const ep = snapshot?.episode;
   if (!selectedEp || !ep) return;
-  const showingThis = snapshot.showing_episode === selectedEp && snapshot.showing;
-  if (plyPreview && showingThis) {
+  if (visorPly) {
+    const showingThis = snapshot.showing_episode === selectedEp && snapshot.showing === visorPly;
+    if (!showingThis && visorPublished !== visorPly) {
+      await showVisorPly(visorPly);
+    }
     maybeLook();
     return;
   }
@@ -482,21 +501,27 @@ function renderShow() {
     && snapshot?.scene_status === "ready"
     && !which;
   const label = snapshot?.episode_scene_label || snapshot?.episode_scene;
-  $("pill-show").textContent = which && sameEp
-    ? `viser: ${which}`
+  const visorWhich = (which && sameEp) ? which : visorPly;
+  $("pill-show").textContent = visorWhich && (sameEp || visorPly)
+    ? `viser: ${visorWhich} ply`
     : (label ? `viser: ${label}` : "viser: catalog");
-  $("pill-show").className = "pill" + ((which && sameEp) || catalogOk ? " ok" : "");
+  $("pill-show").className = "pill" + ((which && sameEp) || catalogOk || visorPly ? " ok" : "");
   const hint = $("viser-hint");
   if (hint) {
-    hint.textContent = which && sameEp
-      ? `${which} ply · click Original / Repaired`
+    hint.textContent = visorWhich
+      ? `${visorWhich} ply · click Original / Repaired to swap`
       : (label ? `catalog: ${label}` : "original / repaired toggle");
   }
+  const ep = snapshot?.episode;
   document.querySelectorAll("#show-toggle button").forEach(btn => {
-    btn.classList.toggle("on", btn.dataset.which === compareKind);
+    const target = btn.dataset.which;
+    btn.classList.toggle("on", target === visorWhich);
+    btn.disabled = target === "repaired" ? !ep?.repaired_ply : !ep?.original_ply;
   });
   const busy = snapshot?.job?.status === "running" || snapshot?.job?.status === "stopping";
   $("btn-replay").disabled = busy || !selectedEp;
+  const viewBtn = $("btn-view");
+  if (viewBtn) viewBtn.disabled = busy || !selectedEp || selectedStep == null;
   $("btn-stop").disabled = !busy;
 }
 
@@ -518,8 +543,9 @@ async function tick() {
   jobPill(snapshot.job);
   renderBackends();
   $("msg").textContent = snapshot?.job?.message || $("msg").textContent;
-  if (snapshot?.job?.status === "idle") {
-    /* keep last operator message */
+  if ((snapshot?.job?.status === "running" || snapshot?.job?.status === "completed")
+      && visorPly == null && snapshot?.episode?.repaired_ply) {
+    visorPly = "repaired";
   }
   renderShow();
   renderViews();
@@ -529,7 +555,8 @@ async function tick() {
 
 $("in-ep").onchange = () => {
   selectedStep = null;
-  plyPreview = false;
+  visorPly = null;
+  visorPublished = null;
   looked = { ep: "", step: null };
   compareKind = "original";
   $("msg").textContent = "";
@@ -537,8 +564,22 @@ $("in-ep").onchange = () => {
 };
 $("btn-replay").onclick = async () => {
   if (!selectedEp) return;
+  visorPly = "repaired";
   await post("/api/repair/start", {
     episode: selectedEp,
+    reload_code: $("in-reload").checked,
+    backend: $("in-backend").value || "auto",
+  });
+  tick();
+};
+$("btn-view").onclick = async () => {
+  if (!selectedEp || selectedStep == null) return;
+  visorPly = "repaired";
+  compareKind = "repaired";
+  await post("/api/repair/start", {
+    episode: selectedEp,
+    step: selectedStep,
+    max_seconds: 3600,
     reload_code: $("in-reload").checked,
     backend: $("in-backend").value || "auto",
   });

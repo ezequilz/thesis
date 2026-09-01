@@ -717,6 +717,11 @@ def serve_viewer(
         "up_axis": up_axis,
         "lod_level": int(getattr(initial_spec, "lod_level", 0) or 0),
         "generation": int(generation or 0),
+        "mtime": 0.0,
+        "updated_at": 0.0,
+        "catalog_id": getattr(initial_spec, "id", None)
+        if not str(getattr(initial_spec, "id", "") or "").startswith("repair-")
+        else None,
         "num_gaussians": scene.num_gaussians,
         "status": "ready",
         "error": None,
@@ -737,25 +742,35 @@ def serve_viewer(
         viewer_url,
     )
 
+    def _room_key(scene_id, catalog_id) -> str:
+        sid = str(scene_id or "")
+        if sid.startswith("repair-"):
+            return str(catalog_id or "")
+        return sid
+
     def _maybe_reload_scene() -> bool:
         from ..scene import load_scene
-        from ..scene.catalog import read_live_scene
+        from ..scene.catalog import live_scene_reload_action, read_live_scene
 
         req = read_live_scene()
         if not req or not req.get("path"):
             return False
+        action = live_scene_reload_action(req, scene_state)
         gen = int(req.get("generation") or 0)
         path = str(req["path"])
-        if gen < scene_state["generation"]:
+        mtime = float(req.get("mtime") or 0.0)
+        if action == "skip":
             return False
-        # Same file: ack. `reload` in scene.json is sticky, so only a strictly
-        # newer generation may re-decode (overwritten scene_repaired.ply).
-        same = path == scene_state["path"] and scene_state["status"] == "ready"
-        force = bool(req.get("reload")) and gen > scene_state["generation"]
-        if same and not force:
-            scene_state["generation"] = max(scene_state["generation"], gen)
+        if action == "ack-same":
+            scene_state["generation"] = max(int(scene_state.get("generation") or 0), gen)
+            scene_state["mtime"] = max(float(scene_state.get("mtime") or 0.0), mtime)
+            scene_state["updated_at"] = max(
+                float(scene_state.get("updated_at") or 0.0),
+                float(req.get("updated_at") or 0.0),
+            )
             scene_state["id"] = req.get("id", scene_state["id"])
             scene_state["label"] = req.get("label", scene_state["label"])
+            scene_state["catalog_id"] = req.get("catalog_id", scene_state.get("catalog_id"))
             up_ax = str(req.get("up_axis") or view["up_axis"])
             if up_ax != scene_state.get("up_axis"):
                 logger.info("Viser flipping up axis %s -> %s", scene_state.get("up_axis"), up_ax)
@@ -766,6 +781,9 @@ def serve_viewer(
         if scene_state["status"] == "loading":
             return False
 
+        room_changed = _room_key(scene_state.get("id"), scene_state.get("catalog_id")) != _room_key(
+            req.get("id"), req.get("catalog_id"),
+        )
         scene_state.update(status="loading", error=None, id=req.get("id"), label=req.get("label"))
         lod = int(req.get("lod_level") or 0)
         up_ax = str(req.get("up_axis") or view["up_axis"])
@@ -787,21 +805,25 @@ def serve_viewer(
             except Exception:
                 pass
             overlay_handles[:] = [origin]
-        # Never snap to the scene centroid on reload — that kills fly/orbit.
-        # Keep the cameras the clients already had. If viser dropped them
-        # (new websocket), fall back to the last inspected step.
-        if saved:
+        # Keep fly/orbit when toggling original/repaired of the same room.
+        # Snap when the asset is a different catalog room (Starter vs Venetian).
+        if saved and not room_changed:
             _restore_client_cameras(saved)
             _apply_up(server, view)
         else:
             state = live["state"]
             if state is not None and state.get("position") is not None:
                 _snap_clients_to_step(server, state, view["forward"], view)
+            else:
+                _apply_view(server, view)
         scene_state.update(
             path=path,
             up_axis=up_ax,
             lod_level=lod,
             generation=gen,
+            mtime=mtime,
+            updated_at=float(req.get("updated_at") or 0.0),
+            catalog_id=req.get("catalog_id"),
             num_gaussians=new_scene.num_gaussians,
             status="ready",
             error=None,
