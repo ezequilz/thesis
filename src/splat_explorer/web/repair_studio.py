@@ -41,6 +41,7 @@ class RepairStudio:
         self.job: dict = self._idle_job()
         self.showing: str | None = None  # original | repaired | None (catalog)
         self.showing_episode: str | None = None
+        self._last_preview_at: float = 0.0
 
     @staticmethod
     def _idle_job(episode: str | None = None) -> dict:
@@ -258,7 +259,7 @@ class RepairStudio:
         if current == scene_id and status == "ready" and not previewing:
             return True, f"Viser already on {scene_id}."
         if current == scene_id and status == "ready" and previewing:
-            return self._republish_catalog()
+            return True, f"Viser showing {self.showing} ply."
         return self.app.select_scene(scene_id)
 
     def _republish_catalog(self) -> tuple[bool, str]:
@@ -275,7 +276,7 @@ class RepairStudio:
             self.showing_episode = None
         return True, f"Viser restored to {spec.id}."
 
-    def show(self, episode_id: str, which: str, *, force: bool = True) -> tuple[bool, str]:
+    def show(self, episode_id: str, which: str, *, force: bool = False) -> tuple[bool, str]:
         which = str(which or "").strip().lower()
         if which not in ("original", "repaired"):
             return False, "which must be 'original' or 'repaired'."
@@ -426,7 +427,10 @@ class RepairStudio:
                             else ""
                         )
                     )
-                self.show(episode_id, "repaired", force=True)
+                now = time.time()
+                if now - self._last_preview_at >= 10.0:
+                    self._last_preview_at = now
+                    self.show(episode_id, "repaired", force=True)
 
             def on_view(index, view, result) -> None:
                 body = result.to_json() if hasattr(result, "to_json") else dict(result)

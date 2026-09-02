@@ -80,6 +80,25 @@ def test_ensure_catalog_scene_skips_when_already_on_episode_room(tmp_path: Path)
     assert "already" in message.lower()
 
 
+def test_ensure_catalog_scene_keeps_repaired_ply_preview(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    ep = tmp_path / "outputs" / "episodes" / "20260901_190223"
+    ep.mkdir(parents=True)
+    (ep / "meta.json").write_text(json.dumps({
+        "params": {"scene": "venetian-balcony", "scene_label": "Venetian Balcony"},
+    }))
+    _tiny_ply(ep / "scene_repaired.ply")
+    app = _FakeApp(ep, scene_id="venetian-balcony")
+    studio = RepairStudio(app)
+    ok, message = studio.show(ep.name, "repaired")
+    assert ok, message
+    assert studio.showing == "repaired"
+    ok, message = studio.ensure_catalog_scene(ep.name)
+    assert ok, message
+    assert studio.showing == "repaired"
+    assert "ply" in message.lower()
+
+
 def test_snapshot_reports_episode_scene(tmp_path: Path):
     ep = _episode(tmp_path)
     app = _FakeApp(ep, scene_id="arch-interiors")
@@ -123,6 +142,29 @@ def test_show_publishes_relative_repaired_ply(tmp_path, monkeypatch):
     assert live["catalog_id"] == "venetian-balcony"
     assert studio.showing == "repaired"
     assert "scene_repaired.ply" in message
+
+
+def test_show_without_force_skips_when_already_previewing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    ep = tmp_path / "outputs" / "episodes" / "20260901_190223"
+    ep.mkdir(parents=True)
+    (ep / "meta.json").write_text(json.dumps({
+        "params": {"scene": "venetian-balcony", "scene_label": "Venetian Balcony"},
+    }))
+    (ep / "scene_repaired.ply").write_bytes(b"ply\n")
+    app = _FakeApp(ep, scene_id="venetian-balcony")
+    studio = RepairStudio(app)
+    ok, message = studio.show(ep.name, "repaired", force=True)
+    assert ok, message
+    generation = app._scene_generation
+    live = json.loads((tmp_path / "outputs" / "live" / "scene.json").read_text())
+    ok, message = studio.show(ep.name, "repaired", force=False)
+    assert ok, message
+    assert "already" in message.lower()
+    assert app._scene_generation == generation
+    again = json.loads((tmp_path / "outputs" / "live" / "scene.json").read_text())
+    assert again["generation"] == live["generation"]
+    assert again["updated_at"] == live["updated_at"]
 
 
 def test_start_replay_focused_requires_that_step(tmp_path: Path):

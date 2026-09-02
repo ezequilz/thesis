@@ -235,7 +235,12 @@ let selectedEp = "";
 let compareKind = "original";
 let visorPly = null; // null = catalog, "original" | "repaired" = episode PLY
 let visorPublished = null;
+let visorSeq = 0;
+let tickBusy = false;
 let looked = { ep: "", step: null };
+let sceneSyncedEp = "";
+let lastJobStatus = "";
+let pollTimer = null;
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -248,14 +253,28 @@ function fmtBytes(n) {
   if (n < 1024 * 1024) return (n / 1024).toFixed(0) + " KB";
   return (n / 1024 / 1024).toFixed(1) + " MB";
 }
-async function post(url, body) {
+function jobActive(job) {
+  const st = job?.status;
+  return st === "running" || st === "stopping";
+}
+function setPolling(on) {
+  if (on) {
+    if (pollTimer == null) pollTimer = setInterval(() => tick({ poll: true }), 1000);
+    return;
+  }
+  if (pollTimer != null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+async function post(url, body, { silent = false } = {}) {
   const r = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
   });
   const data = await r.json().catch(() => ({}));
-  $("msg").textContent = data.message || data.error || "";
+  if (!silent) $("msg").textContent = data.message || data.error || "";
   return data;
 }
 
@@ -295,6 +314,14 @@ function renderBackends() {
 function renderEpisodes() {
   const sel = $("in-ep");
   const live = snapshot?.live_episode;
+  const sig = episodes.map(e =>
+    `${e.id}:${e.n_regen}:${e.has_repaired_ply}:${e.id === live ? 1 : 0}`
+  ).join("|");
+  if (sel.dataset.sig === sig && sel.options.length) {
+    selectedEp = sel.value;
+    return;
+  }
+  sel.dataset.sig = sig;
   const prev = selectedEp || sel.value;
   sel.innerHTML = episodes.map(e => {
     const bits = [];
@@ -310,9 +337,26 @@ function renderEpisodes() {
   selectedEp = sel.value;
 }
 
-function renderViews() {
+function viewBadge(v) {
+  const r = (snapshot?.job?.results || []).find(x => x.step === v.step) || v.repair;
+  const st = r?.status || v.repair_status;
+  return st ? `<span class="badge ${st === "ok" ? "ok" : "err"}">${esc(st)}</span>` : "";
+}
+
+function bindViewClicks(box) {
+  box.querySelectorAll(".view").forEach(el => {
+    el.onclick = () => {
+      selectedStep = Number(el.dataset.step);
+      looked = { ep: "", step: null };
+      renderViews();
+      renderCompare();
+      maybeLook();
+    };
+  });
+}
+
+function renderStats() {
   const ep = snapshot?.episode;
-  const box = $("views");
   const views = ep?.views || [];
   $("st-views").textContent = views.length || "–";
   $("st-orig").textContent = ep?.original_ply ? fmtBytes(ep.original_ply.bytes) : "–";
@@ -326,32 +370,41 @@ function renderViews() {
     : (detected || "–");
   $("st-done").textContent = snapshot?.job?.n_done != null
     ? `${snapshot.job.n_done}/${snapshot.job.n_views || 0}` : "–";
+}
+
+function renderViews() {
+  const ep = snapshot?.episode;
+  const box = $("views");
+  const views = ep?.views || [];
+  renderStats();
   if (!views.length) {
+    box.dataset.steps = "";
     box.innerHTML = '<div class="empty">No regenerated RGB in this episode.</div>';
     return;
   }
-  const jobResults = new Map((snapshot?.job?.results || []).map(r => [r.step, r]));
+  const stepKey = views.map(v => `${v.step}:${v.repaired_url}`).join(",");
+  if (box.dataset.steps === stepKey) {
+    views.forEach(v => {
+      const el = box.querySelector(`.view[data-step="${v.step}"]`);
+      if (!el) return;
+      el.classList.toggle("sel", v.step === selectedStep);
+      const act = el.querySelector(".act");
+      const html = `step ${v.step}${viewBadge(v)}`;
+      if (act && act.innerHTML !== html) act.innerHTML = html;
+    });
+    return;
+  }
+  box.dataset.steps = stepKey;
   box.innerHTML = views.map(v => {
-    const r = jobResults.get(v.step) || v.repair;
-    const st = r?.status || v.repair_status;
-    const badge = st ? `<span class="badge ${st === "ok" ? "ok" : "err"}">${esc(st)}</span>` : "";
     return `<div class="view${v.step === selectedStep ? " sel" : ""}" data-step="${v.step}">
       <img src="${esc(v.repaired_url)}" alt="">
       <div class="info">
-        <div class="act">step ${v.step}${badge}</div>
+        <div class="act">step ${v.step}${viewBadge(v)}</div>
         <div class="times">${esc(v.pose || "")}</div>
       </div>
     </div>`;
   }).join("");
-  box.querySelectorAll(".view").forEach(el => {
-    el.onclick = () => {
-      selectedStep = Number(el.dataset.step);
-      looked = { ep: "", step: null };
-      renderViews();
-      renderCompare();
-      maybeLook();
-    };
-  });
+  bindViewClicks(box);
 }
 
 function currentView() {
@@ -378,6 +431,7 @@ function renderCompare() {
     empty.hidden = false;
     $("compare-nav").hidden = true;
     $("compare-kv").innerHTML = "";
+    delete $("compare-kv").dataset.key;
     return;
   }
   if (selectedStep == null) selectedStep = v.step;
@@ -405,6 +459,11 @@ function renderCompare() {
   $("btn-img-rep").disabled = kinds.length < 2;
   $("compare-nav").hidden = false;
   const r = (snapshot?.job?.results || []).find(x => x.step === v.step) || v.repair || {};
+  const kvKey = [
+    v.step, compareKind, src, r.status, r.backend, r.n_iters, r.seconds, r.error || "",
+  ].join("|");
+  if ($("compare-kv").dataset.key === kvKey) return;
+  $("compare-kv").dataset.key = kvKey;
   $("compare-kv").innerHTML = `
       <span class="k">pose</span><span class="v">${esc(v.pose || "")}</span>
       <span class="k">3D repair</span><span class="v">${esc(r.status || "not run")}</span>
@@ -429,7 +488,7 @@ function shiftKind(dir) {
   setCompareKind(kinds[(i + dir + kinds.length) % kinds.length]);
 }
 
-function setCompareKind(which, { syncViser = true } = {}) {
+function setCompareKind(which, { syncViser = false } = {}) {
   if (which === "lifted") compareKind = "lifted";
   else if (which === "repaired") compareKind = "repaired";
   else compareKind = "original";
@@ -440,7 +499,7 @@ function setCompareKind(which, { syncViser = true } = {}) {
   showVisorPly(plyWhich);
 }
 
-async function showVisorPly(which) {
+async function showVisorPly(which, { force = false } = {}) {
   const ep = snapshot?.episode;
   const hasPly = which === "repaired" ? ep?.repaired_ply : ep?.original_ply;
   if (!selectedEp || !hasPly) {
@@ -449,12 +508,25 @@ async function showVisorPly(which) {
       : "No original PLY yet — run Replay 3D repair first.";
     return;
   }
+  if (!force && visorPublished === which && snapshot?.showing === which
+      && snapshot?.showing_episode === selectedEp) {
+    visorPly = which;
+    renderShow();
+    return;
+  }
+  const seq = ++visorSeq;
   visorPly = which;
+  renderShow();
   const data = await post("/api/repair/show", {
-    episode: selectedEp, which, force: true,
-  });
-  if (data && data.ok === false) visorPly = snapshot?.showing || visorPly;
-  else visorPublished = which;
+    episode: selectedEp, which, force,
+  }, { silent: true });
+  if (seq !== visorSeq) return;
+  if (data && data.ok === false) {
+    visorPly = snapshot?.showing || visorPly;
+    if (data.message || data.error) $("msg").textContent = data.message || data.error;
+  } else {
+    visorPublished = which;
+  }
   renderShow();
 }
 
@@ -462,36 +534,42 @@ function maybeLook() {
   if (!selectedEp || selectedStep == null) return;
   if (looked.ep === selectedEp && looked.step === selectedStep) return;
   looked = { ep: selectedEp, step: selectedStep };
-  post("/api/repair/look", { episode: selectedEp, step: selectedStep });
+  post("/api/repair/look", { episode: selectedEp, step: selectedStep }, { silent: true });
 }
 
 async function syncEpisodeScene() {
   const ep = snapshot?.episode;
   if (!selectedEp || !ep) return;
+  if (sceneSyncedEp === selectedEp) {
+    maybeLook();
+    return;
+  }
+  sceneSyncedEp = selectedEp;
+  if (!visorPly) {
+    if ((snapshot.showing === "original" || snapshot.showing === "repaired")
+        && snapshot.showing_episode === selectedEp) {
+      visorPly = snapshot.showing;
+    } else if (ep.repaired_ply) {
+      visorPly = "repaired";
+    } else if (ep.original_ply) {
+      visorPly = "original";
+    }
+  }
   if (visorPly) {
     const showingThis = snapshot.showing_episode === selectedEp && snapshot.showing === visorPly;
-    if (!showingThis && visorPublished !== visorPly) {
-      await showVisorPly(visorPly);
-    }
+    if (showingThis) visorPublished = visorPly;
+    else await showVisorPly(visorPly, { force: false });
     maybeLook();
     return;
   }
   const want = snapshot.episode_scene;
-  const loadingWanted = Boolean(
-    want && snapshot.scene_id === want && snapshot.scene_status === "loading",
-  );
   const catalogOk = Boolean(
     want
     && snapshot.scene_id === want
-    && snapshot.scene_status === "ready"
-    && !snapshot.showing
+    && (snapshot.scene_status === "ready" || snapshot.scene_status === "loading"),
   );
-  if (catalogOk || loadingWanted) {
-    maybeLook();
-    return;
-  }
-  if (want) {
-    await post("/api/repair/focus", { episode: selectedEp });
+  if (!catalogOk && want) {
+    await post("/api/repair/focus", { episode: selectedEp }, { silent: true });
   }
   maybeLook();
 }
@@ -503,11 +581,11 @@ function renderShow() {
     && snapshot?.scene_status === "ready"
     && !which;
   const label = snapshot?.episode_scene_label || snapshot?.episode_scene;
-  const visorWhich = (which && sameEp) ? which : visorPly;
-  $("pill-show").textContent = visorWhich && (sameEp || visorPly)
+  const visorWhich = visorPly || ((which && sameEp) ? which : null);
+  $("pill-show").textContent = visorWhich
     ? `viser: ${visorWhich} ply`
     : (label ? `viser: ${label}` : "viser: catalog");
-  $("pill-show").className = "pill" + ((which && sameEp) || catalogOk || visorPly ? " ok" : "");
+  $("pill-show").className = "pill" + (visorWhich || catalogOk ? " ok" : "");
   const hint = $("viser-hint");
   if (hint) {
     hint.textContent = visorWhich
@@ -536,31 +614,48 @@ async function refreshEpisodes() {
   renderEpisodes();
 }
 
-async function tick() {
-  const ep = $("in-ep").value;
-  selectedEp = ep;
-  const r = await fetch("/api/repair" + (ep ? `?episode=${encodeURIComponent(ep)}` : ""));
-  snapshot = await r.json();
-  if (!selectedStep && snapshot?.episode?.views?.length) {
-    selectedStep = snapshot.episode.views[0].step;
+async function tick({ poll = false } = {}) {
+  if (tickBusy) return;
+  tickBusy = true;
+  try {
+    const ep = $("in-ep").value;
+    selectedEp = ep;
+    const r = await fetch("/api/repair" + (ep ? `?episode=${encodeURIComponent(ep)}` : ""));
+    snapshot = await r.json();
+    if (selectedStep == null && snapshot?.episode?.views?.length) {
+      selectedStep = snapshot.episode.views[0].step;
+    }
+    jobPill(snapshot.job);
+    renderBackends();
+    if (snapshot?.job?.message) $("msg").textContent = snapshot.job.message;
+    const status = snapshot?.job?.status || "idle";
+    const wasActive = jobActive({ status: lastJobStatus });
+    const nowActive = jobActive(snapshot.job);
+    lastJobStatus = status;
+    if (!poll && visorPly == null && snapshot?.episode?.repaired_ply
+        && (status === "running" || status === "completed")) {
+      visorPly = "repaired";
+    }
+    renderShow();
+    renderViews();
+    renderCompare();
+    if (!poll) await syncEpisodeScene();
+    if (wasActive && !nowActive && visorPly === "repaired" && snapshot?.episode?.repaired_ply) {
+      await showVisorPly("repaired", { force: true });
+    }
+    setPolling(nowActive);
+    if (wasActive && !nowActive) await refreshEpisodes();
+  } finally {
+    tickBusy = false;
   }
-  jobPill(snapshot.job);
-  renderBackends();
-  $("msg").textContent = snapshot?.job?.message || $("msg").textContent;
-  if ((snapshot?.job?.status === "running" || snapshot?.job?.status === "completed")
-      && visorPly == null && snapshot?.episode?.repaired_ply) {
-    visorPly = "repaired";
-  }
-  renderShow();
-  renderViews();
-  renderCompare();
-  await syncEpisodeScene();
 }
 
 $("in-ep").onchange = () => {
   selectedStep = null;
   visorPly = null;
   visorPublished = null;
+  visorSeq += 1;
+  sceneSyncedEp = "";
   looked = { ep: "", step: null };
   compareKind = "original";
   $("msg").textContent = "";
@@ -595,14 +690,21 @@ $("btn-reset").onclick = async () => {
   if (!selectedEp) return;
   visorPly = "original";
   compareKind = "original";
+  sceneSyncedEp = selectedEp;
   await post("/api/repair/reset", { episode: selectedEp });
   tick();
 };
-$("btn-stop").onclick = () => post("/api/repair/stop");
+$("btn-stop").onclick = async () => {
+  await post("/api/repair/stop");
+  tick();
+};
 document.querySelectorAll("#show-toggle button").forEach(btn => {
   btn.onclick = () => {
     if (!selectedEp) return;
-    setCompareKind(btn.dataset.which);
+    const which = btn.dataset.which;
+    compareKind = which === "repaired" ? "repaired" : "original";
+    renderCompare();
+    showVisorPly(which, { force: false });
   };
 });
 $("btn-img-orig").onclick = () => shiftKind(-1);
@@ -617,9 +719,7 @@ fetch("/api/state").then(r => r.json()).then(s => {
   $("viser").src = s.defaults?.viewer_url || "http://localhost:8080";
 }).catch(() => { $("viser").src = "http://localhost:8080"; });
 
-refreshEpisodes().then(tick);
-setInterval(tick, 1000);
-setInterval(refreshEpisodes, 5000);
+refreshEpisodes().then(() => tick());
 </script>
 </body>
 </html>

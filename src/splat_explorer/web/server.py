@@ -248,14 +248,23 @@ class DashboardApp:
                 return
             self.scene_info = {**spec.to_json(), "generation": generation}
             self._pinned = None
-        publish_live_scene(spec, generation)
         with self.repair._lock:
-            self.repair.showing = None
-            self.repair.showing_episode = None
-        try:
-            LIVE_STATE_PATH.unlink(missing_ok=True)
-        except OSError:
-            pass
+            previewing = self.repair.showing is not None
+            preview_which = self.repair.showing
+        if previewing:
+            logger.info(
+                "Keeping visor on %s ply while dashboard loads catalog %s",
+                preview_which, spec.id,
+            )
+        else:
+            publish_live_scene(spec, generation)
+            with self.repair._lock:
+                self.repair.showing = None
+                self.repair.showing_episode = None
+            try:
+                LIVE_STATE_PATH.unlink(missing_ok=True)
+            except OSError:
+                pass
         try:
             t0 = time.perf_counter()
             scene = load_scene(
@@ -265,7 +274,8 @@ class DashboardApp:
             )
             renderer = make_renderer(scene, self.cfg.renderer)
             nav_world, spawn = _build_navigation(self.cfg, scene)
-            self._wait_for_viewer(generation, spec)
+            if not previewing:
+                self._wait_for_viewer(generation, spec)
             with self.lock:
                 if generation != self._scene_generation:
                     logger.info("Discarding superseded load of %s", spec.id)
@@ -797,7 +807,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ok, message = studio.show(
                 str(ep),
                 str(body.get("which") or ""),
-                force=bool(body.get("force", True)),
+                force=bool(body.get("force", False)),
             )
         elif path == "/api/repair/focus":
             ep = body.get("episode") or body.get("id")
