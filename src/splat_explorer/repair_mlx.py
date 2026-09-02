@@ -8,6 +8,10 @@ differentiable rasterizer is RobotFlow Labs' MLX port instead of CUDA gsplat:
       L = (1-λ) ||I_fixed - I_gs||_1 + λ (1-SSIM)
       backward; Adam step on means / color / opacity / scale / quat
 
+Default is that paper loop — no color stamp, no frozen RGB, no extra loss
+mask. ``stamp_first=True`` is the optional ``gsplat-mlx-stamp`` path that
+paints regen RGB onto visible gaussians first (visible updates, worse repair).
+
 No CUDA, no PyTorch at runtime. ``make_repair_backend()`` picks this when
 CUDA+gsplat is missing and ``gsplat_mlx`` + MLX import successfully (M1–M4).
 
@@ -206,9 +210,14 @@ class _Adam:
 
 @dataclass
 class MlxPhotometricRepair:
-    """Differentiable photometric lift on Apple Silicon via gsplat-mlx."""
+    """Differentiable photometric lift on Apple Silicon via gsplat-mlx.
 
-    iters: int = 12
+    Defaults match ``GsplatPhotometricRepair`` (GSFix3D refine): L1+SSIM on
+    the regen view, Adam on means/color/opacity/scale/quat, no color stamp.
+    Set ``stamp_first=True`` for the optional visible-stamp variant.
+    """
+
+    iters: int = 20
     densify: bool = False
     densify_every: int = 5
     densify_grad_thresh: float = 0.0002
@@ -219,17 +228,17 @@ class MlxPhotometricRepair:
     max_opt_gaussians: int = 512
     max_train_side: int = 64
     lr_means: float = 1.6e-4
-    lr_colors: float = 0.05
+    lr_colors: float = 0.0025
     lr_opacities: float = 0.05
     lr_scales: float = 0.005
     lr_quats: float = 0.001
     near: float = 0.05
     tile_size: int = 32
-    lambda_dssim: float = 0.0
-    stamp_first: bool = True
+    lambda_dssim: float = _LAMBDA_DSSIM
+    stamp_first: bool = False
     freeze_colors: bool = False
-    mask_loss: bool = True
-    max_scale_ratio: float = 1.5
+    mask_loss: bool = False
+    max_scale_ratio: float = 0.0
 
     def apply(
         self,
@@ -286,39 +295,62 @@ class MlxPhotometricRepair:
         deadline: float | None = None,
         on_checkpoint=None,
     ) -> dict[str, Any]:
-        """Stamp the regenerated view, then refine chunks until stop or deadline."""
+        """Keep refining until stop or deadline.
+
+        Paper path: photometric chunks only. Stamp path: paint regen RGB
+        first, then geometry-only chunks (colors stay frozen).
+        """
         import time as time_mod
 
-        from .repair import stamp_view_colors
+        n_stamped = 0
+        if self.stamp_first:
+            from .repair import stamp_view_colors
 
-        n_stamped = stamp_view_colors(
-            scene, camera, repaired_rgb, near=self.near, color_lr=1.0,
-        )
-        stats: dict[str, Any] = {
-            "backend": "gsplat-mlx",
-            "n_visible": n_stamped,
-            "n_updated": n_stamped,
-            "n_stamped": n_stamped,
-            "n_spawned": 0,
-            "n_gaussians": scene.num_gaussians,
-            "n_iters": 0,
-            "n_chunks": 0,
-            "l1_before": None,
-            "l1_after": None,
-            "phase": "stamp",
-        }
-        if on_checkpoint is not None:
-            on_checkpoint(dict(stats))
+            n_stamped = stamp_view_colors(
+                scene, camera, repaired_rgb, near=self.near, color_lr=1.0,
+            )
+            stats: dict[str, Any] = {
+                "backend": "gsplat-mlx",
+                "n_visible": n_stamped,
+                "n_updated": n_stamped,
+                "n_stamped": n_stamped,
+                "n_spawned": 0,
+                "n_gaussians": scene.num_gaussians,
+                "n_iters": 0,
+                "n_chunks": 0,
+                "l1_before": None,
+                "l1_after": None,
+                "phase": "stamp",
+            }
+            if on_checkpoint is not None:
+                on_checkpoint(dict(stats))
+            # Colors already match the regen. Further subset Adam on RGB is
+            # what clipped to neon magenta/green/blue after ~1 minute.
+            inner = replace(
+                self,
+                stamp_first=False,
+                freeze_colors=True,
+                lr_colors=0.0,
+                mask_loss=True,
+            )
+            rank_mode = "depth"
+        else:
+            stats = {
+                "backend": "gsplat-mlx",
+                "n_visible": 0,
+                "n_updated": 0,
+                "n_stamped": 0,
+                "n_spawned": 0,
+                "n_gaussians": scene.num_gaussians,
+                "n_iters": 0,
+                "n_chunks": 0,
+                "l1_before": None,
+                "l1_after": None,
+                "phase": "refine",
+            }
+            inner = replace(self, stamp_first=False)
+            rank_mode = "residual"
 
-        # Colors already match the regen. Further subset Adam on RGB is what
-        # clipped to neon magenta/green/blue after ~1 minute.
-        inner = replace(
-            self,
-            stamp_first=False,
-            freeze_colors=True,
-            lr_colors=0.0,
-            mask_loss=True,
-        )
         chunk = 0
         total_iters = 0
         l1_before = None
@@ -331,7 +363,7 @@ class MlxPhotometricRepair:
             last = inner.apply(
                 scene, camera, rendered_rgb, repaired_rgb,
                 rank_offset=chunk * int(self.max_opt_gaussians),
-                rank_mode="depth",
+                rank_mode=rank_mode,
             )
             if l1_before is None:
                 l1_before = last.get("l1_before")
@@ -419,7 +451,8 @@ class MlxPhotometricRepair:
         log_scales = mx.log(mx.maximum(_to_mx(mx, scene.scales[idx]), mx.array(1e-8)))
         log_scales0 = log_scales
         logit_opacities = _inv_sigmoid(mx, _to_mx(mx, scene.opacities[idx]))
-        scale_span = math.log(max(1.01, float(self.max_scale_ratio or 1.0)))
+        ratio = float(self.max_scale_ratio or 0.0)
+        scale_span = math.log(max(1.01, ratio)) if ratio > 1.0 else None
 
         viewmat = _to_mx(mx, np.asarray(camera.w2c, dtype=np.float32))[None]
         K = _to_mx(mx, _scaled_K(camera, train_w, train_h))[None]
@@ -518,7 +551,10 @@ class MlxPhotometricRepair:
             means = opts["means"].step(mx, means, g_means)
             quats = opts["quats"].step(mx, quats, g_quats)
             log_scales = opts["log_scales"].step(mx, log_scales, g_log_scales)
-            log_scales = mx.clip(log_scales, log_scales0 - scale_span, log_scales0 + scale_span)
+            if scale_span is not None:
+                log_scales = mx.clip(
+                    log_scales, log_scales0 - scale_span, log_scales0 + scale_span,
+                )
             logit_opacities = opts["logit_opacities"].step(mx, logit_opacities, g_logit)
             if not freeze_colors:
                 color_param = opts["colors"].step(mx, color_param, g_colors)

@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from ..repair import (
+    HIGHLIGHT_PLY,
     ORIGINAL_PLY,
     REPAIRED_PLY,
     discover_repair_views,
@@ -41,6 +42,7 @@ class RepairStudio:
         self.job: dict = self._idle_job()
         self.showing: str | None = None  # original | repaired | None (catalog)
         self.showing_episode: str | None = None
+        self.showing_highlight: bool = False
         self._last_preview_at: float = 0.0
 
     @staticmethod
@@ -77,6 +79,7 @@ class RepairStudio:
             job = dict(self.job)
             showing = self.showing
             showing_episode = self.showing_episode
+            showing_highlight = self.showing_highlight
         ep = episode_id or job.get("episode") or live_ep
         detail = self.episode_review(ep) if ep else None
         episode_scene = None
@@ -90,6 +93,7 @@ class RepairStudio:
             "job": job,
             "showing": showing,
             "showing_episode": showing_episode,
+            "showing_highlight": showing_highlight,
             "live_episode": live_ep,
             "run_status": run_status,
             "scene_status": scene_status,
@@ -274,12 +278,16 @@ class RepairStudio:
         with self._lock:
             self.showing = None
             self.showing_episode = None
+            self.showing_highlight = False
         return True, f"Viser restored to {spec.id}."
 
-    def show(self, episode_id: str, which: str, *, force: bool = False) -> tuple[bool, str]:
+    def show(
+        self, episode_id: str, which: str, *, force: bool = False, highlight: bool = False,
+    ) -> tuple[bool, str]:
         which = str(which or "").strip().lower()
         if which not in ("original", "repaired"):
             return False, "which must be 'original' or 'repaired'."
+        use_highlight = bool(highlight) and which == "repaired"
         with self.app.lock:
             if self.app.run and self.app.run["status"] in ("running", "stopping"):
                 return False, (
@@ -289,16 +297,24 @@ class RepairStudio:
         d = self.app.episode_path(episode_id)
         if d is None:
             return False, f"Episode {episode_id} not found."
-        ply = d / (ORIGINAL_PLY if which == "original" else REPAIRED_PLY)
-        if not ply.is_file():
-            return False, f"{ply.name} is not on disk yet — run a replay first."
+        if use_highlight:
+            try:
+                ply = self._highlight_ply(d)
+            except Exception as exc:
+                return False, f"Could not build highlight splat: {exc}"
+        else:
+            ply = d / (ORIGINAL_PLY if which == "original" else REPAIRED_PLY)
+            if not ply.is_file():
+                return False, f"{ply.name} is not on disk yet — run a replay first."
         with self._lock:
             already = (
                 self.showing == which
                 and self.showing_episode == episode_id
+                and bool(self.showing_highlight) == bool(use_highlight)
             )
         if already and not force:
-            return True, f"Viser already showing {which}."
+            label = "repaired highlight" if use_highlight else which
+            return True, f"Viser already showing {label}."
         with self.app.lock:
             spec = self.app._scene_spec
             up_axis = spec.up_axis if spec is not None else "+y"
@@ -311,9 +327,10 @@ class RepairStudio:
         catalog_id = episode_scene or (
             spec.id if spec is not None and not str(spec.id).startswith("repair-") else None
         )
+        tag = "highlight" if use_highlight else which
         preview = SceneSpec(
-            id=f"repair-{which}",
-            label=f"{episode_id} ({which})",
+            id=f"repair-{tag}",
+            label=f"{episode_id} ({tag})",
             path=ply,
             up_axis=up_axis,
         )
@@ -321,8 +338,34 @@ class RepairStudio:
         with self._lock:
             self.showing = which
             self.showing_episode = episode_id
-        logger.info("Viser preview %s -> %s (generation %s)", which, ply, generation)
+            self.showing_highlight = use_highlight
+        logger.info("Viser preview %s -> %s (generation %s)", tag, ply, generation)
+        if use_highlight:
+            return True, f"Viser showing repaired splat with changed gaussians in red ({ply.name})."
         return True, f"Viser showing {which} splat ({ply.name})."
+
+    def _highlight_ply(self, episode_dir: Path) -> Path:
+        """Build (or reuse) a red overlay of gaussians that differ from original."""
+        from ..repair import highlight_repaired_scene
+        from ..scene import load_ply, save_ply
+
+        original = Path(episode_dir) / ORIGINAL_PLY
+        repaired = Path(episode_dir) / REPAIRED_PLY
+        out = Path(episode_dir) / HIGHLIGHT_PLY
+        if not original.is_file():
+            raise FileNotFoundError(
+                "scene_original.ply is missing — need it to mark changed gaussians."
+            )
+        if not repaired.is_file():
+            raise FileNotFoundError(
+                "scene_repaired.ply is not on disk yet — run a replay first."
+            )
+        src_mtime = max(original.stat().st_mtime, repaired.stat().st_mtime)
+        if out.is_file() and out.stat().st_mtime >= src_mtime:
+            return out
+        scene = highlight_repaired_scene(load_ply(original), load_ply(repaired))
+        save_ply(scene, out)
+        return out
 
     def look_at(self, episode_id: str, step: int) -> tuple[bool, str]:
         """Point the viser frustum overlay at a regenerated view's camera."""
@@ -430,7 +473,10 @@ class RepairStudio:
                 now = time.time()
                 if now - self._last_preview_at >= 10.0:
                     self._last_preview_at = now
-                    self.show(episode_id, "repaired", force=True)
+                    self.show(
+                        episode_id, "repaired", force=True,
+                        highlight=self.showing_highlight,
+                    )
 
             def on_view(index, view, result) -> None:
                 body = result.to_json() if hasattr(result, "to_json") else dict(result)
@@ -451,7 +497,10 @@ class RepairStudio:
                         )
                     )
                 if result.status == "ok":
-                    self.show(episode_id, "repaired", force=True)
+                    self.show(
+                        episode_id, "repaired", force=True,
+                        highlight=self.showing_highlight,
+                    )
 
             replay(
                 source,

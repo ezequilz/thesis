@@ -22,7 +22,7 @@ Endpoints:
   POST /api/repair/start   replay 3D lift {episode, reload_code, backend, step, resume}
   POST /api/repair/stop   stop a replay
   POST /api/repair/reset  copy scene_original.ply over scene_repaired.ply
-  POST /api/repair/show   point viser at {episode, which: original|repaired}
+  POST /api/repair/show   point viser at {episode, which: original|repaired, highlight?}
   POST /api/repair/focus  load that episode's catalog scene into the shared visor
   POST /api/repair/look   point viser frustum at a regenerated step
   GET  /api/episodes      list all past runs on disk (meta.json summaries)
@@ -261,6 +261,7 @@ class DashboardApp:
             with self.repair._lock:
                 self.repair.showing = None
                 self.repair.showing_episode = None
+                self.repair.showing_highlight = False
             try:
                 LIVE_STATE_PATH.unlink(missing_ok=True)
             except OSError:
@@ -808,6 +809,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 str(ep),
                 str(body.get("which") or ""),
                 force=bool(body.get("force", False)),
+                highlight=bool(body.get("highlight", False)),
             )
         elif path == "/api/repair/focus":
             ep = body.get("episode") or body.get("id")

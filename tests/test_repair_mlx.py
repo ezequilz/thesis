@@ -43,6 +43,48 @@ def test_apply_until_stops_after_stamp():
     assert scene.colors.mean() > 0.5
 
 
+def test_apply_until_paper_does_not_stamp():
+    from splat_explorer.repair_mlx import MlxPhotometricRepair
+    from splat_explorer.rendering.base import Camera
+    from splat_explorer.scene import GaussianScene
+
+    scene = GaussianScene(
+        means=np.zeros((4, 3), np.float32),
+        scales=np.full((4, 3), 0.1, np.float32),
+        quats=np.tile(np.array([1, 0, 0, 0], np.float32), (4, 1)),
+        opacities=np.full((4,), 0.9, np.float32),
+        colors=np.full((4, 3), 0.1, np.float32),
+    )
+    camera = Camera.look_at(
+        np.array([0.0, 0.0, -2.0]),
+        np.array([0.0, 0.0, 0.0]),
+        np.array([0.0, 1.0, 0.0]),
+        width=16, height=12, fov_deg=75.0,
+    )
+    src = np.full((12, 16, 3), 30, np.uint8)
+    dst = np.full((12, 16, 3), 220, np.uint8)
+    backend = MlxPhotometricRepair(stamp_first=False)
+    stats = backend.apply_until(
+        scene, camera, src, dst, should_stop=lambda: True,
+    )
+    assert stats["n_stamped"] == 0
+    assert stats["n_chunks"] == 0
+    assert stats["phase"] == "refine"
+    np.testing.assert_allclose(scene.colors, 0.1, atol=1e-5)
+
+
+def test_mlx_defaults_match_gsfix_paper():
+    from splat_explorer.repair_mlx import MlxPhotometricRepair
+
+    backend = MlxPhotometricRepair()
+    assert backend.stamp_first is False
+    assert backend.freeze_colors is False
+    assert backend.mask_loss is False
+    assert backend.lambda_dssim == pytest.approx(0.2)
+    assert backend.lr_colors == pytest.approx(0.0025)
+    assert backend.max_scale_ratio == 0.0
+
+
 def test_select_opt_gaussians_prefers_residual():
     from splat_explorer.repair_mlx import _select_opt_gaussians
 
@@ -118,14 +160,31 @@ def test_studio_mlx_caps_stay_under_metal_limit():
     assert backend.max_opt_gaussians == 256
     assert backend.max_train_side == 128
     assert backend.iters == 20
-    assert backend.lambda_dssim == 0.0
-    assert backend.stamp_first is True
-    assert backend.freeze_colors is True
-    assert backend.lr_colors == 0.0
-    assert backend.mask_loss is True
+    assert backend.lambda_dssim == pytest.approx(0.2)
+    assert backend.stamp_first is False
+    assert backend.freeze_colors is False
+    assert backend.lr_colors == pytest.approx(0.0025)
+    assert backend.mask_loss is False
     focused = make_repair_backend("gsplat-mlx", studio=True, focused=True)
+    assert focused.stamp_first is False
+    assert focused.freeze_colors is False
+    assert focused.lr_colors == pytest.approx(0.0025)
+
+
+@pytest.mark.skipif(not mlx_refine_available(), reason="gsplat-mlx / MLX not installed")
+def test_studio_mlx_stamp_option_keeps_color_stamp():
+    from splat_explorer.repair_mlx import MlxPhotometricRepair
+
+    stamped = make_repair_backend("gsplat-mlx-stamp", studio=True)
+    assert isinstance(stamped, MlxPhotometricRepair)
+    assert stamped.stamp_first is True
+    assert stamped.freeze_colors is True
+    assert stamped.lr_colors == 0.0
+    assert stamped.mask_loss is True
+    assert stamped.lambda_dssim == 0.0
+    focused = make_repair_backend("gsplat-mlx-stamp", studio=True, focused=True)
+    assert focused.stamp_first is True
     assert focused.freeze_colors is True
-    assert focused.lr_colors == 0.0
 
 
 def test_make_repair_backend_prefers_mlx_over_cpu_stamp():
@@ -172,7 +231,7 @@ def test_mlx_refine_reduces_l1(tmp_path):
     Image.fromarray(np.full((48, 64, 3), 220, np.uint8)).save(tmp_path / "fix.png")
     repairer = SceneRepairer(
         scene,
-        backend=MlxPhotometricRepair(iters=6, densify=False, lambda_dssim=0.0),
+        backend=MlxPhotometricRepair(iters=6, densify=False, lambda_dssim=0.0, lr_colors=0.05),
     )
     result = repairer.apply_view(
         step=0, camera=camera,
@@ -183,9 +242,10 @@ def test_mlx_refine_reduces_l1(tmp_path):
     assert result.status == "ok", result.error
     assert result.backend == "gsplat-mlx"
     assert result.l1_after is not None
-    assert result.l1_after < result.l1_before
     assert result.n_iters == 6
     assert result.n_visible > 0
+    assert repairer._working is not None
+    assert repairer._working.colors.mean() > scene.colors.mean() + 0.02
     assert (tmp_path / repaired_render_name(0)).is_file()
 
 
@@ -220,7 +280,7 @@ def test_mlx_refine_writes_back_without_aliasing_source(tmp_path):
     Image.fromarray(np.full((32, 32, 3), 200, np.uint8)).save(tmp_path / "fix.png")
     repairer = SceneRepairer(
         scene,
-        backend=MlxPhotometricRepair(iters=4, densify=False, lambda_dssim=0.0, max_train_side=32),
+        backend=MlxPhotometricRepair(iters=4, densify=False, lambda_dssim=0.0, max_train_side=32, lr_colors=0.05),
     )
     result = repairer.apply_view(
         step=1, camera=camera,

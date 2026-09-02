@@ -31,7 +31,9 @@ logger = logging.getLogger(__name__)
 
 ORIGINAL_PLY = "scene_original.ply"
 REPAIRED_PLY = "scene_repaired.ply"
+HIGHLIGHT_PLY = "scene_repaired_highlight.ply"
 REPAIR_LOG = "repair_log.json"
+HIGHLIGHT_COLOR = np.array([1.0, 0.08, 0.08], dtype=np.float32)
 
 # Matches the 3DGS / GSFix3D photometric mix (Kerbl et al. use λ ≈ 0.2).
 DEFAULT_LAMBDA_SSIM = 0.2
@@ -52,6 +54,8 @@ _BACKEND_ALIASES = {
     "mlx": "gsplat-mlx",
     "gsplat-mlx": "gsplat-mlx",
     "apple": "gsplat-mlx",
+    "gsplat-mlx-stamp": "gsplat-mlx-stamp",
+    "mlx-stamp": "gsplat-mlx-stamp",
     "cuda": "gsfix-gsplat",
     "gsplat": "gsfix-gsplat",
     "gsfix": "gsfix-gsplat",
@@ -127,7 +131,21 @@ def list_repair_backends() -> dict:
                 "id": "gsplat-mlx",
                 "label": "gsplat-mlx (Apple Silicon / Metal)",
                 "available": mlx,
-                "detail": mlx_detail,
+                "detail": (
+                    f"{mlx_detail}. GSFix3D photometric refine "
+                    "(no color stamp) — the paper method."
+                ),
+            },
+            {
+                "id": "gsplat-mlx-stamp",
+                "label": "gsplat-mlx (w. color stamp)",
+                "available": mlx,
+                "detail": (
+                    "Same Metal rasterizer, but paints regen RGB onto visible "
+                    "gaussians first so updates pop. Breaks the photometric repair; "
+                    "use only to inspect the stamp, not for true testing."
+                    if mlx else mlx_detail
+                ),
             },
             {
                 "id": "gsfix-gsplat",
@@ -172,8 +190,9 @@ def make_repair_backend(
     silently fall back (the dashboard uses that to show a real error).
 
     `studio=True` is the dashboard replay preset. `focused=True` is the
-    single-view tester: stamp regenerated colors onto the whole frustum, then
-    keep refining until the operator stops (capped at one hour).
+    single-view tester: keep refining until the operator stops (capped at
+    one hour). The stamp backend paints regen RGB first; the default MLX
+    backend is the GSFix3D photometric loop only.
     """
     key = _normalize_backend_name(name)
     if key == "auto":
@@ -185,6 +204,38 @@ def make_repair_backend(
     return _build_repair_backend(
         key, studio=studio, focused=focused, required=True,
     )
+
+
+def _mlx_repair_kwargs(*, stamp: bool, studio: bool, focused: bool) -> dict:
+    """Metal-safe caps always; stamp extras only on the (w. color stamp) option."""
+    kwargs: dict = {}
+    if studio or focused:
+        kwargs.update(
+            iters=20,
+            max_train_side=128,
+            max_opt_gaussians=256,
+            tile_size=32,
+        )
+    if stamp:
+        kwargs.update(
+            lambda_dssim=0.0,
+            lr_colors=0.0,
+            lr_scales=0.001,
+            stamp_first=True,
+            freeze_colors=True,
+            mask_loss=True,
+            max_scale_ratio=1.5,
+        )
+    else:
+        kwargs.update(
+            lambda_dssim=DEFAULT_LAMBDA_SSIM,
+            lr_colors=0.0025,
+            stamp_first=False,
+            freeze_colors=False,
+            mask_loss=False,
+            max_scale_ratio=0.0,
+        )
+    return kwargs
 
 
 def _build_repair_backend(key: str, *, studio: bool, focused: bool, required: bool):
@@ -202,7 +253,7 @@ def _build_repair_backend(key: str, *, studio: bool, focused: bool, required: bo
         else:
             logger.info("3D repair backend: GSFix refine (gsplat / CUDA)")
             return GsplatPhotometricRepair()
-    if key == "gsplat-mlx":
+    if key in ("gsplat-mlx", "gsplat-mlx-stamp"):
         from .repair_mlx import MlxPhotometricRepair, mlx_refine_available
 
         if not mlx_refine_available():
@@ -216,39 +267,11 @@ def _build_repair_backend(key: str, *, studio: bool, focused: bool, required: bo
                 raise RuntimeError(msg)
             logger.info(msg)
         else:
-            kwargs = {}
-            if focused:
-                # Stamp the frustum, then geometry-only Metal chunks. Color Adam
-                # on a 256-splat subset vs the full image clips to neon primaries.
-                kwargs = dict(
-                    iters=20,
-                    max_train_side=128,
-                    max_opt_gaussians=256,
-                    lambda_dssim=0.0,
-                    tile_size=32,
-                    lr_colors=0.0,
-                    lr_scales=0.001,
-                    stamp_first=True,
-                    freeze_colors=True,
-                    mask_loss=True,
-                    max_scale_ratio=1.5,
-                )
-            elif studio:
-                kwargs = dict(
-                    iters=20,
-                    max_train_side=128,
-                    max_opt_gaussians=256,
-                    lambda_dssim=0.0,
-                    tile_size=32,
-                    lr_colors=0.0,
-                    lr_scales=0.001,
-                    stamp_first=True,
-                    freeze_colors=True,
-                    mask_loss=True,
-                    max_scale_ratio=1.5,
-                )
+            stamp = key == "gsplat-mlx-stamp"
+            kwargs = _mlx_repair_kwargs(stamp=stamp, studio=studio, focused=focused)
             logger.info(
-                "3D repair backend: GSFix refine (gsplat-mlx / Apple Silicon)%s",
+                "3D repair backend: GSFix refine (gsplat-mlx / Apple Silicon)%s%s",
+                " [w. color stamp]" if stamp else "",
                 " [focused]" if focused else (" [studio]" if studio else ""),
             )
             return MlxPhotometricRepair(**kwargs)
@@ -378,6 +401,47 @@ def stamp_view_colors(
     lr = float(np.clip(color_lr, 0.0, 1.0))
     scene.colors[idx] = np.clip((1.0 - lr) * scene.colors[idx] + lr * target, 0.0, 1.0)
     return int(len(idx))
+
+
+def changed_gaussian_mask(
+    original: GaussianScene,
+    repaired: GaussianScene,
+    *,
+    atol: float = 1e-4,
+) -> np.ndarray:
+    """True for repaired gaussians that moved, recolored, or were newly spawned.
+
+    Index-aligned for the shared prefix (MLX densify appends clones). Anything
+    past ``original.num_gaussians`` is treated as new.
+    """
+    n0 = original.num_gaussians
+    n1 = repaired.num_gaussians
+    mask = np.zeros(n1, dtype=bool)
+    n = min(n0, n1)
+    if n:
+        same = (
+            np.isclose(original.means[:n], repaired.means[:n], atol=atol, rtol=0).all(axis=1)
+            & np.isclose(original.colors[:n], repaired.colors[:n], atol=atol, rtol=0).all(axis=1)
+            & np.isclose(original.opacities[:n], repaired.opacities[:n], atol=atol, rtol=0)
+            & np.isclose(original.scales[:n], repaired.scales[:n], atol=atol, rtol=0).all(axis=1)
+            & np.isclose(original.quats[:n], repaired.quats[:n], atol=atol, rtol=0).all(axis=1)
+        )
+        mask[:n] = ~same
+    if n1 > n0:
+        mask[n0:] = True
+    return mask
+
+
+def highlight_repaired_scene(
+    original: GaussianScene,
+    repaired: GaussianScene,
+) -> GaussianScene:
+    """Copy of `repaired` with changed/new gaussians painted bright red."""
+    out = repaired.copy()
+    mask = changed_gaussian_mask(original, repaired)
+    if np.any(mask):
+        out.colors[mask] = HIGHLIGHT_COLOR
+    return out
 
 
 def _unproject(camera: Camera, u: np.ndarray, v: np.ndarray, z: np.ndarray) -> np.ndarray:

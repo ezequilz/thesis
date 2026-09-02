@@ -43,9 +43,15 @@ def test_explicit_backend_requires_availability():
     if mlx_refine_available():
         from splat_explorer.repair_mlx import MlxPhotometricRepair
         assert isinstance(make_repair_backend("gsplat-mlx"), MlxPhotometricRepair)
+        assert make_repair_backend("gsplat-mlx").stamp_first is False
+        stamped = make_repair_backend("gsplat-mlx-stamp")
+        assert isinstance(stamped, MlxPhotometricRepair)
+        assert stamped.stamp_first is True
     else:
         with pytest.raises(RuntimeError, match="gsplat-mlx"):
             make_repair_backend("gsplat-mlx")
+        with pytest.raises(RuntimeError, match="gsplat-mlx"):
+            make_repair_backend("gsplat-mlx-stamp")
 
 
 def test_list_repair_backends_includes_auto_and_mlx():
@@ -54,9 +60,14 @@ def test_list_repair_backends_includes_auto_and_mlx():
     info = list_repair_backends()
     ids = [b["id"] for b in info["backends"]]
     assert info["detected"] in {"gsfix-gsplat", "gsplat-mlx", "cpu-project"}
-    assert ids[:3] == ["auto", "gsplat-mlx", "gsfix-gsplat"]
+    assert ids[0] == "auto"
+    assert ids[1] == "gsplat-mlx"
+    assert "gsplat-mlx-stamp" in ids
+    assert "gsfix-gsplat" in ids
     auto = info["backends"][0]
     assert auto["available"] is True
+    stamp = next(b for b in info["backends"] if b["id"] == "gsplat-mlx-stamp")
+    assert "color stamp" in stamp["label"]
 
 
 def test_make_repair_backend_falls_back_without_cuda():

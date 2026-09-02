@@ -47,8 +47,13 @@
     background: var(--panel2); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 6px 8px; font-size: 13px; min-width: 220px; }
   #stats { display: flex; gap: 18px; padding: 8px 16px; font-size: 12px; color: var(--dim);
-           border-bottom: 1px solid var(--border); flex: none; flex-wrap: wrap; }
+           border-bottom: 1px solid var(--border); flex: none; flex-wrap: wrap; align-items: center; }
   #stats b { color: var(--text); font-family: var(--mono); font-weight: 600; }
+  #btn-highlight {
+    margin-left: auto; padding: 4px 11px; font-size: 11px; font-weight: 600;
+    background: var(--panel2); color: var(--dim); border: 1px solid var(--border) !important;
+  }
+  #btn-highlight.on { background: #c23a3a; color: #fff; border-color: #c23a3a !important; }
   #msg { font-size: 12px; color: var(--warn); padding: 6px 16px; flex: none; }
   #msg:empty { display: none; padding: 0; }
   label.chk {
@@ -168,9 +173,10 @@
     <select id="in-ep"></select>
   </label>
   <label>backend
-    <select id="in-backend" title="Which 3D lift to run. Auto picks CUDA, then gsplat-mlx, then the CPU stamp. gsplat-mlx trains a small nearby subset so Metal does not hit its resource cap.">
+    <select id="in-backend" title="Which 3D lift to run. Auto picks CUDA, then gsplat-mlx (GSFix3D photometric, no stamp), then the CPU stamp. Pick (w. color stamp) only to inspect painted updates — that path breaks the photometric repair.">
       <option value="auto">Auto (best available)</option>
       <option value="gsplat-mlx">gsplat-mlx (Apple Silicon / Metal)</option>
+      <option value="gsplat-mlx-stamp">gsplat-mlx (w. color stamp)</option>
       <option value="gsfix-gsplat">gsplat CUDA (GSFix3D)</option>
       <option value="cpu-project">CPU color stamp</option>
       <option value="cpu-photometric">CPU photometric (no rasterizer)</option>
@@ -182,7 +188,7 @@
   </label>
   <div style="display:flex;gap:8px;align-self:end">
     <button id="btn-replay">Replay all views</button>
-    <button id="btn-view" title="Paint this regenerated view onto the splat, then keep a geometry-only refine until you press Stop (max 1 hour). Continues from scene_repaired.ply when it exists.">Repair this view</button>
+    <button id="btn-view" title="Photometric-refine this regenerated view until you press Stop (max 1 hour). Continues from scene_repaired.ply when it exists. The (w. color stamp) backend paints RGB first.">Repair this view</button>
     <button id="btn-reset" title="Copy scene_original.ply over scene_repaired.ply and show the original splat.">Reset repair</button>
     <button id="btn-stop" disabled>Stop</button>
   </div>
@@ -200,6 +206,7 @@
   <span>repaired ply <b id="st-rep">–</b></span>
   <span>scene <b id="st-scene">–</b></span>
   <span>lift <b id="st-backend">–</b></span>
+  <button type="button" id="btn-highlight" title="On the Repaired 3D view, paint every gaussian that changed or was added versus the original bright red. Original always stays the real original splat.">highlight repair</button>
 </div>
 <div id="msg"></div>
 
@@ -235,6 +242,7 @@ let selectedEp = "";
 let compareKind = "original";
 let visorPly = null; // null = catalog, "original" | "repaired" = episode PLY
 let visorPublished = null;
+let highlightRepair = false;
 let visorSeq = 0;
 let tickBusy = false;
 let looked = { ep: "", step: null };
@@ -502,14 +510,17 @@ function setCompareKind(which, { syncViser = false } = {}) {
 async function showVisorPly(which, { force = false } = {}) {
   const ep = snapshot?.episode;
   const hasPly = which === "repaired" ? ep?.repaired_ply : ep?.original_ply;
+  const highlight = Boolean(highlightRepair && which === "repaired");
   if (!selectedEp || !hasPly) {
     $("msg").textContent = which === "repaired"
       ? "No repaired PLY yet — run Replay 3D repair first."
       : "No original PLY yet — run Replay 3D repair first.";
     return;
   }
-  if (!force && visorPublished === which && snapshot?.showing === which
-      && snapshot?.showing_episode === selectedEp) {
+  const publishedKey = which + (highlight ? "-hl" : "");
+  if (!force && visorPublished === publishedKey && snapshot?.showing === which
+      && snapshot?.showing_episode === selectedEp
+      && Boolean(snapshot?.showing_highlight) === highlight) {
     visorPly = which;
     renderShow();
     return;
@@ -518,14 +529,14 @@ async function showVisorPly(which, { force = false } = {}) {
   visorPly = which;
   renderShow();
   const data = await post("/api/repair/show", {
-    episode: selectedEp, which, force,
+    episode: selectedEp, which, force, highlight,
   }, { silent: true });
   if (seq !== visorSeq) return;
   if (data && data.ok === false) {
     visorPly = snapshot?.showing || visorPly;
     if (data.message || data.error) $("msg").textContent = data.message || data.error;
   } else {
-    visorPublished = which;
+    visorPublished = publishedKey;
   }
   renderShow();
 }
@@ -556,8 +567,11 @@ async function syncEpisodeScene() {
     }
   }
   if (visorPly) {
-    const showingThis = snapshot.showing_episode === selectedEp && snapshot.showing === visorPly;
-    if (showingThis) visorPublished = visorPly;
+    const wantHl = Boolean(highlightRepair && visorPly === "repaired");
+    const showingThis = snapshot.showing_episode === selectedEp
+      && snapshot.showing === visorPly
+      && Boolean(snapshot.showing_highlight) === wantHl;
+    if (showingThis) visorPublished = visorPly + (wantHl ? "-hl" : "");
     else await showVisorPly(visorPly, { force: false });
     maybeLook();
     return;
@@ -582,14 +596,15 @@ function renderShow() {
     && !which;
   const label = snapshot?.episode_scene_label || snapshot?.episode_scene;
   const visorWhich = visorPly || ((which && sameEp) ? which : null);
+  const visorHl = visorWhich === "repaired" && highlightRepair;
   $("pill-show").textContent = visorWhich
-    ? `viser: ${visorWhich} ply`
+    ? `viser: ${visorWhich} ply${visorHl ? " · highlight" : ""}`
     : (label ? `viser: ${label}` : "viser: catalog");
   $("pill-show").className = "pill" + (visorWhich || catalogOk ? " ok" : "");
   const hint = $("viser-hint");
   if (hint) {
     hint.textContent = visorWhich
-      ? `${visorWhich} ply · click Original / Repaired to swap`
+      ? `${visorWhich} ply${visorHl ? " · changed splats in red" : ""} · click Original / Repaired to swap`
       : (label ? `catalog: ${label}` : "original / repaired toggle");
   }
   const ep = snapshot?.episode;
@@ -598,6 +613,11 @@ function renderShow() {
     btn.classList.toggle("on", target === visorWhich);
     btn.disabled = target === "repaired" ? !ep?.repaired_ply : !ep?.original_ply;
   });
+  const hlBtn = $("btn-highlight");
+  if (hlBtn) {
+    hlBtn.classList.toggle("on", highlightRepair);
+    hlBtn.disabled = !ep?.repaired_ply || !ep?.original_ply;
+  }
   const busy = snapshot?.job?.status === "running" || snapshot?.job?.status === "stopping";
   $("btn-replay").disabled = busy || !selectedEp;
   const viewBtn = $("btn-view");
@@ -697,6 +717,11 @@ $("btn-reset").onclick = async () => {
 $("btn-stop").onclick = async () => {
   await post("/api/repair/stop");
   tick();
+};
+$("btn-highlight").onclick = () => {
+  highlightRepair = !highlightRepair;
+  renderShow();
+  if (visorPly === "repaired") showVisorPly("repaired", { force: true });
 };
 document.querySelectorAll("#show-toggle button").forEach(btn => {
   btn.onclick = () => {

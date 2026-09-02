@@ -260,6 +260,38 @@ def test_reset_repair_restores_original_ply(tmp_path, monkeypatch):
     assert studio.showing == "original"
 
 
+def test_show_highlight_recolors_changed_splats(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    ep = tmp_path / "outputs" / "episodes" / "20260901_190223"
+    ep.mkdir(parents=True)
+    (ep / "meta.json").write_text(json.dumps({
+        "params": {"scene": "venetian-balcony", "scene_label": "Venetian Balcony"},
+    }))
+    _tiny_ply(ep / "scene_original.ply", (0.2, 0.4, 0.8))
+    _tiny_ply(ep / "scene_repaired.ply", (0.9, 0.1, 0.1))
+    app = _FakeApp(ep, scene_id="venetian-balcony")
+    studio = RepairStudio(app)
+    ok, message = studio.show(ep.name, "repaired", highlight=True)
+    assert ok, message
+    assert studio.showing == "repaired"
+    assert studio.showing_highlight is True
+    from splat_explorer.repair import HIGHLIGHT_COLOR, HIGHLIGHT_PLY
+    from splat_explorer.scene import load_ply
+    highlighted = load_ply(ep / HIGHLIGHT_PLY)
+    np.testing.assert_allclose(highlighted.colors[0], HIGHLIGHT_COLOR, atol=1e-3)
+    live = json.loads((tmp_path / "outputs" / "live" / "scene.json").read_text())
+    assert live["id"] == "repair-highlight"
+    assert live["path"].endswith(HIGHLIGHT_PLY)
+    repaired = load_ply(ep / "scene_repaired.ply")
+    np.testing.assert_allclose(repaired.colors[0], [0.9, 0.1, 0.1], atol=1e-3)
+    ok, message = studio.show(ep.name, "original", highlight=True)
+    assert ok, message
+    assert studio.showing == "original"
+    assert studio.showing_highlight is False
+    original = load_ply(ep / "scene_original.ply")
+    np.testing.assert_allclose(original.colors[0], [0.2, 0.4, 0.8], atol=1e-3)
+
+
 def test_catalog_id_from_live_ignores_repair_preview():
     from splat_explorer.scene.catalog import catalog_id_from_live
 

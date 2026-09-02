@@ -14,6 +14,7 @@ from splat_explorer.agent.loop import run_episode
 from splat_explorer.agent.regenerate import RegenerateResult, regenerate_frame_name
 from splat_explorer.rendering.base import Camera
 from splat_explorer.repair import (
+    HIGHLIGHT_COLOR,
     ORIGINAL_PLY,
     REPAIRED_PLY,
     PhotometricViewRepair,
@@ -22,6 +23,7 @@ from splat_explorer.repair import (
     camera_from_record,
     copy_camera,
     discover_repair_views,
+    highlight_repaired_scene,
     replay_episode_repairs,
     repaired_render_name,
     scene_from_renderer,
@@ -92,6 +94,25 @@ def test_stamp_view_colors_front_only_skips_back_surface():
     assert n == 1
     np.testing.assert_allclose(scene.colors[0], [220 / 255.0] * 3, atol=0.02)
     np.testing.assert_allclose(scene.colors[1], [0.1, 0.1, 0.1], atol=1e-5)
+
+
+def test_highlight_repaired_scene_paints_changed_and_new():
+    original = _scene(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        colors=[[0.2, 0.3, 0.4], [0.5, 0.5, 0.5]],
+    )
+    repaired = original.copy()
+    repaired.colors[0] = [0.9, 0.1, 0.1]
+    repaired.means = np.concatenate([repaired.means, [[2.0, 0.0, 0.0]]], axis=0)
+    repaired.scales = np.concatenate([repaired.scales, [[0.05, 0.05, 0.05]]], axis=0)
+    repaired.quats = np.concatenate([repaired.quats, [[1.0, 0.0, 0.0, 0.0]]], axis=0)
+    repaired.opacities = np.concatenate([repaired.opacities, [0.8]], axis=0)
+    repaired.colors = np.concatenate([repaired.colors, [[0.1, 0.8, 0.2]]], axis=0)
+    out = highlight_repaired_scene(original, repaired)
+    np.testing.assert_allclose(out.colors[0], HIGHLIGHT_COLOR, atol=1e-5)
+    np.testing.assert_allclose(out.colors[1], [0.5, 0.5, 0.5], atol=1e-5)
+    np.testing.assert_allclose(out.colors[2], HIGHLIGHT_COLOR, atol=1e-5)
+    np.testing.assert_allclose(repaired.colors[0], [0.9, 0.1, 0.1], atol=1e-5)
 
 
 def test_copy_camera_is_independent():
