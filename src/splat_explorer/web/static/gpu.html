@@ -130,7 +130,8 @@
 <div id="reserve">
   <div class="row">
     <div class="seg" id="seg-hours">
-      <button type="button" data-h="8" class="on">8 hours</button>
+      <button type="button" data-h="2" class="on">2 hours</button>
+      <button type="button" data-h="8">8 hours</button>
       <button type="button" data-h="24">24 hours</button>
       <button type="button" data-h="custom">Custom</button>
     </div>
@@ -200,7 +201,7 @@ const $ = id => document.getElementById(id);
 const AUTO_MS = 30000;
 let snap = null;
 let tickBusy = false;
-let hoursMode = 8;
+let hoursMode = 2;
 let beginMode = "now";
 let selectedParts = new Set(["lrz-hgx-a100-80x4", "lrz-dgx-a100-80x8"]);
 let lastRemoteAt = 0;

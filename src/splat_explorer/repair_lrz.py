@@ -66,7 +66,7 @@ DEFAULT_PARTITION = "lrz-hgx-a100-80x4,lrz-dgx-a100-80x8"
 REVIEW_PARTITIONS = (
     "lrz-v100x2,lrz-hgx-a100-80x4,lrz-dgx-a100-80x8,lrz-hgx-h100-94x4"
 )
-HOLD_HOURS = (8, 24)
+HOLD_HOURS = (2, 8, 24)
 MAX_HOLD_HOURS = 336  # Matches the 14-day partition time limit.
 PARTITION_CATALOG = (
     {"id": "lrz-hgx-a100-80x4", "label": "HGX A100 80GB ×4", "family": "A100", "default": True},
