@@ -43,9 +43,9 @@
               background: var(--panel); border-bottom: 1px solid var(--border);
               flex: none; flex-wrap: wrap; }
   #controls label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--dim); }
-  #controls select {
+  #controls input[type="password"] {
     background: var(--panel2); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 6px 8px; font-size: 13px; min-width: 220px; }
+    border-radius: 6px; padding: 6px 8px; font-size: 13px; min-width: 160px; }
   #stats { display: flex; gap: 18px; padding: 8px 16px; font-size: 12px; color: var(--dim);
            border-bottom: 1px solid var(--border); flex: none; flex-wrap: wrap; align-items: center; }
   #stats b { color: var(--text); font-family: var(--mono); font-weight: 600; }
@@ -181,6 +181,11 @@
       <option value="cpu-project">CPU color stamp</option>
       <option value="cpu-photometric">CPU photometric (no rasterizer)</option>
     </select>
+  </label>
+  <label>LRZ password
+    <input id="in-lrz-pw" type="password" autocomplete="off" spellcheck="false"
+      placeholder="optional fallback"
+      title="Usually unused. Prefer scripts/lrz/ssh-session.sh (password once). This field is a one-run fallback and is never stored.">
   </label>
   <label class="chk" title="Re-import splat_explorer.repair so code edits apply without restarting the dashboard process.">
     <input type="checkbox" id="in-reload" checked>
@@ -376,6 +381,10 @@ function renderStats() {
   $("st-backend").textContent = jobBackend && jobBackend !== "auto"
     ? jobBackend
     : (detected || "–");
+  const lrz = snapshot?.backends?.lrz;
+  if (lrz && lrz.configured) {
+    $("st-backend").title = `LRZ job ${lrz.job_id} @ ${lrz.host}`;
+  }
   $("st-done").textContent = snapshot?.job?.n_done != null
     ? `${snapshot.job.n_done}/${snapshot.job.n_views || 0}` : "–";
 }
@@ -689,7 +698,9 @@ $("btn-replay").onclick = async () => {
     reload_code: $("in-reload").checked,
     backend: $("in-backend").value || "auto",
     resume: true,
+    ssh_password: $("in-lrz-pw")?.value || "",
   });
+  if ($("in-lrz-pw")) $("in-lrz-pw").value = "";
   tick();
 };
 $("btn-view").onclick = async () => {
@@ -703,7 +714,9 @@ $("btn-view").onclick = async () => {
     reload_code: $("in-reload").checked,
     backend: $("in-backend").value || "auto",
     resume: true,
+    ssh_password: $("in-lrz-pw")?.value || "",
   });
+  if ($("in-lrz-pw")) $("in-lrz-pw").value = "";
   tick();
 };
 $("btn-reset").onclick = async () => {

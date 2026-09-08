@@ -784,6 +784,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             step = body.get("step")
             max_seconds = body.get("max_seconds", 3600)
             resume = body.get("resume", True)
+            ssh_password = body.get("ssh_password") or body.get("lrz_password")
             ok, message = studio.start_replay(
                 str(ep),
                 reload_code=bool(reload_code),
@@ -791,6 +792,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 step=None if step is None or step == "" else int(step),
                 max_seconds=float(max_seconds or 3600),
                 resume=bool(resume if resume is not None else True),
+                ssh_password=str(ssh_password) if ssh_password else None,
             )
         elif path == "/api/repair/stop":
             ok, message = studio.stop_replay()

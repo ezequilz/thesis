@@ -1,7 +1,11 @@
-# GPU image for real 3DGS rasterization via gsplat. STUB — not yet built/tested.
-# Requires an NVIDIA GPU host, the NVIDIA container toolkit, and
-# `docker run --gpus all`. gsplat compiles CUDA kernels on first use, so the
-# CUDA *devel* image (with nvcc) is required, not the runtime image.
+# GPU image for real 3DGS rasterization via gsplat.
+# Prefer LRZ Enroot (scripts/lrz/bootstrap.sh) from a Mac — do not build this
+# nvidia/cuda image on Apple Silicon. On a Linux CUDA host:
+#   docker build -f docker/Dockerfile.gpu -t splat-explorer-gpu .
+#   docker run --gpus all splat-explorer-gpu repair-job --job-dir /data/job
+#
+# Requires the NVIDIA container toolkit. gsplat compiles CUDA kernels on first
+# use, so the CUDA *devel* image (with nvcc) is required, not the runtime image.
 
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
@@ -23,7 +27,7 @@ RUN pip install --no-cache-dir --no-deps .
 
 # Select the gsplat backend at runtime:
 #   splat-explorer --config configs/gpu.yaml render-test   (renderer.backend: gsplat)
-# 3D repair uses the same gsplat stack (backend gsfix-gsplat) when this image
-# is the one running the dashboard/harness.
+# Packed LRZ / CUDA refine jobs:
+#   python -m splat_explorer.repair_lrz --job-dir /workspace/inputs/<id>
 ENTRYPOINT ["splat-explorer"]
 CMD ["render-test"]

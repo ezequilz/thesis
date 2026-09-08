@@ -38,8 +38,12 @@ def test_explicit_backend_requires_availability():
     from splat_explorer.repair_mlx import mlx_refine_available
 
     if not gsplat_refine_available():
-        with pytest.raises(RuntimeError, match="CUDA"):
-            make_repair_backend("gsfix-gsplat")
+        from splat_explorer.repair_lrz import LrzRemoteRepair, lrz_configured
+        if lrz_configured():
+            assert isinstance(make_repair_backend("gsfix-gsplat"), LrzRemoteRepair)
+        else:
+            with pytest.raises(RuntimeError, match="CUDA"):
+                make_repair_backend("gsfix-gsplat")
     if mlx_refine_available():
         from splat_explorer.repair_mlx import MlxPhotometricRepair
         assert isinstance(make_repair_backend("gsplat-mlx"), MlxPhotometricRepair)

@@ -100,6 +100,13 @@ def detect_repair_backend() -> str:
 def list_repair_backends() -> dict:
     """Catalog for the repair-studio dropdown (availability is process-local)."""
     cuda = _cuda_available()
+    try:
+        from .repair_lrz import lrz_status
+        lrz = lrz_status()
+        lrz_ok = bool(lrz.get("configured") and lrz.get("session"))
+    except Exception:
+        lrz = {"configured": False}
+        lrz_ok = False
     mlx = _mlx_available()
     docker = _in_docker()
     if mlx:
@@ -111,15 +118,29 @@ def list_repair_backends() -> dict:
         )
     else:
         mlx_detail = "Install with: pip install -e '.[apple]' (Apple Silicon + MLX)"
-    cuda_detail = (
-        "CUDA + gsplat photometric refine"
-        if cuda
-        else "Needs an NVIDIA GPU and pip install -e '.[gpu]'"
-    )
+    if cuda:
+        cuda_detail = "CUDA + gsplat photometric refine (this process)"
+    elif lrz.get("configured") and not lrz.get("session"):
+        cuda_detail = (
+            f"LRZ job {lrz.get('job_id')} configured but no ControlMaster. "
+            "Run scripts/lrz/ssh-session.sh and type your password once."
+        )
+        lrz_ok = False
+    elif lrz_ok:
+        cuda_detail = (
+            f"LRZ A100 via ControlMaster — job {lrz.get('job_id')} @ {lrz.get('host')}. "
+            "Socket ~/.ssh/cm-lrz (scripts/lrz/ssh-session.sh)."
+        )
+    else:
+        cuda_detail = (
+            "Needs an NVIDIA GPU (pip install -e '.[gpu]') or LRZ: copy "
+            "configs/lrz.example.yaml to configs/lrz.local.yaml and set job_id."
+        )
     detected = detect_repair_backend()
     return {
         "detected": detected,
         "docker": docker,
+        "lrz": lrz,
         "backends": [
             {
                 "id": "auto",
@@ -150,7 +171,7 @@ def list_repair_backends() -> dict:
             {
                 "id": "gsfix-gsplat",
                 "label": "gsplat CUDA (GSFix3D)",
-                "available": cuda,
+                "available": bool(cuda or lrz_ok),
                 "detail": cuda_detail,
             },
             {
@@ -242,17 +263,22 @@ def _build_repair_backend(key: str, *, studio: bool, focused: bool, required: bo
     if key == "gsfix-gsplat":
         from .repair_gsfix import GsplatPhotometricRepair, gsplat_refine_available
 
-        if not gsplat_refine_available():
-            msg = (
-                "gsplat CUDA refine is not available in this process "
-                "(needs NVIDIA GPU + pip install -e '.[gpu]')."
-            )
-            if required:
-                raise RuntimeError(msg)
-            logger.info(msg)
-        else:
-            logger.info("3D repair backend: GSFix refine (gsplat / CUDA)")
+        if gsplat_refine_available():
+            logger.info("3D repair backend: GSFix refine (gsplat / CUDA, local)")
             return GsplatPhotometricRepair()
+        from .repair_lrz import LrzRemoteRepair, lrz_configured
+
+        if lrz_configured():
+            logger.info("3D repair backend: GSFix refine (gsplat / CUDA via LRZ)")
+            return LrzRemoteRepair()
+        msg = (
+            "gsplat CUDA refine is not available in this process "
+            "(needs NVIDIA GPU + pip install -e '.[gpu]', or LRZ via "
+            "configs/lrz.local.yaml plus scripts/lrz/ssh-session.sh)."
+        )
+        if required:
+            raise RuntimeError(msg)
+        logger.info(msg)
     if key in ("gsplat-mlx", "gsplat-mlx-stamp"):
         from .repair_mlx import MlxPhotometricRepair, mlx_refine_available
 
@@ -1076,7 +1102,7 @@ def reload_repair_module():
     import importlib
     import sys
 
-    for extra in ("splat_explorer.repair_gsfix", "splat_explorer.repair_mlx"):
+    for extra in ("splat_explorer.repair_gsfix", "splat_explorer.repair_mlx", "splat_explorer.repair_lrz"):
         if extra in sys.modules:
             importlib.reload(sys.modules[extra])
     name = __name__

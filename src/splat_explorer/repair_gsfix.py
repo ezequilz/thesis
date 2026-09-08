@@ -16,7 +16,7 @@ gsplat-mlx on Apple Silicon, and otherwise falls back to the CPU color stamp.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -115,8 +115,72 @@ class GsplatPhotometricRepair:
     lr_scales: float = 0.005
     lr_quats: float = 0.001
     near: float = 0.05
+    packed: bool = False
 
     def apply(
+        self,
+        scene: GaussianScene,
+        camera: Camera,
+        rendered_rgb: np.ndarray,
+        repaired_rgb: np.ndarray,
+    ) -> dict[str, Any]:
+        try:
+            return self._apply(scene, camera, rendered_rgb, repaired_rgb)
+        except RuntimeError as exc:
+            if (
+                self.packed
+                or "out of memory" not in str(exc).lower()
+            ):
+                raise
+            logger.warning("CUDA OOM during GSFix refine; retrying with packed=True")
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            return replace(self, packed=True)._apply(scene, camera, rendered_rgb, repaired_rgb)
+
+    def apply_until(
+        self,
+        scene: GaussianScene,
+        camera: Camera,
+        rendered_rgb: np.ndarray,
+        repaired_rgb: np.ndarray,
+        *,
+        should_stop=None,
+        deadline: float | None = None,
+        on_checkpoint=None,
+    ) -> dict[str, Any]:
+        """Keep running 20-iter paper chunks until Stop or deadline."""
+        import time
+
+        last: dict[str, Any] | None = None
+        total_iters = 0
+        while True:
+            if should_stop is not None and should_stop():
+                break
+            if deadline is not None and time.time() >= deadline:
+                break
+            last = self.apply(scene, camera, rendered_rgb, repaired_rgb)
+            total_iters += int(last.get("n_iters") or 0)
+            last = dict(last)
+            last["n_iters"] = total_iters
+            if on_checkpoint is not None:
+                on_checkpoint(last)
+        if last is None:
+            return {
+                "backend": "gsfix-gsplat",
+                "n_visible": scene.num_gaussians,
+                "n_updated": 0,
+                "n_spawned": 0,
+                "n_gaussians": scene.num_gaussians,
+                "n_iters": 0,
+                "l1_before": 0.0,
+                "l1_after": None,
+            }
+        return last
+
+    def _apply(
         self,
         scene: GaussianScene,
         camera: Camera,
@@ -173,7 +237,7 @@ class GsplatPhotometricRepair:
             quats_n = torch.nn.functional.normalize(quats, dim=-1)
             rgb, info = _rasterize(
                 gsplat, means, quats_n, scales, opacities, colors,
-                viewmat, K, w, h, background,
+                viewmat, K, w, h, background, packed=self.packed,
             )
             means2d = info.get("means2d") if isinstance(info, dict) else None
             if means2d is not None and means2d.requires_grad:
@@ -218,7 +282,7 @@ class GsplatPhotometricRepair:
             quats_n = torch.nn.functional.normalize(quats, dim=-1)
             rgb, _ = _rasterize(
                 gsplat, means, quats_n, scales, opacities, colors,
-                viewmat, K, w, h, background,
+                viewmat, K, w, h, background, packed=self.packed,
             )
             l1_after = float(torch.abs(rgb - target).mean().item())
             render_rgb = _to_uint8(rgb)
@@ -256,7 +320,7 @@ def _image_to_tensor(image: np.ndarray, width: int, height: int, torch, device):
     return torch.from_numpy(arr.astype(np.float32) / 255.0).to(device)
 
 
-def _rasterize(gsplat, means, quats, scales, opacities, colors, viewmat, K, width, height, background):
+def _rasterize(gsplat, means, quats, scales, opacities, colors, viewmat, K, width, height, background, packed=False):
     kwargs = dict(
         means=means,
         quats=quats,
@@ -267,7 +331,7 @@ def _rasterize(gsplat, means, quats, scales, opacities, colors, viewmat, K, widt
         Ks=K,
         width=int(width),
         height=int(height),
-        packed=False,
+        packed=bool(packed),
     )
     try:
         out = gsplat.rasterization(

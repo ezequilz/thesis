@@ -262,10 +262,24 @@ def cmd_viewer(cfg, args) -> None:
     )
 
 
-def cmd_dashboard(cfg, args) -> None:
-    from .web.server import serve_dashboard
+def cmd_repair_job(cfg, args) -> None:
+    from .repair_lrz import apply_packed_job
 
-    serve_dashboard(cfg, host=cfg.dashboard.host, port=args.port or cfg.dashboard.port)
+    apply_packed_job(Path(args.job_dir))
+
+
+def cmd_lrz_sync(cfg, args) -> None:
+    from .repair_lrz import jobs_root, sync_code_and_job
+
+    if args.job_dir:
+        job_dir = Path(args.job_dir)
+    elif args.job_id:
+        job_dir = jobs_root() / str(args.job_id)
+    else:
+        raise SystemExit("usage: splat-explorer lrz-sync <job-id>")
+    if not job_dir.is_dir():
+        raise SystemExit(f"No packed job at {job_dir}. Start a CUDA repair from /repair first.")
+    sync_code_and_job(job_dir)
 
 
 def main() -> None:
@@ -288,6 +302,21 @@ def main() -> None:
     p_dash = sub.add_parser("dashboard", help="Serve the episode control/debug dashboard")
     p_dash.add_argument("--port", type=int, default=None, help="Override dashboard.port")
     p_dash.set_defaults(func=cmd_dashboard)
+
+    p_repair = sub.add_parser(
+        "repair-job",
+        help="Run GSFix CUDA refine on a packed job directory (A100 worker)",
+    )
+    p_repair.add_argument("--job-dir", required=True)
+    p_repair.set_defaults(func=cmd_repair_job)
+
+    p_lrz = sub.add_parser(
+        "lrz-sync",
+        help="rsync a packed job to LRZ, srun CUDA refine, pull results (types password in this terminal)",
+    )
+    p_lrz.add_argument("job_id", nargs="?", default="", help="outputs/lrz-jobs/<id>")
+    p_lrz.add_argument("--job-dir", default="", help="Override path to the packed job directory")
+    p_lrz.set_defaults(func=cmd_lrz_sync)
 
     args = parser.parse_args()
     cfg = load_config(args.config)

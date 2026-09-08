@@ -154,6 +154,7 @@ class RepairStudio:
         step: int | None = None,
         max_seconds: float = 3600.0,
         resume: bool = True,
+        ssh_password: str | None = None,
     ) -> tuple[bool, str]:
         d = self.app.episode_path(episode_id)
         if d is None:
@@ -197,13 +198,18 @@ class RepairStudio:
                     f"step {int(step)} until Stop (max {int(cap)}s)…"
                     if focused
                     else f"Replaying {len(views)} view(s) with {backend_name}…"
+                )
+                + (
+                    " Open scripts/lrz/ssh-session.sh once if ControlMaster is down."
+                    if str(backend_name) in ("gsfix-gsplat", "cuda", "gsplat", "gsfix")
+                    else ""
                 ),
             }
         self._thread = threading.Thread(
             target=self._run,
             args=(
                 episode_id, d, meta, views, bool(reload_code), backend_name,
-                focused, cap, resume,
+                focused, cap, resume, ssh_password or None,
             ),
             daemon=True,
         )
@@ -428,8 +434,11 @@ class RepairStudio:
     def _run(self, episode_id: str, episode_dir: Path, meta: dict,
              views: list[dict], reload_code: bool, backend_name: str = "auto",
              focused: bool = False, max_seconds: float = 3600.0,
-             resume: bool = True) -> None:
+             resume: bool = True, ssh_password: str | None = None) -> None:
         try:
+            if ssh_password:
+                from ..repair_lrz import set_ssh_password
+                set_ssh_password(ssh_password)
             module = reload_repair_module() if reload_code else None
             replay = replay_episode_repairs if module is None else module.replay_episode_repairs
             make_backend = (
@@ -442,6 +451,8 @@ class RepairStudio:
                 backend = factory(backend_name, studio=True, focused=focused)
             except TypeError:
                 backend = factory(backend_name)
+            if hasattr(backend, "should_stop"):
+                backend.should_stop = self._stop.is_set
             params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
             with self.app.lock:
                 spec = self.app._scene_spec
@@ -458,18 +469,30 @@ class RepairStudio:
                 elapsed = time.time() - started
                 phase = stats.get("phase") or "refine"
                 with self._lock:
-                    self.job["message"] = (
-                        f"Step {views[0].get('step')} {phase}"
-                        + (f" · chunk {stats.get('n_chunks')}" if stats.get("n_chunks") else "")
-                        + (f" · {int(stats.get('n_stamped') or stats.get('n_updated') or 0)} stamped")
-                        + (f" · {stats.get('n_iters') or 0} iters")
-                        + (f" · {elapsed:.0f}s")
-                        + (
-                            f" · train {stats['train_width']}x{stats['train_height']}"
-                            if stats.get("train_width") and stats.get("train_height")
-                            else ""
+                    if str(phase) in ("awaiting_ssh", "packed"):
+                        cmd = stats.get("command") or "scripts/lrz/ssh-session.sh"
+                        self.job["message"] = (
+                            f"Packed for LRZ. If CUDA is greyed out, run `{cmd}` "
+                            "and type your password once (ControlMaster ~/.ssh/cm-lrz)."
                         )
-                    )
+                    elif str(phase) in ("rsync_up", "srun", "rsync_down"):
+                        self.job["message"] = (
+                            f"Step {views[0].get('step')} {phase} via LRZ ControlMaster"
+                            f" · {elapsed:.0f}s"
+                        )
+                    else:
+                        self.job["message"] = (
+                            f"Step {views[0].get('step')} {phase}"
+                            + (f" · chunk {stats.get('n_chunks')}" if stats.get("n_chunks") else "")
+                            + (f" · {int(stats.get('n_stamped') or stats.get('n_updated') or 0)} stamped")
+                            + (f" · {stats.get('n_iters') or 0} iters")
+                            + (f" · {elapsed:.0f}s")
+                            + (
+                                f" · train {stats['train_width']}x{stats['train_height']}"
+                                if stats.get("train_width") and stats.get("train_height")
+                                else ""
+                            )
+                        )
                 now = time.time()
                 if now - self._last_preview_at >= 10.0:
                     self._last_preview_at = now
@@ -502,6 +525,9 @@ class RepairStudio:
                         highlight=self.showing_highlight,
                     )
 
+            if hasattr(backend, "on_progress"):
+                backend.on_progress = on_progress
+
             replay(
                 source,
                 episode_dir,
@@ -513,7 +539,7 @@ class RepairStudio:
                 should_stop=self._stop.is_set,
                 until_stop=focused,
                 deadline=deadline,
-                on_progress=on_progress if focused else None,
+                on_progress=on_progress,
             )
             with self._lock:
                 stopped = self._stop.is_set()
@@ -538,3 +564,9 @@ class RepairStudio:
                 self.job["error"] = f"{type(exc).__name__}: {exc}"
                 self.job["message"] = self.job["error"]
                 self.job["finished_at"] = time.time()
+        finally:
+            try:
+                from ..repair_lrz import set_ssh_password
+                set_ssh_password(None)
+            except Exception:
+                pass
