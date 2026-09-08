@@ -306,8 +306,10 @@ def _start_render_api(
 ) -> ThreadingHTTPServer:
     """HTTP API the harness uses to grab a visor frame.
 
-    GET  /health  -> {clients, capture_ready, viewports, viewer_url, scene?}
-    POST /render  -> JPEG of the WebGL view at the requested camera
+    GET  /health   -> {clients, capture_ready, viewports, viewer_url, scene?}
+    GET  /cameras  -> {cameras: [{id, position, look_at, up, wxyz, fov, ...}]}
+    POST /render   -> JPEG of the WebGL view at the requested camera
+                      (any_client=true uses the repair visor, not only 4:3 VLM)
     """
 
     class Handler(BaseHTTPRequestHandler):
@@ -326,7 +328,17 @@ def _start_render_api(
             self._send(code, json.dumps(obj).encode(), "application/json")
 
         def do_GET(self) -> None:  # noqa: N802
-            if self.path.split("?", 1)[0] != "/health":
+            route = self.path.split("?", 1)[0]
+            if route == "/cameras":
+                cams, err = capture.cameras()
+                self._send_json({
+                    "cameras": cams,
+                    "clients": len(cams),
+                    "error": err,
+                    "viewer_url": viewer_url,
+                })
+                return
+            if route != "/health":
                 self._send_json({"error": "not found"}, 404)
                 return
             n, err, viewports = capture.client_info()
@@ -356,7 +368,7 @@ def _start_render_api(
                 self._send_json({"error": "invalid JSON"}, 400)
                 return
             try:
-                jpeg = capture.render(params)
+                jpeg = capture.render(params, any_client=bool(params.get("any_client")))
             except CaptureError as exc:
                 self._send_json({"error": str(exc)}, 503)
                 return
@@ -416,6 +428,36 @@ class _VisorCapture:
             })
         return len(clients), None, viewports
 
+    def cameras(self) -> tuple[list[dict], str | None]:
+        """Live visor camera poses (one entry per connected browser tab)."""
+        try:
+            clients = self._server.get_clients()
+        except Exception as exc:
+            return [], str(exc)
+        out: list[dict] = []
+        for cid, client in clients.items():
+            try:
+                cam = client.camera
+                updated = float(getattr(getattr(cam, "_state", None), "update_timestamp", 0.0) or 0.0)
+                if updated == 0.0:
+                    continue
+                w, h = self._viewport(client)
+                out.append({
+                    "id": cid,
+                    "width": w,
+                    "height": h,
+                    "position": np.asarray(cam.position, dtype=np.float64).tolist(),
+                    "look_at": np.asarray(cam.look_at, dtype=np.float64).tolist(),
+                    "up": np.asarray(cam.up_direction, dtype=np.float64).tolist(),
+                    "wxyz": np.asarray(cam.wxyz, dtype=np.float64).tolist(),
+                    "fov": float(cam.fov),
+                    "updated_at": updated,
+                    "usable": self._usable(w, h),
+                })
+            except Exception:
+                continue
+        return out, None
+
     def client_count(self) -> tuple[int, str | None]:
         n, err, _ = self.client_info()
         return n, err
@@ -434,7 +476,8 @@ class _VisorCapture:
             return False
         return _aspect_match(width, height, need_w, need_h)
 
-    def _pick_clients(self, clients: dict, need_w: int, need_h: int) -> list:
+    def _pick_clients(self, clients: dict, need_w: int, need_h: int,
+                      *, any_client: bool = False) -> list:
         """Prefer a 4:3 canvas closest to the VLM size (the dashboard iframe)."""
         target_px = need_w * need_h
         ranked = []
@@ -448,7 +491,18 @@ class _VisorCapture:
             px_err = abs(w * h - target_px)
             ranked.append((cid != self._good_client_id, aspect_err, px_err, cid, client))
         ranked.sort()
-        return [(cid, client) for _, _, _, cid, client in ranked]
+        if ranked:
+            return [(cid, client) for _, _, _, cid, client in ranked]
+        if not any_client:
+            return []
+        fallback = []
+        for cid, client in clients.items():
+            w, h = self._viewport(client)
+            if w < self.MIN_VIEW_W or h < self.MIN_VIEW_H:
+                continue
+            fallback.append((-(w * h), cid, client))
+        fallback.sort()
+        return [(cid, client) for _, cid, client in fallback]
 
     def _get_render(self, client, *, width: int, height: int, wxyz, position, fov):
         """Call get_render at the VLM size, with a timeout so a frozen tab
@@ -523,7 +577,7 @@ class _VisorCapture:
         if not visible:
             time.sleep(_OVERLAY_HIDE_SETTLE_S * 2)
 
-    def render(self, params: dict) -> bytes:
+    def render(self, params: dict, *, any_client: bool = False) -> bytes:
         width = int(params["width"])
         height = int(params["height"])
         if width < 16 or height < 16 or width > _VLM_MAX_W or height > _VLM_MAX_H:
@@ -535,16 +589,20 @@ class _VisorCapture:
             clients = self._server.get_clients()
             if not clients:
                 raise CaptureError(
-                    "No visor connected. Keep the episode dashboard open — it "
-                    "runs a 4:3 capture visor at the selected VLM resolution."
+                    "No visor connected. Keep the repair dashboard open so its "
+                    "3D visor can answer, or keep the episode dashboard tab visible."
                 )
-            order = self._pick_clients(clients, width, height)
+            order = self._pick_clients(clients, width, height, any_client=any_client)
             if not order:
                 sizes = [
                     f"{cid}:{self._viewport(c)[0]}x{self._viewport(c)[1]}"
                     for cid, c in clients.items()
                 ]
                 raise CaptureError(
+                    "No capture visor ready "
+                    f"(connected viewports: {', '.join(sizes) or 'none'}). "
+                    "Keep the repair dashboard tab visible."
+                    if any_client else
                     "No 4:3 capture visor ready "
                     f"(connected viewports: {', '.join(sizes) or 'none'}). "
                     "Keep the episode dashboard tab visible; the visor iframe "

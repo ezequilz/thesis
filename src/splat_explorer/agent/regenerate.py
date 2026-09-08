@@ -26,6 +26,7 @@ import base64
 import io
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -315,6 +316,38 @@ def regenerator_from_policy(policy) -> "Regenerator | None":
     client = getattr(policy, "client", None)
     if client is None:
         return None
+    return Regenerator(client=client, model=IMAGE_MODEL)
+
+
+def regenerator_from_config(cfg=None) -> "Regenerator":
+    """Studio/dashboard Regenerator: same CliRelay endpoint, gpt-image-2.
+
+    Independent of any running episode so /repair testing cannot touch the
+    harness client or its thread pool.
+    """
+    from openai import OpenAI
+
+    from .cli_relay import DEFAULT_BASE_URL, _resolve_api_key
+
+    agent = {}
+    if cfg is not None:
+        raw = getattr(cfg, "agent", None)
+        if raw is None and hasattr(cfg, "get"):
+            raw = cfg.get("agent")
+        if isinstance(raw, dict):
+            agent = raw
+        elif raw is not None:
+            agent = dict(raw)
+    base_url = (
+        agent.get("relay_base_url")
+        or os.environ.get("CLIRELAY_BASE_URL", "")
+        or DEFAULT_BASE_URL
+    )
+    client = OpenAI(
+        base_url=base_url,
+        api_key=_resolve_api_key(str(agent.get("relay_api_key") or "")),
+        timeout=REQUEST_TIMEOUT_S,
+    )
     return Regenerator(client=client, model=IMAGE_MODEL)
 
 

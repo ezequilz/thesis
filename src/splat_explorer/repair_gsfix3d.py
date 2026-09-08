@@ -173,7 +173,15 @@ def densify_clone_split(
     )
 
 
-def _viewspace_grad_norm(means2d, n_gaussians, torch):
+def _viewspace_grad_norm(means2d, n_gaussians, torch, info=None, width=None, height=None):
+    """Per-gaussian |xy| screen-space grad, or None if gsplat did not retain it.
+
+    gsplat returns ``means2d`` as ``[C, N, 2]`` (unpacked) or ``[nnz, 2]``
+    (packed). ``.grad`` is dropped unless ``retain_grad()`` ran on the exact
+    tensor from ``rasterization``; ``absgrad=True`` fills ``.absgrad``.
+    Screen-space scaling matches gsplat ``DefaultStrategy`` so Kerbl's
+    0.0002 threshold is in the same units.
+    """
     if means2d is None:
         return None
     grad = getattr(means2d, "absgrad", None)
@@ -182,11 +190,41 @@ def _viewspace_grad_norm(means2d, n_gaussians, torch):
     if grad is None:
         return None
     g = grad.detach()
+    info = info if isinstance(info, dict) else {}
+    ids = info.get("gaussian_ids")
     if g.ndim == 3:
-        g = g[0]
-    if g.shape[0] != n_gaussians:
+        g = g.reshape(-1, g.shape[-1])
+        if ids is None and g.shape[0] == n_gaussians:
+            pass
+        elif ids is None and g.shape[0] != n_gaussians:
+            return None
+    if width and height and g.shape[-1] >= 2:
+        g = g.clone()
+        g[..., 0] = g[..., 0] * (float(width) / 2.0)
+        g[..., 1] = g[..., 1] * (float(height) / 2.0)
+    mag = g[..., :2].norm(dim=-1)
+    if mag.shape[0] == n_gaussians:
+        return mag
+    if ids is None or mag.shape[0] != int(ids.reshape(-1).shape[0]):
         return None
-    return g[..., :2].norm(dim=-1)
+    out = torch.zeros(n_gaussians, device=mag.device, dtype=mag.dtype)
+    out.index_add_(0, ids.reshape(-1).long(), mag.reshape(-1))
+    return out
+
+
+def _n_visible_from_info(info, n_gaussians, torch):
+    if not isinstance(info, dict):
+        return n_gaussians
+    radii = info.get("radii")
+    if radii is None:
+        return n_gaussians
+    r = radii.detach()
+    if r.ndim == 2:
+        r = r[0]
+    if r.shape[0] != n_gaussians:
+        return n_gaussians
+    n = int((r > 0).sum())
+    return n if n else n_gaussians
 
 
 @dataclass
@@ -416,13 +454,19 @@ class GsplatGsfix3dRepair:
                 viewmat, K, w, h, background, packed=self.packed,
             )
             means2d = info.get("means2d") if isinstance(info, dict) else None
-            if means2d is not None and means2d.requires_grad:
-                means2d.retain_grad()
+            if means2d is not None:
+                try:
+                    means2d.retain_grad()
+                except Exception:
+                    pass
             loss, l1 = photometric_loss(rgb, target, torch, self.lambda_dssim)
             last_l1 = float(l1.item())
             loss.backward()
 
-            vis_norm = _viewspace_grad_norm(means2d, means.shape[0], torch)
+            n_visible = _n_visible_from_info(info, means.shape[0], torch)
+            vis_norm = _viewspace_grad_norm(
+                means2d, means.shape[0], torch, info=info, width=w, height=h,
+            )
             if vis_norm is not None:
                 radii = info.get("radii") if isinstance(info, dict) else None
                 vis = vis_norm > 0
@@ -432,9 +476,13 @@ class GsplatGsfix3dRepair:
                         r = r[0]
                     if r.shape[0] == vis.shape[0]:
                         vis = vis & (r > 0)
-                n_visible = int(vis.sum()) if vis.any() else int(means.shape[0])
                 xyz_grad_accum = xyz_grad_accum + vis_norm
                 xyz_grad_denom = xyz_grad_denom + vis.to(xyz_grad_accum.dtype)
+            elif it == 0:
+                logger.warning(
+                    "GSFix3D densify: no means2d screen grads (absgrad/retain_grad). "
+                    "Clone+split will not spawn until gsplat exposes them."
+                )
 
             # Adam on this iteration's graph, then densify. Recreating the
             # optimizer before step() would drop .grad (unlike INRIA's cat).
@@ -451,6 +499,7 @@ class GsplatGsfix3dRepair:
                 and means.shape[0] < int(self.max_gaussians)
             ):
                 avg = xyz_grad_accum / xyz_grad_denom.clamp(min=1.0)
+                n_high = int((avg >= float(self.densify_grad_thresh)).sum())
                 packed = densify_clone_split(
                     torch, means, quats, f_dc, log_scales, logit_opacities, avg,
                     thresh=self.densify_grad_thresh,
@@ -464,6 +513,13 @@ class GsplatGsfix3dRepair:
                     xyz_grad_accum = torch.zeros(means.shape[0], device=device)
                     xyz_grad_denom = torch.zeros(means.shape[0], device=device)
                     opt = make_opt()
+                elif it == int(self.densify_every) - 1:
+                    logger.info(
+                        "GSFix3D densify: 0 spawned (max |grad2d|=%.6f, %d above %.6f)",
+                        float(avg.max().item()) if avg.numel() else 0.0,
+                        n_high,
+                        float(self.densify_grad_thresh),
+                    )
 
             if last_iter and self.densify and means.shape[0] > 32:
                 with torch.no_grad():

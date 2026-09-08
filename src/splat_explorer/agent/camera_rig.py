@@ -222,6 +222,38 @@ class CameraRig:
             "blocked": result["blocked"],
         }
 
+    def aim_at(self, target: np.ndarray) -> None:
+        """Set gravity-aligned yaw/pitch so the rig looks toward `target`.
+
+        Drops visor roll: the repair pipeline rebuilds cameras from this rig,
+        same as episode steps.
+        """
+        look = np.asarray(target, dtype=np.float64) - self.position
+        n = float(np.linalg.norm(look))
+        if n < 1e-8:
+            return
+        look /= n
+        horiz = look - self.up * np.dot(look, self.up)
+        hn = float(np.linalg.norm(horiz))
+        pitch = float(np.degrees(np.arctan2(float(np.dot(look, self.up)), hn)))
+        self.pitch_deg = float(max(-89.0, min(89.0, pitch)))
+        if hn < 1e-8:
+            return
+        horiz /= hn
+        yaw = np.degrees(np.arctan2(np.dot(horiz, self._right0), np.dot(horiz, self._fwd0)))
+        self.yaw_deg = float(yaw % 360.0)
+
+    @classmethod
+    def from_look_at(
+        cls,
+        position: np.ndarray,
+        look_at: np.ndarray,
+        up_axis: str = "+y",
+    ) -> "CameraRig":
+        rig = cls(np.asarray(position, dtype=np.float64), up_axis=up_axis)
+        rig.aim_at(look_at)
+        return rig
+
     def camera(self, width: int, height: int, fov_deg: float) -> Camera:
         target = self.position + self.view_direction()
         return Camera.look_at(

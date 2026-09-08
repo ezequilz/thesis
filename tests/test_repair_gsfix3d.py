@@ -9,6 +9,7 @@ import pytest
 
 from splat_explorer.repair_gsfix3d import (
     GsplatGsfix3dRepair,
+    _viewspace_grad_norm,
     densify_clone_split,
     instantiate_cuda_repair,
     rgb_to_sh,
@@ -68,6 +69,29 @@ def test_instantiate_cuda_repair_dispatches_baseline():
     base = instantiate_cuda_repair(method="gsfix-gsplat-baseline", iters=3)
     assert isinstance(base, GsplatPhotometricRepair)
     assert base.iters == 3
+
+
+def test_viewspace_grad_norm_unpacked_and_packed():
+    torch = pytest.importorskip("torch")
+    g = torch.zeros(1, 4, 2)
+    g[0, 1, 0] = 0.4
+    means2d = type("M", (), {"grad": g, "absgrad": None})()
+    mag = _viewspace_grad_norm(means2d, 4, torch, width=100, height=80)
+    assert mag is not None
+    assert mag.shape == (4,)
+    assert float(mag[1]) == pytest.approx(0.4 * 50.0)
+    assert float(mag[0]) == 0.0
+
+    nnz = torch.tensor([[0.1, 0.0], [0.2, 0.0]])
+    packed = type("M", (), {"grad": nnz, "absgrad": None})()
+    ids = torch.tensor([2, 0])
+    mag2 = _viewspace_grad_norm(
+        packed, 4, torch, info={"gaussian_ids": ids}, width=10, height=10,
+    )
+    assert mag2 is not None
+    assert float(mag2[2]) == pytest.approx(0.1 * 5.0)
+    assert float(mag2[0]) == pytest.approx(0.2 * 5.0)
+    assert float(mag2[1]) == 0.0
 
 
 def test_rgb_sh_roundtrip_numpy():

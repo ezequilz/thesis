@@ -32,6 +32,7 @@ Endpoints:
   POST /api/repair/reset  copy scene_original.ply over scene_repaired.ply
   POST /api/repair/show   point viser at {episode, which: original|repaired, highlight?}
   POST /api/repair/focus  load that episode's catalog scene into the shared visor
+  POST /api/repair/add-view  capture visor camera as a dashboard-only test view
   POST /api/repair/look   point viser frustum at a regenerated step
   GET  /api/episodes      list all past runs on disk (meta.json summaries)
   GET  /api/episodes/<id>      full trace of one past run (steps + artifacts)
@@ -869,6 +870,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "message": "Missing episode or step."}, 400)
                 return
             ok, message = studio.look_at(str(ep), int(body["step"]))
+        elif path == "/api/repair/add-view":
+            ep = body.get("episode") or body.get("id")
+            if not ep:
+                self._send_json({"ok": False, "message": "Missing episode id."}, 400)
+                return
+            ok, message, extra = studio.add_view(str(ep))
+            payload = {"ok": ok, "message": message, **(extra or {})}
+            self._send_json(payload, 200 if ok else 409)
+            return
         elif path == "/api/repair/gpu/probe":
             snap = studio.gpu_snapshot(
                 probe=True, force=bool(body.get("force", True)),

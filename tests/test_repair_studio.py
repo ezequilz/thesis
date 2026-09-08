@@ -15,6 +15,7 @@ from splat_explorer.web.repair_studio import (
     RepairStudio,
     focused_cap_label,
     focused_finish_message,
+    pick_interactive_camera,
 )
 
 
@@ -39,6 +40,7 @@ class _FakeApp:
             camera=SimpleNamespace(up_axis="+y"),
             renderer=SimpleNamespace(fov_deg=75.0),
         )
+        self.published = []
 
     @staticmethod
     def _read_json(path: Path):
@@ -54,6 +56,13 @@ class _FakeApp:
         self.selected.append(scene_id)
         self._scene_spec = _Spec(scene_id)
         return True, f"Loading {scene_id}"
+
+    def _publish_pose(self, record, frame_path, params, trajectory, *, snap_camera=False):
+        self.published.append({
+            "step": record.get("step"),
+            "snap_camera": snap_camera,
+            "frame": getattr(frame_path, "name", str(frame_path)),
+        })
 
 
 def _episode(tmp_path: Path, scene: str = "venetian-balcony") -> Path:
@@ -399,3 +408,99 @@ def test_start_replay_focused_uses_twelve_hour_cap(tmp_path: Path):
     assert "12h" in message
     assert studio.job["max_seconds"] == FOCUSED_REPAIR_MAX_SECONDS
     studio.stop_replay()
+
+
+def test_pick_interactive_camera_skips_spectator_and_prefers_recent():
+    cameras = [
+        {
+            "id": 1, "width": 1920, "height": 1080, "usable": False,
+            "updated_at": 50.0, "position": [0, 0, 0],
+        },
+        {
+            "id": 2, "width": 960, "height": 720, "usable": True,
+            "updated_at": 10.0, "position": [1, 1, 1],
+        },
+        {
+            "id": 3, "width": 640, "height": 800, "usable": False,
+            "updated_at": 20.0, "position": [2, 2, 2],
+        },
+    ]
+    picked = pick_interactive_camera(cameras)
+    assert picked["id"] == 3
+    newer = dict(cameras[1], updated_at=99.0)
+    picked = pick_interactive_camera([cameras[0], newer, cameras[2]])
+    assert picked["id"] == 2
+
+
+class _FakeRegen:
+    def __init__(self):
+        self.submitted = []
+
+    def submit(self, image_path, episode_dir, step, on_done=None):
+        from splat_explorer.agent.regenerate import RegenerateResult, write_meta
+        self.submitted.append((Path(image_path).name, Path(episode_dir), int(step)))
+        write_meta(episode_dir, RegenerateResult(step=int(step), status="queued", model="gpt-image-2"))
+
+
+def test_add_view_is_dashboard_only_and_queues_image_repair(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_session_alive", lambda cfg=None: False)
+    ep = _episode(tmp_path)
+    _regen_view(ep, step=4)
+    actions = (ep / "actions.jsonl").read_text()
+    meta = (ep / "meta.json").read_text()
+    app = _FakeApp(ep, scene_id="venetian-balcony")
+    studio = RepairStudio(app)
+    regen = _FakeRegen()
+    studio._visor_cameras = lambda: [{
+        "id": 7, "width": 640, "height": 800, "usable": False, "updated_at": 1.0,
+        "position": [1.0, 1.5, 2.0], "look_at": [2.0, 1.4, 3.0],
+    }]
+    studio._capture_view_rgb = lambda camera: np.full(
+        (camera.height, camera.width, 3), 90, dtype=np.uint8,
+    )
+    studio._ensure_regenerator = lambda: regen
+    ok, message, extra = studio.add_view(ep.name)
+    assert ok, message
+    assert extra["step"] == 5
+    assert extra["custom"] is True
+    assert extra["queued"] is True
+    assert regen.submitted == [("step_005.png", ep, 5)]
+    assert (ep / "step_005.png").is_file()
+    assert (ep / "repair_custom_views.jsonl").is_file()
+    assert (ep / "actions.jsonl").read_text() == actions
+    assert (ep / "meta.json").read_text() == meta
+    review = studio.episode_review(ep.name)
+    steps = [v["step"] for v in review["views"]]
+    assert steps[-1] == 5
+    custom = review["views"][-1]
+    assert custom["custom"] is True
+    assert custom["repaired_url"] is None
+    assert custom["regen_status"] == "queued"
+    snap = studio.snapshot(ep.name)
+    assert snap["pending_regen"] is True
+    ok, look_msg = studio.look_at(ep.name, 5)
+    assert ok, look_msg
+    ok, replay_msg = studio.start_replay(ep.name, step=5, backend="cpu-project")
+    assert ok is False
+    assert "step 5" in replay_msg.lower()
+    Image.new("RGB", (16, 12), (200, 180, 40)).save(ep / "step_005_regen.png")
+    ok, replay_all = studio.start_replay(ep.name, backend="cpu-project", reload_code=False)
+    assert ok, replay_all
+    assert studio.job["n_views"] == 1
+    studio.stop_replay()
+    ok, replay_msg = studio.start_replay(
+        ep.name, step=5, backend="cpu-project", reload_code=False,
+    )
+    assert ok, replay_msg
+    studio.stop_replay()
+
+
+def test_add_view_blocked_while_episode_runs(tmp_path: Path):
+    ep = _episode(tmp_path)
+    app = _FakeApp(ep, scene_id="venetian-balcony")
+    app.run = {"status": "running"}
+    studio = RepairStudio(app)
+    ok, message, extra = studio.add_view(ep.name)
+    assert ok is False
+    assert extra == {}
+    assert "episode" in message.lower()

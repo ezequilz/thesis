@@ -21,10 +21,12 @@ from splat_explorer.repair import (
     PhotometricViewRepair,
     ProjectedViewRepair,
     SceneRepairer,
+    append_custom_repair_view,
     camera_from_record,
     copy_camera,
     discover_repair_views,
     highlight_repaired_scene,
+    next_repair_step,
     replay_episode_repairs,
     repaired_render_name,
     scene_from_renderer,
@@ -446,15 +448,55 @@ def test_discover_repair_views_needs_regen_png(tmp_path: Path):
     assert views[0]["repaired_name"] == "step_000_regen.png"
     assert views[0]["width"] == 32
     assert views[0]["height"] == 24
+    assert views[0]["custom"] is False
+
+
+def test_discover_repair_views_appends_custom_without_touching_actions(tmp_path: Path):
+    ep = _write_episode_with_regen(tmp_path)
+    actions = (ep / "actions.jsonl").read_text()
+    Image.new("RGB", (32, 24), (10, 10, 10)).save(ep / "step_002.png")
+    append_custom_repair_view(ep, {
+        "step": 2,
+        "position": [1.0, 1.5, 2.0],
+        "yaw_deg": 30.0,
+        "pitch_deg": -5.0,
+        "pose": "custom",
+        "frame": "step_002.png",
+        "regenerate_frame": "step_002_regen.png",
+    })
+    pending = discover_repair_views(ep, include_pending_custom=True)
+    assert [v["step"] for v in pending] == [0, 2]
+    assert pending[1]["custom"] is True
+    assert pending[1]["has_repaired"] is False
+    assert discover_repair_views(ep) == [pending[0]]
+    Image.new("RGB", (32, 24), (200, 180, 40)).save(ep / "step_002_regen.png")
+    ready = discover_repair_views(ep)
+    assert [v["step"] for v in ready] == [0, 2]
+    assert ready[1]["custom"] is True
+    assert (ep / "actions.jsonl").read_text() == actions
+    assert next_repair_step(ep) == 3
 
 
 def test_camera_from_record_matches_rig():
-    rec = {"position": [0.0, 1.5, 0.0], "yaw_deg": 0.0, "pitch_deg": 0.0}
+    rec = {"position": [0.0, 1.5, 0.0], "yaw_deg": 15.0, "pitch_deg": -10.0}
     cam = camera_from_record(rec, up_axis="+y", width=32, height=24, fov_deg=75.0)
-    rig = CameraRig(np.array([0.0, 1.5, 0.0]), up_axis="+y")
+    rig = CameraRig(
+        np.array([0.0, 1.5, 0.0]), up_axis="+y", yaw_deg=15.0, pitch_deg=-10.0,
+    )
     expected = rig.camera(32, 24, 75.0)
     np.testing.assert_allclose(cam.position, expected.position, atol=1e-5)
     np.testing.assert_allclose(cam.rotation, expected.rotation, atol=1e-5)
+
+
+def test_camera_rig_from_look_at_roundtrip():
+    rig = CameraRig(
+        np.array([1.0, 1.5, 2.0]), up_axis="+y", yaw_deg=40.0, pitch_deg=-12.0,
+    )
+    target = rig.position + rig.view_direction()
+    recovered = CameraRig.from_look_at(rig.position, target, up_axis="+y")
+    yaw_err = abs((recovered.yaw_deg - (rig.yaw_deg % 360.0) + 180.0) % 360.0 - 180.0)
+    assert yaw_err < 0.05
+    np.testing.assert_allclose(recovered.pitch_deg, rig.pitch_deg, atol=0.05)
 
 
 def test_replay_episode_repairs_writes_both_plys(tmp_path: Path):

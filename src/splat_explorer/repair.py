@@ -34,6 +34,7 @@ REPAIRED_PLY = "scene_repaired.ply"
 HIGHLIGHT_PLY = "scene_repaired_highlight.ply"
 REPAIR_LOG = "repair_log.json"
 METRICS_JSON = "metrics.json"
+CUSTOM_VIEWS_JSONL = "repair_custom_views.jsonl"
 HIGHLIGHT_COLOR = np.array([1.0, 0.08, 0.08], dtype=np.float32)
 
 # Matches the 3DGS / GSFix3D photometric mix (Kerbl et al. use λ ≈ 0.2).
@@ -1083,6 +1084,82 @@ def regen_png_name(step: int) -> str:
     return f"step_{int(step):03d}_regen.png"
 
 
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
+def _append_jsonl(path: Path, record: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
+def _step_from_record(rec: dict) -> int | None:
+    try:
+        step = int(rec.get("step", -1))
+    except (TypeError, ValueError):
+        return None
+    return step if step >= 0 else None
+
+
+def existing_repair_steps(episode_dir: Path) -> set[int]:
+    """Step indices already used by the episode or by dashboard custom views."""
+    episode_dir = Path(episode_dir)
+    steps: set[int] = set()
+    for rec in _read_jsonl(episode_dir / "actions.jsonl"):
+        step = _step_from_record(rec)
+        if step is not None:
+            steps.add(step)
+    for rec in _read_jsonl(episode_dir / CUSTOM_VIEWS_JSONL):
+        step = _step_from_record(rec)
+        if step is not None:
+            steps.add(step)
+    for path in episode_dir.glob("step_*"):
+        name = path.name
+        if not name.startswith("step_"):
+            continue
+        digits = []
+        for ch in name[5:]:
+            if ch.isdigit():
+                digits.append(ch)
+            else:
+                break
+        if digits:
+            steps.add(int("".join(digits)))
+    return steps
+
+
+def next_repair_step(episode_dir: Path) -> int:
+    used = existing_repair_steps(episode_dir)
+    return (max(used) + 1) if used else 0
+
+
+def append_custom_repair_view(episode_dir: Path, record: dict) -> dict:
+    """Append a dashboard-only camera view. Never writes actions.jsonl."""
+    episode_dir = Path(episode_dir)
+    body = dict(record)
+    body["custom"] = True
+    body["source"] = "repair-dashboard"
+    _append_jsonl(episode_dir / CUSTOM_VIEWS_JSONL, body)
+    return body
+
+
 def camera_from_record(
     record: dict,
     *,
@@ -1111,11 +1188,78 @@ def _image_size(path: Path) -> tuple[int, int] | None:
         return None
 
 
-def discover_repair_views(episode_dir: Path, meta: dict | None = None) -> list[dict]:
+def _view_from_record(
+    rec: dict,
+    episode_dir: Path,
+    *,
+    default_w: int,
+    default_h: int,
+    fov_deg: float,
+    custom: bool,
+    include_pending: bool,
+) -> dict | None:
+    step = _step_from_record(rec)
+    if step is None or "position" not in rec:
+        return None
+    rendered_name = rec.get("frame") or f"step_{step:03d}.png"
+    rendered_path = episode_dir / rendered_name
+    repaired_name = rec.get("regenerate_frame") or regen_png_name(step)
+    repaired_path = episode_dir / repaired_name
+    has_repaired = repaired_path.is_file()
+    if not has_repaired and not (custom and include_pending):
+        return None
+    size = _image_size(rendered_path) or (default_w, default_h)
+    repair_meta = {}
+    rp = episode_dir / repair_meta_name(step)
+    if rp.is_file():
+        try:
+            repair_meta = json.loads(rp.read_text())
+        except (OSError, json.JSONDecodeError):
+            repair_meta = {}
+    regen_meta = {}
+    gp = episode_dir / f"step_{step:03d}_regen.json"
+    if gp.is_file():
+        try:
+            regen_meta = json.loads(gp.read_text())
+        except (OSError, json.JSONDecodeError):
+            regen_meta = {}
+    return {
+        "step": step,
+        "rendered_name": rendered_path.name,
+        "repaired_name": repaired_path.name,
+        "rendered_path": str(rendered_path),
+        "repaired_path": str(repaired_path),
+        "has_repaired": has_repaired,
+        "position": rec["position"],
+        "yaw_deg": float(rec.get("yaw_deg") or 0.0),
+        "pitch_deg": float(rec.get("pitch_deg") or 0.0),
+        "pose": rec.get("pose"),
+        "width": int(size[0]),
+        "height": int(size[1]),
+        "fov_deg": fov_deg,
+        "repair_status": repair_meta.get("status"),
+        "repair": repair_meta or None,
+        "regen_status": regen_meta.get("status") or rec.get("regen_status"),
+        "custom": bool(custom or rec.get("custom")),
+        "lift_name": repaired_render_name(step) if (episode_dir / repaired_render_name(step)).is_file() else None,
+    }
+
+
+def discover_repair_views(
+    episode_dir: Path,
+    meta: dict | None = None,
+    *,
+    include_pending_custom: bool = False,
+) -> list[dict]:
     """Episode steps that have a regenerated RGB PNG plus a camera pose.
 
+    Agent traces stay in actions.jsonl. Dashboard-only cameras are stored in
+    repair_custom_views.jsonl and appended after the original views so the
+    harness / episode video never see them.
+
     Does not require a live episode or an existing 3D repair — only the
-    diffusion-fixed image next to the original render.
+    diffusion-fixed image next to the original render (custom views can be
+    listed before that PNG exists when `include_pending_custom` is set).
     """
     episode_dir = Path(episode_dir)
     meta = meta if meta is not None else {}
@@ -1128,57 +1272,27 @@ def discover_repair_views(episode_dir: Path, meta: dict | None = None) -> list[d
     default_h = int(params.get("height") or 720)
     fov_deg = float(params.get("fov_deg") or 75.0)
     views: list[dict] = []
-    actions_path = episode_dir / "actions.jsonl"
-    if not actions_path.is_file():
-        return views
-    try:
-        lines = actions_path.read_text().splitlines()
-    except OSError:
-        return views
-    for line in lines:
-        if not line.strip():
+    seen: set[int] = set()
+    for rec in _read_jsonl(episode_dir / "actions.jsonl"):
+        view = _view_from_record(
+            rec, episode_dir,
+            default_w=default_w, default_h=default_h, fov_deg=fov_deg,
+            custom=False, include_pending=False,
+        )
+        if view is None or view["step"] in seen:
             continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
+        seen.add(view["step"])
+        views.append(view)
+    for rec in _read_jsonl(episode_dir / CUSTOM_VIEWS_JSONL):
+        view = _view_from_record(
+            rec, episode_dir,
+            default_w=default_w, default_h=default_h, fov_deg=fov_deg,
+            custom=True, include_pending=include_pending_custom,
+        )
+        if view is None or view["step"] in seen:
             continue
-        try:
-            step = int(rec.get("step", -1))
-        except (TypeError, ValueError):
-            continue
-        if step < 0 or "position" not in rec:
-            continue
-        rendered_name = rec.get("frame") or f"step_{step:03d}.png"
-        rendered_path = episode_dir / rendered_name
-        repaired_name = rec.get("regenerate_frame") or regen_png_name(step)
-        repaired_path = episode_dir / repaired_name
-        if not repaired_path.is_file():
-            continue
-        size = _image_size(rendered_path) or (default_w, default_h)
-        repair_meta = {}
-        rp = episode_dir / repair_meta_name(step)
-        if rp.is_file():
-            try:
-                repair_meta = json.loads(rp.read_text())
-            except (OSError, json.JSONDecodeError):
-                repair_meta = {}
-        views.append({
-            "step": step,
-            "rendered_name": rendered_path.name,
-            "repaired_name": repaired_path.name,
-            "rendered_path": str(rendered_path),
-            "repaired_path": str(repaired_path),
-            "position": rec["position"],
-            "yaw_deg": float(rec.get("yaw_deg") or 0.0),
-            "pitch_deg": float(rec.get("pitch_deg") or 0.0),
-            "pose": rec.get("pose"),
-            "width": int(size[0]),
-            "height": int(size[1]),
-            "fov_deg": fov_deg,
-            "repair_status": repair_meta.get("status"),
-            "repair": repair_meta or None,
-            "lift_name": repaired_render_name(step) if (episode_dir / repaired_render_name(step)).is_file() else None,
-        })
+        seen.add(view["step"])
+        views.append(view)
     return views
 
 

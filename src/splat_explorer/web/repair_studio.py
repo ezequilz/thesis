@@ -6,11 +6,14 @@ the photometric lift after code edits — no live VLM / image-model run needed.
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import threading
 import time
 from pathlib import Path
+
+import numpy as np
 
 from ..repair import (
     HIGHLIGHT_PLY,
@@ -18,8 +21,10 @@ from ..repair import (
     ORIGINAL_PLY,
     REPAIRED_PLY,
     REPAIR_LOG,
+    append_custom_repair_view,
     discover_repair_views,
     list_repair_backends,
+    next_repair_step,
     reload_repair_module,
     repair_meta_name,
     repair_progress_suffix,
@@ -32,6 +37,37 @@ logger = logging.getLogger(__name__)
 # Focused "Repair this view" safety net. CUDA GSFix3D used to exit after one
 # 20-iter paper chunk (~11s) and then always print "Reached 1h cap".
 FOCUSED_REPAIR_MAX_SECONDS = 12 * 3600
+_SPECTATOR_ASPECT = 16.0 / 9.0
+_SPECTATOR_ASPECT_TOL = 0.08
+
+
+def pick_interactive_camera(cameras: list[dict]) -> dict | None:
+    """Choose the visor tab the user is flying, not the HD spectator.
+
+    Prefers the most recently updated non-16:9 client. On a timestamp tie,
+    skip the 4:3 episode-capture visor so the repair-page iframe wins.
+    """
+    if not cameras:
+        return None
+
+    def is_spectator(cam: dict) -> bool:
+        w, h = int(cam.get("width") or 0), int(cam.get("height") or 0)
+        if h < 90 or w < 160:
+            return False
+        return abs((w / h) - _SPECTATOR_ASPECT) <= _SPECTATOR_ASPECT_TOL
+
+    candidates = [c for c in cameras if not is_spectator(c)] or list(cameras)
+
+    def sort_key(cam: dict):
+        w, h = int(cam.get("width") or 0), int(cam.get("height") or 0)
+        usable = bool(cam.get("usable"))
+        return (
+            float(cam.get("updated_at") or 0.0),
+            0 if usable else 1,
+            w * h,
+        )
+
+    return max(candidates, key=sort_key)
 
 
 def focused_cap_label(seconds: float) -> str:
@@ -82,6 +118,8 @@ class RepairStudio:
         self.showing_episode: str | None = None
         self.showing_highlight: bool = False
         self._last_preview_at: float = 0.0
+        self._regenerator = None
+        self._regenerator_lock = threading.Lock()
 
     @staticmethod
     def _idle_job(episode: str | None = None) -> dict:
@@ -141,6 +179,14 @@ class RepairStudio:
             "up_axis": up_axis,
             "backends": list_repair_backends(),
             "episode": detail,
+            "pending_regen": bool(
+                detail
+                and any(
+                    (v.get("custom") and (v.get("regen_status") in ("queued", None))
+                     and not v.get("has_repaired"))
+                    for v in (detail.get("views") or [])
+                )
+            ),
             "viewer_url": f"http://localhost:{self.app.cfg.viewer.port}",
             "gpu_url": "/repair/gpu",
         }
@@ -221,11 +267,14 @@ class RepairStudio:
         if d is None:
             return None
         meta = self.app._read_json(d / "meta.json") or {}
-        views = discover_repair_views(d, meta=meta)
+        views = discover_repair_views(d, meta=meta, include_pending_custom=True)
         for view in views:
             step = view["step"]
             view["rendered_url"] = f"/frames/{ep_id}/{view['rendered_name']}"
-            view["repaired_url"] = f"/frames/{ep_id}/{view['repaired_name']}"
+            if view.get("has_repaired"):
+                view["repaired_url"] = f"/frames/{ep_id}/{view['repaired_name']}"
+            else:
+                view["repaired_url"] = None
             lift = view.get("lift_name")
             view["lifted_url"] = f"/frames/{ep_id}/{lift}" if lift else None
             del view["rendered_path"]
@@ -304,13 +353,15 @@ class RepairStudio:
             return False, f"Episode {episode_id} not found."
         meta = self.app._read_json(d / "meta.json") or {}
         views = discover_repair_views(d, meta=meta)
-        if not views:
-            return False, "No regenerated RGB views in this episode (need step_NNN_regen.png)."
         focused = step is not None
         if focused:
             views = [v for v in views if int(v["step"]) == int(step)]
             if not views:
                 return False, f"No regenerated view at step {step}."
+        else:
+            views = [v for v in views if not v.get("custom")]
+            if not views:
+                return False, "No regenerated RGB views in this episode (need step_NNN_regen.png)."
         has_ply = (d / REPAIRED_PLY).is_file() or (d / ORIGINAL_PLY).is_file()
         with self.app.lock:
             catalog_ready = self.app.scene_status == "ready" and self.app.scene is not None
@@ -394,6 +445,173 @@ class RepairStudio:
         if not ok:
             return True, f"Restored {repaired.name} from original. {message}"
         return True, f"Restored {repaired.name} from original."
+
+    def add_view(self, episode_id: str) -> tuple[bool, str, dict]:
+        """Capture the live visor camera as a dashboard-only repair view.
+
+        Writes `repair_custom_views.jsonl` + `step_NNN.png` and queues gpt-image-2
+        on the studio Regenerator thread pool. Does not touch actions.jsonl,
+        meta.json, or a running harness episode.
+        """
+        extra: dict = {}
+        with self._lock:
+            if self.job["status"] == "running":
+                return False, "Wait for the current 3D repair to finish (or Stop) before adding a view.", extra
+        with self.app.lock:
+            run = self.app.run
+            if run and run.get("status") in ("running", "stopping"):
+                return False, "Stop the episode before adding a custom repair view.", extra
+        d = self.app.episode_path(episode_id)
+        if d is None:
+            return False, f"Episode {episode_id} not found.", extra
+        meta = self.app._read_json(d / "meta.json") or {}
+        params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
+        width = int(params.get("width") or 960)
+        height = int(params.get("height") or 720)
+        fov_deg = float(params.get("fov_deg") or getattr(self.app.cfg.renderer, "fov_deg", 75.0) or 75.0)
+        up_axis = str(
+            params.get("up_axis")
+            or getattr(self.app.cfg.camera, "up_axis", None)
+            or "+y"
+        )
+        try:
+            cameras = self._visor_cameras()
+        except Exception as exc:
+            return False, f"Could not read visor cameras: {exc}", extra
+        cam = pick_interactive_camera(cameras)
+        if cam is None:
+            return False, (
+                "No visor camera yet. Keep the 3D visor on this page visible "
+                "and fly to the view you want, then try again. "
+                "If this dashboard was already running, restart the visor so it serves /cameras."
+            ), extra
+        from ..agent.camera_rig import CameraRig
+
+        look_at = cam.get("look_at")
+        position = cam.get("position")
+        if not look_at or not position:
+            return False, "Visor camera is missing position/look_at.", extra
+        rig = CameraRig.from_look_at(position, look_at, up_axis=up_axis)
+        camera = rig.camera(width, height, fov_deg)
+        try:
+            rgb = self._capture_view_rgb(camera)
+        except Exception as exc:
+            return False, f"Could not capture this visor view: {exc}", extra
+        step = next_repair_step(d)
+        frame_name = f"step_{step:03d}.png"
+        regen_name = f"step_{step:03d}_regen.png"
+        from PIL import Image
+
+        Image.fromarray(rgb, mode="RGB").save(d / frame_name)
+        record = {
+            "step": step,
+            "position": np.asarray(rig.position, dtype=np.float64).tolist(),
+            "yaw_deg": float(rig.yaw_deg),
+            "pitch_deg": float(rig.pitch_deg),
+            "pose": rig.state_description(),
+            "frame": frame_name,
+            "regenerate_frame": regen_name,
+            "width": width,
+            "height": height,
+            "fov_deg": fov_deg,
+        }
+        append_custom_repair_view(d, record)
+        queued = False
+        regen_error = None
+        try:
+            regen = self._ensure_regenerator()
+            regen.submit(d / frame_name, d, step)
+            queued = True
+        except Exception as exc:
+            logger.exception("Could not queue image repair for custom step %s", step)
+            regen_error = f"{type(exc).__name__}: {exc}"
+        extra = {
+            "step": step,
+            "pose": record["pose"],
+            "custom": True,
+            "queued": queued,
+        }
+        if queued:
+            return True, (
+                f"Added custom step {step} from the visor and queued image repair. "
+                "It appears at the end of the list; Repair this view unlocks once the PNG returns."
+            ), extra
+        return True, (
+            f"Added custom step {step} from the visor, but image repair did not queue "
+            f"({regen_error})."
+        ), extra
+
+    def _visor_render_url(self) -> str:
+        viewer = self.app.cfg.viewer
+        port = 8081
+        if hasattr(viewer, "get"):
+            port = int(viewer.get("render_port", 8081) or 8081)
+        else:
+            port = int(getattr(viewer, "render_port", 8081) or 8081)
+        return f"http://localhost:{port}"
+
+    def _visor_cameras(self) -> list[dict]:
+        import urllib.error
+        import urllib.request
+
+        url = self._visor_render_url() + "/cameras"
+        try:
+            with urllib.request.urlopen(url, timeout=3.0) as resp:
+                payload = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise RuntimeError(
+                    "Visor capture API has no /cameras yet — restart the visor "
+                    "(scripts/start.sh) and reload /repair."
+                ) from exc
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
+            raise RuntimeError(f"GET /cameras -> HTTP {exc.code}: {detail}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Could not reach visor cameras at {url}: {exc}") from exc
+        cams = payload.get("cameras") if isinstance(payload, dict) else None
+        if not isinstance(cams, list):
+            raise RuntimeError("Visor /cameras returned no camera list.")
+        return cams
+
+    def _capture_view_rgb(self, camera) -> "np.ndarray":
+        import io
+        import urllib.error
+        import urllib.request
+
+        from PIL import Image
+
+        body = json.dumps({
+            "position": np.asarray(camera.position, dtype=np.float64).tolist(),
+            "wxyz": camera.rotation_wxyz().tolist(),
+            "fov": camera.vertical_fov_rad(),
+            "width": int(camera.width),
+            "height": int(camera.height),
+            "any_client": True,
+        }).encode()
+        url = self._visor_render_url() + "/render"
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=30.0) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:400]
+            raise RuntimeError(f"POST /render -> HTTP {exc.code}: {detail}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise RuntimeError(f"Visor capture at {url} failed: {exc}") from exc
+        img = np.asarray(Image.open(io.BytesIO(raw)).convert("RGB"))
+        need_w, need_h = int(camera.width), int(camera.height)
+        if img.shape[1] != need_w or img.shape[0] != need_h:
+            from ..rendering.viser_viewer import _center_crop_and_resize
+            img = _center_crop_and_resize(img, need_w, need_h)
+        return img
+
+    def _ensure_regenerator(self):
+        with self._regenerator_lock:
+            if self._regenerator is None:
+                from ..agent.regenerate import regenerator_from_config
+                self._regenerator = regenerator_from_config(self.app.cfg)
+            return self._regenerator
 
     def ensure_catalog_scene(self, episode_id: str) -> tuple[bool, str]:
         """Load the episode's catalog scene into the shared visor (one 3DGS)."""
@@ -533,6 +751,9 @@ class RepairStudio:
         meta = self.app._read_json(d / "meta.json") or {}
         views = discover_repair_views(d, meta=meta)
         view = next((v for v in views if int(v["step"]) == int(step)), None)
+        if view is None:
+            views = discover_repair_views(d, meta=meta, include_pending_custom=True)
+            view = next((v for v in views if int(v["step"]) == int(step)), None)
         if view is None:
             return False, f"No regenerated view at step {step}."
         record = {

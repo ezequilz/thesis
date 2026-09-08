@@ -369,18 +369,26 @@ def _rasterize(gsplat, means, quats, scales, opacities, colors, viewmat, K, widt
         height=int(height),
         packed=bool(packed),
     )
+    extra = dict(backgrounds=background.unsqueeze(0), render_mode="RGB", absgrad=True)
     try:
-        out = gsplat.rasterization(
-            **kwargs,
-            backgrounds=background.unsqueeze(0),
-            render_mode="RGB",
-        )
+        out = gsplat.rasterization(**kwargs, **extra)
     except TypeError:
-        out = gsplat.rasterization(**kwargs)
+        extra.pop("absgrad", None)
+        try:
+            out = gsplat.rasterization(**kwargs, **extra)
+        except TypeError:
+            out = gsplat.rasterization(**kwargs)
     colors_out, _alphas, info = out[0], out[1], out[2] if len(out) > 2 else {}
     rgb = colors_out[0]
     if rgb.shape[-1] > 3:
         rgb = rgb[..., :3]
+    if isinstance(info, dict):
+        means2d = info.get("means2d")
+        if means2d is not None:
+            try:
+                means2d.retain_grad()
+            except Exception:
+                pass
     return rgb.clamp(0.0, 1.0), info if isinstance(info, dict) else {}
 
 
