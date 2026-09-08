@@ -29,6 +29,40 @@ from ..scene.catalog import SceneSpec, publish_live_scene
 
 logger = logging.getLogger(__name__)
 
+# Focused "Repair this view" safety net. CUDA GSFix3D used to exit after one
+# 20-iter paper chunk (~11s) and then always print "Reached 1h cap".
+FOCUSED_REPAIR_MAX_SECONDS = 12 * 3600
+
+
+def focused_cap_label(seconds: float) -> str:
+    sec = max(0.0, float(seconds))
+    hours = sec / 3600.0
+    if sec >= 3600 and abs(hours - round(hours)) < 1e-6:
+        return f"{int(round(hours))}h"
+    if sec >= 60:
+        return f"{int(round(sec / 60.0))} min"
+    return f"{int(round(sec))}s"
+
+
+def focused_finish_message(
+    *,
+    stopped: bool,
+    hit_deadline: bool,
+    step,
+    elapsed: float,
+    cap: float,
+) -> str:
+    if stopped:
+        reason = "Stopped"
+    elif hit_deadline:
+        reason = f"Reached {focused_cap_label(cap)} cap"
+    else:
+        reason = "Finished"
+    return (
+        f"{reason} on step {step} after {elapsed:.0f}s. "
+        "Toggle Repaired to inspect."
+    )
+
 
 def _ply_info(path: Path) -> dict | None:
     if not path.is_file():
@@ -120,10 +154,16 @@ class RepairStudio:
             repair_job=job, request_probe=probe, force_probe=force,
         )
 
-    def gpu_allocate(self, hours: int = 8, after: bool | str | None = False) -> dict:
+    def gpu_allocate(
+        self,
+        hours: int = 8,
+        after: bool | str | None = False,
+        begin: str | None = None,
+        partition: str | None = None,
+    ) -> dict:
         from ..repair_lrz import allocate_lrz_gpu
 
-        result = allocate_lrz_gpu(hours, after=after)
+        result = allocate_lrz_gpu(hours, after=after, begin=begin, partition=partition)
         snap = self.gpu_snapshot(probe=True, force=True)
         snap["allocate"] = result
         snap["ok"] = True
@@ -139,10 +179,10 @@ class RepairStudio:
         snap["message"] = result.get("message")
         return snap
 
-    def gpu_widen(self, job_id: str | None = None) -> dict:
+    def gpu_widen(self, job_id: str | None = None, partition: str | None = None) -> dict:
         from ..repair_lrz import widen_lrz_job
 
-        result = widen_lrz_job(job_id)
+        result = widen_lrz_job(job_id, partition=partition)
         snap = self.gpu_snapshot(probe=True, force=True)
         snap["ok"] = True
         snap["message"] = result.get("message")
@@ -155,6 +195,9 @@ class RepairStudio:
         result = review_lrz_partitions(force=force)
         snap = self.gpu_snapshot()
         snap["partitions"] = result.get("partitions")
+        snap["nodes"] = result.get("nodes")
+        snap["summary"] = result.get("summary")
+        snap["default_free"] = result.get("default_free")
         snap["ok"] = True
         snap["message"] = result.get("message")
         return snap
@@ -252,7 +295,7 @@ class RepairStudio:
         reload_code: bool = True,
         backend: str = "gsfix-gsplat",
         step: int | None = None,
-        max_seconds: float = 3600.0,
+        max_seconds: float = FOCUSED_REPAIR_MAX_SECONDS,
         resume: bool = True,
         ssh_password: str | None = None,
     ) -> tuple[bool, str]:
@@ -277,7 +320,7 @@ class RepairStudio:
                 "loading, or run scripts/start.sh and try again."
             )
         backend_name = str(backend or "gsfix-gsplat").strip() or "gsfix-gsplat"
-        cap = max(30.0, float(max_seconds or 3600.0))
+        cap = max(30.0, float(max_seconds or FOCUSED_REPAIR_MAX_SECONDS))
         resume = bool(resume)
         with self._lock:
             if self.job["status"] == "running":
@@ -295,7 +338,7 @@ class RepairStudio:
                 "resume": resume,
                 "message": (
                     f"{'Continuing' if resume and (d / REPAIRED_PLY).is_file() else 'Repairing'} "
-                    f"step {int(step)} until Stop (max {int(cap)}s)…"
+                    f"step {int(step)} until Stop (max {focused_cap_label(cap)})…"
                     if focused
                     else f"Replaying {len(views)} view(s) with {backend_name}…"
                 )
@@ -318,7 +361,10 @@ class RepairStudio:
         )
         self._thread.start()
         if focused:
-            return True, f"Repairing step {int(step)} — press Stop when it looks right (max {int(cap / 60)} min)."
+            return True, (
+                f"Repairing step {int(step)} — press Stop when it looks right "
+                f"(max {focused_cap_label(cap)})."
+            )
         return True, f"Replaying 3D repair on {len(views)} view(s) ({backend_name})."
 
     def stop_replay(self) -> tuple[bool, str]:
@@ -536,7 +582,7 @@ class RepairStudio:
 
     def _run(self, episode_id: str, episode_dir: Path, meta: dict,
              views: list[dict], reload_code: bool, backend_name: str = "auto",
-             focused: bool = False, max_seconds: float = 3600.0,
+             focused: bool = False, max_seconds: float = FOCUSED_REPAIR_MAX_SECONDS,
              resume: bool = True, ssh_password: str | None = None) -> None:
         try:
             if ssh_password:
@@ -649,9 +695,17 @@ class RepairStudio:
                 n_ok = sum(1 for r in self.job["results"] if r.get("status") == "ok")
                 if focused:
                     elapsed = (self.job["finished_at"] or time.time()) - (self.job["started_at"] or time.time())
-                    self.job["message"] = (
-                        f"{'Stopped' if stopped else 'Reached 1h cap'} on step "
-                        f"{views[0].get('step')} after {elapsed:.0f}s. Toggle Repaired to inspect."
+                    hit_deadline = (
+                        not stopped
+                        and deadline is not None
+                        and self.job["finished_at"] >= deadline
+                    )
+                    self.job["message"] = focused_finish_message(
+                        stopped=stopped,
+                        hit_deadline=hit_deadline,
+                        step=views[0].get("step"),
+                        elapsed=elapsed,
+                        cap=max_seconds,
                     )
                 else:
                     self.job["message"] = (

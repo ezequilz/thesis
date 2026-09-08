@@ -56,11 +56,55 @@
   #st-l1.ok b { color: var(--ok); }
   #st-l1.err b { color: var(--err); }
   #st-l1.busy b { color: var(--warn); }
+  #metrics-wrap {
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+  #metrics-wrap[hidden] { display: none; }
   #btn-metrics {
     font-size: 11px; color: var(--dim); font-weight: 500;
     text-decoration: underline; text-underline-offset: 2px;
+    background: none; border: 0; padding: 0; cursor: pointer; font-family: inherit;
   }
-  #btn-metrics[hidden] { display: none; }
+  #btn-metrics:hover { color: var(--text); }
+  #btn-metrics-dl {
+    display: grid; place-content: center; width: 16px; height: 16px;
+    color: var(--dim); border-radius: 4px;
+  }
+  #btn-metrics-dl:hover { color: var(--accent); background: var(--panel2); }
+  #btn-metrics-dl svg { display: block; }
+  #metrics-pop {
+    position: fixed; inset: 0; z-index: 40;
+    background: rgba(10, 12, 16, .38);
+    display: flex; align-items: flex-start; justify-content: center;
+    padding: 56px 16px 16px;
+  }
+  #metrics-pop[hidden] { display: none; }
+  #metrics-card {
+    width: min(520px, 100%); max-height: min(70vh, 640px);
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.45);
+    display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+  }
+  #metrics-card header {
+    display: flex; align-items: center; gap: 10px; flex: none;
+    padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--border);
+    background: var(--panel2);
+  }
+  #metrics-card header span {
+    font-size: 12px; font-family: var(--mono); color: var(--text); min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #metrics-pop-close {
+    margin-left: auto; width: 26px; height: 26px; padding: 0;
+    background: transparent; color: var(--dim); font-size: 18px; font-weight: 500;
+    border-radius: 6px; line-height: 1;
+  }
+  #metrics-pop-close:hover { background: var(--border); color: var(--text); }
+  #metrics-pop-body {
+    margin: 0; padding: 12px 14px; overflow: auto; flex: 1; min-height: 0;
+    font: 12px/1.5 var(--mono); color: var(--text); white-space: pre;
+  }
+  #metrics-pop-body.dim { color: var(--dim); }
   #btn-highlight {
     margin-left: auto; padding: 4px 11px; font-size: 11px; font-weight: 600;
     background: var(--panel2); color: var(--dim); border: 1px solid var(--border) !important;
@@ -208,7 +252,7 @@
   </label>
   <div style="display:flex;gap:8px;align-self:end">
     <button id="btn-replay">Replay all views</button>
-    <button id="btn-view" title="Photometric-refine this regenerated view. CUDA GSFix3D runs the paper's 20 iterations (no color stamp) and stops; click again for another pass. Baseline / MLX-stamp keep going until Stop (max 1 hour). Continues from scene_repaired.ply when it exists.">Repair this view</button>
+    <button id="btn-view" title="Photometric-refine this regenerated view until you press Stop (max 12 hours). CUDA GSFix3D keeps repeating the paper's 20-iter photometric lift (no color stamp). Replay all views still does one 20-iter pass per view. Continues from scene_repaired.ply when it exists.">Repair this view</button>
     <button id="btn-reset" title="Copy scene_original.ply over scene_repaired.ply and show the original splat.">Reset repair</button>
     <button id="btn-stop" disabled>Stop</button>
   </div>
@@ -227,8 +271,24 @@
   <span>scene <b id="st-scene">–</b></span>
   <span>lift <b id="st-backend">–</b></span>
   <span id="st-l1">L1 <b>–</b></span>
-  <a id="btn-metrics" href="#" download="metrics.json" hidden title="Download this repair's metrics.json">metrics.json</a>
+  <span id="metrics-wrap" hidden>
+    <button type="button" id="btn-metrics" title="View this repair's metrics.json">metrics.json</button>
+    <a id="btn-metrics-dl" href="#" download="metrics.json" title="Download metrics.json" aria-label="Download metrics.json">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+        <path d="M6 1.5v6.2M3.4 5.6L6 8.2l2.6-2.6M2 10.5h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </a>
+  </span>
   <button type="button" id="btn-highlight" title="On the Repaired 3D view, paint every gaussian that changed or was added versus the original bright red. Original always stays the real original splat.">highlight repair</button>
+</div>
+<div id="metrics-pop" hidden>
+  <div id="metrics-card" role="dialog" aria-modal="true" aria-labelledby="metrics-pop-title">
+    <header>
+      <span id="metrics-pop-title">metrics.json</span>
+      <button type="button" id="metrics-pop-close" title="Close">×</button>
+    </header>
+    <pre id="metrics-pop-body" class="dim">Loading…</pre>
+  </div>
 </div>
 <div id="msg"></div>
 
@@ -257,6 +317,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
+const FOCUSED_REPAIR_MAX_SECONDS = 12 * 3600;
 let episodes = [];
 let snapshot = null;
 let selectedStep = null;
@@ -472,15 +533,20 @@ function renderStats() {
   l1El.className = l1 ? l1.cls : "";
   l1El.title = l1 ? l1.title : "Photometric L1 versus the regen PNG (after should be lower)";
   l1El.innerHTML = l1 ? `L1 <b>${esc(l1.text)}</b>` : "L1 <b>–</b>";
-  const metrics = $("btn-metrics");
+  const wrap = $("metrics-wrap");
+  const dl = $("btn-metrics-dl");
   const epId = selectedEp || episode?.id;
   const canDl = Boolean(epId && (episode?.has_metrics || l1));
-  metrics.hidden = !canDl;
+  wrap.hidden = !canDl;
   if (canDl) {
     const step = v?.step ?? selectedStep;
     const base = episode?.metrics_url || `/api/repair/metrics?episode=${encodeURIComponent(epId)}`;
-    metrics.href = base + (step != null ? `&step=${encodeURIComponent(step)}` : "");
-    metrics.download = step != null ? `step_${String(step).padStart(3, "0")}_metrics.json` : "metrics.json";
+    const href = base + (step != null ? `&step=${encodeURIComponent(step)}` : "");
+    const filename = step != null ? `step_${String(step).padStart(3, "0")}_metrics.json` : "metrics.json";
+    dl.href = href;
+    dl.download = filename;
+    wrap.dataset.href = href;
+    wrap.dataset.filename = filename;
   }
 }
 
@@ -812,7 +878,7 @@ $("btn-view").onclick = async () => {
   await post("/api/repair/start", {
     episode: selectedEp,
     step: selectedStep,
-    max_seconds: 3600,
+    max_seconds: FOCUSED_REPAIR_MAX_SECONDS,
     reload_code: $("in-reload").checked,
     backend: $("in-backend").value || "gsfix-gsplat",
     resume: true,
@@ -838,6 +904,49 @@ $("btn-highlight").onclick = () => {
   renderShow();
   if (visorPly === "repaired") showVisorPly("repaired", { force: true });
 };
+
+function closeMetricsPop() {
+  $("metrics-pop").hidden = true;
+}
+async function openMetricsPop() {
+  const wrap = $("metrics-wrap");
+  const href = wrap.dataset.href;
+  const filename = wrap.dataset.filename || "metrics.json";
+  if (!href) return;
+  const pop = $("metrics-pop");
+  const body = $("metrics-pop-body");
+  $("metrics-pop-title").textContent = filename;
+  body.className = "dim";
+  body.textContent = "Loading…";
+  pop.hidden = false;
+  try {
+    const r = await fetch(href);
+    const data = await r.json();
+    if (!r.ok || data?.error) {
+      body.textContent = data?.error || `Could not load ${filename}`;
+      return;
+    }
+    body.className = "";
+    body.textContent = JSON.stringify(data, null, 2);
+  } catch (err) {
+    body.textContent = String(err?.message || err);
+  }
+}
+$("btn-metrics").onclick = () => openMetricsPop();
+$("metrics-pop-close").onclick = (e) => {
+  e.stopPropagation();
+  closeMetricsPop();
+};
+$("metrics-pop").onclick = (e) => {
+  if (e.target === $("metrics-pop")) closeMetricsPop();
+};
+$("metrics-card").onclick = (e) => e.stopPropagation();
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && !$("metrics-pop").hidden) {
+    closeMetricsPop();
+    e.preventDefault();
+  }
+});
 document.querySelectorAll("#show-toggle button").forEach(btn => {
   btn.onclick = () => {
     if (!selectedEp) return;
@@ -851,6 +960,7 @@ $("btn-img-orig").onclick = () => shiftKind(-1);
 $("btn-img-rep").onclick = () => shiftKind(1);
 document.addEventListener("keydown", e => {
   if (e.target && /input|select|textarea/i.test(e.target.tagName)) return;
+  if (!$("metrics-pop").hidden) return;
   if (e.key === "ArrowLeft") shiftKind(-1);
   if (e.key === "ArrowRight") shiftKind(1);
 });

@@ -67,7 +67,13 @@ REVIEW_PARTITIONS = (
     "lrz-v100x2,lrz-hgx-a100-80x4,lrz-dgx-a100-80x8,lrz-hgx-h100-94x4"
 )
 HOLD_HOURS = (8, 24)
-HOLD_SECONDS = {8: 8 * 3600, 24: 24 * 3600}
+MAX_HOLD_HOURS = 336  # Matches the 14-day partition time limit.
+PARTITION_CATALOG = (
+    {"id": "lrz-hgx-a100-80x4", "label": "HGX A100 80GB ×4", "family": "A100", "default": True},
+    {"id": "lrz-dgx-a100-80x8", "label": "DGX A100 80GB ×8", "family": "A100", "default": True},
+    {"id": "lrz-hgx-h100-94x4", "label": "HGX H100 94GB ×4", "family": "H100", "default": False},
+    {"id": "lrz-v100x2", "label": "V100 ×2", "family": "V100", "default": False},
+)
 
 
 def set_ssh_password(password: str | None) -> None:
@@ -208,12 +214,16 @@ def lrz_status() -> dict[str, Any]:
         "gpu_url": "/repair/gpu",
         "partition": os.environ.get("LRZ_PARTITION") or DEFAULT_PARTITION,
         "hold_hours": list(HOLD_HOURS),
+        "max_hold_hours": MAX_HOLD_HOURS,
+        "catalog": [dict(p) for p in PARTITION_CATALOG],
     }
 
 
-def lrz_scripts(hours: int = 8, *, after: bool = False) -> dict[str, str]:
+def lrz_scripts(hours: int = 8, *, after: bool = False, begin: str | None = None) -> dict[str, str]:
     hours = normalize_hold_hours(hours)
     alloc = f"scripts/lrz/allocate.sh {hours}h"
+    if begin:
+        alloc += f" --begin {begin}"
     if after:
         alloc += " --after"
     return {
@@ -236,14 +246,46 @@ def normalize_hold_hours(hours: int | str) -> int:
     try:
         value = int(raw)
     except ValueError as exc:
-        raise ValueError("Hold duration must be 8h or 24h.") from exc
-    if value not in HOLD_SECONDS:
-        raise ValueError("Hold duration must be 8h or 24h.")
+        raise ValueError(f"Hold duration must be 1–{MAX_HOLD_HOURS} hours.") from exc
+    if value < 1 or value > MAX_HOLD_HOURS:
+        raise ValueError(f"Hold duration must be 1–{MAX_HOLD_HOURS} hours.")
     return value
+
+
+def hold_sleep_seconds(hours: int | str) -> int:
+    return normalize_hold_hours(hours) * 3600
 
 
 def slurm_time_limit(hours: int | str) -> str:
     return f"{normalize_hold_hours(hours):02d}:00:00"
+
+
+def slurm_begin_spec(begin: str | None) -> str | None:
+    """Return a Slurm --begin= value, or None for an immediate start."""
+    raw = str(begin or "").strip()
+    if not raw or raw.lower() in ("now", "immediate"):
+        return None
+    lowered = raw.lower()
+    if lowered in ("tomorrow", "midnight", "noon"):
+        return lowered
+    stamp = raw.replace(" ", "T")
+    if re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$", stamp):
+        stamp += ":00"
+    if not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", stamp):
+        raise ValueError("Start time must be now, tomorrow, or YYYY-MM-DDTHH:MM.")
+    return stamp
+
+
+def normalize_partition(partition: str | None) -> str:
+    raw = (partition or os.environ.get("LRZ_PARTITION") or DEFAULT_PARTITION).strip()
+    known = {p["id"] for p in PARTITION_CATALOG}
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if not parts:
+        raise ValueError("Select at least one GPU partition.")
+    bad = [p for p in parts if p not in known]
+    if bad:
+        raise ValueError(f"Unknown partition(s): {', '.join(bad)}")
+    return ",".join(dict.fromkeys(parts))
 
 
 def sbatch_hold_command(
@@ -252,14 +294,16 @@ def sbatch_hold_command(
     partition: str | None = None,
     job_name: str | None = None,
     after_job: str | None = None,
+    begin: str | None = None,
     cpus: int = 4,
     mem: str = "32G",
     gres: str = "gpu:1",
 ) -> str:
     """One sleep hold job. Does not wait in the queue."""
     hours = normalize_hold_hours(hours)
-    partition = (partition or os.environ.get("LRZ_PARTITION") or DEFAULT_PARTITION).strip()
+    partition = normalize_partition(partition)
     name = job_name or f"gs-{hours}h"
+    begin_spec = slurm_begin_spec(begin)
     parts = [
         "sbatch",
         f"--job-name={name}",
@@ -272,12 +316,14 @@ def sbatch_hold_command(
         f"--time={slurm_time_limit(hours)}",
         f"--output={name}-%j.log",
     ]
+    if begin_spec:
+        parts.append(f"--begin={begin_spec}")
     if after_job:
         job = str(after_job).strip()
         if not job.isdigit():
             raise ValueError("after_job must be a numeric Slurm id.")
         parts.append(f"--dependency=afterany:{job}")
-    parts.append(f"--wrap='sleep {HOLD_SECONDS[hours]}'")
+    parts.append(f"--wrap='sleep {hold_sleep_seconds(hours)}'")
     return " ".join(parts)
 
 
@@ -611,6 +657,94 @@ def parse_sinfo_lines(text: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _tres_gpu_count(text: str | None) -> int | None:
+    match = re.search(r"gres/gpu=(\d+)", text or "", re.I)
+    return int(match.group(1)) if match else None
+
+
+def parse_scontrol_nodes(text: str) -> list[dict[str, Any]]:
+    """Parse `scontrol show node` blocks for GPU CfgTRES vs AllocTRES."""
+    nodes: list[dict[str, Any]] = []
+    for chunk in re.split(r"\n\s*\n", text or ""):
+        if "NodeName=" not in chunk:
+            continue
+        name_m = re.search(r"NodeName=(\S+)", chunk)
+        if not name_m:
+            continue
+        state_m = re.search(r"\bState=(\S+)", chunk)
+        part_m = re.search(r"\bPartitions=(\S+)", chunk)
+        feat_m = re.search(r"\bAvailableFeatures=(\S+)", chunk)
+        cfg_m = re.search(r"\bCfgTRES=(\S+)", chunk)
+        alloc_m = re.search(r"\bAllocTRES=(\S+)", chunk)
+        state = (state_m.group(1) if state_m else "").rstrip(",")
+        state_u = state.upper()
+        down = any(flag in state_u for flag in ("INVAL", "DOWN", "DRAIN", "FAIL", "NOT_RESPONDING"))
+        gpu_cfg = _tres_gpu_count(cfg_m.group(1) if cfg_m else "")
+        gpu_alloc = _tres_gpu_count(alloc_m.group(1) if alloc_m else "") or 0
+        gpu_free = None if gpu_cfg is None else max(0, int(gpu_cfg) - int(gpu_alloc))
+        nodes.append({
+            "name": name_m.group(1),
+            "state": state or None,
+            "partition": (part_m.group(1) if part_m else "").split(",")[0] or None,
+            "features": feat_m.group(1) if feat_m else None,
+            "gpu_cfg": gpu_cfg,
+            "gpu_alloc": gpu_alloc if gpu_cfg is not None else None,
+            "gpu_free": gpu_free,
+            "down": down,
+        })
+    return nodes
+
+
+def summarize_gpu_availability(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    for spec in PARTITION_CATALOG:
+        by_id[spec["id"]] = {
+            **spec,
+            "gpu_cfg": 0,
+            "gpu_alloc": 0,
+            "gpu_free": 0,
+            "nodes": 0,
+            "nodes_free": 0,
+            "nodes_full": 0,
+            "nodes_down": 0,
+            "has_free": False,
+        }
+    for node in nodes:
+        pid = node.get("partition")
+        if pid not in by_id:
+            continue
+        row = by_id[pid]
+        row["nodes"] += 1
+        if node.get("down"):
+            row["nodes_down"] += 1
+            continue
+        cfg = int(node.get("gpu_cfg") or 0)
+        alloc = int(node.get("gpu_alloc") or 0)
+        free = int(node.get("gpu_free") or 0)
+        row["gpu_cfg"] += cfg
+        row["gpu_alloc"] += alloc
+        row["gpu_free"] += free
+        if free > 0:
+            row["nodes_free"] += 1
+        elif cfg:
+            row["nodes_full"] += 1
+    for row in by_id.values():
+        row["has_free"] = row["gpu_free"] > 0
+    return list(by_id.values())
+
+
+def review_command() -> str:
+    """One SSH script: sinfo summary + scontrol GPU counts. Not a poll loop."""
+    parts = REVIEW_PARTITIONS
+    return (
+        "echo SINFO\n"
+        f"sinfo -p {parts} -h -o '%P|%a|%l|%D|%T|%N' || true\n"
+        "echo SCONTROL\n"
+        f"nodes=$(sinfo -p {parts} -N -h -o '%N' | sort -u | paste -sd, -)\n"
+        'if [ -n "$nodes" ]; then scontrol show node "$nodes"; fi\n'
+    )
+
+
 def sinfo_command(partitions: str | None = None) -> str:
     parts = (partitions or REVIEW_PARTITIONS).strip()
     return f"sinfo -p {parts} -h -o '%P|%a|%l|%D|%T|%N'"
@@ -620,7 +754,7 @@ def widen_command(job_id: str, partition: str | None = None) -> str:
     job = str(job_id).strip()
     if not job.isdigit():
         raise ValueError("job_id must be a numeric Slurm id.")
-    part = (partition or os.environ.get("LRZ_PARTITION") or DEFAULT_PARTITION).strip()
+    part = normalize_partition(partition)
     return f"scontrol update JobId={job} Partition={part}"
 
 
@@ -1036,11 +1170,15 @@ def allocate_lrz_gpu(
     hours: int | str = 8,
     *,
     after: bool | str | None = False,
+    begin: str | None = None,
+    partition: str | None = None,
     switch: bool | None = None,
     cfg: dict | None = None,
 ) -> dict[str, Any]:
     """Submit one sleep hold job. Never waits on the queue."""
     hours = normalize_hold_hours(hours)
+    begin_spec = slurm_begin_spec(begin)
+    partition = normalize_partition(partition)
     cfg = cfg or load_lrz_config()
     if not cfg.get("user") or not cfg.get("host"):
         raise RuntimeError("Set user/host in configs/lrz.local.yaml first.")
@@ -1048,11 +1186,12 @@ def allocate_lrz_gpu(
         raise RuntimeError(session_required_message())
     after_job = _resolve_after_job(cfg, after)
     if switch is None:
-        switch = after_job is None
+        switch = after_job is None and begin_spec is None
     command = sbatch_hold_command(
         hours,
-        partition=os.environ.get("LRZ_PARTITION") or DEFAULT_PARTITION,
+        partition=partition,
         after_job=after_job,
+        begin=begin_spec,
         cpus=int(cfg.get("cpus") or 4),
         mem=str(cfg.get("mem") or "32G"),
     )
@@ -1071,16 +1210,21 @@ def allocate_lrz_gpu(
             write_lrz_job_id(job_id)
             switched = True
             reset_gpu_probe_cache()
+        when = f" starting {begin_spec}" if begin_spec else ""
         if after_job:
             message = (
-                f"Queued job {job_id} ({hours}h) after {after_job}. "
-                "When it is R, click Use on that row (or scripts/lrz/allocate.sh --use "
-                f"{job_id}) and reconnect: scripts/lrz/gpu-shell.sh"
+                f"Queued job {job_id} ({hours}h{when}) after {after_job} on {partition}. "
+                "When it is R, click Use on that row and reconnect: scripts/lrz/gpu-shell.sh"
+            )
+        elif begin_spec:
+            message = (
+                f"Submitted job {job_id} ({hours}h) on {partition}, begin={begin_spec}. "
+                "It stays PD until that time. Do not loop squeue."
             )
         else:
             message = (
-                f"Submitted job {job_id} ({hours}h sleep hold). "
-                "One squeue --me to confirm; do not loop. If PD (Priority), widen partitions. "
+                f"Submitted job {job_id} ({hours}h sleep hold) on {partition}. "
+                "One squeue --me to confirm. If PD (Priority), widen partitions. "
                 "Then scripts/lrz/gpu-shell.sh"
             )
         return {
@@ -1088,6 +1232,8 @@ def allocate_lrz_gpu(
             "job_id": job_id,
             "hours": hours,
             "after_job": after_job,
+            "begin": begin_spec,
+            "partition": partition,
             "switched": switched,
             "command": command,
             "stdout": output,
@@ -1109,64 +1255,111 @@ def use_lrz_job(job_id: str) -> dict[str, Any]:
     }
 
 
-def widen_lrz_job(job_id: str | None = None, *, cfg: dict | None = None) -> dict[str, Any]:
-    """One scontrol to add both A100 partitions. Not a loop."""
+def widen_lrz_job(
+    job_id: str | None = None,
+    *,
+    partition: str | None = None,
+    cfg: dict | None = None,
+) -> dict[str, Any]:
+    """One scontrol to update eligible partitions. Not a loop."""
     cfg = cfg or load_lrz_config()
     if not lrz_session_alive(cfg):
         raise RuntimeError(session_required_message())
     job = str(job_id or cfg.get("job_id") or "").strip()
-    command = widen_command(job)
+    command = widen_command(job, partition=partition)
     result = _ssh_run(cfg, command, timeout=PROBE_TIMEOUT_S)
     output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
     if result.returncode != 0:
         raise RuntimeError(output or "scontrol update failed.")
     reset_gpu_probe_cache()
+    part = normalize_partition(partition)
     return {
         "ok": True,
         "job_id": job,
         "command": command,
         "stdout": output,
-        "message": f"Updated job {job} to {DEFAULT_PARTITION}. Probe once — do not loop squeue.",
+        "partition": part,
+        "message": f"Updated job {job} to {part}. Probe once — do not loop squeue.",
     }
 
 
+def _review_sections(text: str) -> dict[str, str]:
+    sections: dict[str, str] = {}
+    current: str | None = None
+    buf: list[str] = []
+    for line in (text or "").splitlines():
+        key = line.strip()
+        if key in {"SINFO", "SCONTROL"}:
+            if current is not None:
+                sections[current] = "\n".join(buf).strip()
+            current = key.lower()
+            buf = []
+        elif current is not None:
+            buf.append(line)
+    if current is not None:
+        sections[current] = "\n".join(buf).strip()
+    return sections
+
+
 def review_lrz_partitions(*, force: bool = False, cfg: dict | None = None) -> dict[str, Any]:
-    """One sinfo call. Cached; never polled in a loop."""
+    """One sinfo + one scontrol show node. Cached; never polled in a loop."""
     cfg = cfg or load_lrz_config()
     if not lrz_session_alive(cfg):
         raise RuntimeError(session_required_message())
     now = time.time()
     with _SINFO["lock"]:
         age = now - float(_SINFO["at"] or 0)
-        if not force and _SINFO["body"] is not None and age < 60:
+        cached = _SINFO["body"]
+        if not force and isinstance(cached, dict) and age < 60:
             return {
                 "ok": True,
-                "partitions": _SINFO["body"],
+                **cached,
                 "cached": True,
                 "age_s": round(age, 1),
                 "message": "Using cached sinfo (LRZ forbids sinfo loops).",
             }
-    command = sinfo_command()
-    result = _ssh_run(cfg, command, timeout=PROBE_TIMEOUT_S)
+    command = review_command()
+    result = _ssh_run(cfg, command, timeout=max(PROBE_TIMEOUT_S, 60.0))
     output = (result.stdout or "").strip()
     err = (result.stderr or "").strip()
     if result.returncode != 0:
-        message = err or output or "sinfo failed."
+        message = err or output or "sinfo/scontrol failed."
         with _SINFO["lock"]:
             _SINFO["at"] = time.time()
             _SINFO["error"] = message
         raise RuntimeError(message)
-    rows = parse_sinfo_lines(output)
+    sections = _review_sections(output)
+    partitions = parse_sinfo_lines(sections.get("sinfo") or "")
+    nodes = parse_scontrol_nodes(sections.get("scontrol") or "")
+    summary = summarize_gpu_availability(nodes)
+    default_free = sum(row["gpu_free"] for row in summary if row.get("default"))
+    other_free = [row for row in summary if not row.get("default") and row.get("has_free")]
+    if default_free == 0 and other_free:
+        hint = (
+            "Default A100 partitions look full. "
+            + ", ".join(f"{r['label']} has {r['gpu_free']} free" for r in other_free)
+            + " — select those below."
+        )
+    elif default_free:
+        hint = f"{default_free} A100 GPU(s) free on the default partitions. MIXED nodes can still have a slot."
+    else:
+        hint = "No free GPUs counted on reviewed nodes. Queue anyway or pick another start time."
+    body = {
+        "partitions": partitions,
+        "nodes": nodes,
+        "summary": summary,
+        "default_free": default_free,
+    }
     with _SINFO["lock"]:
         _SINFO["at"] = time.time()
-        _SINFO["body"] = rows
+        _SINFO["body"] = body
         _SINFO["error"] = None
     return {
         "ok": True,
-        "partitions": rows,
+        **body,
         "cached": False,
         "command": command,
-        "message": "One sinfo snapshot. MIXED nodes may still have a free GPU.",
+        "message": hint,
     }
 
 
@@ -1225,9 +1418,19 @@ def lrz_dashboard_snapshot(
     if isinstance(gpus, list) and gpus:
         free_mib = gpus[0].get("memory_free_mib")
     with _SINFO["lock"]:
-        partitions = _SINFO["body"]
+        sinfo_body = _SINFO["body"]
         partitions_at = float(_SINFO["at"] or 0)
         partitions_error = _SINFO["error"]
+    if isinstance(sinfo_body, dict):
+        partitions = sinfo_body.get("partitions")
+        nodes = sinfo_body.get("nodes") or []
+        summary = sinfo_body.get("summary") or []
+        default_free = sinfo_body.get("default_free")
+    else:
+        partitions = sinfo_body
+        nodes = []
+        summary = []
+        default_free = None
     return {
         "connection": status,
         "checks": checks,
@@ -1236,6 +1439,10 @@ def lrz_dashboard_snapshot(
         "slurm": slurm,
         "jobs": jobs,
         "partitions": partitions,
+        "nodes": nodes,
+        "summary": summary,
+        "default_free": default_free,
+        "catalog": [dict(p) for p in PARTITION_CATALOG],
         "partitions_age_s": round(time.time() - partitions_at, 1) if partitions_at else None,
         "partitions_error": partitions_error,
         "container": container,
@@ -1254,6 +1461,7 @@ def lrz_dashboard_snapshot(
         "probe_age_s": round(time.time() - probed_at, 1) if probed_at else None,
         "scripts": lrz_scripts(),
         "hold_hours": list(HOLD_HOURS),
+        "max_hold_hours": MAX_HOLD_HOURS,
         "partition": status.get("partition") or DEFAULT_PARTITION,
         "hint": "Slurm is queried at most once per 30s while this page is visible. sinfo only on Review partitions.",
     }

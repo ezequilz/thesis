@@ -134,6 +134,9 @@ def test_make_repair_backend_lrz(monkeypatch):
     assert isinstance(paper, LrzRemoteRepair)
     assert paper.method == "gsfix-gsplat"
     assert paper.max_chunks == 1
+    focused = make_repair_backend("gsfix-gsplat", studio=True, focused=True)
+    assert isinstance(focused, LrzRemoteRepair)
+    assert focused.max_chunks == 0
     baseline = make_repair_backend("gsfix-gsplat-baseline")
     assert isinstance(baseline, LrzRemoteRepair)
     assert baseline.method == "gsfix-gsplat-baseline"
@@ -305,6 +308,11 @@ def test_sbatch_hold_8h_24h_and_after():
     assert "--job-name=gs-8h" in eight
     assert "lrz-hgx-a100-80x4,lrz-dgx-a100-80x8" in eight
     assert "--gres=gpu:1" in eight
+    six = sbatch_hold_command(6, begin="2026-09-10T09:00", partition="lrz-hgx-h100-94x4")
+    assert "--time=06:00:00" in six
+    assert "sleep 21600" in six
+    assert "--begin=2026-09-10T09:00:00" in six
+    assert "--partition=lrz-hgx-h100-94x4" in six
     twenty = sbatch_hold_command("24h", after_job="5777469")
     assert "--time=24:00:00" in twenty
     assert "sleep 86400" in twenty
@@ -384,4 +392,44 @@ def test_connection_checks_missing_job_points_at_allocate():
     )
     action = next_action_from_checks(checks)
     assert action and "allocate.sh" in action
+
+
+def test_parse_scontrol_counts_free_gpus():
+    from splat_explorer.repair_lrz import parse_scontrol_nodes, slurm_begin_spec, summarize_gpu_availability
+
+    assert slurm_begin_spec("now") is None
+    assert slurm_begin_spec("tomorrow") == "tomorrow"
+    assert slurm_begin_spec("2026-09-10T09:00") == "2026-09-10T09:00:00"
+    nodes = parse_scontrol_nodes(
+        "NodeName=lrz-dgx-a100-001 Arch=x86_64\n"
+        "   AvailableFeatures=A100-80GB\n"
+        "   State=MIXED ThreadsPerCore=2\n"
+        "   Partitions=lrz-dgx-a100-80x8\n"
+        "   CfgTRES=cpu=252,mem=1951G,billing=3996312,gres/gpu=8\n"
+        "   AllocTRES=cpu=176,mem=676G,gres/gpu=8\n"
+        "\n"
+        "NodeName=lrz-dgx-a100-002 Arch=x86_64\n"
+        "   AvailableFeatures=A100-80GB\n"
+        "   State=MIXED\n"
+        "   Partitions=lrz-dgx-a100-80x8\n"
+        "   CfgTRES=cpu=252,mem=1951G,billing=3996312,gres/gpu=8\n"
+        "   AllocTRES=cpu=152,mem=460G,gres/gpu=7\n"
+        "\n"
+        "NodeName=lrz-hgx-a100-003 Arch=x86_64\n"
+        "   State=INVAL\n"
+        "   Partitions=lrz-hgx-a100-80x4\n"
+        "   CfgTRES=cpu=1,mem=1G,gres/gpu=4\n"
+        "   AllocTRES=cpu=0,mem=0G,gres/gpu=0\n"
+    )
+    assert nodes[0]["gpu_free"] == 0
+    assert nodes[1]["gpu_free"] == 1
+    assert nodes[1]["name"] == "lrz-dgx-a100-002"
+    assert nodes[2]["down"] is True
+    summary = summarize_gpu_availability(nodes)
+    dgx = next(r for r in summary if r["id"] == "lrz-dgx-a100-80x8")
+    assert dgx["gpu_free"] == 1
+    assert dgx["has_free"] is True
+    hgx = next(r for r in summary if r["id"] == "lrz-hgx-a100-80x4")
+    assert hgx["gpu_free"] == 0
+    assert hgx["nodes_down"] == 1
 

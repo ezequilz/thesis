@@ -24,6 +24,39 @@ def test_gsfix3d_module_does_not_stamp():
     assert "stamp_first" not in src
 
 
+def test_apply_until_paper_default_is_one_chunk():
+    backend = GsplatGsfix3dRepair()
+    calls = {"n": 0}
+
+    def fake_apply(*_a, **_k):
+        calls["n"] += 1
+        return {"n_iters": 20, "l1_before": 0.5, "l1_after": 0.4}
+
+    backend.apply = fake_apply
+    out = backend.apply_until(object(), object(), object(), object())
+    assert calls["n"] == 1
+    assert out["n_chunks"] == 1
+    assert out["n_iters"] == 20
+
+
+def test_apply_until_max_chunks_zero_keeps_going_until_stop():
+    backend = GsplatGsfix3dRepair(max_chunks=0)
+    calls = {"n": 0}
+
+    def fake_apply(*_a, **_k):
+        calls["n"] += 1
+        return {"n_iters": 20, "l1_before": 0.5, "l1_after": 0.4}
+
+    backend.apply = fake_apply
+    out = backend.apply_until(
+        object(), object(), object(), object(),
+        should_stop=lambda: calls["n"] >= 3,
+    )
+    assert calls["n"] == 3
+    assert out["n_chunks"] == 3
+    assert out["n_iters"] == 60
+
+
 def test_instantiate_cuda_repair_dispatches_baseline():
     from splat_explorer.repair_gsfix import GsplatPhotometricRepair
 

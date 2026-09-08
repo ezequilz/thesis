@@ -258,9 +258,10 @@ def make_repair_backend(
 
     `studio=True` is the dashboard replay preset. `focused=True` is the
     single-view tester: keep refining until the operator stops (capped at
-    one hour). The stamp backend paints regen RGB first; CUDA ``gsfix-gsplat``
-    is the paper photometric loop (no stamp). ``gsfix-gsplat-baseline`` is
-    the frozen pre-paper CUDA lift.
+    12 hours). CUDA ``gsfix-gsplat`` uses uncapped 20-iter chunks in that
+    mode; episode replay still does the paper's single 20-iter pass. The
+    stamp backend paints regen RGB first. ``gsfix-gsplat-baseline`` is the
+    frozen pre-paper CUDA lift.
     """
     key = _normalize_backend_name(name)
     if key == "auto":
@@ -283,6 +284,13 @@ def make_repair_backend(
     return _build_repair_backend(
         key, studio=studio, focused=focused, required=True,
     )
+
+
+def _cuda_max_chunks(key: str, *, focused: bool) -> int:
+    """Paper GSFix3D is one 20-iter pass; focused dashboard tests loop until Stop."""
+    if focused or key == "gsfix-gsplat-baseline":
+        return 0
+    return 1
 
 
 def _mlx_repair_kwargs(*, stamp: bool, studio: bool, focused: bool) -> dict:
@@ -328,7 +336,10 @@ def _build_repair_backend(key: str, *, studio: bool, focused: bool, required: bo
                 "3D repair backend: %s (gsplat / CUDA, local)",
                 "GSFix3D paper" if key == "gsfix-gsplat" else "GSFix CUDA baseline",
             )
-            return instantiate_cuda_repair(method=key)
+            return instantiate_cuda_repair(
+                method=key,
+                max_chunks=_cuda_max_chunks(key, focused=focused),
+            )
         from .repair_lrz import LrzRemoteRepair, lrz_configured
 
         if lrz_configured():
@@ -338,7 +349,7 @@ def _build_repair_backend(key: str, *, studio: bool, focused: bool, required: bo
             )
             return LrzRemoteRepair(
                 method=key,
-                max_chunks=0 if key == "gsfix-gsplat-baseline" else 1,
+                max_chunks=_cuda_max_chunks(key, focused=focused),
             )
         msg = (
             "gsplat CUDA refine is not available in this process "

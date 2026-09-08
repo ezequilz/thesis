@@ -39,7 +39,12 @@ def test_explicit_backend_requires_availability():
     from splat_explorer.repair_mlx import mlx_refine_available
 
     if gsplat_refine_available():
-        assert isinstance(make_repair_backend("gsfix-gsplat"), GsplatGsfix3dRepair)
+        paper = make_repair_backend("gsfix-gsplat")
+        assert isinstance(paper, GsplatGsfix3dRepair)
+        assert paper.max_chunks == 1
+        focused = make_repair_backend("gsfix-gsplat", studio=True, focused=True)
+        assert isinstance(focused, GsplatGsfix3dRepair)
+        assert focused.max_chunks == 0
         assert isinstance(make_repair_backend("gsfix-gsplat-baseline"), GsplatPhotometricRepair)
     else:
         from splat_explorer.repair_lrz import LrzRemoteRepair, lrz_configured
@@ -47,6 +52,9 @@ def test_explicit_backend_requires_availability():
             paper = make_repair_backend("gsfix-gsplat")
             assert isinstance(paper, LrzRemoteRepair)
             assert paper.method == "gsfix-gsplat"
+            assert paper.max_chunks == 1
+            focused = make_repair_backend("gsfix-gsplat", studio=True, focused=True)
+            assert focused.max_chunks == 0
             base = make_repair_backend("gsfix-gsplat-baseline")
             assert isinstance(base, LrzRemoteRepair)
             assert base.method == "gsfix-gsplat-baseline"

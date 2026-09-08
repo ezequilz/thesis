@@ -10,7 +10,12 @@ from types import SimpleNamespace
 import numpy as np
 from PIL import Image
 
-from splat_explorer.web.repair_studio import RepairStudio
+from splat_explorer.web.repair_studio import (
+    FOCUSED_REPAIR_MAX_SECONDS,
+    RepairStudio,
+    focused_cap_label,
+    focused_finish_message,
+)
 
 
 class _Spec:
@@ -356,3 +361,41 @@ def test_metrics_payload_marks_l1_improved(tmp_path: Path):
     review = studio.episode_review(ep.name)
     assert review["has_metrics"] is True
     assert review["metrics_url"].startswith("/api/repair/metrics")
+
+
+def test_focused_cap_is_twelve_hours():
+    assert FOCUSED_REPAIR_MAX_SECONDS == 12 * 3600
+    assert focused_cap_label(FOCUSED_REPAIR_MAX_SECONDS) == "12h"
+    assert focused_cap_label(3600) == "1h"
+    assert focused_cap_label(90) == "2 min"
+
+
+def test_focused_finish_message_does_not_claim_cap_on_early_exit():
+    early = focused_finish_message(
+        stopped=False, hit_deadline=False, step=27, elapsed=11.4, cap=12 * 3600,
+    )
+    assert "1h cap" not in early
+    assert early.startswith("Finished on step 27 after 11s")
+    capped = focused_finish_message(
+        stopped=False, hit_deadline=True, step=27, elapsed=12 * 3600, cap=12 * 3600,
+    )
+    assert capped.startswith("Reached 12h cap on step 27")
+    stopped = focused_finish_message(
+        stopped=True, hit_deadline=False, step=27, elapsed=42, cap=12 * 3600,
+    )
+    assert stopped.startswith("Stopped on step 27 after 42s")
+
+
+def test_start_replay_focused_uses_twelve_hour_cap(tmp_path: Path):
+    ep = _episode(tmp_path)
+    _regen_view(ep)
+    _tiny_ply(ep / "scene_original.ply")
+    app = _FakeApp(ep, scene_id="venetian-balcony")
+    studio = RepairStudio(app)
+    ok, message = studio.start_replay(
+        ep.name, step=4, backend="cpu-project", reload_code=False,
+    )
+    assert ok, message
+    assert "12h" in message
+    assert studio.job["max_seconds"] == FOCUSED_REPAIR_MAX_SECONDS
+    studio.stop_replay()

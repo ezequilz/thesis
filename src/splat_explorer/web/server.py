@@ -817,6 +817,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _serve_repair_post(self, path: str, body: dict) -> None:
         studio = self.app.repair
         if path == "/api/repair/start":
+            from .repair_studio import FOCUSED_REPAIR_MAX_SECONDS
+
             ep = body.get("episode") or body.get("id")
             if not ep:
                 self._send_json({"ok": False, "message": "Missing episode id."}, 400)
@@ -824,7 +826,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             reload_code = body.get("reload_code", True)
             backend = body.get("backend") or "gsfix-gsplat"
             step = body.get("step")
-            max_seconds = body.get("max_seconds", 3600)
+            max_seconds = body.get("max_seconds", FOCUSED_REPAIR_MAX_SECONDS)
             resume = body.get("resume", True)
             ssh_password = body.get("ssh_password") or body.get("lrz_password")
             ok, message = studio.start_replay(
@@ -832,7 +834,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 reload_code=bool(reload_code),
                 backend=str(backend),
                 step=None if step is None or step == "" else int(step),
-                max_seconds=float(max_seconds or 3600),
+                max_seconds=float(max_seconds or FOCUSED_REPAIR_MAX_SECONDS),
                 resume=bool(resume if resume is not None else True),
                 ssh_password=str(ssh_password) if ssh_password else None,
             )
@@ -876,8 +878,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif path == "/api/repair/gpu/allocate":
             hours = body.get("hours") or 8
             after = body.get("after", False)
+            begin = body.get("begin") or None
+            partition = body.get("partition") or None
             try:
-                snap = studio.gpu_allocate(hours=hours, after=after)
+                snap = studio.gpu_allocate(
+                    hours=hours, after=after, begin=begin, partition=partition,
+                )
             except (RuntimeError, ValueError) as exc:
                 self._send_json({"ok": False, "message": str(exc)}, 409)
                 return
@@ -897,8 +903,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         elif path == "/api/repair/gpu/widen":
             job_id = str(body.get("job_id") or "").strip() or None
+            partition = body.get("partition") or None
             try:
-                snap = studio.gpu_widen(job_id)
+                snap = studio.gpu_widen(job_id, partition=partition)
             except (RuntimeError, ValueError) as exc:
                 self._send_json({"ok": False, "message": str(exc)}, 409)
                 return

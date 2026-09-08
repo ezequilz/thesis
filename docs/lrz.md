@@ -63,11 +63,15 @@ Socket: `~/.ssh/cm-lrz` (8h). Close with:
 ```
 
 3. If you do not already have a running GPU job, allocate **once** (no
-   `squeue` loop). Pick 8h (default) or 24h:
+   `squeue` loop). Pick 8h, 24h, or any custom hours. Optionally delay the
+   start (tomorrow / a datetime) and choose partitions after reviewing
+   availability on `/repair/gpu`:
 
 ```bash
 scripts/lrz/allocate.sh 8h
 scripts/lrz/allocate.sh 24h
+scripts/lrz/allocate.sh 6h --begin 2026-09-10T09:00
+scripts/lrz/allocate.sh 8h --partition lrz-hgx-h100-94x4
 # Replacement that waits until the current job ends (avoids two GPUs):
 scripts/lrz/allocate.sh 24h --after
 ```
@@ -226,7 +230,7 @@ not `R`, reserve a new one (or **Use** an already-running row).
 | Script | What it does |
 | --- | --- |
 | `scripts/lrz/ssh-session.sh` | Password once → `~/.ssh/cm-lrz`; one `squeue --me` |
-| `scripts/lrz/allocate.sh 8h\|24h` | One `sbatch` sleep-hold; writes `job_id` unless `--after` |
+| `scripts/lrz/allocate.sh 8h\|24h\|Nh` | One `sbatch` sleep-hold; `--begin`, `--partition` optional |
 | `scripts/lrz/allocate.sh --after` | Queue a replacement (`--dependency=afterany`) |
 | `scripts/lrz/allocate.sh --widen` | One `scontrol` to both A100 partitions |
 | `scripts/lrz/allocate.sh --use ID` | Point `lrz.local.yaml` at an existing job |
