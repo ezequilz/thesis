@@ -1854,7 +1854,7 @@ class LrzRemoteRepair:
     iters: int = 20
     kf_iters: int = 50
     lambda_dssim: float = 0.2
-    densify: bool = True
+    densify: bool = False
     densify_every: int = 5
     densify_grad_thresh: float = 0.0002
     prune_opacity: float = 0.005

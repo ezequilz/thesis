@@ -36,6 +36,7 @@ def test_instantiate_visprune_alias():
     vis = instantiate_cuda_repair(method="visprune")
     assert isinstance(vis, GsplatGsfix3dVisPruneRepair)
     assert vis._result_backend() == BACKEND_ID
+    assert vis.densify is True
     assert vis.freeze_occluded is False
     assert vis.error_prune is True
     assert vis._updatable_mask(None, None, None, None, None) is None
@@ -44,6 +45,7 @@ def test_instantiate_visprune_alias():
 def test_paper_instantiate_is_not_visprune():
     paper = instantiate_cuda_repair(method="gsfix-gsplat")
     assert type(paper) is GsplatGsfix3dRepair
+    assert paper.densify is False
     assert GsplatGsfix3dVisPruneRepair._apply is not GsplatGsfix3dRepair._apply
 
 

@@ -80,7 +80,7 @@ def densify_clone_split(
     max_clone: int,
     max_gaussians: int,
 ):
-    """Kerbl clone (small) + split (large). Same as paper, 1-D opacity-safe."""
+    """Kerbl clone (small) + split (large). 1-D opacity-safe."""
     n = int(means.shape[0])
     if n == 0 or n >= int(max_gaussians):
         return None
@@ -459,6 +459,7 @@ class GsplatGsfix3dVisPruneRepair(GsplatGsfix3dRepair):
     paper class) so GSFix3D stays the original working implementation.
     """
 
+    densify: bool = True
     freeze_occluded: bool = False
     error_prune: bool = True
     error_thresh: float = 0.12

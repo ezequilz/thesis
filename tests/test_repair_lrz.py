@@ -134,6 +134,7 @@ def test_make_repair_backend_lrz(monkeypatch):
     assert isinstance(paper, LrzRemoteRepair)
     assert paper.method == "gsfix-gsplat"
     assert paper.max_chunks == 1
+    assert paper.densify is False
     focused = make_repair_backend("gsfix-gsplat", studio=True, focused=True)
     assert isinstance(focused, LrzRemoteRepair)
     assert focused.max_chunks == 0
@@ -145,18 +146,21 @@ def test_make_repair_backend_lrz(monkeypatch):
     assert isinstance(vis, LrzRemoteRepair)
     assert vis.method == "gsfix-gsplat-visprune"
     assert vis.max_chunks == 1
+    assert vis.densify is True
     auto = make_repair_backend("auto", studio=True)
     assert isinstance(auto, LrzRemoteRepair)
 
 
 def test_lrz_visprune_params_include_experimental_flags():
-    packed = LrzRemoteRepair(method="gsfix-gsplat-visprune")._params()
+    packed = LrzRemoteRepair(method="gsfix-gsplat-visprune", densify=True)._params()
     assert packed["method"] == "gsfix-gsplat-visprune"
+    assert packed["densify"] is True
     assert packed["freeze_occluded"] is False
     assert packed["error_prune"] is True
     assert packed["anchor_weight"] == 0.3
     paper = LrzRemoteRepair(method="gsfix-gsplat")._params()
     assert "freeze_occluded" not in paper
+    assert paper["densify"] is False
 
 
 def test_srun_worker_overlaps_sleep_hold():

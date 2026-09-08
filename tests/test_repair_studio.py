@@ -271,12 +271,24 @@ def test_reset_repair_restores_original_ply(tmp_path, monkeypatch):
     _tiny_ply(ep / "scene_repaired.ply", (0.9, 0.1, 0.1))
     app = _FakeApp(ep, scene_id="venetian-balcony")
     studio = RepairStudio(app)
+    studio.job = {
+        **studio._idle_job(ep.name),
+        "status": "error",
+        "error": "RuntimeError: command failed (1): ssh … Tensors must have same number of dimensions",
+        "message": "RuntimeError: command failed (1): ssh … Tensors must have same number of dimensions",
+        "results": [{"step": 4, "status": "error"}],
+    }
     ok, message = studio.reset_repair(ep.name)
     assert ok, message
     from splat_explorer.scene import load_ply
     restored = load_ply(ep / "scene_repaired.ply")
     np.testing.assert_allclose(restored.colors[0], [0.2, 0.4, 0.8], atol=1e-4)
     assert studio.showing == "original"
+    assert studio.job["status"] == "idle"
+    assert studio.job["error"] is None
+    assert studio.job["results"] == []
+    assert "Restored" in (studio.job["message"] or "")
+    assert "RuntimeError" not in (studio.job["message"] or "")
 
 
 def test_show_highlight_recolors_changed_splats(tmp_path, monkeypatch):

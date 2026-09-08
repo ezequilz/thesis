@@ -442,10 +442,15 @@ class RepairStudio:
             return False, "No scene_original.ply yet — run a repair once to snapshot the catalog."
         shutil.copy2(original, repaired)
         logger.info("Reset %s from %s", repaired.name, original.name)
+        note = f"Restored {repaired.name} from original."
         ok, message = self.show(episode_id, "original", force=True)
         if not ok:
-            return True, f"Restored {repaired.name} from original. {message}"
-        return True, f"Restored {repaired.name} from original."
+            note = f"{note} {message}"
+        with self._lock:
+            # Drop the last job's traceback so /repair does not keep showing
+            # a failed LRZ run after the splat has been restored.
+            self.job = {**self._idle_job(episode_id), "message": note}
+        return True, note
 
     def add_view(self, episode_id: str) -> tuple[bool, str, dict]:
         """Capture the live visor camera as a dashboard-only repair view.

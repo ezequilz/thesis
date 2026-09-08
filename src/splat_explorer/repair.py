@@ -167,7 +167,8 @@ def list_repair_backends() -> dict:
                 "available": bool(cuda or lrz_ok),
                 "detail": (
                     f"{cuda_detail}. Paper §3.3 photometric lift: 20 iters, "
-                    "L1+SSIM, clone+split densify, SH DC colors. No color stamp."
+                    "L1+SSIM, SH DC colors. No clone/split densify "
+                    "(that is vis-prune only). No color stamp."
                 ),
             },
             {
@@ -374,6 +375,7 @@ def _build_repair_backend(key: str, *, studio: bool, focused: bool, required: bo
             return LrzRemoteRepair(
                 method=key,
                 max_chunks=_cuda_max_chunks(key, focused=focused),
+                densify=key != "gsfix-gsplat",
             )
         msg = (
             "gsplat CUDA refine is not available in this process "

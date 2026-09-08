@@ -10,7 +10,6 @@ import pytest
 from splat_explorer.repair_gsfix3d import (
     GsplatGsfix3dRepair,
     _viewspace_grad_norm,
-    densify_clone_split,
     instantiate_cuda_repair,
     rgb_to_sh,
     sh_to_rgb,
@@ -66,6 +65,7 @@ def test_instantiate_cuda_repair_dispatches_baseline():
     assert paper.iters == 7
     assert paper.kf_iters == 50
     assert paper.max_chunks == 1
+    assert paper.densify is False
     base = instantiate_cuda_repair(method="gsfix-gsplat-baseline", iters=3)
     assert isinstance(base, GsplatPhotometricRepair)
     assert base.iters == 3
@@ -73,7 +73,10 @@ def test_instantiate_cuda_repair_dispatches_baseline():
     vis = instantiate_cuda_repair(method="gsfix-gsplat-visprune", iters=11)
     assert isinstance(vis, GsplatGsfix3dVisPruneRepair)
     assert vis.iters == 11
+    assert vis.densify is True
     assert vis._result_backend() == "gsfix-gsplat-visprune"
+    forced = instantiate_cuda_repair(method="gsfix-gsplat", densify=True)
+    assert forced.densify is False
     assert not isinstance(paper, GsplatGsfix3dVisPruneRepair)
     assert not hasattr(GsplatGsfix3dRepair, "_setup_anchors")
     assert not hasattr(GsplatGsfix3dRepair, "_updatable_mask")
@@ -84,6 +87,9 @@ def test_instantiate_cuda_repair_dispatches_baseline():
     assert "_setup_anchors" not in paper_src
     assert "_error_mask_prune_tensors" not in paper_src
     assert "_augment_loss" not in paper_src
+    assert "densify_clone_split" not in paper_src
+    from splat_explorer import repair_gsfix3d as paper_mod
+    assert not hasattr(paper_mod, "densify_clone_split")
 
 
 def test_viewspace_grad_norm_unpacked():
@@ -109,29 +115,6 @@ def test_rgb_sh_roundtrip():
     rgb = torch.tensor([[0.2, 0.5, 0.9], [0.0, 1.0, 0.33]])
     out = sh_to_rgb(rgb_to_sh(rgb))
     assert torch.allclose(out, rgb, atol=1e-5)
-
-
-def test_densify_clone_split_small_vs_large():
-    torch = pytest.importorskip("torch")
-    n = 4
-    means = torch.zeros(n, 3, requires_grad=True)
-    quats = torch.tensor([[1.0, 0.0, 0.0, 0.0]] * n, requires_grad=True)
-    f_dc = torch.zeros(n, 3, requires_grad=True)
-    scales = torch.tensor([[0.01, 0.01, 0.01], [0.01, 0.01, 0.01], [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]])
-    log_scales = torch.log(scales).requires_grad_(True)
-    # Paper densify uses ``.repeat(2, 1)``, which expects a trailing dim.
-    logit = torch.zeros(n, 1, requires_grad=True)
-    mag = torch.tensor([1.0, 0.0, 1.0, 0.0])
-    packed = densify_clone_split(
-        torch, means, quats, f_dc, log_scales, logit, mag,
-        thresh=0.5, split_scale=0.1, max_clone=16, max_gaussians=100,
-    )
-    assert packed is not None
-    means2, _, _, _, logit2, n_spawned = packed
-    # clone gaussian 0 (+1) and split gaussian 2 into 2 (+1 net) → 6
-    assert int(means2.shape[0]) == 6
-    assert int(n_spawned) == 2
-    assert logit2.shape == (6, 1)
 
 
 @pytest.mark.skipif(
@@ -163,7 +146,7 @@ def test_gsfix3d_refine_reduces_l1(tmp_path):
     Image.fromarray(np.full((48, 64, 3), 220, np.uint8)).save(tmp_path / "fix.png")
     repairer = SceneRepairer(
         scene,
-        backend=GsplatGsfix3dRepair(iters=8, densify=False),
+        backend=GsplatGsfix3dRepair(iters=8),
     )
     result = repairer.apply_view(
         step=0, camera=camera,

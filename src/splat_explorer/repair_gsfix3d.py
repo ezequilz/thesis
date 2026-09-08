@@ -9,10 +9,12 @@ Per repaired view (``iters=20``, paper default)::
     I_gs = rasterize(gaussians, camera)
     L = 0.8 ||I_fixed - I_gs||_1 + 0.2 (1 - SSIM)
     backward
-    accumulate view-space positional gradients
-    every 5 steps: clone small + split large Gaussians (Kerbl ADC)
-    last iter: prune opacity < 0.005
-    Adam step  (never skipped on densify steps)
+    Adam step
+
+Kerbl clone/split densify is not in this loop. The upstream
+``scripts/gsfix3d/refine_gs.py`` does call ``gaussians.densify`` every 5
+iters; that path lives only on ``GsplatGsfix3dVisPruneRepair``. PLY
+opacities are 1-D, and ``.repeat(2, 1)`` then crashes the paper split.
 
 Colors are optimized as SH DC coefficients (RGB2SH / SH2RGB), matching
 the INRIA ``GaussianModel``, not as raw RGB. That is what stopped the
@@ -84,95 +86,6 @@ def _quat_to_rotmat(quats, torch):
     return rot
 
 
-def densify_clone_split(
-    torch,
-    means,
-    quats,
-    f_dc,
-    log_scales,
-    logit_opacities,
-    grad_norm,
-    *,
-    thresh: float,
-    split_scale: float,
-    max_clone: int,
-    max_gaussians: int,
-):
-    """Kerbl clone (small) + split (large). Returns new params and n_spawned.
-
-    ``grad_norm`` is the accumulated view-space mean |xy-grad| / count,
-    same as ``GaussianModel.densify``. Clone and split masks are disjoint.
-    """
-    n = int(means.shape[0])
-    if n == 0 or n >= int(max_gaussians):
-        return None
-    mag = grad_norm.detach().reshape(n)
-    mag = torch.nan_to_num(mag, nan=0.0)
-    scales = torch.exp(log_scales)
-    max_s = scales.max(dim=-1).values
-    high = mag >= float(thresh)
-    clone_sel = high & (max_s <= float(split_scale))
-    split_sel = high & (max_s > float(split_scale))
-    n_clone = int(clone_sel.sum())
-    n_split = int(split_sel.sum())
-    budget = max(0, int(max_gaussians) - n)
-    if n_clone + n_split == 0 or budget <= 0:
-        return None
-    # Prefer highest-grad when we would exceed max_clone / remaining slots.
-    cap = min(int(max_clone), budget)
-    if n_clone + n_split > cap:
-        idx = torch.topk(mag, k=min(cap, n)).indices
-        pick = torch.zeros_like(high)
-        pick[idx] = True
-        clone_sel = clone_sel & pick
-        split_sel = split_sel & pick
-        n_clone = int(clone_sel.sum())
-        n_split = int(split_sel.sum())
-        if n_clone + n_split == 0:
-            return None
-
-    parts_means = [means[~split_sel].detach()]
-    parts_quats = [quats[~split_sel].detach()]
-    parts_dc = [f_dc[~split_sel].detach()]
-    parts_log = [log_scales[~split_sel].detach()]
-    parts_op = [logit_opacities[~split_sel].detach()]
-    n_spawned = 0
-
-    if n_clone:
-        parts_means.append(means[clone_sel].detach())
-        parts_quats.append(quats[clone_sel].detach())
-        parts_dc.append(f_dc[clone_sel].detach())
-        parts_log.append(log_scales[clone_sel].detach())
-        parts_op.append(logit_opacities[clone_sel].detach())
-        n_spawned += n_clone
-
-    if n_split:
-        stds = scales[split_sel].repeat(_SPLIT_N, 1)
-        samples = torch.normal(mean=torch.zeros_like(stds), std=stds)
-        rots = _quat_to_rotmat(torch.nn.functional.normalize(quats[split_sel], dim=-1), torch)
-        rots = rots.repeat(_SPLIT_N, 1, 1)
-        new_means = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + means[split_sel].repeat(_SPLIT_N, 1)
-        new_scales = scales[split_sel].repeat(_SPLIT_N, 1) / _SPLIT_SCALE_DIV
-        parts_means.append(new_means.detach())
-        parts_quats.append(quats[split_sel].detach().repeat(_SPLIT_N, 1))
-        parts_dc.append(f_dc[split_sel].detach().repeat(_SPLIT_N, 1))
-        parts_log.append(torch.log(torch.clamp(new_scales, min=1e-8)).detach())
-        parts_op.append(logit_opacities[split_sel].detach().repeat(_SPLIT_N, 1))
-        n_spawned += n_split * _SPLIT_N - n_split  # net: each split becomes 2
-
-    def _cat(chunks):
-        return torch.cat(chunks, dim=0).detach().requires_grad_(True)
-
-    return (
-        _cat(parts_means),
-        _cat(parts_quats),
-        _cat(parts_dc),
-        _cat(parts_log),
-        _cat(parts_op),
-        n_spawned,
-    )
-
-
 def _viewspace_grad_norm(means2d, n_gaussians, torch):
     if means2d is None:
         return None
@@ -195,14 +108,16 @@ class GsplatGsfix3dRepair:
 
     Add fields / override ``apply`` in a subclass when testing a new
     method, and register it in ``repair.CUDA_REPAIR_METHODS``.
-    Experimental extras live only on ``GsplatGsfix3dVisPruneRepair``
-    (``gsfix-gsplat-visprune``) — do not add hooks here.
+    Experimental extras (including Kerbl densify) live only on
+    ``GsplatGsfix3dVisPruneRepair`` (``gsfix-gsplat-visprune``) — do not
+    add hooks here. ``densify`` defaults off so an LRZ params dump cannot
+    re-enable clone/split on this class.
     """
 
     iters: int = 20
     kf_iters: int = 50
     lambda_dssim: float = _LAMBDA_DSSIM
-    densify: bool = True
+    densify: bool = False
     densify_every: int = 5
     densify_grad_thresh: float = 0.0002
     prune_opacity: float = 0.005
@@ -386,9 +301,6 @@ class GsplatGsfix3dRepair:
         K = torch.from_numpy(np.asarray(camera.intrinsics, dtype=np.float32)).to(device).unsqueeze(0)
         bg = _BACKGROUND_WHITE if self.white_background else _BACKGROUND_BLACK
         background = torch.tensor(bg, device=device)
-        n_spawned = 0
-        xyz_grad_accum = torch.zeros(means.shape[0], device=device)
-        xyz_grad_denom = torch.zeros(means.shape[0], device=device)
 
         def make_opt():
             return torch.optim.Adam(
@@ -435,46 +347,11 @@ class GsplatGsfix3dRepair:
                     if r.shape[0] == vis.shape[0]:
                         vis = vis & (r > 0)
                 n_visible = int(vis.sum()) if vis.any() else int(means.shape[0])
-                xyz_grad_accum = xyz_grad_accum + vis_norm
-                xyz_grad_denom = xyz_grad_denom + vis.to(xyz_grad_accum.dtype)
 
-            # Adam on this iteration's graph, then densify. Recreating the
-            # optimizer before step() would drop .grad (unlike INRIA's cat).
             opt.step()
             opt.zero_grad(set_to_none=True)
             with torch.no_grad():
                 quats.copy_(torch.nn.functional.normalize(quats, dim=-1))
-
-            last_iter = it == int(self.iters) - 1
-            if (
-                self.densify
-                and (it + 1) % int(self.densify_every) == 0
-                and not last_iter
-                and means.shape[0] < int(self.max_gaussians)
-            ):
-                avg = xyz_grad_accum / xyz_grad_denom.clamp(min=1.0)
-                packed = densify_clone_split(
-                    torch, means, quats, f_dc, log_scales, logit_opacities, avg,
-                    thresh=self.densify_grad_thresh,
-                    split_scale=self.split_scale,
-                    max_clone=self.max_clone,
-                    max_gaussians=self.max_gaussians,
-                )
-                if packed is not None:
-                    means, quats, f_dc, log_scales, logit_opacities, n_new = packed
-                    n_spawned += n_new
-                    xyz_grad_accum = torch.zeros(means.shape[0], device=device)
-                    xyz_grad_denom = torch.zeros(means.shape[0], device=device)
-                    opt = make_opt()
-
-            if last_iter and self.densify and means.shape[0] > 32:
-                with torch.no_grad():
-                    keep = torch.sigmoid(logit_opacities) > float(self.prune_opacity)
-                    if int(keep.sum()) >= 32 and int((~keep).sum()) > 0:
-                        means, quats, f_dc, log_scales, logit_opacities = (
-                            means[keep], quats[keep], f_dc[keep],
-                            log_scales[keep], logit_opacities[keep],
-                        )
 
             if self.on_progress is not None:
                 self.on_progress({
@@ -483,7 +360,7 @@ class GsplatGsfix3dRepair:
                     "n_iters": it + 1,
                     "n_updated": int(means.shape[0]),
                     "n_gaussians": int(means.shape[0]),
-                    "n_spawned": int(n_spawned),
+                    "n_spawned": 0,
                     "n_stamped": 0,
                     "n_visible": int(n_visible),
                     "l1_before": round(l1_before, 6),
@@ -510,15 +387,15 @@ class GsplatGsfix3dRepair:
 
         n1 = scene.num_gaussians
         logger.info(
-            "GSFix3D refine: %d iters, L1 %.4f -> %.4f, %d -> %d gaussians (+%d)",
-            self.iters, l1_before, l1_after, n0, n1, n_spawned,
+            "GSFix3D refine: %d iters, L1 %.4f -> %.4f, %d -> %d gaussians",
+            self.iters, l1_before, l1_after, n0, n1,
         )
         return {
             "backend": BACKEND_ID,
             "n_visible": int(n_visible),
             "n_updated": n1,
             "n_stamped": 0,
-            "n_spawned": int(max(0, n1 - n0) if n_spawned == 0 else n_spawned),
+            "n_spawned": 0,
             "n_gaussians": n1,
             "n_iters": int(self.iters),
             "l1_before": round(l1_before, 6),
@@ -545,4 +422,6 @@ def instantiate_cuda_repair(params: dict | None = None, **overrides):
     skip = {"on_progress"}
     allowed = {f.name for f in fields(cls) if f.name not in skip}
     kwargs = {k: body[k] for k in allowed if k in body}
+    if cls is GsplatGsfix3dRepair:
+        kwargs.pop("densify", None)
     return cls(**kwargs)

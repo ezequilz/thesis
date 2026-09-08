@@ -210,7 +210,7 @@ works on this machine:
 
 | Backend | What it does | Requirements |
 |---------|--------------|--------------|
-| `gsfix-gsplat` | Paper GSFix3D photometric refine (20 iters, L1+SSIM, clone+split, SH DC; no color stamp) | NVIDIA GPU, `pip install -e ".[gpu]"` |
+| `gsfix-gsplat` | Paper GSFix3D photometric refine (20 iters, L1+SSIM, SH DC; no clone/split, no color stamp) | NVIDIA GPU, `pip install -e ".[gpu]"` |
 | `gsfix-gsplat-baseline` | Frozen pre-paper CUDA lift (uncapped RGB). A/B only | same |
 | `gsplat-mlx` | Same refine loop on Apple Silicon via [gsplat-mlx](https://github.com/RobotFlow-Labs/gsplat-mlx) (Metal, no CUDA) | M1/M2/M3/M4, `pip install -e ".[apple]"` |
 | `cpu-project` | Color stamp at existing depths (no backprop) | none (default fallback) |
