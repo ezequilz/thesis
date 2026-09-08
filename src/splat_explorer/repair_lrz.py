@@ -17,6 +17,7 @@ import io
 import json
 import logging
 import os
+import re
 import shlex
 import stat
 import subprocess
@@ -59,6 +60,14 @@ _DEFAULTS = {
     "mem": "32G",
     "container_name": "splat-repair",
 }
+
+# Both A100 partitions: HGX-only sat in PD (Priority) while a DGX A100 was free.
+DEFAULT_PARTITION = "lrz-hgx-a100-80x4,lrz-dgx-a100-80x8"
+REVIEW_PARTITIONS = (
+    "lrz-v100x2,lrz-hgx-a100-80x4,lrz-dgx-a100-80x8,lrz-hgx-h100-94x4"
+)
+HOLD_HOURS = (8, 24)
+HOLD_SECONDS = {8: 8 * 3600, 24: 24 * 3600}
 
 
 def set_ssh_password(password: str | None) -> None:
@@ -193,8 +202,121 @@ def lrz_status() -> dict[str, Any]:
         "control_socket_exists": sock.exists(),
         "session_script": "scripts/lrz/ssh-session.sh",
         "run_script": "scripts/lrz/run-repair.sh",
+        "allocate_script": "scripts/lrz/allocate.sh",
+        "gpu_shell_script": "scripts/lrz/gpu-shell.sh",
+        "status_script": "scripts/lrz/status.sh",
         "gpu_url": "/repair/gpu",
+        "partition": os.environ.get("LRZ_PARTITION") or DEFAULT_PARTITION,
+        "hold_hours": list(HOLD_HOURS),
     }
+
+
+def lrz_scripts(hours: int = 8, *, after: bool = False) -> dict[str, str]:
+    hours = normalize_hold_hours(hours)
+    alloc = f"scripts/lrz/allocate.sh {hours}h"
+    if after:
+        alloc += " --after"
+    return {
+        "session": "scripts/lrz/ssh-session.sh",
+        "allocate": alloc,
+        "allocate_8h": "scripts/lrz/allocate.sh 8h",
+        "allocate_24h": "scripts/lrz/allocate.sh 24h",
+        "allocate_after": f"scripts/lrz/allocate.sh {hours}h --after",
+        "widen": "scripts/lrz/allocate.sh --widen",
+        "status": "scripts/lrz/status.sh",
+        "status_sinfo": "scripts/lrz/status.sh --sinfo",
+        "gpu_shell": "scripts/lrz/gpu-shell.sh",
+        "bootstrap": "scripts/lrz/bootstrap.sh",
+        "run": "scripts/lrz/run-repair.sh",
+    }
+
+
+def normalize_hold_hours(hours: int | str) -> int:
+    raw = str(hours).strip().lower().rstrip("h")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("Hold duration must be 8h or 24h.") from exc
+    if value not in HOLD_SECONDS:
+        raise ValueError("Hold duration must be 8h or 24h.")
+    return value
+
+
+def slurm_time_limit(hours: int | str) -> str:
+    return f"{normalize_hold_hours(hours):02d}:00:00"
+
+
+def sbatch_hold_command(
+    hours: int | str = 8,
+    *,
+    partition: str | None = None,
+    job_name: str | None = None,
+    after_job: str | None = None,
+    cpus: int = 4,
+    mem: str = "32G",
+    gres: str = "gpu:1",
+) -> str:
+    """One sleep hold job. Does not wait in the queue."""
+    hours = normalize_hold_hours(hours)
+    partition = (partition or os.environ.get("LRZ_PARTITION") or DEFAULT_PARTITION).strip()
+    name = job_name or f"gs-{hours}h"
+    parts = [
+        "sbatch",
+        f"--job-name={name}",
+        f"--partition={partition}",
+        "--nodes=1",
+        "--ntasks=1",
+        f"--gres={gres}",
+        f"--cpus-per-task={int(cpus)}",
+        f"--mem={mem}",
+        f"--time={slurm_time_limit(hours)}",
+        f"--output={name}-%j.log",
+    ]
+    if after_job:
+        job = str(after_job).strip()
+        if not job.isdigit():
+            raise ValueError("after_job must be a numeric Slurm id.")
+        parts.append(f"--dependency=afterany:{job}")
+    parts.append(f"--wrap='sleep {HOLD_SECONDS[hours]}'")
+    return " ".join(parts)
+
+
+def parse_sbatch_output(text: str) -> str:
+    match = re.search(r"Submitted batch job\s+(\d+)", text or "")
+    if not match:
+        raise RuntimeError((text or "").strip() or "sbatch produced no job id.")
+    return match.group(1)
+
+
+def lrz_local_config_path() -> Path:
+    cwd = Path.cwd() / "configs" / "lrz.local.yaml"
+    pkg = Path(__file__).resolve().parents[2] / "configs" / "lrz.local.yaml"
+    if cwd.is_file():
+        return cwd
+    if pkg.is_file():
+        return pkg
+    return cwd
+
+
+def write_lrz_job_id(job_id: str, path: Path | None = None) -> Path:
+    """Rewrite ``job_id`` in configs/lrz.local.yaml. Password is never written."""
+    job_id = str(job_id).strip()
+    if not job_id.isdigit():
+        raise ValueError("job_id must be a numeric Slurm id.")
+    path = Path(path) if path is not None else lrz_local_config_path()
+    if not path.is_file():
+        raise RuntimeError(
+            f"{path} is missing. Copy configs/lrz.example.yaml to configs/lrz.local.yaml first."
+        )
+    text = path.read_text()
+    replacement = f'job_id: "{job_id}"'
+    new, n = re.subn(r"(?m)^job_id:\s*.*$", replacement, text, count=1)
+    if n != 1:
+        if not text.endswith("\n"):
+            text += "\n"
+        new = text + replacement + "\n"
+    path.write_text(new)
+    return path
 
 
 def jobs_root() -> Path:
@@ -386,7 +508,7 @@ def job_results_ready(job_dir: Path) -> bool:
     return (job_dir / OUT_PLY).is_file() and (job_dir / METRICS_JSON).is_file()
 
 
-PROBE_TTL_S = 25.0  # LRZ treats automated squeue loops as a DoS.
+PROBE_TTL_S = 30.0  # LRZ treats automated squeue loops as a DoS.
 PROBE_TIMEOUT_S = 25.0
 SMI_TIMEOUT_S = 35.0
 _SMI_FIELDS = (
@@ -401,21 +523,28 @@ _PROBE = {
     "error": None,
     "inflight": False,
 }
+_SINFO = {
+    "lock": threading.Lock(),
+    "at": 0.0,
+    "body": None,
+    "error": None,
+}
+_ALLOCATE = {"lock": threading.Lock(), "inflight": False}
 
 
 def parse_squeue_line(line: str) -> dict | None:
-    """Parse `squeue -o '%i|%t|%P|%N|%M|%l|%r'`."""
+    """Parse `squeue -o '%i|%t|%P|%N|%M|%l|%r'` or with optional `|%j` name."""
     text = (line or "").strip()
     if not text:
         return None
     row = text.splitlines()[0].strip()
-    if not row or row.startswith("squeue"):
+    if not row or row.lower().startswith("squeue") or row.lower().startswith("jobid"):
         return None
     parts = [p.strip() for p in row.split("|")]
     while len(parts) < 7:
         parts.append("")
     reason = parts[6] if parts[6] not in ("", "None", "N/A") else None
-    return {
+    body = {
         "job_id": parts[0],
         "state": parts[1],
         "partition": parts[2],
@@ -423,7 +552,76 @@ def parse_squeue_line(line: str) -> dict | None:
         "elapsed": parts[4],
         "timelimit": parts[5],
         "reason": reason,
+        "name": parts[7] if len(parts) > 7 and parts[7] else None,
+        "current": False,
     }
+    if not body["job_id"] or not body["job_id"].isdigit():
+        return None
+    return body
+
+
+def parse_squeue_lines(text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for line in (text or "").splitlines():
+        row = parse_squeue_line(line)
+        if row is None or row["job_id"] in seen:
+            continue
+        seen.add(row["job_id"])
+        rows.append(row)
+    return rows
+
+
+def select_slurm_job(jobs: list[dict[str, Any]], job_id: str) -> dict | None:
+    wanted = str(job_id or "").strip()
+    if wanted.isdigit():
+        for row in jobs:
+            if row.get("job_id") == wanted:
+                marked = dict(row)
+                marked["current"] = True
+                return marked
+        return None
+    running = [row for row in jobs if row.get("state") == "R"]
+    if len(running) == 1:
+        marked = dict(running[0])
+        marked["current"] = False
+        return marked
+    return None
+
+
+def parse_sinfo_lines(text: str) -> list[dict[str, Any]]:
+    """Parse `sinfo -h -o '%P|%a|%l|%D|%T|%N'`."""
+    rows: list[dict[str, Any]] = []
+    for line in (text or "").splitlines():
+        raw = line.strip()
+        if not raw or raw.lower().startswith("partition") or raw.lower().startswith("sinfo"):
+            continue
+        parts = [p.strip() for p in raw.split("|")]
+        if len(parts) < 6:
+            continue
+        nodes_raw = parts[3]
+        rows.append({
+            "partition": parts[0].rstrip("*"),
+            "avail": parts[1],
+            "timelimit": parts[2],
+            "nodes": int(nodes_raw) if nodes_raw.isdigit() else nodes_raw,
+            "state": parts[4],
+            "nodelist": parts[5],
+        })
+    return rows
+
+
+def sinfo_command(partitions: str | None = None) -> str:
+    parts = (partitions or REVIEW_PARTITIONS).strip()
+    return f"sinfo -p {parts} -h -o '%P|%a|%l|%D|%T|%N'"
+
+
+def widen_command(job_id: str, partition: str | None = None) -> str:
+    job = str(job_id).strip()
+    if not job.isdigit():
+        raise ValueError("job_id must be a numeric Slurm id.")
+    part = (partition or os.environ.get("LRZ_PARTITION") or DEFAULT_PARTITION).strip()
+    return f"scontrol update JobId={job} Partition={part}"
 
 
 def parse_nvidia_smi_csv(text: str) -> list[dict]:
@@ -452,6 +650,9 @@ def parse_nvidia_smi_csv(text: str) -> list[dict]:
         used = body.get("memory_used_mib") or 0
         if isinstance(total, (int, float)) and total:
             body["memory_pct"] = round(100.0 * float(used) / float(total), 1)
+            body["memory_free_mib"] = max(0.0, float(total) - float(used or 0))
+        else:
+            body["memory_free_mib"] = None
         gpus.append(body)
     return gpus
 
@@ -543,7 +744,7 @@ def build_connection_checks(
         checks.append({
             "id": "config", "ok": False, "label": "LRZ config",
             "detail": "No running sbatch id in configs/lrz.local.yaml.",
-            "action": "Run scripts/lrz/allocate.sh (or paste the current sbatch id into job_id).",
+            "action": "Reserve 8h or 24h from /repair/gpu (or scripts/lrz/allocate.sh 8h).",
         })
     if session:
         checks.append({
@@ -576,10 +777,11 @@ def build_connection_checks(
         reason = slurm.get("reason")
         extra = f" ({reason})" if reason else ""
         action = (
-            "Job is pending. On the login node, once: "
-            f"scontrol update JobId={job_id} Partition=lrz-hgx-a100-80x4,lrz-dgx-a100-80x8"
+            "Job is pending. Widen A100 partitions once "
+            f"(scripts/lrz/allocate.sh --widen, or scontrol update JobId={job_id} "
+            f"Partition={DEFAULT_PARTITION})."
             if state == "PD" else
-            "Allocate a new GPU with scripts/lrz/allocate.sh and update job_id."
+            "Reserve a new 8h or 24h GPU from /repair/gpu (or scripts/lrz/allocate.sh 8h)."
         )
         checks.append({
             "id": "slurm", "ok": False, "label": "Slurm job",
@@ -590,7 +792,7 @@ def build_connection_checks(
         checks.append({
             "id": "slurm", "ok": False, "label": "Slurm job",
             "detail": f"Job {job_id} is not in the queue (expired or wrong id).",
-            "action": "The 6h hold job ended. Run scripts/lrz/allocate.sh and update job_id.",
+            "action": "The GPU hold job ended. Reserve 8h or 24h from /repair/gpu (or scripts/lrz/allocate.sh 8h).",
         })
 
     if not probed:
@@ -614,7 +816,9 @@ def build_connection_checks(
             "action": (
                 "On the GPU node (scripts/lrz/gpu-shell.sh): "
                 "enroot import -o containers/pytorch.sqsh "
-                "docker://pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel"
+                "docker://pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel "
+                "(or NGC with # : docker://nvcr.io#nvidia/pytorch:24.10-py3). "
+                "See scripts/lrz/bootstrap.sh."
             ),
         })
 
@@ -667,7 +871,6 @@ def _ssh_run(cfg: dict, remote: str, *, timeout: float = PROBE_TIMEOUT_S) -> sub
 
 
 def _login_probe_script(cfg: dict, packed_id: str | None) -> str:
-    job = shlex.quote(str(cfg["job_id"]))
     container = shlex.quote(str(cfg.get("container") or "/nonexistent"))
     workspace = shlex.quote(str(cfg["workspace"]))
     if packed_id:
@@ -677,7 +880,7 @@ def _login_probe_script(cfg: dict, packed_id: str | None) -> str:
         status_block = "echo NONE"
     return (
         "echo SQUEUE\n"
-        f"squeue --me --job={job} -h -o '%i|%t|%P|%N|%M|%l|%r' || true\n"
+        "squeue --me -h -o '%i|%t|%P|%N|%M|%l|%r|%j' || true\n"
         "echo CONTAINER\n"
         f"if [ -f {container} ]; then echo OK $(stat -c%s {container}); else echo MISSING; fi\n"
         "echo NGC\n"
@@ -704,10 +907,8 @@ def nvidia_smi_command(cfg: dict) -> str:
 
 
 def probe_lrz_gpu(cfg: dict | None = None, *, packed_id: str | None = None) -> dict[str, Any]:
-    """One SSH login probe (includes one squeue) plus nvidia-smi if the job is R."""
+    """One SSH login probe (includes one squeue --me) plus nvidia-smi if the job is R."""
     cfg = cfg or load_lrz_config()
-    if not str(cfg.get("job_id") or "").isdigit():
-        raise RuntimeError("No LRZ job id in configs/lrz.local.yaml.")
     if not lrz_session_alive(cfg):
         raise RuntimeError(session_required_message())
     result = _ssh_run(cfg, _login_probe_script(cfg, packed_id), timeout=PROBE_TIMEOUT_S)
@@ -715,7 +916,10 @@ def probe_lrz_gpu(cfg: dict | None = None, *, packed_id: str | None = None) -> d
         err = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(err or "LRZ login probe failed.")
     parsed = parse_probe_bundle(result.stdout or "")
-    slurm = parse_squeue_line(parsed.get("squeue") or "")
+    jobs = parse_squeue_lines(parsed.get("squeue") or "")
+    slurm = select_slurm_job(jobs, str(cfg.get("job_id") or ""))
+    for row in jobs:
+        row["current"] = bool(slurm and row.get("job_id") == slurm.get("job_id") and slurm.get("current"))
     container_raw = (parsed.get("container") or "").strip()
     size = None
     parts = container_raw.split()
@@ -736,12 +940,15 @@ def probe_lrz_gpu(cfg: dict | None = None, *, packed_id: str | None = None) -> d
             remote_status = {"raw": status_raw[:500]}
     gpu_body: dict[str, Any] | None = None
     gpu_error = None
-    if slurm and slurm.get("state") == "R":
-        smi = _ssh_run(cfg, nvidia_smi_command(cfg), timeout=SMI_TIMEOUT_S)
+    smi_job = (slurm or {}).get("job_id") if slurm and slurm.get("state") == "R" else None
+    if smi_job:
+        smi_cfg = dict(cfg)
+        smi_cfg["job_id"] = smi_job
+        smi = _ssh_run(cfg, nvidia_smi_command(smi_cfg), timeout=SMI_TIMEOUT_S)
         if smi.returncode == 0:
             gpu_body = {
                 "gpus": parse_nvidia_smi_csv(smi.stdout or ""),
-                "node": slurm.get("node"),
+                "node": slurm.get("node") if slurm else None,
             }
             if not gpu_body["gpus"]:
                 gpu_error = (smi.stdout or smi.stderr or "empty nvidia-smi").strip()[:400]
@@ -749,6 +956,7 @@ def probe_lrz_gpu(cfg: dict | None = None, *, packed_id: str | None = None) -> d
             gpu_error = (smi.stderr or smi.stdout or "nvidia-smi via srun failed").strip()[:400]
     return {
         "slurm": slurm,
+        "jobs": jobs,
         "container": container,
         "ngc": (parsed.get("ngc") or "").strip() == "OK",
         "workspace_ok": (parsed.get("workspace") or "").strip() == "OK",
@@ -763,8 +971,6 @@ def request_gpu_probe(*, force: bool = False, packed_id: str | None = None) -> d
     cfg = load_lrz_config()
     if not lrz_session_alive(cfg):
         return {"started": False, "reason": "ssh"}
-    if not str(cfg.get("job_id") or "").isdigit():
-        return {"started": False, "reason": "config"}
     now = time.time()
     with _PROBE["lock"]:
         if _PROBE["inflight"]:
@@ -806,6 +1012,162 @@ def reset_gpu_probe_cache() -> None:
         _PROBE["body"] = None
         _PROBE["error"] = None
         _PROBE["inflight"] = False
+    with _SINFO["lock"]:
+        _SINFO["at"] = 0.0
+        _SINFO["body"] = None
+        _SINFO["error"] = None
+
+
+def _resolve_after_job(cfg: dict, after: bool | str | None) -> str | None:
+    if after in (None, False, "", 0):
+        return None
+    if after is True:
+        job = str(cfg.get("job_id") or "").strip()
+        if not job.isdigit():
+            raise RuntimeError("No current job_id to chain after. Reserve without --after, or pass a job id.")
+        return job
+    job = str(after).strip()
+    if not job.isdigit():
+        raise ValueError("after must be a numeric Slurm job id.")
+    return job
+
+
+def allocate_lrz_gpu(
+    hours: int | str = 8,
+    *,
+    after: bool | str | None = False,
+    switch: bool | None = None,
+    cfg: dict | None = None,
+) -> dict[str, Any]:
+    """Submit one sleep hold job. Never waits on the queue."""
+    hours = normalize_hold_hours(hours)
+    cfg = cfg or load_lrz_config()
+    if not cfg.get("user") or not cfg.get("host"):
+        raise RuntimeError("Set user/host in configs/lrz.local.yaml first.")
+    if not lrz_session_alive(cfg):
+        raise RuntimeError(session_required_message())
+    after_job = _resolve_after_job(cfg, after)
+    if switch is None:
+        switch = after_job is None
+    command = sbatch_hold_command(
+        hours,
+        partition=os.environ.get("LRZ_PARTITION") or DEFAULT_PARTITION,
+        after_job=after_job,
+        cpus=int(cfg.get("cpus") or 4),
+        mem=str(cfg.get("mem") or "32G"),
+    )
+    with _ALLOCATE["lock"]:
+        if _ALLOCATE["inflight"]:
+            raise RuntimeError("An allocation is already in flight.")
+        _ALLOCATE["inflight"] = True
+    try:
+        result = _ssh_run(cfg, command, timeout=PROBE_TIMEOUT_S)
+        output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+        if result.returncode != 0:
+            raise RuntimeError(output or "sbatch failed.")
+        job_id = parse_sbatch_output(output)
+        switched = False
+        if switch:
+            write_lrz_job_id(job_id)
+            switched = True
+            reset_gpu_probe_cache()
+        if after_job:
+            message = (
+                f"Queued job {job_id} ({hours}h) after {after_job}. "
+                "When it is R, click Use on that row (or scripts/lrz/allocate.sh --use "
+                f"{job_id}) and reconnect: scripts/lrz/gpu-shell.sh"
+            )
+        else:
+            message = (
+                f"Submitted job {job_id} ({hours}h sleep hold). "
+                "One squeue --me to confirm; do not loop. If PD (Priority), widen partitions. "
+                "Then scripts/lrz/gpu-shell.sh"
+            )
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "hours": hours,
+            "after_job": after_job,
+            "switched": switched,
+            "command": command,
+            "stdout": output,
+            "message": message,
+        }
+    finally:
+        with _ALLOCATE["lock"]:
+            _ALLOCATE["inflight"] = False
+
+
+def use_lrz_job(job_id: str) -> dict[str, Any]:
+    path = write_lrz_job_id(job_id)
+    reset_gpu_probe_cache()
+    return {
+        "ok": True,
+        "job_id": str(job_id).strip(),
+        "path": str(path),
+        "message": f"Now using job {job_id}. Probe GPU, then scripts/lrz/gpu-shell.sh",
+    }
+
+
+def widen_lrz_job(job_id: str | None = None, *, cfg: dict | None = None) -> dict[str, Any]:
+    """One scontrol to add both A100 partitions. Not a loop."""
+    cfg = cfg or load_lrz_config()
+    if not lrz_session_alive(cfg):
+        raise RuntimeError(session_required_message())
+    job = str(job_id or cfg.get("job_id") or "").strip()
+    command = widen_command(job)
+    result = _ssh_run(cfg, command, timeout=PROBE_TIMEOUT_S)
+    output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+    if result.returncode != 0:
+        raise RuntimeError(output or "scontrol update failed.")
+    reset_gpu_probe_cache()
+    return {
+        "ok": True,
+        "job_id": job,
+        "command": command,
+        "stdout": output,
+        "message": f"Updated job {job} to {DEFAULT_PARTITION}. Probe once — do not loop squeue.",
+    }
+
+
+def review_lrz_partitions(*, force: bool = False, cfg: dict | None = None) -> dict[str, Any]:
+    """One sinfo call. Cached; never polled in a loop."""
+    cfg = cfg or load_lrz_config()
+    if not lrz_session_alive(cfg):
+        raise RuntimeError(session_required_message())
+    now = time.time()
+    with _SINFO["lock"]:
+        age = now - float(_SINFO["at"] or 0)
+        if not force and _SINFO["body"] is not None and age < 60:
+            return {
+                "ok": True,
+                "partitions": _SINFO["body"],
+                "cached": True,
+                "age_s": round(age, 1),
+                "message": "Using cached sinfo (LRZ forbids sinfo loops).",
+            }
+    command = sinfo_command()
+    result = _ssh_run(cfg, command, timeout=PROBE_TIMEOUT_S)
+    output = (result.stdout or "").strip()
+    err = (result.stderr or "").strip()
+    if result.returncode != 0:
+        message = err or output or "sinfo failed."
+        with _SINFO["lock"]:
+            _SINFO["at"] = time.time()
+            _SINFO["error"] = message
+        raise RuntimeError(message)
+    rows = parse_sinfo_lines(output)
+    with _SINFO["lock"]:
+        _SINFO["at"] = time.time()
+        _SINFO["body"] = rows
+        _SINFO["error"] = None
+    return {
+        "ok": True,
+        "partitions": rows,
+        "cached": False,
+        "command": command,
+        "message": "One sinfo snapshot. MIXED nodes may still have a free GPU.",
+    }
 
 
 def lrz_dashboard_snapshot(
@@ -827,7 +1189,6 @@ def lrz_dashboard_snapshot(
         probed_at = float(_PROBE["at"] or 0)
     if (
         status["session"]
-        and status["configured"]
         and cached is None
         and not inflight
         and not error
@@ -839,6 +1200,7 @@ def lrz_dashboard_snapshot(
             error = _PROBE["error"]
             probed_at = float(_PROBE["at"] or 0)
     slurm = (cached or {}).get("slurm")
+    jobs = list((cached or {}).get("jobs") or [])
     container = (cached or {}).get("container")
     gpu = (cached or {}).get("gpu")
     gpu_error = (cached or {}).get("gpu_error") or error
@@ -858,18 +1220,31 @@ def lrz_dashboard_snapshot(
         if c["id"] in ("config", "ssh", "slurm", "container")
     )
     latest = packed[0] if packed else None
+    gpus = (gpu or {}).get("gpus") if isinstance(gpu, dict) else None
+    free_mib = None
+    if isinstance(gpus, list) and gpus:
+        free_mib = gpus[0].get("memory_free_mib")
+    with _SINFO["lock"]:
+        partitions = _SINFO["body"]
+        partitions_at = float(_SINFO["at"] or 0)
+        partitions_error = _SINFO["error"]
     return {
         "connection": status,
         "checks": checks,
         "ready": ready,
         "next_action": next_action_from_checks(checks),
         "slurm": slurm,
+        "jobs": jobs,
+        "partitions": partitions,
+        "partitions_age_s": round(time.time() - partitions_at, 1) if partitions_at else None,
+        "partitions_error": partitions_error,
         "container": container,
         "ngc": (cached or {}).get("ngc"),
         "workspace_ok": (cached or {}).get("workspace_ok"),
-        "gpu": (gpu or {}).get("gpus") if isinstance(gpu, dict) else None,
+        "gpu": gpus,
         "gpu_node": (gpu or {}).get("node") if isinstance(gpu, dict) else (slurm or {}).get("node"),
         "gpu_error": gpu_error,
+        "gpu_free_mib": free_mib,
         "remote_status": (cached or {}).get("remote_status"),
         "repair": repair_job,
         "packed_jobs": packed,
@@ -877,7 +1252,10 @@ def lrz_dashboard_snapshot(
         "probing": inflight,
         "probed_at": probed_at or None,
         "probe_age_s": round(time.time() - probed_at, 1) if probed_at else None,
-        "hint": "Slurm is queried at most once per 25s — LRZ forbids squeue loops.",
+        "scripts": lrz_scripts(),
+        "hold_hours": list(HOLD_HOURS),
+        "partition": status.get("partition") or DEFAULT_PARTITION,
+        "hint": "Slurm is queried at most once per 25s — LRZ forbids squeue loops. sinfo only on Review partitions.",
     }
 
 

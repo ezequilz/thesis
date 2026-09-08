@@ -3,11 +3,21 @@
 # the sbatch hold job is `sleep` and already occupies the allocation.
 #
 #   scripts/lrz/gpu-shell.sh
+#   scripts/lrz/gpu-shell.sh 5777469
 set -euo pipefail
 # shellcheck source=env.sh
 source "$(cd "$(dirname "$0")" && pwd)/env.sh"
 cd "$LRZ_ROOT"
 lrz_load_config
+
+if [ "${1:-}" != "" ]; then
+  if [[ "$1" =~ ^[0-9]+$ ]]; then
+    LRZ_JOB_ID="$1"
+  else
+    echo "Usage: scripts/lrz/gpu-shell.sh [job-id]"
+    exit 2
+  fi
+fi
 lrz_require_job
 
 if ! lrz_mux_alive; then

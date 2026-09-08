@@ -11,8 +11,8 @@
 # Do NOT use -fN here — that backgrounds ssh and breaks the password prompt
 # in Cursor's terminal (Permission denied even with the right password).
 #
-# Requires eduVPN. Does not allocate a GPU — that is still a manual sbatch
-# (scripts/lrz/allocate.sh). Full handover: docs/lrz.md.
+# Requires eduVPN. Does not allocate a GPU — that is scripts/lrz/allocate.sh
+# (8h or 24h) or the Reserve button on http://localhost:8090/repair/gpu.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
