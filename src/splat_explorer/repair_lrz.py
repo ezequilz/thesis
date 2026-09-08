@@ -12,6 +12,8 @@ The A100 worker is :func:`apply_packed_job` (``python -m splat_explorer.repair_l
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import logging
 import os
@@ -172,18 +174,26 @@ def session_required_message() -> str:
 
 def lrz_status() -> dict[str, Any]:
     cfg = load_lrz_config()
-    alive = lrz_session_alive(cfg) if lrz_configured() else False
+    configured = lrz_configured()
+    can_ssh = bool(cfg["user"] and cfg["host"])
+    alive = lrz_session_alive(cfg) if can_ssh else False
+    sock = control_path()
     return {
-        "configured": lrz_configured(),
+        "configured": configured,
         "session": alive,
         "user": cfg["user"],
         "host": cfg["host"],
         "job_id": cfg["job_id"],
         "workspace": cfg["workspace"],
         "container": cfg.get("container"),
-        "control_path": str(control_path()),
+        "cpus": cfg.get("cpus"),
+        "mem": cfg.get("mem"),
+        "container_name": cfg.get("container_name"),
+        "control_path": str(sock),
+        "control_socket_exists": sock.exists(),
         "session_script": "scripts/lrz/ssh-session.sh",
         "run_script": "scripts/lrz/run-repair.sh",
+        "gpu_url": "/repair/gpu",
     }
 
 
@@ -273,6 +283,23 @@ def pack_refine_job(
     return job_dir
 
 
+def _jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    try:
+        if isinstance(value, np.generic):
+            return value.item()
+    except Exception:
+        pass
+    return str(value)
+
+
 def apply_packed_job(job_dir: Path, backend=None) -> dict[str, Any]:
     """CUDA (or injected) refine inside a packed job directory. Mutates scene on disk."""
     job_dir = Path(job_dir)
@@ -281,6 +308,12 @@ def apply_packed_job(job_dir: Path, backend=None) -> dict[str, Any]:
     scene = load_ply(job_dir / SCENE_PLY)
     rendered = np.asarray(Image.open(job_dir / RENDERED_PNG).convert("RGB"), dtype=np.uint8)
     repaired = np.asarray(Image.open(job_dir / REPAIRED_PNG).convert("RGB"), dtype=np.uint8)
+    write_status(
+        job_dir,
+        phase="cuda_import",
+        message="Loading torch/gsplat (first run on this node compiles CUDA kernels)…",
+        n_gaussians=int(scene.num_gaussians),
+    )
     if backend is None:
         from .repair_gsfix import GsplatPhotometricRepair
 
@@ -292,6 +325,34 @@ def apply_packed_job(job_dir: Path, backend=None) -> dict[str, Any]:
         }
         kwargs = {k: params[k] for k in allowed if k in params}
         backend = GsplatPhotometricRepair(**kwargs)
+    existing = getattr(backend, "on_progress", None)
+
+    def on_progress(stats: dict) -> None:
+        fields = {
+            k: _jsonable(v) for k, v in stats.items()
+            if k != "render_rgb" and v is not None
+        }
+        phase = str(fields.get("phase") or "refine")
+        if phase == "cuda_ready":
+            fields["message"] = (
+                f"GPU ready: {fields.get('gpu_name') or 'CUDA'}. "
+                "Starting photometric refine…"
+            )
+        elif phase == "refine":
+            it = fields.get("iter") or fields.get("n_iters") or 0
+            l1 = fields.get("l1")
+            fields["message"] = (
+                f"Refine iter {it}"
+                + (f" · L1 {l1:.4f}" if isinstance(l1, (int, float)) else "")
+            )
+        write_status(job_dir, **fields)
+        if callable(existing):
+            existing(stats)
+
+    try:
+        backend.on_progress = on_progress
+    except Exception:
+        pass
     stats = backend.apply(scene, camera, rendered, repaired)
     save_ply(scene, job_dir / OUT_PLY)
     render_rgb = stats.get("render_rgb")
@@ -300,7 +361,9 @@ def apply_packed_job(job_dir: Path, backend=None) -> dict[str, Any]:
     metrics = {k: v for k, v in stats.items() if k != "render_rgb"}
     metrics["job_id"] = job_dir.name
     _write_json(job_dir / METRICS_JSON, metrics)
-    write_status(job_dir, phase="done", message="CUDA refine finished.")
+    write_status(job_dir, phase="done", message="CUDA refine finished.", **{
+        k: _jsonable(v) for k, v in metrics.items() if k not in ("job_id",)
+    })
     return stats
 
 
@@ -328,6 +391,501 @@ def ingest_job_results(scene: GaussianScene, job_dir: Path) -> dict[str, Any]:
 def job_results_ready(job_dir: Path) -> bool:
     job_dir = Path(job_dir)
     return (job_dir / OUT_PLY).is_file() and (job_dir / METRICS_JSON).is_file()
+
+
+PROBE_TTL_S = 25.0  # LRZ treats automated squeue loops as a DoS.
+PROBE_TIMEOUT_S = 25.0
+SMI_TIMEOUT_S = 35.0
+_SMI_FIELDS = (
+    "index", "name", "memory_used_mib", "memory_total_mib",
+    "utilization_gpu", "utilization_memory", "temperature_c",
+    "power_w", "power_limit_w", "compute_cap",
+)
+_PROBE = {
+    "lock": threading.Lock(),
+    "at": 0.0,
+    "body": None,
+    "error": None,
+    "inflight": False,
+}
+
+
+def parse_squeue_line(line: str) -> dict | None:
+    """Parse `squeue -o '%i|%t|%P|%N|%M|%l|%r'`."""
+    text = (line or "").strip()
+    if not text:
+        return None
+    row = text.splitlines()[0].strip()
+    if not row or row.startswith("squeue"):
+        return None
+    parts = [p.strip() for p in row.split("|")]
+    while len(parts) < 7:
+        parts.append("")
+    reason = parts[6] if parts[6] not in ("", "None", "N/A") else None
+    return {
+        "job_id": parts[0],
+        "state": parts[1],
+        "partition": parts[2],
+        "node": parts[3],
+        "elapsed": parts[4],
+        "timelimit": parts[5],
+        "reason": reason,
+    }
+
+
+def parse_nvidia_smi_csv(text: str) -> list[dict]:
+    """Parse `nvidia-smi --query-gpu=... --format=csv,noheader,nounits`."""
+    gpus: list[dict] = []
+    reader = csv.reader(io.StringIO(text or ""))
+    for row in reader:
+        if not row or not any(str(c).strip() for c in row):
+            continue
+        cells = [str(c).strip() for c in row]
+        if cells[0].lower().startswith("index") or cells[0].lower().startswith("nvidia-smi"):
+            continue
+        body: dict[str, Any] = {}
+        for i, key in enumerate(_SMI_FIELDS):
+            raw = cells[i] if i < len(cells) else ""
+            if key in ("name", "compute_cap"):
+                body[key] = raw
+            elif key == "index":
+                body[key] = int(raw) if raw.isdigit() else 0
+            else:
+                try:
+                    body[key] = float(raw)
+                except ValueError:
+                    body[key] = None
+        total = body.get("memory_total_mib")
+        used = body.get("memory_used_mib") or 0
+        if isinstance(total, (int, float)) and total:
+            body["memory_pct"] = round(100.0 * float(used) / float(total), 1)
+        gpus.append(body)
+    return gpus
+
+
+def parse_probe_bundle(text: str) -> dict[str, str]:
+    sections: dict[str, str] = {}
+    current: str | None = None
+    buf: list[str] = []
+    markers = {"SQUEUE", "CONTAINER", "NGC", "WORKSPACE", "STATUS"}
+    for line in (text or "").splitlines():
+        key = line.strip()
+        if key in markers:
+            if current is not None:
+                sections[current] = "\n".join(buf).strip()
+            current = key.lower()
+            buf = []
+        elif current is not None:
+            buf.append(line)
+    if current is not None:
+        sections[current] = "\n".join(buf).strip()
+    return sections
+
+
+def packed_job_summary(job_dir: Path) -> dict[str, Any]:
+    job_dir = Path(job_dir)
+    status: dict[str, Any] = {}
+    sp = job_dir / STATUS_JSON
+    if sp.is_file():
+        try:
+            loaded = json.loads(sp.read_text())
+            if isinstance(loaded, dict):
+                status = loaded
+        except (OSError, json.JSONDecodeError):
+            status = {}
+    metrics: dict[str, Any] = {}
+    mp = job_dir / METRICS_JSON
+    if mp.is_file():
+        try:
+            loaded = json.loads(mp.read_text())
+            if isinstance(loaded, dict):
+                metrics = loaded
+        except (OSError, json.JSONDecodeError):
+            metrics = {}
+    return {
+        "id": job_dir.name,
+        "phase": status.get("phase"),
+        "message": status.get("message"),
+        "updated_at": status.get("updated_at") or job_dir.stat().st_mtime,
+        "ready": job_results_ready(job_dir),
+        "has_ply": (job_dir / OUT_PLY).is_file(),
+        "n_iters": metrics.get("n_iters") or status.get("n_iters") or status.get("iter"),
+        "l1_before": metrics.get("l1_before") or status.get("l1_before"),
+        "l1_after": metrics.get("l1_after") or status.get("l1_after"),
+        "l1": status.get("l1"),
+        "gpu_name": status.get("gpu_name"),
+        "n_gaussians": metrics.get("n_gaussians") or status.get("n_gaussians"),
+        "n_spawned": metrics.get("n_spawned") or status.get("n_spawned"),
+    }
+
+
+def list_packed_jobs(limit: int = 12) -> list[dict[str, Any]]:
+    root = Path.cwd() / "outputs" / "lrz-jobs"
+    if not root.is_dir():
+        return []
+    dirs = [p for p in root.iterdir() if p.is_dir()]
+    dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return [packed_job_summary(d) for d in dirs[: max(1, int(limit))]]
+
+
+def build_connection_checks(
+    *,
+    configured: bool,
+    session: bool,
+    job_id: str,
+    slurm: dict | None,
+    container: dict | None,
+    gpu: dict | None,
+    gpu_error: str | None,
+    probed: bool,
+) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    if configured and str(job_id).isdigit():
+        checks.append({
+            "id": "config", "ok": True, "label": "LRZ config",
+            "detail": f"job_id {job_id} in configs/lrz.local.yaml",
+            "action": None,
+        })
+    else:
+        checks.append({
+            "id": "config", "ok": False, "label": "LRZ config",
+            "detail": "No running sbatch id in configs/lrz.local.yaml.",
+            "action": "Run scripts/lrz/allocate.sh (or paste the current sbatch id into job_id).",
+        })
+    if session:
+        checks.append({
+            "id": "ssh", "ok": True, "label": "SSH session",
+            "detail": f"ControlMaster {control_path()}",
+            "action": None,
+        })
+    else:
+        checks.append({
+            "id": "ssh", "ok": False, "label": "SSH session",
+            "detail": "ControlMaster is down — the dashboard cannot reach the cluster.",
+            "action": "Connect eduVPN, then run scripts/lrz/ssh-session.sh and type your LRZ password once.",
+        })
+
+    if not probed:
+        checks.append({
+            "id": "slurm", "ok": None, "label": "Slurm job",
+            "detail": "Waiting for a one-shot squeue (not looped).",
+            "action": None if session else "Open the SSH session first.",
+        })
+    elif slurm and slurm.get("state") == "R":
+        node = slurm.get("node") or "?"
+        checks.append({
+            "id": "slurm", "ok": True, "label": "Slurm job",
+            "detail": f"{slurm.get('job_id')} R on {node} · {slurm.get('elapsed') or '?'} / {slurm.get('timelimit') or '?'}",
+            "action": None,
+        })
+    elif slurm and slurm.get("state"):
+        state = slurm["state"]
+        reason = slurm.get("reason")
+        extra = f" ({reason})" if reason else ""
+        action = (
+            "Job is pending. On the login node, once: "
+            f"scontrol update JobId={job_id} Partition=lrz-hgx-a100-80x4,lrz-dgx-a100-80x8"
+            if state == "PD" else
+            "Allocate a new GPU with scripts/lrz/allocate.sh and update job_id."
+        )
+        checks.append({
+            "id": "slurm", "ok": False, "label": "Slurm job",
+            "detail": f"Job {job_id} is {state}{extra}",
+            "action": action,
+        })
+    else:
+        checks.append({
+            "id": "slurm", "ok": False, "label": "Slurm job",
+            "detail": f"Job {job_id} is not in the queue (expired or wrong id).",
+            "action": "The 6h hold job ended. Run scripts/lrz/allocate.sh and update job_id.",
+        })
+
+    if not probed:
+        checks.append({
+            "id": "container", "ok": None, "label": "Enroot image",
+            "detail": "Not probed yet.",
+            "action": None,
+        })
+    elif container and container.get("ok"):
+        size = container.get("bytes")
+        detail = f"{size / (1024 ** 3):.1f} GB squashfs" if isinstance(size, (int, float)) and size else "pytorch.sqsh present"
+        checks.append({
+            "id": "container", "ok": True, "label": "Enroot image",
+            "detail": detail,
+            "action": None,
+        })
+    else:
+        checks.append({
+            "id": "container", "ok": False, "label": "Enroot image",
+            "detail": "pytorch.sqsh is missing on DSS — CUDA repair cannot start.",
+            "action": (
+                "On the GPU node (scripts/lrz/gpu-shell.sh): "
+                "enroot import -o containers/pytorch.sqsh "
+                "docker://pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel"
+            ),
+        })
+
+    gpus = (gpu or {}).get("gpus") if isinstance(gpu, dict) else gpu
+    if isinstance(gpus, list) and gpus:
+        g0 = gpus[0]
+        used = g0.get("memory_used_mib")
+        total = g0.get("memory_total_mib")
+        mem = f"{int(used)}/{int(total)} MiB" if used is not None and total else ""
+        checks.append({
+            "id": "gpu", "ok": True, "label": "GPU",
+            "detail": " · ".join(x for x in (g0.get("name"), mem) if x),
+            "action": None,
+        })
+    elif probed and slurm and slurm.get("state") == "R":
+        checks.append({
+            "id": "gpu", "ok": False if gpu_error else None, "label": "GPU",
+            "detail": gpu_error or "Job is R; nvidia-smi via srun --overlap did not return yet.",
+            "action": gpu_error,
+        })
+    else:
+        checks.append({
+            "id": "gpu", "ok": None, "label": "GPU",
+            "detail": "Needs a running Slurm allocation.",
+            "action": None,
+        })
+    return checks
+
+
+def next_action_from_checks(checks: list[dict[str, Any]]) -> str | None:
+    for check in checks:
+        if check.get("ok") is False and check.get("action"):
+            return str(check["action"])
+    for check in checks:
+        if check.get("ok") is None and check.get("action"):
+            return str(check["action"])
+    return None
+
+
+def _ssh_run(cfg: dict, remote: str, *, timeout: float = PROBE_TIMEOUT_S) -> subprocess.CompletedProcess:
+    argv = ssh_argv(cfg, multiplex=True) + [remote]
+    return subprocess.run(
+        argv,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+def _login_probe_script(cfg: dict, packed_id: str | None) -> str:
+    job = shlex.quote(str(cfg["job_id"]))
+    container = shlex.quote(str(cfg.get("container") or "/nonexistent"))
+    workspace = shlex.quote(str(cfg["workspace"]))
+    if packed_id:
+        status = shlex.quote(f"{cfg['workspace']}/inputs/{packed_id}/{STATUS_JSON}")
+        status_block = f"if [ -f {status} ]; then cat {status}; else echo NONE; fi"
+    else:
+        status_block = "echo NONE"
+    return (
+        "echo SQUEUE\n"
+        f"squeue --me --job={job} -h -o '%i|%t|%P|%N|%M|%l|%r' || true\n"
+        "echo CONTAINER\n"
+        f"if [ -f {container} ]; then echo OK $(stat -c%s {container}); else echo MISSING; fi\n"
+        "echo NGC\n"
+        "if [ -s \"$HOME/enroot/.credentials\" ]; then echo OK; else echo MISSING; fi\n"
+        "echo WORKSPACE\n"
+        f"if [ -d {workspace} ]; then echo OK; else echo MISSING; fi\n"
+        "echo STATUS\n"
+        f"{status_block}\n"
+    )
+
+
+def nvidia_smi_command(cfg: dict) -> str:
+    job = shlex.quote(str(cfg["job_id"]))
+    inner = (
+        "nvidia-smi --query-gpu=index,name,memory.used,memory.total,"
+        "utilization.gpu,utilization.memory,temperature.gpu,power.draw,power.limit,compute_cap "
+        "--format=csv,noheader,nounits"
+    )
+    return (
+        f"srun --jobid={job} --overlap --nodes=1 --ntasks=1 "
+        f"--cpus-per-task=1 --gres=gpu:1 --quiet "
+        f"bash -lc {shlex.quote(inner)}"
+    )
+
+
+def probe_lrz_gpu(cfg: dict | None = None, *, packed_id: str | None = None) -> dict[str, Any]:
+    """One SSH login probe (includes one squeue) plus nvidia-smi if the job is R."""
+    cfg = cfg or load_lrz_config()
+    if not str(cfg.get("job_id") or "").isdigit():
+        raise RuntimeError("No LRZ job id in configs/lrz.local.yaml.")
+    if not lrz_session_alive(cfg):
+        raise RuntimeError(session_required_message())
+    result = _ssh_run(cfg, _login_probe_script(cfg, packed_id), timeout=PROBE_TIMEOUT_S)
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(err or "LRZ login probe failed.")
+    parsed = parse_probe_bundle(result.stdout or "")
+    slurm = parse_squeue_line(parsed.get("squeue") or "")
+    container_raw = (parsed.get("container") or "").strip()
+    size = None
+    parts = container_raw.split()
+    if len(parts) >= 2 and parts[0] == "OK":
+        try:
+            size = int(parts[1])
+        except ValueError:
+            size = None
+    container = {"ok": container_raw.startswith("OK"), "bytes": size}
+    remote_status = None
+    status_raw = (parsed.get("status") or "").strip()
+    if status_raw and status_raw != "NONE":
+        try:
+            loaded = json.loads(status_raw)
+            if isinstance(loaded, dict):
+                remote_status = loaded
+        except json.JSONDecodeError:
+            remote_status = {"raw": status_raw[:500]}
+    gpu_body: dict[str, Any] | None = None
+    gpu_error = None
+    if slurm and slurm.get("state") == "R":
+        smi = _ssh_run(cfg, nvidia_smi_command(cfg), timeout=SMI_TIMEOUT_S)
+        if smi.returncode == 0:
+            gpu_body = {
+                "gpus": parse_nvidia_smi_csv(smi.stdout or ""),
+                "node": slurm.get("node"),
+            }
+            if not gpu_body["gpus"]:
+                gpu_error = (smi.stdout or smi.stderr or "empty nvidia-smi").strip()[:400]
+        else:
+            gpu_error = (smi.stderr or smi.stdout or "nvidia-smi via srun failed").strip()[:400]
+    return {
+        "slurm": slurm,
+        "container": container,
+        "ngc": (parsed.get("ngc") or "").strip() == "OK",
+        "workspace_ok": (parsed.get("workspace") or "").strip() == "OK",
+        "remote_status": remote_status,
+        "gpu": gpu_body,
+        "gpu_error": gpu_error,
+    }
+
+
+def request_gpu_probe(*, force: bool = False, packed_id: str | None = None) -> dict[str, Any]:
+    """Start at most one background probe. Never loops squeue."""
+    cfg = load_lrz_config()
+    if not lrz_session_alive(cfg):
+        return {"started": False, "reason": "ssh"}
+    if not str(cfg.get("job_id") or "").isdigit():
+        return {"started": False, "reason": "config"}
+    now = time.time()
+    with _PROBE["lock"]:
+        if _PROBE["inflight"]:
+            return {"started": False, "reason": "inflight"}
+        age = now - float(_PROBE["at"] or 0)
+        if not force and _PROBE["body"] is not None and age < PROBE_TTL_S:
+            return {"started": False, "reason": "fresh", "age_s": round(age, 1)}
+        if not force and _PROBE["error"] and age < 8:
+            return {"started": False, "reason": "backoff"}
+        _PROBE["inflight"] = True
+    threading.Thread(
+        target=_run_probe_thread, args=(cfg, packed_id), daemon=True, name="lrz-gpu-probe",
+    ).start()
+    return {"started": True}
+
+
+def _run_probe_thread(cfg: dict, packed_id: str | None) -> None:
+    body = None
+    err = None
+    try:
+        body = probe_lrz_gpu(cfg, packed_id=packed_id)
+    except Exception as exc:
+        err = f"{type(exc).__name__}: {exc}"
+        logger.warning("LRZ GPU probe failed: %s", err)
+    with _PROBE["lock"]:
+        _PROBE["at"] = time.time()
+        if body is not None:
+            _PROBE["body"] = body
+            _PROBE["error"] = None
+        else:
+            _PROBE["error"] = err
+        _PROBE["inflight"] = False
+
+
+def reset_gpu_probe_cache() -> None:
+    """Tests only."""
+    with _PROBE["lock"]:
+        _PROBE["at"] = 0.0
+        _PROBE["body"] = None
+        _PROBE["error"] = None
+        _PROBE["inflight"] = False
+
+
+def lrz_dashboard_snapshot(
+    repair_job: dict | None = None,
+    *,
+    request_probe: bool = False,
+    force_probe: bool = False,
+) -> dict[str, Any]:
+    """Local connection + current repair, plus a cached GPU probe."""
+    status = lrz_status()
+    packed = list_packed_jobs()
+    packed_id = packed[0]["id"] if packed else None
+    if request_probe or force_probe:
+        request_gpu_probe(force=force_probe, packed_id=packed_id)
+    with _PROBE["lock"]:
+        inflight = bool(_PROBE["inflight"])
+        cached = _PROBE["body"]
+        error = _PROBE["error"]
+        probed_at = float(_PROBE["at"] or 0)
+    if (
+        status["session"]
+        and status["configured"]
+        and cached is None
+        and not inflight
+        and not error
+    ):
+        request_gpu_probe(force=False, packed_id=packed_id)
+        with _PROBE["lock"]:
+            inflight = bool(_PROBE["inflight"])
+            cached = _PROBE["body"]
+            error = _PROBE["error"]
+            probed_at = float(_PROBE["at"] or 0)
+    slurm = (cached or {}).get("slurm")
+    container = (cached or {}).get("container")
+    gpu = (cached or {}).get("gpu")
+    gpu_error = (cached or {}).get("gpu_error") or error
+    checks = build_connection_checks(
+        configured=bool(status["configured"]),
+        session=bool(status["session"]),
+        job_id=str(status.get("job_id") or ""),
+        slurm=slurm,
+        container=container,
+        gpu=gpu,
+        gpu_error=gpu_error,
+        probed=cached is not None,
+    )
+    ready = all(
+        c.get("ok") is True
+        for c in checks
+        if c["id"] in ("config", "ssh", "slurm", "container")
+    )
+    latest = packed[0] if packed else None
+    return {
+        "connection": status,
+        "checks": checks,
+        "ready": ready,
+        "next_action": next_action_from_checks(checks),
+        "slurm": slurm,
+        "container": container,
+        "ngc": (cached or {}).get("ngc"),
+        "workspace_ok": (cached or {}).get("workspace_ok"),
+        "gpu": (gpu or {}).get("gpus") if isinstance(gpu, dict) else None,
+        "gpu_node": (gpu or {}).get("node") if isinstance(gpu, dict) else (slurm or {}).get("node"),
+        "gpu_error": gpu_error,
+        "remote_status": (cached or {}).get("remote_status"),
+        "repair": repair_job,
+        "packed_jobs": packed,
+        "current_packed": latest,
+        "probing": inflight,
+        "probed_at": probed_at or None,
+        "probe_age_s": round(time.time() - probed_at, 1) if probed_at else None,
+        "hint": "Slurm is queried at most once per 25s — LRZ forbids squeue loops.",
+    }
 
 
 def _ssh_bin() -> str:
@@ -374,7 +932,10 @@ def srun_worker_command(cfg: dict, job_id: str) -> str:
     name = cfg.get("container_name") or "splat-repair"
     inner = (
         "export PYTHONPATH=/workspace/code/src${PYTHONPATH:+:$PYTHONPATH}; "
-        "export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-8.0}; "
+        # NGC PyTorch images pre-set a wide TORCH_CUDA_ARCH_LIST (sm_52–sm_90).
+        # gsplat 1.5 uses labeled_partition, which will not compile for sm_52.
+        "export TORCH_CUDA_ARCH_LIST=8.0; "
+        "export MAX_JOBS=4; "
         f"python -m splat_explorer.repair_lrz --job-dir /workspace/inputs/{job_id}"
     )
     return (
@@ -725,6 +1286,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--job-dir", required=True, help="Packed job directory (local or /workspace/inputs/id)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    os.environ["TORCH_CUDA_ARCH_LIST"] = os.environ.get("LRZ_CUDA_ARCH") or "8.0"
     stats = apply_packed_job(Path(args.job_dir))
     logger.info("repair-job done: %s", {k: v for k, v in stats.items() if k != "render_rgb"})
 

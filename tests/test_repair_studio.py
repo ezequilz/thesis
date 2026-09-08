@@ -99,7 +99,8 @@ def test_ensure_catalog_scene_keeps_repaired_ply_preview(tmp_path, monkeypatch):
     assert "ply" in message.lower()
 
 
-def test_snapshot_reports_episode_scene(tmp_path: Path):
+def test_snapshot_reports_episode_scene(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_session_alive", lambda cfg=None: False)
     ep = _episode(tmp_path)
     app = _FakeApp(ep, scene_id="arch-interiors")
     studio = RepairStudio(app)
@@ -108,6 +109,10 @@ def test_snapshot_reports_episode_scene(tmp_path: Path):
     assert snap["episode_scene_label"] == "Venetian Balcony"
     assert snap["scene_id"] == "arch-interiors"
     assert "backends" in snap
+    assert snap["gpu_url"] == "/repair/gpu"
+    gpu = studio.gpu_snapshot()
+    assert "checks" in gpu
+    assert gpu["repair"]["status"] == "idle"
     assert snap["backends"]["detected"] in {"gsfix-gsplat", "gsplat-mlx", "cpu-project"}
 
 

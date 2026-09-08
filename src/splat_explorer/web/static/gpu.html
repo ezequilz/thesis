@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>splat-explorer · GPU / LRZ</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #101318; --panel: #171c24; --panel2: #1e2530; --border: #2a3342;
+    --text: #dce3ee; --dim: #8b97a8; --accent: #5aa2ff; --ok: #45c98b;
+    --warn: #e6b450; --err: #ef6a6a; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 14px; padding: 10px 16px;
+           background: var(--panel); border-bottom: 1px solid var(--border);
+           flex: none; flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header h1 span { color: var(--dim); font-weight: 400; }
+  .pill { padding: 2px 10px; border-radius: 20px; font-size: 12px;
+          background: var(--panel2); border: 1px solid var(--border); color: var(--dim); }
+  .pill.ok { color: var(--ok); border-color: var(--ok); }
+  .pill.busy { color: var(--warn); border-color: var(--warn); }
+  .pill.err { color: var(--err); border-color: var(--err); }
+  .spacer { flex: 1; }
+  a { color: var(--accent); text-decoration: none; }
+  button { border: 0; border-radius: 6px; padding: 7px 16px; font-size: 13px;
+           font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  #btn-probe { background: var(--accent); color: #0b1220; }
+  .ghost { background: var(--panel2); color: var(--text); border: 1px solid var(--border) !important; }
+  #toolbar { display: flex; gap: 12px; align-items: center; padding: 10px 16px;
+             background: var(--panel); border-bottom: 1px solid var(--border);
+             flex: none; flex-wrap: wrap; }
+  #toolbar .hint { font-size: 12px; color: var(--dim); max-width: 640px; }
+  #action {
+    margin: 10px 16px 0; padding: 10px 14px; border-radius: 8px;
+    background: #2a2214; border: 1px solid var(--warn); color: var(--warn);
+    font-size: 13px; flex: none;
+  }
+  #action.ok { background: #142a20; border-color: var(--ok); color: var(--ok); }
+  #action:empty { display: none; }
+  #main { flex: 1; min-height: 0; overflow: auto; padding: 16px; }
+  .pipeline { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 16px; }
+  .check {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; min-height: 92px;
+  }
+  .check .lbl { font-size: 11px; color: var(--dim); letter-spacing: .04em; text-transform: uppercase; }
+  .check .st { font-size: 15px; font-weight: 650; margin: 4px 0 6px; }
+  .check .dt { font-size: 12px; color: var(--dim); font-family: var(--mono); word-break: break-word; }
+  .check.ok { box-shadow: inset 3px 0 0 var(--ok); }
+  .check.err { box-shadow: inset 3px 0 0 var(--err); }
+  .check.busy { box-shadow: inset 3px 0 0 var(--warn); }
+  .grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card h2 { margin: 0 0 10px; font-size: 13px; font-weight: 650; color: var(--dim);
+             letter-spacing: .04em; text-transform: uppercase; }
+  .gpu-name { font-size: 20px; font-weight: 650; margin: 0 0 4px; }
+  .gpu-sub { color: var(--dim); font-size: 12px; font-family: var(--mono); margin-bottom: 14px; }
+  .meters { display: flex; flex-direction: column; gap: 12px; }
+  .meter .row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; }
+  .meter .k { color: var(--dim); }
+  .meter .v { font-family: var(--mono); }
+  .bar { height: 8px; background: #2a3342; border-radius: 99px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); border-radius: 99px; }
+  .bar.warn > i { background: var(--warn); }
+  .bar.err > i { background: var(--err); }
+  .kv { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; font-size: 13px; }
+  .kv .k { color: var(--dim); }
+  .kv .v { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: left; color: var(--dim); font-weight: 600; padding: 6px 8px 8px 0; }
+  td { padding: 7px 8px 7px 0; border-top: 1px solid var(--border); font-family: var(--mono); font-size: 12px; }
+  .empty { color: var(--dim); padding: 8px 0; }
+  .stats { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+  .stats span { color: var(--dim); font-size: 12px; }
+  .stats b { color: var(--text); font-family: var(--mono); }
+  @media (max-width: 1100px) {
+    .pipeline { grid-template-columns: 1fr 1fr; }
+    .grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>splat-explorer <span>· GPU / LRZ</span></h1>
+  <span id="pill-ready" class="pill">checking…</span>
+  <span id="pill-job" class="pill">repair: idle</span>
+  <span class="spacer"></span>
+  <a href="/repair">repair review</a>
+  <a href="/">episode dashboard</a>
+</header>
+
+<div id="toolbar">
+  <button id="btn-probe">Probe GPU now</button>
+  <span id="probe-meta" class="hint">One squeue + nvidia-smi per probe. Cached for 25s (LRZ forbids squeue loops).</span>
+</div>
+<div id="action"></div>
+
+<div id="main">
+  <div class="pipeline" id="pipeline"></div>
+  <div class="grid">
+    <div class="card" id="gpu-card">
+      <h2>Connected GPU</h2>
+      <div class="empty">No GPU probe yet. Open the SSH session, then click Probe GPU now.</div>
+    </div>
+    <div class="card" id="repair-card">
+      <h2>Current repair</h2>
+      <div class="empty">No CUDA repair running.</div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <h2>Packed LRZ jobs</h2>
+    <div id="packed"><div class="empty">No packed jobs in outputs/lrz-jobs. Start gsplat CUDA from the repair page.</div></div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <h2>Connection</h2>
+    <div class="kv" id="conn-kv"></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let snap = null;
+let tickBusy = false;
+let lastProbeAt = 0;
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[c]));
+}
+function cls(ok) {
+  if (ok === true) return "ok";
+  if (ok === false) return "err";
+  return "busy";
+}
+function stateLabel(ok) {
+  if (ok === true) return "ready";
+  if (ok === false) return "blocked";
+  return "unknown";
+}
+function fmtBytes(n) {
+  if (n == null || n === "") return "–";
+  const x = Number(n);
+  if (!Number.isFinite(x)) return "–";
+  if (x < 1024) return x + " B";
+  if (x < 1024 * 1024) return (x / 1024).toFixed(0) + " KB";
+  if (x < 1024 * 1024 * 1024) return (x / 1024 / 1024).toFixed(1) + " MB";
+  return (x / 1024 / 1024 / 1024).toFixed(1) + " GB";
+}
+function fmtElapsed(started) {
+  if (!started) return "–";
+  const s = Math.max(0, Date.now() / 1000 - Number(started));
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+}
+function fmtL1(n) {
+  if (n == null || n === "") return null;
+  const x = Number(n);
+  return Number.isFinite(x) ? x.toFixed(4) : null;
+}
+function ageText(age) {
+  if (age == null) return "never";
+  if (age < 2) return "just now";
+  if (age < 60) return `${Math.round(age)}s ago`;
+  return `${Math.round(age / 60)}m ago`;
+}
+
+function renderPipeline() {
+  const checks = snap?.checks || [];
+  $("pipeline").innerHTML = checks.map(c => {
+    return `<div class="check ${cls(c.ok)}">
+      <div class="lbl">${esc(c.label)}</div>
+      <div class="st">${esc(stateLabel(c.ok))}</div>
+      <div class="dt">${esc(c.detail || "")}</div>
+    </div>`;
+  }).join("");
+}
+
+function renderGpu() {
+  const card = $("gpu-card");
+  const gpus = snap?.gpu || [];
+  const g = gpus[0];
+  const slurm = snap?.slurm;
+  if (!g) {
+    const err = snap?.gpu_error;
+    const probing = snap?.probing;
+    card.innerHTML = `<h2>Connected GPU</h2>
+      <div class="empty">${esc(
+        probing ? "Probing the allocated node…"
+        : err ? err
+        : slurm?.state === "R"
+          ? "Job is running, but nvidia-smi has not returned yet."
+          : "No GPU probe yet. Open the SSH session, then click Probe GPU now."
+      )}</div>`;
+    return;
+  }
+  const memPct = Number(g.memory_pct || 0);
+  const util = Number(g.utilization_gpu || 0);
+  const memCls = memPct >= 90 ? "err" : memPct >= 70 ? "warn" : "";
+  const utilCls = util >= 90 ? "ok" : util >= 5 ? "" : "warn";
+  const node = snap.gpu_node || slurm?.node || "–";
+  const part = slurm?.partition || "–";
+  card.innerHTML = `<h2>Connected GPU</h2>
+    <div class="gpu-name">${esc(g.name || "GPU")}</div>
+    <div class="gpu-sub">${esc(node)} · ${esc(part)} · sm ${esc(g.compute_cap || "–")}</div>
+    <div class="meters">
+      <div class="meter">
+        <div class="row"><span class="k">VRAM</span>
+          <span class="v">${esc(Math.round(g.memory_used_mib || 0))} / ${esc(Math.round(g.memory_total_mib || 0))} MiB (${esc(memPct)}%)</span></div>
+        <div class="bar ${memCls}"><i style="width:${Math.min(100, memPct)}%"></i></div>
+      </div>
+      <div class="meter">
+        <div class="row"><span class="k">Utilization</span>
+          <span class="v">${esc(Math.round(util))}%</span></div>
+        <div class="bar ${utilCls}"><i style="width:${Math.min(100, util)}%"></i></div>
+      </div>
+    </div>
+    <div class="kv" style="margin-top:14px">
+      <span class="k">temperature</span><span class="v">${g.temperature_c != null ? esc(Math.round(g.temperature_c)) + " °C" : "–"}</span>
+      <span class="k">power</span><span class="v">${g.power_w != null ? esc(Number(g.power_w).toFixed(0)) + " / " + esc(Number(g.power_limit_w || 0).toFixed(0)) + " W" : "–"}</span>
+      <span class="k">job elapsed</span><span class="v">${esc(slurm?.elapsed || "–")} / ${esc(slurm?.timelimit || "–")}</span>
+      <span class="k">compute cap</span><span class="v">${esc(g.compute_cap || "–")}</span>
+    </div>`;
+}
+
+function repairStats(job, packed, remote) {
+  const results = job?.results || [];
+  const last = results[results.length - 1] || {};
+  const src = remote || packed || {};
+  return {
+    status: job?.status || "idle",
+    backend: job?.backend || src.backend || "–",
+    episode: job?.episode || "–",
+    step: job?.current_step ?? last.step,
+    message: job?.message || src.message || "",
+    phase: src.phase || (job?.status === "running" ? "running" : "idle"),
+    n_iters: src.n_iters ?? last.n_iters,
+    l1_before: fmtL1(src.l1_before ?? last.l1_before),
+    l1_after: fmtL1(src.l1_after ?? last.l1_after),
+    l1: fmtL1(src.l1),
+    n_gaussians: src.n_gaussians ?? last.n_gaussians,
+    gpu_name: src.gpu_name,
+    elapsed: fmtElapsed(job?.started_at),
+    error: job?.error,
+  };
+}
+
+function renderRepair() {
+  const card = $("repair-card");
+  const job = snap?.repair || {};
+  const packed = snap?.current_packed;
+  const remote = snap?.remote_status;
+  const s = repairStats(job, packed, remote);
+  const l1 = s.l1_after || s.l1;
+  const l1Text = s.l1_before && l1 ? `${s.l1_before} → ${l1}` : (l1 || s.l1_before || "–");
+  card.innerHTML = `<h2>Current repair</h2>
+    <div class="stats">
+      <span>status <b>${esc(s.status)}</b></span>
+      <span>backend <b>${esc(s.backend)}</b></span>
+      <span>phase <b>${esc(s.phase)}</b></span>
+      <span>elapsed <b>${esc(s.elapsed)}</b></span>
+    </div>
+    <div class="kv">
+      <span class="k">episode</span><span class="v">${esc(s.episode)}</span>
+      <span class="k">step</span><span class="v">${s.step != null ? esc(s.step) : "–"}</span>
+      <span class="k">iters</span><span class="v">${s.n_iters ?? "–"}</span>
+      <span class="k">L1</span><span class="v">${esc(l1Text)}</span>
+      <span class="k">gaussians</span><span class="v">${s.n_gaussians ?? "–"}</span>
+      <span class="k">worker GPU</span><span class="v">${esc(s.gpu_name || "–")}</span>
+      <span class="k">message</span><span class="v">${esc(s.message || "–")}</span>
+      ${s.error ? `<span class="k">error</span><span class="v">${esc(s.error)}</span>` : ""}
+    </div>`;
+}
+
+function renderPacked() {
+  const jobs = snap?.packed_jobs || [];
+  const box = $("packed");
+  if (!jobs.length) {
+    box.innerHTML = '<div class="empty">No packed jobs in outputs/lrz-jobs. Start gsplat CUDA from the repair page.</div>';
+    return;
+  }
+  box.innerHTML = `<table>
+    <thead><tr><th>id</th><th>phase</th><th>iters</th><th>L1</th><th>message</th></tr></thead>
+    <tbody>${jobs.map(j => {
+      const l1 = fmtL1(j.l1_after) || fmtL1(j.l1) || fmtL1(j.l1_before) || "–";
+      return `<tr>
+        <td>${esc(j.id)}</td>
+        <td>${esc(j.phase || "–")}${j.ready ? " · ready" : ""}</td>
+        <td>${j.n_iters ?? "–"}</td>
+        <td>${esc(l1)}</td>
+        <td>${esc(j.message || "")}</td>
+      </tr>`;
+    }).join("")}</tbody>
+  </table>`;
+}
+
+function renderConn() {
+  const c = snap?.connection || {};
+  $("conn-kv").innerHTML = `
+    <span class="k">user@host</span><span class="v">${esc(c.user)}@${esc(c.host)}</span>
+    <span class="k">job_id</span><span class="v">${esc(c.job_id || "–")}</span>
+    <span class="k">workspace</span><span class="v">${esc(c.workspace || "–")}</span>
+    <span class="k">container</span><span class="v">${esc(c.container || "–")}</span>
+    <span class="k">container name</span><span class="v">${esc(c.container_name || "–")}</span>
+    <span class="k">ControlMaster</span><span class="v">${esc(c.control_path || "–")}${c.session ? " · alive" : " · down"}</span>
+    <span class="k">NGC creds</span><span class="v">${snap?.ngc === true ? "present" : snap?.ngc === false ? "missing (ok if using Docker Hub image)" : "–"}</span>
+    <span class="k">DSS workspace</span><span class="v">${snap?.workspace_ok === true ? "ok" : snap?.workspace_ok === false ? "missing" : "–"}</span>
+    <span class="k">session script</span><span class="v">${esc(c.session_script || "scripts/lrz/ssh-session.sh")}</span>
+  `;
+}
+
+function renderChrome() {
+  const ready = $("pill-ready");
+  if (snap?.ready) {
+    ready.textContent = "pipeline ready";
+    ready.className = "pill ok";
+  } else if (snap?.probing) {
+    ready.textContent = "probing…";
+    ready.className = "pill busy";
+  } else {
+    ready.textContent = "blocked";
+    ready.className = "pill err";
+  }
+  const job = snap?.repair || {};
+  const pj = $("pill-job");
+  const st = job.status || "idle";
+  pj.textContent = "repair: " + st;
+  pj.className = "pill" + (st === "running" || st === "stopping" ? " busy"
+    : st === "error" ? " err" : st === "completed" ? " ok" : "");
+  const action = $("action");
+  if (snap?.ready && !snap?.next_action) {
+    action.className = "ok";
+    action.textContent = "Connection looks good. Start gsplat CUDA from /repair — first run compiles gsplat on the node and can sit on cuda_import for several minutes.";
+  } else {
+    action.className = "";
+    action.textContent = snap?.next_action || "";
+  }
+  const age = snap?.probe_age_s;
+  $("probe-meta").textContent = snap?.probing
+    ? "Probing login node + GPU (one squeue, then nvidia-smi). Not looped."
+    : `Last probe ${ageText(age)}. ${snap?.hint || ""}`;
+  $("btn-probe").disabled = Boolean(snap?.probing);
+}
+
+function render() {
+  renderChrome();
+  renderPipeline();
+  renderGpu();
+  renderRepair();
+  renderPacked();
+  renderConn();
+}
+
+async function tick({ probe = false } = {}) {
+  if (tickBusy) return;
+  tickBusy = true;
+  try {
+    const r = await fetch("/api/repair/gpu" + (probe ? "?probe=1" : ""));
+    snap = await r.json();
+    render();
+  } catch (err) {
+    $("action").className = "";
+    $("action").textContent = "Dashboard API error: " + err;
+  } finally {
+    tickBusy = false;
+  }
+}
+
+$("btn-probe").onclick = async () => {
+  $("btn-probe").disabled = true;
+  try {
+    const r = await fetch("/api/repair/gpu/probe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force: true }),
+    });
+    snap = await r.json();
+    lastProbeAt = Date.now();
+    render();
+  } catch (err) {
+    $("action").textContent = "Probe failed: " + err;
+  }
+};
+
+tick({ probe: true });
+setInterval(() => tick(), 1000);
+setInterval(() => {
+  if (document.hidden) return;
+  if (snap?.probing) return;
+  if (!snap?.connection?.session) return;
+  const age = snap?.probe_age_s;
+  if (age != null && age < 40) return;
+  tick({ probe: true });
+}, 5000);
+</script>
+</body>
+</html>

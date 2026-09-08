@@ -107,7 +107,17 @@ class RepairStudio:
             "backends": list_repair_backends(),
             "episode": detail,
             "viewer_url": f"http://localhost:{self.app.cfg.viewer.port}",
+            "gpu_url": "/repair/gpu",
         }
+
+    def gpu_snapshot(self, *, probe: bool = False, force: bool = False) -> dict:
+        from ..repair_lrz import lrz_dashboard_snapshot
+
+        with self._lock:
+            job = dict(self.job)
+        return lrz_dashboard_snapshot(
+            repair_job=job, request_probe=probe, force_probe=force,
+        )
 
     def list_episodes(self) -> list[dict]:
         entries = []

@@ -157,3 +157,123 @@ def test_example_yaml_alone_is_not_configured(monkeypatch):
     if Path("configs/lrz.local.yaml").is_file():
         pytest.skip("local LRZ config present")
     assert lrz_configured() is False
+
+
+def test_parse_squeue_and_nvidia_smi():
+    from splat_explorer.repair_lrz import parse_nvidia_smi_csv, parse_probe_bundle, parse_squeue_line
+
+    row = parse_squeue_line(
+        "5777469|R|lrz-dgx-a100-80x8|lrz-dgx-a100-002|1:02|6:00:00|None"
+    )
+    assert row["job_id"] == "5777469"
+    assert row["state"] == "R"
+    assert row["node"] == "lrz-dgx-a100-002"
+    assert row["reason"] is None
+    assert parse_squeue_line("") is None
+    pending = parse_squeue_line("5777469|PD|lrz-hgx-a100-80x4||0:00|6:00:00|Priority")
+    assert pending["state"] == "PD"
+    assert pending["reason"] == "Priority"
+
+    gpus = parse_nvidia_smi_csv(
+        "0, NVIDIA A100-SXM4-80GB, 0, 81920, 0, 0, 29, 61.00, 400.00, 8.0\n"
+    )
+    assert len(gpus) == 1
+    assert gpus[0]["name"] == "NVIDIA A100-SXM4-80GB"
+    assert gpus[0]["memory_total_mib"] == 81920
+    assert gpus[0]["memory_pct"] == 0.0
+    assert gpus[0]["compute_cap"] == "8.0"
+
+    bundle = parse_probe_bundle(
+        "SQUEUE\n5777469|R|p|node|1:00|6:00:00|None\n"
+        "CONTAINER\nOK 123456\nNGC\nMISSING\nWORKSPACE\nOK\nSTATUS\nNONE\n"
+    )
+    assert bundle["squeue"].startswith("5777469")
+    assert bundle["container"] == "OK 123456"
+    assert bundle["ngc"] == "MISSING"
+
+
+def test_connection_checks_ssh_down_is_next_action():
+    from splat_explorer.repair_lrz import build_connection_checks, next_action_from_checks
+
+    checks = build_connection_checks(
+        configured=True, session=False, job_id="5777469",
+        slurm=None, container=None, gpu=None, gpu_error=None, probed=False,
+    )
+    ssh = next(c for c in checks if c["id"] == "ssh")
+    assert ssh["ok"] is False
+    action = next_action_from_checks(checks)
+    assert action and "ssh-session.sh" in action
+
+
+def test_connection_checks_missing_container():
+    from splat_explorer.repair_lrz import build_connection_checks, next_action_from_checks
+
+    checks = build_connection_checks(
+        configured=True, session=True, job_id="5777469",
+        slurm={"job_id": "5777469", "state": "R", "node": "lrz-dgx-a100-002",
+               "elapsed": "1:00", "timelimit": "6:00:00"},
+        container={"ok": False, "bytes": None},
+        gpu=None, gpu_error=None, probed=True,
+    )
+    action = next_action_from_checks(checks)
+    assert action and "enroot import" in action
+    slurm = next(c for c in checks if c["id"] == "slurm")
+    assert slurm["ok"] is True
+
+
+def test_dashboard_snapshot_ssh_down(monkeypatch, tmp_path):
+    from splat_explorer.repair_lrz import lrz_dashboard_snapshot, reset_gpu_probe_cache
+
+    reset_gpu_probe_cache()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("splat_explorer.repair_lrz.load_lrz_config", lambda: {
+        "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "5777469",
+        "workspace": "/dss/ws", "container": "/dss/ws/containers/pytorch.sqsh",
+        "cpus": 4, "mem": "32G", "container_name": "splat-repair",
+    })
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_configured", lambda: True)
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_session_alive", lambda cfg=None: False)
+    body = lrz_dashboard_snapshot(
+        repair_job={"status": "idle", "backend": "gsfix-gsplat", "episode": "ep1"},
+    )
+    assert body["ready"] is False
+    assert body["repair"]["status"] == "idle"
+    assert "ssh-session.sh" in (body["next_action"] or "")
+    assert body["probing"] is False
+    assert body["gpu"] is None
+
+
+def test_dashboard_snapshot_lists_packed_jobs(monkeypatch, tmp_path):
+    from splat_explorer.repair_lrz import lrz_dashboard_snapshot, reset_gpu_probe_cache
+
+    reset_gpu_probe_cache()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("splat_explorer.repair_lrz.load_lrz_config", lambda: {
+        "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "5777469",
+        "workspace": "/dss/ws", "container": "/dss/ws/containers/pytorch.sqsh",
+        "cpus": 4, "mem": "32G", "container_name": "splat-repair",
+    })
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_configured", lambda: True)
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_session_alive", lambda cfg=None: False)
+    scene = _scene()
+    camera = CameraRig(np.array([0.0, 0.0, -1.0]), up_axis="+y").camera(8, 8, 75.0)
+    pack_refine_job(
+        scene, camera, np.zeros((8, 8, 3), np.uint8), np.ones((8, 8, 3), np.uint8) * 200,
+        job_id="packed1",
+    )
+    body = lrz_dashboard_snapshot(repair_job={"status": "running", "message": "rsync_up"})
+    assert body["packed_jobs"][0]["id"] == "packed1"
+    assert body["packed_jobs"][0]["phase"] == "packed"
+    assert body["current_packed"]["id"] == "packed1"
+    assert body["repair"]["status"] == "running"
+
+
+def test_nvidia_smi_command_overlaps_hold_job():
+    from splat_explorer.repair_lrz import nvidia_smi_command
+
+    cmd = nvidia_smi_command({"job_id": "5777469"})
+    assert "--overlap" in cmd
+    assert "--jobid=5777469" in cmd
+    assert "nvidia-smi" in cmd
+    assert "--gres=gpu:1" in cmd
+

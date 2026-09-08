@@ -28,13 +28,25 @@ stop_host_dashboard() {
     fi
     rm -f outputs/dashboard.pid
   fi
-  local leftover
+  local leftover pid cmd
   leftover=$(pgrep -f "[.]venv/bin/splat-explorer dashboard" || true)
   for pid in $leftover; do
     echo "    Stopping leftover dashboard (pid $pid)"
     kill "$pid" || true
   done
-  sleep 0.4
+  # Don't let a lingering :8090 listener make the restart skip the dashboard.
+  for _ in $(seq 1 20); do
+    leftover=$(lsof -ti "tcp:8090" -sTCP:LISTEN || true)
+    [ -z "$leftover" ] && break
+    for pid in $leftover; do
+      cmd=$(ps -p "$pid" -o command= || true)
+      if [[ "$cmd" == *"splat-explorer dashboard"* ]]; then
+        echo "    Waiting for dashboard pid $pid to release :8090"
+        kill "$pid" 2>/dev/null || true
+      fi
+    done
+    sleep 0.25
+  done
 }
 
 RENDER_TEST=0 EPISODE=0
@@ -165,7 +177,13 @@ if [ "$HOST_DASHBOARD" = 1 ] && [ "$DASH_FREE" = 1 ]; then
   printf "    Waiting for host dashboard"
   DASH_UP=0
   for _ in $(seq 1 40); do
-    if curl -s -o /dev/null "http://127.0.0.1:8090"; then echo "  up"; DASH_UP=1; break; fi
+    if curl -s -o /dev/null "http://127.0.0.1:8090" \
+      && curl -s -o /dev/null "http://127.0.0.1:8090/repair" \
+      && curl -s -o /dev/null "http://127.0.0.1:8090/repair/gpu"; then
+      echo "  up"
+      DASH_UP=1
+      break
+    fi
     printf "."
     sleep 0.5
   done
@@ -208,6 +226,8 @@ if [ "${HOST_DASHBOARD:-0}" = 1 ]; then
 else
   echo "  Dashboard      : http://localhost:8090  (start/watch episodes, VLM debug)"
 fi
+echo "  Repair review  : http://localhost:8090/repair"
+echo "  GPU / LRZ      : http://localhost:8090/repair/gpu"
 echo "  Spectator (HD) : http://localhost:8090/spectator  (viewing only)"
 echo "  CLI episode    : export CLIRELAY_API_KEY=sk-... && \\"
 echo "                   splat-explorer --config configs/cli_relay.yaml explore"

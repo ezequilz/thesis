@@ -17,7 +17,10 @@ Endpoints:
   GET  /spectator         HD visor for looking around (not used for VLM captures)
   GET  /video/<id>        player tab: loading, then the stitched episode video
   GET  /repair            3D repair review: original vs repaired splat, replay past runs
+  GET  /repair/gpu        LRZ SSH + GPU connection dashboard
   GET  /api/repair        repair-studio snapshot (optional ?episode=)
+  GET  /api/repair/gpu    LRZ connection, cached GPU probe, current repair stats
+  POST /api/repair/gpu/probe  one-shot remote GPU/Slurm probe (rate-limited)
   GET  /api/repair/episodes     past runs with regen counts / ply flags
   GET  /api/repair/metrics      download metrics.json (?episode=&step=)
   POST /api/repair/start   replay 3D lift {episode, reload_code, backend, step, resume}
@@ -716,6 +719,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(200, (STATIC_DIR / "spectator.html").read_bytes(), "text/html; charset=utf-8")
         elif path in ("/repair", "/repair.html"):
             self._send(200, (STATIC_DIR / "repair.html").read_bytes(), "text/html; charset=utf-8")
+        elif path in ("/repair/gpu", "/gpu", "/gpu.html"):
+            self._send(200, (STATIC_DIR / "gpu.html").read_bytes(), "text/html; charset=utf-8")
         elif path.startswith("/video/"):
             ep = path[len("/video/"):]
             if not ep or "/" in ep:
@@ -759,6 +764,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             query = parse_qs(urlsplit(self.path).query)
             episode = (query.get("episode") or [None])[0]
             self._send_json(studio.snapshot(episode or None))
+            return
+        if path == "/api/repair/gpu":
+            query = parse_qs(urlsplit(self.path).query)
+            probe = (query.get("probe") or ["0"])[0] in ("1", "true", "yes")
+            self._send_json(studio.gpu_snapshot(probe=probe))
             return
         if path == "/api/repair/metrics":
             query = parse_qs(urlsplit(self.path).query)
@@ -853,6 +863,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "message": "Missing episode or step."}, 400)
                 return
             ok, message = studio.look_at(str(ep), int(body["step"]))
+        elif path == "/api/repair/gpu/probe":
+            snap = studio.gpu_snapshot(
+                probe=True, force=bool(body.get("force", True)),
+            )
+            self._send_json(snap)
+            return
         else:
             self._send_json({"error": "not found"}, 404)
             return

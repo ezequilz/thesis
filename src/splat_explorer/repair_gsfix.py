@@ -16,8 +16,13 @@ gsplat-mlx on Apple Silicon, and otherwise falls back to the CPU color stamp.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Callable
+
+# NGC PyTorch sets TORCH_CUDA_ARCH_LIST to sm_52–sm_90. gsplat 1.5 uses
+# cooperative_groups::labeled_partition, which fails on those old archs.
+os.environ["TORCH_CUDA_ARCH_LIST"] = os.environ.get("LRZ_CUDA_ARCH") or "8.0"
 
 import numpy as np
 
@@ -116,6 +121,7 @@ class GsplatPhotometricRepair:
     lr_quats: float = 0.001
     near: float = 0.05
     packed: bool = False
+    on_progress: Callable[[dict], None] | None = None
 
     def apply(
         self,
@@ -192,6 +198,15 @@ class GsplatPhotometricRepair:
 
         device = torch.device("cuda")
         h, w = int(camera.height), int(camera.width)
+        if self.on_progress is not None:
+            props = torch.cuda.get_device_properties(0)
+            self.on_progress({
+                "phase": "cuda_ready",
+                "gpu_name": torch.cuda.get_device_name(0),
+                "gpu_memory_total_mib": int(props.total_memory / (1024 * 1024)),
+                "n_gaussians": int(scene.num_gaussians),
+                "n_iters": 0,
+            })
         target = _image_to_tensor(repaired_rgb, w, h, torch, device)
         rendered = _image_to_tensor(rendered_rgb, w, h, torch, device)
         l1_before = float(torch.abs(target - rendered).mean().item())
@@ -266,6 +281,17 @@ class GsplatPhotometricRepair:
             opt.zero_grad(set_to_none=True)
             with torch.no_grad():
                 quats.copy_(torch.nn.functional.normalize(quats, dim=-1))
+            if self.on_progress is not None:
+                self.on_progress({
+                    "phase": "refine",
+                    "iter": it + 1,
+                    "n_iters": it + 1,
+                    "n_updated": int(means.shape[0]),
+                    "n_gaussians": int(means.shape[0]),
+                    "n_spawned": int(n_spawned),
+                    "l1_before": round(l1_before, 6),
+                    "l1": round(last_l1, 6),
+                })
 
         if self.densify and means.shape[0] > 32:
             with torch.no_grad():
