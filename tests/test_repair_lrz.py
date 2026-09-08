@@ -187,6 +187,7 @@ def test_parse_squeue_and_nvidia_smi():
     assert gpus[0]["name"] == "NVIDIA A100-SXM4-80GB"
     assert gpus[0]["memory_total_mib"] == 81920
     assert gpus[0]["memory_pct"] == 0.0
+    assert gpus[0]["memory_free_mib"] == 81920
     assert gpus[0]["compute_cap"] == "8.0"
 
     bundle = parse_probe_bundle(
@@ -247,6 +248,9 @@ def test_dashboard_snapshot_ssh_down(monkeypatch, tmp_path):
     assert "ssh-session.sh" in (body["next_action"] or "")
     assert body["probing"] is False
     assert body["gpu"] is None
+    assert body["jobs"] == []
+    assert body["scripts"]["allocate_8h"] == "scripts/lrz/allocate.sh 8h"
+    assert "30s" in body["hint"]
 
 
 def test_dashboard_snapshot_lists_packed_jobs(monkeypatch, tmp_path):
@@ -282,4 +286,102 @@ def test_nvidia_smi_command_overlaps_hold_job():
     assert "--jobid=5777469" in cmd
     assert "nvidia-smi" in cmd
     assert "--gres=gpu:1" in cmd
+
+
+def test_sbatch_hold_8h_24h_and_after():
+    from splat_explorer.repair_lrz import (
+        parse_sbatch_output,
+        parse_sinfo_lines,
+        parse_squeue_lines,
+        sbatch_hold_command,
+        select_slurm_job,
+        sinfo_command,
+        widen_command,
+    )
+
+    eight = sbatch_hold_command(8)
+    assert "--time=08:00:00" in eight
+    assert "--wrap='sleep 28800'" in eight
+    assert "--job-name=gs-8h" in eight
+    assert "lrz-hgx-a100-80x4,lrz-dgx-a100-80x8" in eight
+    assert "--gres=gpu:1" in eight
+    twenty = sbatch_hold_command("24h", after_job="5777469")
+    assert "--time=24:00:00" in twenty
+    assert "sleep 86400" in twenty
+    assert "--dependency=afterany:5777469" in twenty
+    assert parse_sbatch_output("Submitted batch job 5777470\n") == "5777470"
+    jobs = parse_squeue_lines(
+        "5777469|R|lrz-dgx-a100-80x8|lrz-dgx-a100-002|1:02|08:00:00|None|gs-8h\n"
+        "5777470|PD|lrz-hgx-a100-80x4||0:00|24:00:00|Priority|gs-24h\n"
+    )
+    assert [j["job_id"] for j in jobs] == ["5777469", "5777470"]
+    assert jobs[0]["name"] == "gs-8h"
+    picked = select_slurm_job(jobs, "5777470")
+    assert picked["state"] == "PD"
+    assert picked["current"] is True
+    rows = parse_sinfo_lines(
+        "lrz-dgx-a100-80x8|up|14-00:00:0|4|mix|lrz-dgx-a100-[001-002,004-005]\n"
+        "lrz-hgx-a100-80x4*|up|14-00:00:0|1|mix|lrz-hgx-a100-004\n"
+    )
+    assert rows[0]["state"] == "mix"
+    assert rows[1]["partition"] == "lrz-hgx-a100-80x4"
+    assert "lrz-v100x2" in sinfo_command()
+    assert "Partition=lrz-hgx-a100-80x4,lrz-dgx-a100-80x8" in widen_command("5777469")
+
+
+def test_write_lrz_job_id(tmp_path):
+    from splat_explorer.repair_lrz import write_lrz_job_id
+
+    path = tmp_path / "lrz.local.yaml"
+    path.write_text('user: go73kaf2\njob_id: ""\n')
+    write_lrz_job_id("5777470", path)
+    assert 'job_id: "5777470"' in path.read_text()
+
+
+def test_allocate_one_sbatch_no_wait(monkeypatch, tmp_path):
+    from splat_explorer.repair_lrz import allocate_lrz_gpu, reset_gpu_probe_cache
+
+    reset_gpu_probe_cache()
+    cfg_path = tmp_path / "configs" / "lrz.local.yaml"
+    cfg_path.parent.mkdir()
+    cfg_path.write_text('user: go73kaf2\nhost: login.ai.lrz.de\njob_id: ""\n')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_session_alive", lambda cfg=None: True)
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz._ssh_run",
+        lambda cfg, remote, timeout=25: type("R", (), {
+            "returncode": 0, "stdout": "Submitted batch job 5777471", "stderr": "",
+        })(),
+    )
+    body = allocate_lrz_gpu(8)
+    assert body["job_id"] == "5777471"
+    assert body["switched"] is True
+    assert 'job_id: "5777471"' in cfg_path.read_text()
+    chained = allocate_lrz_gpu(24, after="5777471")
+    assert chained["after_job"] == "5777471"
+    assert chained["switched"] is False
+    assert "--dependency=afterany:5777471" in chained["command"]
+
+
+def test_login_probe_lists_all_jobs_once():
+    from splat_explorer.repair_lrz import _login_probe_script
+
+    script = _login_probe_script(
+        {"job_id": "5777469", "workspace": "/dss/ws",
+         "container": "/dss/ws/containers/pytorch.sqsh"},
+        None,
+    )
+    assert "squeue --me" in script
+    assert "--job=" not in script
+
+
+def test_connection_checks_missing_job_points_at_allocate():
+    from splat_explorer.repair_lrz import build_connection_checks, next_action_from_checks
+
+    checks = build_connection_checks(
+        configured=False, session=True, job_id="",
+        slurm=None, container=None, gpu=None, gpu_error=None, probed=False,
+    )
+    action = next_action_from_checks(checks)
+    assert action and "allocate.sh" in action
 

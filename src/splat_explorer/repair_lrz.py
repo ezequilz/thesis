@@ -1255,7 +1255,7 @@ def lrz_dashboard_snapshot(
         "scripts": lrz_scripts(),
         "hold_hours": list(HOLD_HOURS),
         "partition": status.get("partition") or DEFAULT_PARTITION,
-        "hint": "Slurm is queried at most once per 25s — LRZ forbids squeue loops. sinfo only on Review partitions.",
+        "hint": "Slurm is queried at most once per 30s while this page is visible. sinfo only on Review partitions.",
     }
 
 

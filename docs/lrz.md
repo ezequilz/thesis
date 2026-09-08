@@ -9,9 +9,10 @@ Enroot/NGC: <https://doku.lrz.de/4-2-enroot-images-from-nvidia-ngc-2747831798.ht
 
 ## What you are allocating
 
-A 6-hour **hold job** (`sleep`) that keeps one GPU. Repair work is extra
+An **8h or 24h hold job** (`sleep`) that keeps one GPU. Repair work is extra
 `srun --overlap` steps on that job. Enroot/Pyxis exist **only on compute
-nodes**, not on the login node.
+nodes**, not on the login node. Running shells and SSH sockets do **not**
+preserve GPU processes; keep code, containers, scenes, and results on DSS.
 
 Default account used here: `go73kaf2` @ `login.ai.lrz.de`  
 DSS workspace: `/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000/go73kaf2/splat-explorer`
@@ -24,6 +25,12 @@ cp configs/lrz.example.yaml configs/lrz.local.yaml
 ```
 
 `configs/lrz.local.yaml` is gitignored.
+
+The repeatable path is the GPU dashboard after `./scripts/start.sh`:
+[http://localhost:8090/repair/gpu](http://localhost:8090/repair/gpu)
+(8h/24h Reserve, jobs list, VRAM free, setup checks, one-shot partition
+review). Auto-refresh is at most once per 30s and only while that tab is
+visible. Scripts below do the same work from a terminal.
 
 ## Every session (laptop)
 
@@ -56,20 +63,23 @@ Socket: `~/.ssh/cm-lrz` (8h). Close with:
 ```
 
 3. If you do not already have a running GPU job, allocate **once** (no
-   `squeue` loop):
+   `squeue` loop). Pick 8h (default) or 24h:
 
 ```bash
-scripts/lrz/allocate.sh
+scripts/lrz/allocate.sh 8h
+scripts/lrz/allocate.sh 24h
+# Replacement that waits until the current job ends (avoids two GPUs):
+scripts/lrz/allocate.sh 24h --after
 ```
 
-That submits:
+That submits (8h example):
 
 ```bash
-sbatch --job-name=gs-debug \
+sbatch --job-name=gs-8h \
   --partition=lrz-hgx-a100-80x4,lrz-dgx-a100-80x8 \
   --nodes=1 --ntasks=1 --gres=gpu:1 --cpus-per-task=4 --mem=32G \
-  --time=06:00:00 --output=gs-debug-%j.log \
-  --wrap='sleep 21600'
+  --time=08:00:00 --output=gs-8h-%j.log \
+  --wrap='sleep 28800'
 ```
 
 Both A100 partitions are listed on purpose. Submitting only
@@ -77,6 +87,8 @@ Both A100 partitions are listed on purpose. Submitting only
 If that happens, one `scontrol` (not a loop):
 
 ```bash
+scripts/lrz/allocate.sh --widen
+# same as:
 scontrol update JobId=<JOBID> Partition=lrz-hgx-a100-80x4,lrz-dgx-a100-80x8
 ```
 
@@ -190,24 +202,36 @@ PYTHONPATH=/workspace/code/src python -m splat_explorer.repair_lrz --job-dir /wo
 
 ## Dashboard (after squashfs exists)
 
-Keep eduVPN up and `~/.ssh/cm-lrz` alive.
+Keep eduVPN up and `~/.ssh/cm-lrz` alive. ControlPersist is 8h — for a 24h
+hold, run `ssh-session.sh` again if the mux drops.
 
-1. Local stack: `./scripts/start.sh` → <http://localhost:8090/repair>
-2. Backend **gsplat CUDA (GSFix3D)** — paper photometric lift, no color
-   stamp. **gsplat CUDA (baseline)** is the frozen pre-paper lift for A/B.
-3. Repair this view. First run rsyncs `src/` to DSS, then `srun --overlap`
-   on job `job_id`.
+1. Local stack: `./scripts/start.sh` → <http://localhost:8090/repair/gpu>
+2. **Reserve GPU** 8h or 24h (optional “queue after current job”). Widen
+   partitions if the job sits in `PD (Priority)`. **Probe GPU** for VRAM
+   free / utilization. **Review partitions** is one `sinfo`, never looped.
+3. Open a GPU shell if you still need Enroot/bootstrap:
+   `scripts/lrz/gpu-shell.sh`
+4. Back on <http://localhost:8090/repair>, backend **gsplat CUDA (GSFix3D)**.
+   First run rsyncs `src/` to DSS, then `srun --overlap` on `job_id`.
+
+The GPU page auto-probes at most once per 30s **while that tab is visible**.
+Hidden tabs keep the last snapshot and send nothing. Use Probe GPU to refresh
+manually.
 
 If the socket is gone: `scripts/lrz/ssh-session.sh` again. If the job is
-not `R`, allocate a new one and update `job_id`.
+not `R`, reserve a new one (or **Use** an already-running row).
 
 ## Scripts
 
 | Script | What it does |
 | --- | --- |
 | `scripts/lrz/ssh-session.sh` | Password once → `~/.ssh/cm-lrz`; one `squeue --me` |
-| `scripts/lrz/allocate.sh` | One `sbatch`; writes `job_id` into `lrz.local.yaml` |
-| `scripts/lrz/gpu-shell.sh` | `srun --overlap --pty bash` on the allocated node |
+| `scripts/lrz/allocate.sh 8h\|24h` | One `sbatch` sleep-hold; writes `job_id` unless `--after` |
+| `scripts/lrz/allocate.sh --after` | Queue a replacement (`--dependency=afterany`) |
+| `scripts/lrz/allocate.sh --widen` | One `scontrol` to both A100 partitions |
+| `scripts/lrz/allocate.sh --use ID` | Point `lrz.local.yaml` at an existing job |
+| `scripts/lrz/status.sh [--sinfo]` | One `squeue --me` (+ optional one `sinfo`) |
+| `scripts/lrz/gpu-shell.sh [id]` | `srun --overlap --pty bash` on the allocated node |
 | `scripts/lrz/bootstrap.sh` | Prints/checks workspace + the import commands above |
 | `scripts/lrz/run-repair.sh` | Manual rsync + remote worker (dashboard usually does this) |
 

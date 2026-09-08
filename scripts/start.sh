@@ -233,7 +233,7 @@ else
   echo "  Dashboard      : http://localhost:8090  (start/watch episodes, VLM debug)"
 fi
 echo "  Repair review  : http://localhost:8090/repair"
-echo "  GPU / LRZ      : http://localhost:8090/repair/gpu"
+echo "  GPU / LRZ      : http://localhost:8090/repair/gpu  (reserve 8h/24h, probe, jobs)"
 echo "  Spectator (HD) : http://localhost:8090/spectator  (viewing only)"
 echo "  CLI episode    : export CLIRELAY_API_KEY=sk-... && \\"
 echo "                   splat-explorer --config configs/cli_relay.yaml explore"

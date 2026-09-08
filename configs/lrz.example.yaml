@@ -5,7 +5,7 @@
 user: go73kaf2
 host: login.ai.lrz.de
 # Current `sbatch` job holding the GPU. Empty / non-numeric = CUDA-via-LRZ off.
-# scripts/lrz/allocate.sh rewrites this.
+# scripts/lrz/allocate.sh 8h|24h rewrites this (or Reserve on /repair/gpu).
 job_id: ""
 workspace: /dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000/go73kaf2/splat-explorer
 # Enroot squashfs on DSS (imported once; see docs/lrz.md).

@@ -120,6 +120,45 @@ class RepairStudio:
             repair_job=job, request_probe=probe, force_probe=force,
         )
 
+    def gpu_allocate(self, hours: int = 8, after: bool | str | None = False) -> dict:
+        from ..repair_lrz import allocate_lrz_gpu
+
+        result = allocate_lrz_gpu(hours, after=after)
+        snap = self.gpu_snapshot(probe=True, force=True)
+        snap["allocate"] = result
+        snap["ok"] = True
+        snap["message"] = result.get("message")
+        return snap
+
+    def gpu_use_job(self, job_id: str) -> dict:
+        from ..repair_lrz import use_lrz_job
+
+        result = use_lrz_job(job_id)
+        snap = self.gpu_snapshot(probe=True, force=True)
+        snap["ok"] = True
+        snap["message"] = result.get("message")
+        return snap
+
+    def gpu_widen(self, job_id: str | None = None) -> dict:
+        from ..repair_lrz import widen_lrz_job
+
+        result = widen_lrz_job(job_id)
+        snap = self.gpu_snapshot(probe=True, force=True)
+        snap["ok"] = True
+        snap["message"] = result.get("message")
+        snap["widen"] = result
+        return snap
+
+    def gpu_review(self, *, force: bool = True) -> dict:
+        from ..repair_lrz import review_lrz_partitions
+
+        result = review_lrz_partitions(force=force)
+        snap = self.gpu_snapshot()
+        snap["partitions"] = result.get("partitions")
+        snap["ok"] = True
+        snap["message"] = result.get("message")
+        return snap
+
     def list_episodes(self) -> list[dict]:
         entries = []
         for entry in self.app.list_episodes():

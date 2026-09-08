@@ -20,7 +20,11 @@ Endpoints:
   GET  /repair/gpu        LRZ SSH + GPU connection dashboard
   GET  /api/repair        repair-studio snapshot (optional ?episode=)
   GET  /api/repair/gpu    LRZ connection, cached GPU probe, current repair stats
-  POST /api/repair/gpu/probe  one-shot remote GPU/Slurm probe (rate-limited)
+  POST /api/repair/gpu/probe  one-shot remote GPU/Slurm probe (rate-limited, 30s)
+  POST /api/repair/gpu/allocate  submit 8h/24h sleep hold {hours, after}
+  POST /api/repair/gpu/use      point configs/lrz.local.yaml at {job_id}
+  POST /api/repair/gpu/widen    one scontrol to both A100 partitions
+  POST /api/repair/gpu/review   one sinfo snapshot
   GET  /api/repair/episodes     past runs with regen counts / ply flags
   GET  /api/repair/metrics      download metrics.json (?episode=&step=)
   POST /api/repair/start   replay 3D lift {episode, reload_code, backend, step, resume}
@@ -867,6 +871,45 @@ class DashboardHandler(BaseHTTPRequestHandler):
             snap = studio.gpu_snapshot(
                 probe=True, force=bool(body.get("force", True)),
             )
+            self._send_json(snap)
+            return
+        elif path == "/api/repair/gpu/allocate":
+            hours = body.get("hours") or 8
+            after = body.get("after", False)
+            try:
+                snap = studio.gpu_allocate(hours=hours, after=after)
+            except (RuntimeError, ValueError) as exc:
+                self._send_json({"ok": False, "message": str(exc)}, 409)
+                return
+            self._send_json(snap)
+            return
+        elif path == "/api/repair/gpu/use":
+            job_id = str(body.get("job_id") or "").strip()
+            if not job_id.isdigit():
+                self._send_json({"ok": False, "message": "Missing numeric job_id."}, 400)
+                return
+            try:
+                snap = studio.gpu_use_job(job_id)
+            except (RuntimeError, ValueError) as exc:
+                self._send_json({"ok": False, "message": str(exc)}, 409)
+                return
+            self._send_json(snap)
+            return
+        elif path == "/api/repair/gpu/widen":
+            job_id = str(body.get("job_id") or "").strip() or None
+            try:
+                snap = studio.gpu_widen(job_id)
+            except (RuntimeError, ValueError) as exc:
+                self._send_json({"ok": False, "message": str(exc)}, 409)
+                return
+            self._send_json(snap)
+            return
+        elif path == "/api/repair/gpu/review":
+            try:
+                snap = studio.gpu_review(force=bool(body.get("force", True)))
+            except (RuntimeError, ValueError) as exc:
+                self._send_json({"ok": False, "message": str(exc)}, 409)
+                return
             self._send_json(snap)
             return
         else:

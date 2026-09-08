@@ -247,7 +247,9 @@ only the compact `.sog` or use Git LFS.
 ## LRZ CUDA repair (GSFix3D on an allocated GPU)
 
 Mac hosts have no CUDA. The repair page can ship a view to an LRZ A100 when
-you have eduVPN, a ControlMaster SSH session, and a running GPU hold job.
+you have eduVPN, a ControlMaster SSH session, and a running GPU hold job
+(8h or 24h sleep allocation). Reserve, inspect VRAM/jobs, and reconnect from
+[http://localhost:8090/repair/gpu](http://localhost:8090/repair/gpu).
 Step-by-step (password login, `sbatch`, `--overlap`, Enroot/NGC import):
 [`docs/lrz.md`](docs/lrz.md).
 
