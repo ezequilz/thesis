@@ -137,7 +137,10 @@ def list_repair_backends() -> dict:
             "Needs an NVIDIA GPU (pip install -e '.[gpu]') or LRZ: copy "
             "configs/lrz.example.yaml to configs/lrz.local.yaml and set job_id."
         )
-    detected = detect_repair_backend()
+    if cuda or lrz_ok:
+        detected = "gsfix-gsplat"
+    else:
+        detected = detect_repair_backend()
     return {
         "detected": detected,
         "docker": docker,
@@ -147,7 +150,16 @@ def list_repair_backends() -> dict:
                 "id": "auto",
                 "label": f"Auto ({detected})",
                 "available": True,
-                "detail": f"Picks the best stack in this process: {detected}",
+                "detail": (
+                    f"Repair page default is gsplat CUDA / LRZ when configured; "
+                    f"otherwise {detected}."
+                ),
+            },
+            {
+                "id": "gsfix-gsplat",
+                "label": "gsplat CUDA (GSFix3D)",
+                "available": bool(cuda or lrz_ok),
+                "detail": cuda_detail,
             },
             {
                 "id": "gsplat-mlx",
@@ -168,12 +180,6 @@ def list_repair_backends() -> dict:
                     "use only to inspect the stamp, not for true testing."
                     if mlx else mlx_detail
                 ),
-            },
-            {
-                "id": "gsfix-gsplat",
-                "label": "gsplat CUDA (GSFix3D)",
-                "available": bool(cuda or lrz_ok),
-                "detail": cuda_detail,
             },
             {
                 "id": "cpu-project",
@@ -208,7 +214,9 @@ def make_repair_backend(
     """Build a lift backend.
 
     `name='auto'` detects CUDA gsplat, then Apple Silicon gsplat-mlx, then the
-    CPU color stamp. An explicit name must be available here — it will not
+    CPU color stamp. Dashboard replay (`studio=True`) prefers LRZ CUDA when
+    `configs/lrz.local.yaml` has a job id, so the repair page does not silently
+    fall through to Metal. An explicit name must be available here — it will not
     silently fall back (the dashboard uses that to show a real error).
 
     `studio=True` is the dashboard replay preset. `focused=True` is the
@@ -218,6 +226,17 @@ def make_repair_backend(
     """
     key = _normalize_backend_name(name)
     if key == "auto":
+        if studio:
+            try:
+                from .repair_lrz import lrz_configured
+                if lrz_configured():
+                    key = "gsfix-gsplat"
+                    logger.info("3D repair backend (studio auto → LRZ CUDA): %s", key)
+                    return _build_repair_backend(
+                        key, studio=studio, focused=focused, required=True,
+                    )
+            except Exception:
+                pass
         key = detect_repair_backend()
         logger.info("3D repair backend (auto): %s", key)
         return _build_repair_backend(

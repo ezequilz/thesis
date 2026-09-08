@@ -63,7 +63,7 @@ class RepairStudio:
             "finished_at": None,
             "results": [],
             "reload_code": False,
-            "backend": "auto",
+            "backend": "gsfix-gsplat",
             "mode": "episode",
             "max_seconds": None,
             "resume": None,
@@ -200,7 +200,7 @@ class RepairStudio:
         episode_id: str,
         *,
         reload_code: bool = True,
-        backend: str = "auto",
+        backend: str = "gsfix-gsplat",
         step: int | None = None,
         max_seconds: float = 3600.0,
         resume: bool = True,
@@ -226,7 +226,7 @@ class RepairStudio:
                 "Dashboard scene is not ready. Wait for the catalog to finish "
                 "loading, or run scripts/start.sh and try again."
             )
-        backend_name = str(backend or "auto").strip() or "auto"
+        backend_name = str(backend or "gsfix-gsplat").strip() or "gsfix-gsplat"
         cap = max(30.0, float(max_seconds or 3600.0))
         resume = bool(resume)
         with self._lock:

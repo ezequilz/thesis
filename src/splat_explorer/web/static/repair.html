@@ -181,11 +181,11 @@
     <select id="in-ep"></select>
   </label>
   <label>backend
-    <select id="in-backend" title="Which 3D lift to run. Auto picks CUDA, then gsplat-mlx (GSFix3D photometric, no stamp), then the CPU stamp. Pick (w. color stamp) only to inspect painted updates — that path breaks the photometric repair.">
+    <select id="in-backend" title="Which 3D lift to run. Default is gsplat CUDA (LRZ A100). Auto uses CUDA/LRZ when a job is configured, else gsplat-mlx, else the CPU stamp. Pick (w. color stamp) only to inspect painted updates — that path breaks the photometric repair.">
       <option value="auto">Auto (best available)</option>
+      <option value="gsfix-gsplat" selected>gsplat CUDA (GSFix3D)</option>
       <option value="gsplat-mlx">gsplat-mlx (Apple Silicon / Metal)</option>
       <option value="gsplat-mlx-stamp">gsplat-mlx (w. color stamp)</option>
-      <option value="gsfix-gsplat">gsplat CUDA (GSFix3D)</option>
       <option value="cpu-project">CPU color stamp</option>
       <option value="cpu-photometric">CPU photometric (no rasterizer)</option>
     </select>
@@ -314,10 +314,12 @@ function renderBackends() {
   if (!sel) return;
   const info = snapshot?.backends;
   const list = info?.backends || [];
-  const prev = sel.value || "auto";
+  const stored = localStorage.getItem("repair-backend");
+  const prev = sel.dataset.user || stored
+    || (sel.value && sel.value !== "auto" ? sel.value : "gsfix-gsplat");
   if (!list.length) {
     if (!sel.options.length) {
-      sel.innerHTML = '<option value="auto">Auto</option>';
+      sel.innerHTML = '<option value="gsfix-gsplat">gsplat CUDA (GSFix3D)</option>';
     }
     return;
   }
@@ -329,6 +331,7 @@ function renderBackends() {
     return `<option value="${esc(b.id)}" title="${esc(b.detail || "")}">${esc(b.label)}${mark}</option>`;
   }).join("");
   if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  else if ([...sel.options].some(o => o.value === "gsfix-gsplat")) sel.value = "gsfix-gsplat";
   else sel.value = "auto";
   const chosen = list.find(b => b.id === sel.value);
   sel.title = chosen?.detail || "";
@@ -407,11 +410,11 @@ function l1Info(r) {
 }
 
 function renderStats() {
-  const ep = snapshot?.episode;
-  const views = ep?.views || [];
+  const episode = snapshot?.episode;
+  const views = episode?.views || [];
   $("st-views").textContent = views.length || "–";
-  $("st-orig").textContent = ep?.original_ply ? fmtBytes(ep.original_ply.bytes) : "–";
-  $("st-rep").textContent = ep?.repaired_ply ? fmtBytes(ep.repaired_ply.bytes) : "–";
+  $("st-orig").textContent = episode?.original_ply ? fmtBytes(episode.original_ply.bytes) : "–";
+  $("st-rep").textContent = episode?.repaired_ply ? fmtBytes(episode.repaired_ply.bytes) : "–";
   $("st-scene").textContent = snapshot?.episode_scene_label
     || snapshot?.episode_scene || snapshot?.scene_id || "–";
   const detected = snapshot?.backends?.detected;
@@ -425,6 +428,23 @@ function renderStats() {
   }
   $("st-done").textContent = snapshot?.job?.n_done != null
     ? `${snapshot.job.n_done}/${snapshot.job.n_views || 0}` : "–";
+  const v = currentView();
+  const r = viewRepair(v);
+  const l1 = l1Info(r);
+  const l1El = $("st-l1");
+  l1El.className = l1 ? l1.cls : "";
+  l1El.title = l1 ? l1.title : "Photometric L1 versus the regen PNG (after should be lower)";
+  l1El.innerHTML = l1 ? `L1 <b>${esc(l1.text)}</b>` : "L1 <b>–</b>";
+  const metrics = $("btn-metrics");
+  const epId = selectedEp || episode?.id;
+  const canDl = Boolean(epId && (episode?.has_metrics || l1));
+  metrics.hidden = !canDl;
+  if (canDl) {
+    const step = v?.step ?? selectedStep;
+    const base = episode?.metrics_url || `/api/repair/metrics?episode=${encodeURIComponent(epId)}`;
+    metrics.href = base + (step != null ? `&step=${encodeURIComponent(step)}` : "");
+    metrics.download = step != null ? `step_${String(step).padStart(3, "0")}_metrics.json` : "metrics.json";
+  }
 }
 
 function renderViews() {
@@ -513,12 +533,14 @@ function renderCompare() {
   $("btn-img-orig").disabled = kinds.length < 2;
   $("btn-img-rep").disabled = kinds.length < 2;
   $("compare-nav").hidden = false;
-  const r = (snapshot?.job?.results || []).find(x => x.step === v.step) || v.repair || {};
+  const r = viewRepair(v);
   const kvKey = [
-    v.step, compareKind, src, r.status, r.backend, r.n_iters, r.seconds, r.error || "",
+    v.step, compareKind, src, r.status, r.backend, r.n_iters, r.seconds,
+    r.l1_before, r.l1_after, r.error || "",
   ].join("|");
   if ($("compare-kv").dataset.key === kvKey) return;
   $("compare-kv").dataset.key = kvKey;
+  const l1 = l1Info(r);
   $("compare-kv").innerHTML = `
       <span class="k">pose</span><span class="v">${esc(v.pose || "")}</span>
       <span class="k">3D repair</span><span class="v">${esc(r.status || "not run")}</span>
@@ -527,8 +549,7 @@ function renderCompare() {
       <span class="k">train res</span><span class="v">${r.train_width && r.train_height ? `${r.train_width}×${r.train_height}` : "–"}</span>
       <span class="k">visible</span><span class="v">${r.n_visible ?? "–"}</span>
       <span class="k">spawned</span><span class="v">${r.n_spawned ?? "–"}</span>
-      <span class="k">L1 before</span><span class="v">${r.l1_before ?? "–"}</span>
-      <span class="k">L1 after</span><span class="v">${r.l1_after ?? "–"}</span>
+      <span class="k">L1</span><span class="v">${l1 ? esc(l1.text) : "–"}</span>
       <span class="k">seconds</span><span class="v">${r.seconds ?? "–"}</span>
       <span class="k">gaussians</span><span class="v">${r.n_gaussians ?? "–"}</span>
       ${r.error ? `<span class="k">error</span><span class="v">${esc(r.error)}</span>` : ""}`;
@@ -717,6 +738,11 @@ async function tick({ poll = false } = {}) {
   }
 }
 
+$("in-backend").onchange = () => {
+  const sel = $("in-backend");
+  sel.dataset.user = sel.value;
+  try { localStorage.setItem("repair-backend", sel.value); } catch (_) {}
+};
 $("in-ep").onchange = () => {
   selectedStep = null;
   visorPly = null;
@@ -734,7 +760,7 @@ $("btn-replay").onclick = async () => {
   await post("/api/repair/start", {
     episode: selectedEp,
     reload_code: $("in-reload").checked,
-    backend: $("in-backend").value || "auto",
+    backend: $("in-backend").value || "gsfix-gsplat",
     resume: true,
     ssh_password: $("in-lrz-pw")?.value || "",
   });
@@ -750,7 +776,7 @@ $("btn-view").onclick = async () => {
     step: selectedStep,
     max_seconds: 3600,
     reload_code: $("in-reload").checked,
-    backend: $("in-backend").value || "auto",
+    backend: $("in-backend").value || "gsfix-gsplat",
     resume: true,
     ssh_password: $("in-lrz-pw")?.value || "",
   });

@@ -15,6 +15,7 @@ from splat_explorer.agent.regenerate import RegenerateResult, regenerate_frame_n
 from splat_explorer.rendering.base import Camera
 from splat_explorer.repair import (
     HIGHLIGHT_COLOR,
+    METRICS_JSON,
     ORIGINAL_PLY,
     REPAIRED_PLY,
     PhotometricViewRepair,
@@ -283,6 +284,11 @@ def test_on_done_runs_after_regenerate(tmp_path: Path):
     assert meta["status"] == "ok"
     log = json.loads((tmp_path / "repair_log.json").read_text())
     assert log["repaired_ply"] == REPAIRED_PLY
+    metrics = json.loads((tmp_path / METRICS_JSON).read_text())
+    assert metrics["status"] == "ok"
+    assert "l1_before" in metrics
+    assert "l1_after" in metrics
+    assert "l1_improved" in metrics
 
 
 def test_skips_when_regenerate_has_no_image(tmp_path: Path):

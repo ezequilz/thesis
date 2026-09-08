@@ -65,9 +65,8 @@ def test_list_repair_backends_includes_auto_and_mlx():
     ids = [b["id"] for b in info["backends"]]
     assert info["detected"] in {"gsfix-gsplat", "gsplat-mlx", "cpu-project"}
     assert ids[0] == "auto"
-    assert ids[1] == "gsplat-mlx"
-    assert "gsplat-mlx-stamp" in ids
-    assert "gsfix-gsplat" in ids
+    assert ids[1] == "gsfix-gsplat"
+    assert "gsplat-mlx" in ids
     auto = info["backends"][0]
     assert auto["available"] is True
     stamp = next(b for b in info["backends"] if b["id"] == "gsplat-mlx-stamp")

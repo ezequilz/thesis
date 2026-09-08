@@ -808,7 +808,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "message": "Missing episode id."}, 400)
                 return
             reload_code = body.get("reload_code", True)
-            backend = body.get("backend") or "auto"
+            backend = body.get("backend") or "gsfix-gsplat"
             step = body.get("step")
             max_seconds = body.get("max_seconds", 3600)
             resume = body.get("resume", True)

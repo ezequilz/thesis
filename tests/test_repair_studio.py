@@ -236,7 +236,7 @@ def test_start_replay_continues_from_episode_ply_while_catalog_loads(tmp_path: P
     app.scene_status = "loading"
     app.scene = None
     studio = RepairStudio(app)
-    ok, message = studio.start_replay(ep.name, step=4, resume=True)
+    ok, message = studio.start_replay(ep.name, step=4, resume=True, backend="cpu-project")
     assert ok, message
     studio.stop_replay()
 
@@ -321,3 +321,33 @@ def test_live_scene_reload_follows_newer_path_even_if_generation_drops():
     assert live_scene_reload_action(req, state) == "load"
     stale = dict(req, updated_at=0.5, path="3dgs_rooms/Venetian Balcony")
     assert live_scene_reload_action(stale, state) == "skip"
+
+
+def test_metrics_payload_marks_l1_improved(tmp_path: Path):
+    ep = _episode(tmp_path)
+    (ep / "metrics.json").write_text(json.dumps({
+        "step": 4,
+        "l1_before": 0.42,
+        "l1_after": 0.11,
+        "backend": "gsfix-gsplat",
+    }))
+    (ep / "step_004_repair.json").write_text(json.dumps({
+        "step": 4,
+        "l1_before": 0.42,
+        "l1_after": 0.11,
+        "backend": "gsfix-gsplat",
+    }))
+    app = _FakeApp(ep)
+    studio = RepairStudio(app)
+    body, name = studio.metrics_payload(ep.name)
+    assert name == "metrics.json"
+    assert body["l1_improved"] is True
+    assert body["l1_after"] == 0.11
+    stepped, step_name = studio.metrics_payload(ep.name, step=4)
+    assert step_name == "step_004_metrics.json"
+    assert stepped["l1_before"] == 0.42
+    missing, _ = studio.metrics_payload(ep.name, step=9)
+    assert missing is None
+    review = studio.episode_review(ep.name)
+    assert review["has_metrics"] is True
+    assert review["metrics_url"].startswith("/api/repair/metrics")
