@@ -336,7 +336,10 @@ def _build_repair_backend(key: str, *, studio: bool, focused: bool, required: bo
                 "3D repair backend: %s (gsplat / CUDA via LRZ)",
                 "GSFix3D paper" if key == "gsfix-gsplat" else "GSFix CUDA baseline",
             )
-            return LrzRemoteRepair(method=key)
+            return LrzRemoteRepair(
+                method=key,
+                max_chunks=0 if key == "gsfix-gsplat-baseline" else 1,
+            )
         msg = (
             "gsplat CUDA refine is not available in this process "
             "(needs NVIDIA GPU + pip install -e '.[gpu]', or LRZ via "

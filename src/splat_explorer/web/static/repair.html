@@ -208,7 +208,7 @@
   </label>
   <div style="display:flex;gap:8px;align-self:end">
     <button id="btn-replay">Replay all views</button>
-    <button id="btn-view" title="Photometric-refine this regenerated view until you press Stop (max 1 hour). Continues from scene_repaired.ply when it exists. CUDA GSFix3D runs paper 20-iter chunks (no color stamp). The (w. color stamp) backend paints RGB first.">Repair this view</button>
+    <button id="btn-view" title="Photometric-refine this regenerated view. CUDA GSFix3D runs the paper's 20 iterations (no color stamp) and stops; click again for another pass. Baseline / MLX-stamp keep going until Stop (max 1 hour). Continues from scene_repaired.ply when it exists.">Repair this view</button>
     <button id="btn-reset" title="Copy scene_original.ply over scene_repaired.ply and show the original splat.">Reset repair</button>
     <button id="btn-stop" disabled>Stop</button>
   </div>

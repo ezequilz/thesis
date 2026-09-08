@@ -215,6 +215,7 @@ class GsplatGsfix3dRepair:
     near: float = 0.05
     packed: bool = False
     white_background: bool = False
+    max_chunks: int = 1
     on_progress: Callable[[dict], None] | None = None
 
     def apply(
@@ -248,17 +249,23 @@ class GsplatGsfix3dRepair:
         deadline: float | None = None,
         on_checkpoint=None,
     ) -> dict[str, Any]:
-        """Repeat paper 20-iter chunks until Stop / deadline (research)."""
+        """Run ``max_chunks`` paper 20-iter passes (default 1 = paper §3.3).
+
+        Set ``max_chunks=0`` to keep going until Stop / deadline (research).
+        """
         import time
 
         last: dict[str, Any] | None = None
         total_iters = 0
         l1_before = None
         chunk = 0
+        limit = int(self.max_chunks)
         while True:
             if should_stop is not None and should_stop():
                 break
             if deadline is not None and time.time() >= deadline:
+                break
+            if limit > 0 and chunk >= limit:
                 break
             last = self.apply(scene, camera, rendered_rgb, repaired_rgb)
             if l1_before is None:

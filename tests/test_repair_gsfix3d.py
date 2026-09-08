@@ -31,6 +31,7 @@ def test_instantiate_cuda_repair_dispatches_baseline():
     assert isinstance(paper, GsplatGsfix3dRepair)
     assert paper.iters == 7
     assert paper.kf_iters == 50
+    assert paper.max_chunks == 1
     base = instantiate_cuda_repair(method="gsfix-gsplat-baseline", iters=3)
     assert isinstance(base, GsplatPhotometricRepair)
     assert base.iters == 3

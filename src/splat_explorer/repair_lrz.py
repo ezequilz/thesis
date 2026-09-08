@@ -1181,6 +1181,7 @@ class LrzRemoteRepair:
     near: float = 0.05
     packed: bool = False
     white_background: bool = False
+    max_chunks: int = 1
     on_progress: Callable[[dict], None] | None = None
     should_stop: Callable[[], bool] | None = None
 
@@ -1205,6 +1206,7 @@ class LrzRemoteRepair:
             "near": float(self.near),
             "packed": bool(self.packed),
             "white_background": bool(self.white_background),
+            "max_chunks": int(self.max_chunks),
         }
 
     def apply(
@@ -1250,21 +1252,27 @@ class LrzRemoteRepair:
         last: dict[str, Any] | None = None
         total_iters = 0
         l1_before = None
+        chunk = 0
         self.should_stop = should_stop
         self.on_progress = on_checkpoint
         password = get_ssh_password() or os.environ.get("LRZ_SSH_PASSWORD")
         once = not lrz_session_alive() and not bool(password)
+        limit = int(self.max_chunks)
         while True:
             if should_stop is not None and should_stop():
                 break
             if deadline is not None and time.time() >= deadline:
                 break
+            if limit > 0 and chunk >= limit:
+                break
             last = self.apply(scene, camera, rendered_rgb, repaired_rgb)
+            chunk += 1
             if l1_before is None:
                 l1_before = last.get("l1_before")
             total_iters += int(last.get("n_iters") or 0)
             last = dict(last)
             last["n_iters"] = total_iters
+            last["n_chunks"] = chunk
             last["n_stamped"] = int(last.get("n_stamped") or 0)
             last["l1_before"] = l1_before
             if on_checkpoint is not None:

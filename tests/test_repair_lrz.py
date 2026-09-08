@@ -130,12 +130,14 @@ def test_make_repair_backend_lrz(monkeypatch):
     if gsplat_refine_available():
         pytest.skip("local CUDA wins over LRZ")
     monkeypatch.setattr("splat_explorer.repair_lrz.lrz_configured", lambda: True)
-    backend = make_repair_backend("gsfix-gsplat")
-    assert isinstance(backend, LrzRemoteRepair)
-    assert backend.method == "gsfix-gsplat"
+    paper = make_repair_backend("gsfix-gsplat")
+    assert isinstance(paper, LrzRemoteRepair)
+    assert paper.method == "gsfix-gsplat"
+    assert paper.max_chunks == 1
     baseline = make_repair_backend("gsfix-gsplat-baseline")
     assert isinstance(baseline, LrzRemoteRepair)
     assert baseline.method == "gsfix-gsplat-baseline"
+    assert baseline.max_chunks == 0
     auto = make_repair_backend("auto", studio=True)
     assert isinstance(auto, LrzRemoteRepair)
 
