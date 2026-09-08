@@ -34,16 +34,27 @@ def test_make_repair_backend_rejects_unknown_name():
 
 
 def test_explicit_backend_requires_availability():
-    from splat_explorer.repair_gsfix import gsplat_refine_available
+    from splat_explorer.repair_gsfix import GsplatPhotometricRepair, gsplat_refine_available
+    from splat_explorer.repair_gsfix3d import GsplatGsfix3dRepair
     from splat_explorer.repair_mlx import mlx_refine_available
 
-    if not gsplat_refine_available():
+    if gsplat_refine_available():
+        assert isinstance(make_repair_backend("gsfix-gsplat"), GsplatGsfix3dRepair)
+        assert isinstance(make_repair_backend("gsfix-gsplat-baseline"), GsplatPhotometricRepair)
+    else:
         from splat_explorer.repair_lrz import LrzRemoteRepair, lrz_configured
         if lrz_configured():
-            assert isinstance(make_repair_backend("gsfix-gsplat"), LrzRemoteRepair)
+            paper = make_repair_backend("gsfix-gsplat")
+            assert isinstance(paper, LrzRemoteRepair)
+            assert paper.method == "gsfix-gsplat"
+            base = make_repair_backend("gsfix-gsplat-baseline")
+            assert isinstance(base, LrzRemoteRepair)
+            assert base.method == "gsfix-gsplat-baseline"
         else:
             with pytest.raises(RuntimeError, match="CUDA"):
                 make_repair_backend("gsfix-gsplat")
+            with pytest.raises(RuntimeError, match="CUDA"):
+                make_repair_backend("gsfix-gsplat-baseline")
     if mlx_refine_available():
         from splat_explorer.repair_mlx import MlxPhotometricRepair
         assert isinstance(make_repair_backend("gsplat-mlx"), MlxPhotometricRepair)
@@ -66,11 +77,14 @@ def test_list_repair_backends_includes_auto_and_mlx():
     assert info["detected"] in {"gsfix-gsplat", "gsplat-mlx", "cpu-project"}
     assert ids[0] == "auto"
     assert ids[1] == "gsfix-gsplat"
+    assert ids[2] == "gsfix-gsplat-baseline"
     assert "gsplat-mlx" in ids
     auto = info["backends"][0]
     assert auto["available"] is True
     stamp = next(b for b in info["backends"] if b["id"] == "gsplat-mlx-stamp")
     assert "color stamp" in stamp["label"]
+    paper = next(b for b in info["backends"] if b["id"] == "gsfix-gsplat")
+    assert "No color stamp" in paper["detail"]
 
 
 def test_make_repair_backend_falls_back_without_cuda():
@@ -79,13 +93,25 @@ def test_make_repair_backend_falls_back_without_cuda():
     from splat_explorer.repair_mlx import mlx_refine_available
 
     if gsplat_refine_available():
-        from splat_explorer.repair_gsfix import GsplatPhotometricRepair
-        assert isinstance(backend, GsplatPhotometricRepair)
+        from splat_explorer.repair_gsfix3d import GsplatGsfix3dRepair
+        assert isinstance(backend, GsplatGsfix3dRepair)
     elif mlx_refine_available():
         from splat_explorer.repair_mlx import MlxPhotometricRepair
         assert isinstance(backend, MlxPhotometricRepair)
     else:
         assert isinstance(backend, ProjectedViewRepair)
+
+
+def test_repair_progress_suffix_does_not_call_updates_stamped():
+    from splat_explorer.repair import repair_progress_suffix
+
+    text = repair_progress_suffix({"n_updated": 387316, "n_iters": 340, "n_stamped": 0})
+    assert "stamped" not in text
+    assert "387316 gaussians" in text
+    assert "340 iters" in text
+    stamped = repair_progress_suffix({"n_stamped": 12, "n_updated": 99})
+    assert "12 stamped" in stamped
+    assert "99" not in stamped
 
 
 def test_ssim_and_l1_on_cpu():
@@ -175,7 +201,7 @@ def test_gsplat_refine_reduces_l1(tmp_path):
         episode_dir=tmp_path,
     )
     assert result.status == "ok"
-    assert result.backend == "gsfix-gsplat"
+    assert result.backend == "gsfix-gsplat-baseline"
     assert result.l1_after is not None
     assert result.l1_after < result.l1_before
     assert (tmp_path / repaired_render_name(0)).is_file()

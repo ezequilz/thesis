@@ -187,9 +187,10 @@
     <select id="in-ep"></select>
   </label>
   <label>backend
-    <select id="in-backend" title="Which 3D lift to run. Default is gsplat CUDA (LRZ A100). Auto uses CUDA/LRZ when a job is configured, else gsplat-mlx, else the CPU stamp. Pick (w. color stamp) only to inspect painted updates — that path breaks the photometric repair.">
+    <select id="in-backend" title="Which 3D lift to run. Default is gsplat CUDA GSFix3D (paper §3.3, no color stamp). Baseline is the frozen pre-paper CUDA lift. Auto uses CUDA/LRZ when a job is configured, else gsplat-mlx, else the CPU stamp. Pick (w. color stamp) only to inspect painted updates.">
       <option value="auto">Auto (best available)</option>
       <option value="gsfix-gsplat" selected>gsplat CUDA (GSFix3D)</option>
+      <option value="gsfix-gsplat-baseline">gsplat CUDA (baseline)</option>
       <option value="gsplat-mlx">gsplat-mlx (Apple Silicon / Metal)</option>
       <option value="gsplat-mlx-stamp">gsplat-mlx (w. color stamp)</option>
       <option value="cpu-project">CPU color stamp</option>
@@ -207,7 +208,7 @@
   </label>
   <div style="display:flex;gap:8px;align-self:end">
     <button id="btn-replay">Replay all views</button>
-    <button id="btn-view" title="Photometric-refine this regenerated view until you press Stop (max 1 hour). Continues from scene_repaired.ply when it exists. The (w. color stamp) backend paints RGB first.">Repair this view</button>
+    <button id="btn-view" title="Photometric-refine this regenerated view until you press Stop (max 1 hour). Continues from scene_repaired.ply when it exists. CUDA GSFix3D runs paper 20-iter chunks (no color stamp). The (w. color stamp) backend paints RGB first.">Repair this view</button>
     <button id="btn-reset" title="Copy scene_original.ply over scene_repaired.ply and show the original splat.">Reset repair</button>
     <button id="btn-stop" disabled>Stop</button>
   </div>

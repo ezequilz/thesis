@@ -1,16 +1,19 @@
-"""GSFix3D §3.3 photometric lift via gsplat (refine side only).
+"""Frozen CUDA photometric lift (pre-paper baseline).
 
-Ports the loop in GSFix3D ``scripts/gsfix3d/refine_gs.py`` onto our
-``GaussianScene``:
+This is the gsplat refine that produced neon / needle artifacts when a
+single view ran for hundreds of iterations. It is kept as backend
+``gsfix-gsplat-baseline`` for A/B against the paper method in
+``repair_gsfix3d.py`` (the default ``gsfix-gsplat``).
 
-  for each repaired view, for ``iters`` steps:
-      I_gs = rasterize(gaussians, camera)          # differentiable
-      L = (1-λ) ||I_fixed - I_gs||_1 + λ (1-SSIM)
-      backward; densify every 5 steps; Adam step
+Known deviations from GSFix3D ``scripts/gsfix3d/refine_gs.py``:
 
-No GSFixer diffusion, no mesh, no depth network. The regen PNG is I_fixed.
-Requires NVIDIA CUDA + ``gsplat``. ``make_repair_backend()`` then tries
-gsplat-mlx on Apple Silicon, and otherwise falls back to the CPU color stamp.
+- RGB is Adam-optimized with no SH / sigmoid activation (can leave [0, 1]
+  mid-loop; commit clamps — that clamp is the "neon" posterization).
+- Densify only clones (no split of large Gaussians) and skips the Adam
+  step on densify iterations.
+- ``apply_until`` repeats 20-iter chunks until Stop (paper is 20 / view).
+- No color stamp — that path was never on CUDA; the repair UI used to
+  label ``n_updated`` as "stamped".
 """
 
 from __future__ import annotations
@@ -104,7 +107,7 @@ def _to_uint8(rgb) -> np.ndarray:
 
 @dataclass
 class GsplatPhotometricRepair:
-    """Differentiable photometric lift. Same loss and iter structure as GSFix3D refine."""
+    """Frozen CUDA lift. Prefer ``GsplatGsfix3dRepair`` (``gsfix-gsplat``)."""
 
     iters: int = 20
     lambda_dssim: float = _LAMBDA_DSSIM
@@ -162,22 +165,28 @@ class GsplatPhotometricRepair:
 
         last: dict[str, Any] | None = None
         total_iters = 0
+        l1_before = None
         while True:
             if should_stop is not None and should_stop():
                 break
             if deadline is not None and time.time() >= deadline:
                 break
             last = self.apply(scene, camera, rendered_rgb, repaired_rgb)
+            if l1_before is None:
+                l1_before = last.get("l1_before")
             total_iters += int(last.get("n_iters") or 0)
             last = dict(last)
             last["n_iters"] = total_iters
+            last["n_stamped"] = 0
+            last["l1_before"] = l1_before
             if on_checkpoint is not None:
                 on_checkpoint(last)
         if last is None:
             return {
-                "backend": "gsfix-gsplat",
+                "backend": "gsfix-gsplat-baseline",
                 "n_visible": scene.num_gaussians,
                 "n_updated": 0,
+                "n_stamped": 0,
                 "n_spawned": 0,
                 "n_gaussians": scene.num_gaussians,
                 "n_iters": 0,
@@ -321,13 +330,14 @@ class GsplatPhotometricRepair:
 
         n1 = scene.num_gaussians
         logger.info(
-            "GSFix refine: %d iters, L1 %.4f -> %.4f, %d -> %d gaussians (+%d)",
+            "GSFix baseline refine: %d iters, L1 %.4f -> %.4f, %d -> %d gaussians (+%d)",
             self.iters, l1_before, l1_after, n0, n1, n_spawned,
         )
         return {
-            "backend": "gsfix-gsplat",
+            "backend": "gsfix-gsplat-baseline",
             "n_visible": n1,
             "n_updated": n1,
+            "n_stamped": 0,
             "n_spawned": int(max(0, n1 - n0) if n_spawned == 0 else n_spawned),
             "n_gaussians": n1,
             "n_iters": int(self.iters),

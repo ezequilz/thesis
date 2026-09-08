@@ -29,7 +29,7 @@ stop_host_dashboard() {
     rm -f outputs/dashboard.pid
   fi
   local leftover pid cmd
-  leftover=$(pgrep -f "[.]venv/bin/splat-explorer dashboard" || true)
+  leftover=$(pgrep -f "[s]plat-explorer dashboard" || true)
   for pid in $leftover; do
     echo "    Stopping leftover dashboard (pid $pid)"
     kill "$pid" || true
@@ -171,17 +171,23 @@ if [ "$HOST_DASHBOARD" = 1 ] && [ "$DASH_FREE" = 1 ]; then
   export CLIRELAY_BASE_URL="${CLIRELAY_BASE_URL:-http://localhost:8317/v1}"
   export VISER_RENDER_URL="${VISER_RENDER_URL:-http://localhost:8081}"
   export VISER_VIEWER_URL="${VISER_VIEWER_URL:-http://localhost:8080}"
-  nohup .venv/bin/splat-explorer dashboard >> outputs/dashboard.log 2>&1 &
+  nohup .venv/bin/splat-explorer dashboard >> outputs/dashboard.log 2>&1 </dev/null &
   echo $! > outputs/dashboard.pid
+  disown $! 2>/dev/null || true
   echo "    Host dashboard pid $(cat outputs/dashboard.pid)  (logs: outputs/dashboard.log)"
   printf "    Waiting for host dashboard"
   DASH_UP=0
   for _ in $(seq 1 40); do
-    if curl -s -o /dev/null "http://127.0.0.1:8090" \
-      && curl -s -o /dev/null "http://127.0.0.1:8090/repair" \
-      && curl -s -o /dev/null "http://127.0.0.1:8090/repair/gpu"; then
+    if curl -sf -o /dev/null "http://127.0.0.1:8090" \
+      && curl -sf -o /dev/null "http://127.0.0.1:8090/repair" \
+      && curl -sf -o /dev/null "http://127.0.0.1:8090/repair/gpu"; then
       echo "  up"
       DASH_UP=1
+      listen_pid=$(lsof -ti "tcp:8090" -sTCP:LISTEN | head -1 || true)
+      if [ -n "${listen_pid:-}" ]; then
+        echo "$listen_pid" > outputs/dashboard.pid
+    echo "    Listening pid $listen_pid"
+      fi
       break
     fi
     printf "."

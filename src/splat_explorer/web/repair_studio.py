@@ -22,6 +22,7 @@ from ..repair import (
     list_repair_backends,
     reload_repair_module,
     repair_meta_name,
+    repair_progress_suffix,
     replay_episode_repairs,
 )
 from ..scene.catalog import SceneSpec, publish_live_scene
@@ -261,7 +262,10 @@ class RepairStudio:
                 )
                 + (
                     " Open scripts/lrz/ssh-session.sh once if ControlMaster is down."
-                    if str(backend_name) in ("gsfix-gsplat", "cuda", "gsplat", "gsfix")
+                    if str(backend_name) in (
+                        "gsfix-gsplat", "gsfix-gsplat-baseline",
+                        "cuda", "gsplat", "gsfix",
+                    )
                     else ""
                 ),
             }
@@ -543,9 +547,7 @@ class RepairStudio:
                     else:
                         self.job["message"] = (
                             f"Step {views[0].get('step')} {phase}"
-                            + (f" · chunk {stats.get('n_chunks')}" if stats.get("n_chunks") else "")
-                            + (f" · {int(stats.get('n_stamped') or stats.get('n_updated') or 0)} stamped")
-                            + (f" · {stats.get('n_iters') or 0} iters")
+                            + repair_progress_suffix(stats)
                             + (f" · {elapsed:.0f}s")
                             + (
                                 f" · train {stats['train_width']}x{stats['train_height']}"

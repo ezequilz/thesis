@@ -193,7 +193,8 @@ PYTHONPATH=/workspace/code/src python -m splat_explorer.repair_lrz --job-dir /wo
 Keep eduVPN up and `~/.ssh/cm-lrz` alive.
 
 1. Local stack: `./scripts/start.sh` → <http://localhost:8090/repair>
-2. Backend **gsplat CUDA (GSFix3D)** (not Auto — Auto stays on the Mac).
+2. Backend **gsplat CUDA (GSFix3D)** — paper photometric lift, no color
+   stamp. **gsplat CUDA (baseline)** is the frozen pre-paper lift for A/B.
 3. Repair this view. First run rsyncs `src/` to DSS, then `srun --overlap`
    on job `job_id`.
 

@@ -44,7 +44,8 @@ src/splat_explorer/
     loop.py                       observe → decide → act episode loop + logging
     regenerate.py                 gpt-image-2 repair of reported artifact frames
   repair.py                     3DGS view-local lift after a regen PNG
-  repair_gsfix.py               CUDA/gsplat photometric refine (GSFix3D)
+  repair_gsfix3d.py             CUDA/gsplat GSFix3D paper refine (default)
+  repair_gsfix.py               Frozen CUDA baseline (uncapped RGB; A/B)
   repair_mlx.py                 Apple Silicon refine via gsplat-mlx (Metal)
   tasks/
     registry.py                   Prompt variant switch (agent.prompt: v1 / v2 / v3)
@@ -209,7 +210,8 @@ works on this machine:
 
 | Backend | What it does | Requirements |
 |---------|--------------|--------------|
-| `gsfix-gsplat` | Differentiable photometric refine (GSFix3D loop) | NVIDIA GPU, `pip install -e ".[gpu]"` |
+| `gsfix-gsplat` | Paper GSFix3D photometric refine (20 iters, L1+SSIM, clone+split, SH DC; no color stamp) | NVIDIA GPU, `pip install -e ".[gpu]"` |
+| `gsfix-gsplat-baseline` | Frozen pre-paper CUDA lift (uncapped RGB). A/B only | same |
 | `gsplat-mlx` | Same refine loop on Apple Silicon via [gsplat-mlx](https://github.com/RobotFlow-Labs/gsplat-mlx) (Metal, no CUDA) | M1/M2/M3/M4, `pip install -e ".[apple]"` |
 | `cpu-project` | Color stamp at existing depths (no backprop) | none (default fallback) |
 

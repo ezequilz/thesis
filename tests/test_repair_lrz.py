@@ -132,6 +132,10 @@ def test_make_repair_backend_lrz(monkeypatch):
     monkeypatch.setattr("splat_explorer.repair_lrz.lrz_configured", lambda: True)
     backend = make_repair_backend("gsfix-gsplat")
     assert isinstance(backend, LrzRemoteRepair)
+    assert backend.method == "gsfix-gsplat"
+    baseline = make_repair_backend("gsfix-gsplat-baseline")
+    assert isinstance(baseline, LrzRemoteRepair)
+    assert baseline.method == "gsfix-gsplat-baseline"
     auto = make_repair_backend("auto", studio=True)
     assert isinstance(auto, LrzRemoteRepair)
 

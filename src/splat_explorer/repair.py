@@ -61,6 +61,9 @@ _BACKEND_ALIASES = {
     "gsplat": "gsfix-gsplat",
     "gsfix": "gsfix-gsplat",
     "gsfix-gsplat": "gsfix-gsplat",
+    "gsfix3d": "gsfix-gsplat",
+    "gsfix-gsplat-baseline": "gsfix-gsplat-baseline",
+    "baseline": "gsfix-gsplat-baseline",
     "cpu": "cpu-project",
     "cpu-project": "cpu-project",
     "project": "cpu-project",
@@ -159,7 +162,19 @@ def list_repair_backends() -> dict:
                 "id": "gsfix-gsplat",
                 "label": "gsplat CUDA (GSFix3D)",
                 "available": bool(cuda or lrz_ok),
-                "detail": cuda_detail,
+                "detail": (
+                    f"{cuda_detail}. Paper §3.3 photometric lift: 20 iters, "
+                    "L1+SSIM, clone+split densify, SH DC colors. No color stamp."
+                ),
+            },
+            {
+                "id": "gsfix-gsplat-baseline",
+                "label": "gsplat CUDA (baseline)",
+                "available": bool(cuda or lrz_ok),
+                "detail": (
+                    "Frozen pre-paper CUDA lift (uncapped RGB Adam, clone-only "
+                    "densify). Keep for A/B; do not use as the research default."
+                ),
             },
             {
                 "id": "gsplat-mlx",
@@ -205,6 +220,28 @@ def _normalize_backend_name(name: str | None) -> str:
     return _BACKEND_ALIASES[key]
 
 
+def repair_progress_suffix(stats: dict) -> str:
+    """Human status fragment for the repair-studio ticker. Never says 'stamped'
+    unless the backend actually painted RGB (``n_stamped``)."""
+    parts: list[str] = []
+    if stats.get("n_chunks"):
+        parts.append(f"chunk {stats['n_chunks']}")
+    if stats.get("kf_pass"):
+        parts.append(f"keyframes {stats['kf_pass']}/{stats.get('kf_iters') or '?'}")
+    n_stamped = int(stats.get("n_stamped") or 0)
+    n_updated = int(stats.get("n_updated") or 0)
+    n_gaussians = int(stats.get("n_gaussians") or 0)
+    if n_stamped:
+        parts.append(f"{n_stamped} stamped")
+    elif n_updated:
+        parts.append(f"{n_updated} gaussians")
+    elif n_gaussians:
+        parts.append(f"{n_gaussians} gaussians")
+    if stats.get("n_iters"):
+        parts.append(f"{stats['n_iters']} iters")
+    return "".join(f" · {p}" for p in parts)
+
+
 def make_repair_backend(
     name: str | None = "auto",
     *,
@@ -221,8 +258,9 @@ def make_repair_backend(
 
     `studio=True` is the dashboard replay preset. `focused=True` is the
     single-view tester: keep refining until the operator stops (capped at
-    one hour). The stamp backend paints regen RGB first; the default MLX
-    backend is the GSFix3D photometric loop only.
+    one hour). The stamp backend paints regen RGB first; CUDA ``gsfix-gsplat``
+    is the paper photometric loop (no stamp). ``gsfix-gsplat-baseline`` is
+    the frozen pre-paper CUDA lift.
     """
     key = _normalize_backend_name(name)
     if key == "auto":
@@ -280,17 +318,25 @@ def _mlx_repair_kwargs(*, stamp: bool, studio: bool, focused: bool) -> dict:
 
 
 def _build_repair_backend(key: str, *, studio: bool, focused: bool, required: bool):
-    if key == "gsfix-gsplat":
-        from .repair_gsfix import GsplatPhotometricRepair, gsplat_refine_available
+    if key in ("gsfix-gsplat", "gsfix-gsplat-baseline"):
+        from .repair_gsfix import gsplat_refine_available
 
         if gsplat_refine_available():
-            logger.info("3D repair backend: GSFix refine (gsplat / CUDA, local)")
-            return GsplatPhotometricRepair()
+            from .repair_gsfix3d import instantiate_cuda_repair
+
+            logger.info(
+                "3D repair backend: %s (gsplat / CUDA, local)",
+                "GSFix3D paper" if key == "gsfix-gsplat" else "GSFix CUDA baseline",
+            )
+            return instantiate_cuda_repair(method=key)
         from .repair_lrz import LrzRemoteRepair, lrz_configured
 
         if lrz_configured():
-            logger.info("3D repair backend: GSFix refine (gsplat / CUDA via LRZ)")
-            return LrzRemoteRepair()
+            logger.info(
+                "3D repair backend: %s (gsplat / CUDA via LRZ)",
+                "GSFix3D paper" if key == "gsfix-gsplat" else "GSFix CUDA baseline",
+            )
+            return LrzRemoteRepair(method=key)
         msg = (
             "gsplat CUDA refine is not available in this process "
             "(needs NVIDIA GPU + pip install -e '.[gpu]', or LRZ via "
@@ -1127,7 +1173,12 @@ def reload_repair_module():
     import importlib
     import sys
 
-    for extra in ("splat_explorer.repair_gsfix", "splat_explorer.repair_mlx", "splat_explorer.repair_lrz"):
+    for extra in (
+        "splat_explorer.repair_gsfix",
+        "splat_explorer.repair_gsfix3d",
+        "splat_explorer.repair_mlx",
+        "splat_explorer.repair_lrz",
+    ):
         if extra in sys.modules:
             importlib.reload(sys.modules[extra])
     name = __name__
@@ -1161,6 +1212,7 @@ def replay_episode_repairs(
         backend = make_repair_backend()
     repairer = SceneRepairer(source, backend=backend)
     results: list[RepairResult] = []
+    dataset: list[tuple[Camera, np.ndarray]] = []
     for i, view in enumerate(views):
         if should_stop is not None and should_stop():
             break
@@ -1181,7 +1233,28 @@ def replay_episode_repairs(
             deadline=deadline,
             on_progress=on_progress,
         )
+        if result.status == "ok":
+            dataset.append((copy_camera(camera), _load_rgb(Path(view["repaired_path"]))))
         results.append(result)
         if on_view is not None:
             on_view(i, view, result)
+    if (
+        not until_stop
+        and len(dataset) >= 2
+        and hasattr(backend, "refine_extended_dataset")
+        and (should_stop is None or not should_stop())
+    ):
+        with repairer._lock:
+            working = repairer._working
+        if working is not None:
+            logger.info(
+                "GSFix3D keyframe stage: %d repaired views",
+                len(dataset),
+            )
+            backend.refine_extended_dataset(
+                working, dataset, on_progress=on_progress,
+            )
+            out_ply = episode_dir / REPAIRED_PLY
+            save_ply(working, out_ply)
+            repairer.repaired_ply = out_ply
     return results

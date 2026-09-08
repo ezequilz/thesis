@@ -315,16 +315,9 @@ def apply_packed_job(job_dir: Path, backend=None) -> dict[str, Any]:
         n_gaussians=int(scene.num_gaussians),
     )
     if backend is None:
-        from .repair_gsfix import GsplatPhotometricRepair
+        from .repair_gsfix3d import instantiate_cuda_repair
 
-        allowed = {
-            "iters", "lambda_dssim", "densify", "densify_every",
-            "densify_grad_thresh", "prune_opacity", "max_clone", "max_gaussians",
-            "lr_means", "lr_colors", "lr_opacities", "lr_scales", "lr_quats",
-            "near", "packed",
-        }
-        kwargs = {k: params[k] for k in allowed if k in params}
-        backend = GsplatPhotometricRepair(**kwargs)
+        backend = instantiate_cuda_repair(params)
     existing = getattr(backend, "on_progress", None)
 
     def on_progress(stats: dict) -> None:
@@ -1167,14 +1160,17 @@ def wait_for_job_results(
 
 @dataclass
 class LrzRemoteRepair:
-    """Same stats contract as GsplatPhotometricRepair, executed on LRZ."""
+    """Same stats contract as the local CUDA lift, executed on LRZ."""
 
+    method: str = "gsfix-gsplat"
     iters: int = 20
+    kf_iters: int = 50
     lambda_dssim: float = 0.2
     densify: bool = True
     densify_every: int = 5
     densify_grad_thresh: float = 0.0002
     prune_opacity: float = 0.005
+    split_scale: float = 0.1
     max_clone: int = 2048
     max_gaussians: int = 2_500_000
     lr_means: float = 1.6e-4
@@ -1184,17 +1180,21 @@ class LrzRemoteRepair:
     lr_quats: float = 0.001
     near: float = 0.05
     packed: bool = False
+    white_background: bool = False
     on_progress: Callable[[dict], None] | None = None
     should_stop: Callable[[], bool] | None = None
 
     def _params(self) -> dict:
         return {
+            "method": str(self.method),
             "iters": int(self.iters),
+            "kf_iters": int(self.kf_iters),
             "lambda_dssim": float(self.lambda_dssim),
             "densify": bool(self.densify),
             "densify_every": int(self.densify_every),
             "densify_grad_thresh": float(self.densify_grad_thresh),
             "prune_opacity": float(self.prune_opacity),
+            "split_scale": float(self.split_scale),
             "max_clone": int(self.max_clone),
             "max_gaussians": int(self.max_gaussians),
             "lr_means": float(self.lr_means),
@@ -1204,6 +1204,7 @@ class LrzRemoteRepair:
             "lr_quats": float(self.lr_quats),
             "near": float(self.near),
             "packed": bool(self.packed),
+            "white_background": bool(self.white_background),
         }
 
     def apply(
@@ -1248,6 +1249,7 @@ class LrzRemoteRepair:
     ) -> dict[str, Any]:
         last: dict[str, Any] | None = None
         total_iters = 0
+        l1_before = None
         self.should_stop = should_stop
         self.on_progress = on_checkpoint
         password = get_ssh_password() or os.environ.get("LRZ_SSH_PASSWORD")
@@ -1258,18 +1260,23 @@ class LrzRemoteRepair:
             if deadline is not None and time.time() >= deadline:
                 break
             last = self.apply(scene, camera, rendered_rgb, repaired_rgb)
+            if l1_before is None:
+                l1_before = last.get("l1_before")
             total_iters += int(last.get("n_iters") or 0)
             last = dict(last)
             last["n_iters"] = total_iters
+            last["n_stamped"] = int(last.get("n_stamped") or 0)
+            last["l1_before"] = l1_before
             if on_checkpoint is not None:
                 on_checkpoint(last)
             if once:
                 break
         if last is None:
             return {
-                "backend": "gsfix-gsplat",
+                "backend": str(self.method),
                 "n_visible": scene.num_gaussians,
                 "n_updated": 0,
+                "n_stamped": 0,
                 "n_spawned": 0,
                 "n_gaussians": scene.num_gaussians,
                 "n_iters": 0,
