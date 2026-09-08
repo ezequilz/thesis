@@ -84,19 +84,6 @@ def _quat_to_rotmat(quats, torch):
     return rot
 
 
-def _repeat_along_n(t, n_rep: int):
-    """Repeat along Gaussian dim 0 without promoting a 1-D tensor to 2-D.
-
-    ``t.repeat(2, 1)`` on shape ``(K,)`` prepends a dimension → ``(2, K)``.
-    Opacity logits from the PLY are ``(N,)``, so that form cannot be
-    concatenated with the kept 1-D slice (the /repair crash on LRZ).
-    """
-    n_rep = int(n_rep)
-    if n_rep == 1:
-        return t
-    return t.repeat((n_rep,) + (1,) * (t.ndim - 1))
-
-
 def densify_clone_split(
     torch,
     means,
@@ -160,20 +147,17 @@ def densify_clone_split(
         n_spawned += n_clone
 
     if n_split:
-        stds = _repeat_along_n(scales[split_sel], _SPLIT_N)
+        stds = scales[split_sel].repeat(_SPLIT_N, 1)
         samples = torch.normal(mean=torch.zeros_like(stds), std=stds)
         rots = _quat_to_rotmat(torch.nn.functional.normalize(quats[split_sel], dim=-1), torch)
-        rots = _repeat_along_n(rots, _SPLIT_N)
-        new_means = (
-            torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1)
-            + _repeat_along_n(means[split_sel], _SPLIT_N)
-        )
-        new_scales = _repeat_along_n(scales[split_sel], _SPLIT_N) / _SPLIT_SCALE_DIV
+        rots = rots.repeat(_SPLIT_N, 1, 1)
+        new_means = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + means[split_sel].repeat(_SPLIT_N, 1)
+        new_scales = scales[split_sel].repeat(_SPLIT_N, 1) / _SPLIT_SCALE_DIV
         parts_means.append(new_means.detach())
-        parts_quats.append(_repeat_along_n(quats[split_sel].detach(), _SPLIT_N))
-        parts_dc.append(_repeat_along_n(f_dc[split_sel].detach(), _SPLIT_N))
+        parts_quats.append(quats[split_sel].detach().repeat(_SPLIT_N, 1))
+        parts_dc.append(f_dc[split_sel].detach().repeat(_SPLIT_N, 1))
         parts_log.append(torch.log(torch.clamp(new_scales, min=1e-8)).detach())
-        parts_op.append(_repeat_along_n(logit_opacities[split_sel].detach(), _SPLIT_N))
+        parts_op.append(logit_opacities[split_sel].detach().repeat(_SPLIT_N, 1))
         n_spawned += n_split * _SPLIT_N - n_split  # net: each split becomes 2
 
     def _cat(chunks):
@@ -189,15 +173,7 @@ def densify_clone_split(
     )
 
 
-def _viewspace_grad_norm(means2d, n_gaussians, torch, info=None, width=None, height=None):
-    """Per-gaussian |xy| screen-space grad, or None if gsplat did not retain it.
-
-    gsplat returns ``means2d`` as ``[C, N, 2]`` (unpacked) or ``[nnz, 2]``
-    (packed). ``.grad`` is dropped unless ``retain_grad()`` ran on the exact
-    tensor from ``rasterization``; ``absgrad=True`` fills ``.absgrad``.
-    Screen-space scaling matches gsplat ``DefaultStrategy`` so Kerbl's
-    0.0002 threshold is in the same units.
-    """
+def _viewspace_grad_norm(means2d, n_gaussians, torch):
     if means2d is None:
         return None
     grad = getattr(means2d, "absgrad", None)
@@ -206,49 +182,21 @@ def _viewspace_grad_norm(means2d, n_gaussians, torch, info=None, width=None, hei
     if grad is None:
         return None
     g = grad.detach()
-    info = info if isinstance(info, dict) else {}
-    ids = info.get("gaussian_ids")
     if g.ndim == 3:
-        g = g.reshape(-1, g.shape[-1])
-        if ids is None and g.shape[0] == n_gaussians:
-            pass
-        elif ids is None and g.shape[0] != n_gaussians:
-            return None
-    if width and height and g.shape[-1] >= 2:
-        g = g.clone()
-        g[..., 0] = g[..., 0] * (float(width) / 2.0)
-        g[..., 1] = g[..., 1] * (float(height) / 2.0)
-    mag = g[..., :2].norm(dim=-1)
-    if mag.shape[0] == n_gaussians:
-        return mag
-    if ids is None or mag.shape[0] != int(ids.reshape(-1).shape[0]):
+        g = g[0]
+    if g.shape[0] != n_gaussians:
         return None
-    out = torch.zeros(n_gaussians, device=mag.device, dtype=mag.dtype)
-    out.index_add_(0, ids.reshape(-1).long(), mag.reshape(-1))
-    return out
-
-
-def _n_visible_from_info(info, n_gaussians, torch):
-    if not isinstance(info, dict):
-        return n_gaussians
-    radii = info.get("radii")
-    if radii is None:
-        return n_gaussians
-    r = radii.detach()
-    if r.ndim == 2:
-        r = r[0]
-    if r.shape[0] != n_gaussians:
-        return n_gaussians
-    n = int((r > 0).sum())
-    return n if n else n_gaussians
+    return g[..., :2].norm(dim=-1)
 
 
 @dataclass
 class GsplatGsfix3dRepair:
     """Paper §3.3 CUDA refine. Default ``gsfix-gsplat`` backend.
 
-    Add fields / override hooks in a subclass when testing a new
-    method, and register it in ``instantiate_cuda_repair``.
+    Add fields / override ``apply`` in a subclass when testing a new
+    method, and register it in ``repair.CUDA_REPAIR_METHODS``.
+    Experimental extras live only on ``GsplatGsfix3dVisPruneRepair``
+    (``gsfix-gsplat-visprune``) — do not add hooks here.
     """
 
     iters: int = 20
@@ -271,64 +219,6 @@ class GsplatGsfix3dRepair:
     white_background: bool = False
     max_chunks: int = 1
     on_progress: Callable[[dict], None] | None = None
-
-    def _result_backend(self) -> str:
-        return BACKEND_ID
-
-    def _updatable_mask(self, means, camera, logit_opacities, info, torch):
-        """(N,) bool tensor of Gaussians that may receive Adam, or None (all)."""
-        return None
-
-    def _setup_anchors(
-        self,
-        gsplat,
-        means,
-        quats,
-        f_dc,
-        log_scales,
-        logit_opacities,
-        camera,
-        device,
-        torch,
-        w,
-        h,
-        background,
-        packed,
-    ):
-        return None
-
-    def _augment_loss(
-        self,
-        loss,
-        gsplat,
-        means,
-        quats_n,
-        scales,
-        opacities,
-        colors,
-        background,
-        w,
-        h,
-        torch,
-        packed,
-        anchor_state,
-    ):
-        return loss
-
-    def _error_mask_prune_tensors(
-        self,
-        last_iter: bool,
-        means,
-        quats,
-        f_dc,
-        log_scales,
-        logit_opacities,
-        camera,
-        rendered_rgb,
-        repaired_rgb,
-        torch,
-    ):
-        return means, quats, f_dc, log_scales, logit_opacities, 0
 
     def apply(
         self,
@@ -394,7 +284,7 @@ class GsplatGsfix3dRepair:
                 on_checkpoint(last)
         if last is None:
             return {
-                "backend": self._result_backend(),
+                "backend": BACKEND_ID,
                 "n_visible": scene.num_gaussians,
                 "n_updated": 0,
                 "n_stamped": 0,
@@ -417,7 +307,7 @@ class GsplatGsfix3dRepair:
         """Paper second stage: ``kf_iters`` shuffled passes over repaired views."""
         if not views or int(self.kf_iters) <= 0:
             return {
-                "backend": self._result_backend(),
+                "backend": BACKEND_ID,
                 "phase": "keyframes",
                 "n_iters": 0,
                 "n_stamped": 0,
@@ -443,7 +333,7 @@ class GsplatGsfix3dRepair:
                     "kf_iters": int(self.kf_iters),
                 })
         last = dict(last)
-        last["backend"] = self._result_backend()
+        last["backend"] = BACKEND_ID
         last["phase"] = "keyframes"
         last["n_iters"] = total
         last["n_stamped"] = 0
@@ -517,11 +407,6 @@ class GsplatGsfix3dRepair:
         last_l1 = l1_before
         rgb = None
         n_visible = int(means.shape[0])
-        n_error_pruned = 0
-        anchor_state = self._setup_anchors(
-            gsplat, means, quats, f_dc, log_scales, logit_opacities,
-            camera, device, torch, w, h, background, self.packed,
-        )
 
         for it in range(int(self.iters)):
             scales = torch.exp(log_scales)
@@ -533,36 +418,13 @@ class GsplatGsfix3dRepair:
                 viewmat, K, w, h, background, packed=self.packed,
             )
             means2d = info.get("means2d") if isinstance(info, dict) else None
-            if means2d is not None:
-                try:
-                    means2d.retain_grad()
-                except Exception:
-                    pass
+            if means2d is not None and means2d.requires_grad:
+                means2d.retain_grad()
             loss, l1 = photometric_loss(rgb, target, torch, self.lambda_dssim)
             last_l1 = float(l1.item())
-            loss = self._augment_loss(
-                loss, gsplat, means, quats_n, scales, opacities, colors,
-                background, w, h, torch, self.packed, anchor_state,
-            )
             loss.backward()
 
-            updatable = self._updatable_mask(
-                means, camera, logit_opacities, info, torch,
-            )
-            if updatable is not None:
-                for t in (means, quats, f_dc, log_scales, logit_opacities):
-                    if t.grad is None:
-                        continue
-                    m = updatable.to(device=t.grad.device, dtype=t.grad.dtype)
-                    if t.grad.ndim == 1:
-                        t.grad.mul_(m)
-                    else:
-                        t.grad.mul_(m.reshape([-1] + [1] * (t.grad.ndim - 1)))
-
-            n_visible = _n_visible_from_info(info, means.shape[0], torch)
-            vis_norm = _viewspace_grad_norm(
-                means2d, means.shape[0], torch, info=info, width=w, height=h,
-            )
+            vis_norm = _viewspace_grad_norm(means2d, means.shape[0], torch)
             if vis_norm is not None:
                 radii = info.get("radii") if isinstance(info, dict) else None
                 vis = vis_norm > 0
@@ -572,15 +434,9 @@ class GsplatGsfix3dRepair:
                         r = r[0]
                     if r.shape[0] == vis.shape[0]:
                         vis = vis & (r > 0)
-                if updatable is not None and updatable.shape[0] == vis.shape[0]:
-                    vis = vis & updatable
+                n_visible = int(vis.sum()) if vis.any() else int(means.shape[0])
                 xyz_grad_accum = xyz_grad_accum + vis_norm
                 xyz_grad_denom = xyz_grad_denom + vis.to(xyz_grad_accum.dtype)
-            elif it == 0:
-                logger.warning(
-                    "GSFix3D densify: no means2d screen grads (absgrad/retain_grad). "
-                    "Clone+split will not spawn until gsplat exposes them."
-                )
 
             # Adam on this iteration's graph, then densify. Recreating the
             # optimizer before step() would drop .grad (unlike INRIA's cat).
@@ -597,7 +453,6 @@ class GsplatGsfix3dRepair:
                 and means.shape[0] < int(self.max_gaussians)
             ):
                 avg = xyz_grad_accum / xyz_grad_denom.clamp(min=1.0)
-                n_high = int((avg >= float(self.densify_grad_thresh)).sum())
                 packed = densify_clone_split(
                     torch, means, quats, f_dc, log_scales, logit_opacities, avg,
                     thresh=self.densify_grad_thresh,
@@ -611,30 +466,15 @@ class GsplatGsfix3dRepair:
                     xyz_grad_accum = torch.zeros(means.shape[0], device=device)
                     xyz_grad_denom = torch.zeros(means.shape[0], device=device)
                     opt = make_opt()
-                elif it == int(self.densify_every) - 1:
-                    logger.info(
-                        "GSFix3D densify: 0 spawned (max |grad2d|=%.6f, %d above %.6f)",
-                        float(avg.max().item()) if avg.numel() else 0.0,
-                        n_high,
-                        float(self.densify_grad_thresh),
-                    )
 
             if last_iter and self.densify and means.shape[0] > 32:
                 with torch.no_grad():
-                    keep = torch.sigmoid(logit_opacities).reshape(-1) > float(self.prune_opacity)
+                    keep = torch.sigmoid(logit_opacities) > float(self.prune_opacity)
                     if int(keep.sum()) >= 32 and int((~keep).sum()) > 0:
                         means, quats, f_dc, log_scales, logit_opacities = (
                             means[keep], quats[keep], f_dc[keep],
                             log_scales[keep], logit_opacities[keep],
                         )
-
-            means, quats, f_dc, log_scales, logit_opacities, n_drop = (
-                self._error_mask_prune_tensors(
-                    last_iter, means, quats, f_dc, log_scales, logit_opacities,
-                    camera, rendered_rgb, repaired_rgb, torch,
-                )
-            )
-            n_error_pruned += int(n_drop)
 
             if self.on_progress is not None:
                 self.on_progress({
@@ -665,7 +505,7 @@ class GsplatGsfix3dRepair:
         scene.means = means.detach().float().cpu().numpy().astype(np.float32)
         scene.quats = quats_n.detach().float().cpu().numpy().astype(np.float32)
         scene.scales = scales.detach().float().cpu().numpy().astype(np.float32)
-        scene.opacities = opacities.detach().float().cpu().numpy().astype(np.float32).reshape(-1)
+        scene.opacities = opacities.detach().float().cpu().numpy().astype(np.float32)
         scene.colors = torch.clamp(colors, 0.0, 1.0).detach().float().cpu().numpy().astype(np.float32)
 
         n1 = scene.num_gaussians
@@ -674,14 +514,13 @@ class GsplatGsfix3dRepair:
             self.iters, l1_before, l1_after, n0, n1, n_spawned,
         )
         return {
-            "backend": self._result_backend(),
+            "backend": BACKEND_ID,
             "n_visible": int(n_visible),
             "n_updated": n1,
             "n_stamped": 0,
             "n_spawned": int(max(0, n1 - n0) if n_spawned == 0 else n_spawned),
             "n_gaussians": n1,
             "n_iters": int(self.iters),
-            "n_error_pruned": int(n_error_pruned),
             "l1_before": round(l1_before, 6),
             "l1_after": round(l1_after, 6),
             "render_rgb": render_rgb,

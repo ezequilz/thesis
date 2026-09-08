@@ -184,10 +184,11 @@ def list_repair_backends() -> dict:
                 "label": "gsplat CUDA (GSFix3D + vis-prune)",
                 "available": bool(cuda or lrz_ok),
                 "detail": (
-                    f"{cuda_detail}. Experimental: freeze occluded Gaussians, "
-                    "prune floaters on the |original−fixed| error mask, and "
-                    "anchor nearby original-scene yaw/pitch views. Densify only "
-                    "the first 20-iter chunk. Not the paper default."
+                    f"{cuda_detail}. Experimental: prune floaters on the "
+                    "|original−fixed| error mask and anchor nearby original-scene "
+                    "yaw/pitch views. Densify only the first 20-iter chunk. "
+                    "Occlusion freeze is off (it ballooned front floaters into "
+                    "opaque discs). Not the paper default."
                 ),
             },
             {
@@ -276,7 +277,7 @@ def make_repair_backend(
     mode; episode replay still does the paper's single 20-iter pass. The
     stamp backend paints regen RGB first. ``gsfix-gsplat-baseline`` is the
     frozen pre-paper CUDA lift. ``gsfix-gsplat-visprune`` is the experimental
-    occlusion-freeze / error-mask prune / micro-rotation-anchor variant.
+    error-mask prune / micro-rotation-anchor variant (occlusion freeze off).
     """
     key = _normalize_backend_name(name)
     if key == "auto":
@@ -1030,6 +1031,7 @@ class SceneRepairer:
                 checkpoint(stats)
 
             out.status = "ok"
+            out.error = None
             out.n_visible = int(stats.get("n_visible", 0))
             out.n_updated = int(stats.get("n_updated", 0))
             out.n_spawned = int(stats.get("n_spawned", 0))

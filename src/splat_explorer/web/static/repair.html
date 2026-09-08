@@ -234,7 +234,7 @@
     <select id="in-ep"></select>
   </label>
   <label>backend
-    <select id="in-backend" title="Which 3D lift to run. Default is gsplat CUDA GSFix3D (paper §3.3, no color stamp). Baseline is the frozen pre-paper CUDA lift. GSFix3D + vis-prune is experimental (freeze occluded, error-mask prune, original micro-rotation anchors). Auto uses CUDA/LRZ when a job is configured, else gsplat-mlx, else the CPU stamp. Pick (w. color stamp) only to inspect painted updates.">
+    <select id="in-backend" title="Which 3D lift to run. Default is gsplat CUDA GSFix3D (paper §3.3, no color stamp). Baseline is the frozen pre-paper CUDA lift. GSFix3D + vis-prune is experimental (error-mask prune + original micro-rotation anchors; occlusion freeze is off). Auto uses CUDA/LRZ when a job is configured, else gsplat-mlx, else the CPU stamp. Pick (w. color stamp) only to inspect painted updates.">
       <option value="auto">Auto (best available)</option>
       <option value="gsfix-gsplat" selected>gsplat CUDA (GSFix3D)</option>
       <option value="gsfix-gsplat-baseline">gsplat CUDA (baseline)</option>
@@ -500,7 +500,9 @@ function fmtL1(n) {
 }
 function viewRepair(v) {
   if (!v) return {};
-  return (snapshot?.job?.results || []).find(x => x.step === v.step) || v.repair || {};
+  const live = [...(snapshot?.job?.results || [])].reverse().find(x => x.step === v.step);
+  if (live) return live;
+  return v.repair || {};
 }
 function l1Info(r) {
   const before = fmtL1(r?.l1_before);
@@ -674,7 +676,7 @@ function renderCompare() {
       <span class="k">L1</span><span class="v">${l1 ? esc(l1.text) : "–"}</span>
       <span class="k">seconds</span><span class="v">${r.seconds ?? "–"}</span>
       <span class="k">gaussians</span><span class="v">${r.n_gaussians ?? "–"}</span>
-      ${r.error ? `<span class="k">error</span><span class="v">${esc(r.error)}</span>` : ""}`;
+      ${r.error && r.status !== "ok" ? `<span class="k">error</span><span class="v">${esc(r.error)}</span>` : ""}`;
 }
 
 function shiftKind(dir) {

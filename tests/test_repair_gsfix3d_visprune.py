@@ -10,7 +10,10 @@ from splat_explorer.repair_gsfix3d import GsplatGsfix3dRepair, instantiate_cuda_
 from splat_explorer.repair_gsfix3d_visprune import (
     BACKEND_ID,
     GsplatGsfix3dVisPruneRepair,
+    _repeat_along_n,
+    _viewspace_grad_norm,
     apply_updatable_grads,
+    densify_clone_split,
     error_mask_keep,
     front_contributing_mask,
     micro_rotation_cameras,
@@ -33,11 +36,15 @@ def test_instantiate_visprune_alias():
     vis = instantiate_cuda_repair(method="visprune")
     assert isinstance(vis, GsplatGsfix3dVisPruneRepair)
     assert vis._result_backend() == BACKEND_ID
+    assert vis.freeze_occluded is False
+    assert vis.error_prune is True
+    assert vis._updatable_mask(None, None, None, None, None) is None
 
 
 def test_paper_instantiate_is_not_visprune():
     paper = instantiate_cuda_repair(method="gsfix-gsplat")
     assert type(paper) is GsplatGsfix3dRepair
+    assert GsplatGsfix3dVisPruneRepair._apply is not GsplatGsfix3dRepair._apply
 
 
 def test_front_contributing_mask_freezes_far_gaussian():
@@ -111,6 +118,82 @@ def test_micro_rotation_cameras_are_four_distinct_views():
     assert all(d < 0.999 for d in dots)
     pos = [tuple(np.round(c.position, 6)) for c in extra]
     assert len(set(pos)) == 1
+
+
+def test_repeat_along_n_does_not_promote_1d():
+    """``.repeat(2, 1)`` on (K,) prepends a dim; densify cat then dies 1 vs 2."""
+
+    class _Fake:
+        def __init__(self, ndim):
+            self.ndim = ndim
+            self.sizes = None
+
+        def repeat(self, *sizes):
+            self.sizes = sizes
+            return self
+
+    t1 = _Fake(1)
+    assert _repeat_along_n(t1, 2) is t1
+    assert t1.sizes == (2,)
+    t2 = _Fake(2)
+    _repeat_along_n(t2, 2)
+    assert t2.sizes == (2, 1)
+    t3 = _Fake(3)
+    _repeat_along_n(t3, 2)
+    assert t3.sizes == (2, 1, 1)
+
+
+def test_viewspace_grad_norm_unpacked_and_packed():
+    torch = pytest.importorskip("torch")
+    g = torch.zeros(1, 4, 2)
+    g[0, 1, 0] = 0.4
+    means2d = type("M", (), {"grad": g, "absgrad": None})()
+    mag = _viewspace_grad_norm(means2d, 4, torch, width=100, height=80)
+    assert mag is not None
+    assert mag.shape == (4,)
+    assert float(mag[1]) == pytest.approx(0.4 * 50.0)
+    assert float(mag[0]) == 0.0
+
+    nnz = torch.tensor([[0.1, 0.0], [0.2, 0.0]])
+    packed = type("M", (), {"grad": nnz, "absgrad": None})()
+    ids = torch.tensor([2, 0])
+    mag2 = _viewspace_grad_norm(
+        packed, 4, torch, info={"gaussian_ids": ids}, width=10, height=10,
+    )
+    assert mag2 is not None
+    assert float(mag2[2]) == pytest.approx(0.1 * 5.0)
+    assert float(mag2[0]) == pytest.approx(0.2 * 5.0)
+    assert float(mag2[1]) == 0.0
+
+
+def test_densify_clone_split_keeps_1d_opacities():
+    torch = pytest.importorskip("torch")
+    n = 4
+    means = torch.zeros(n, 3, requires_grad=True)
+    quats = torch.tensor([[1.0, 0.0, 0.0, 0.0]] * n, requires_grad=True)
+    f_dc = torch.zeros(n, 3, requires_grad=True)
+    scales = torch.tensor([[0.01, 0.01, 0.01], [0.01, 0.01, 0.01], [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]])
+    log_scales = torch.log(scales).requires_grad_(True)
+    logit = torch.zeros(n, requires_grad=True)
+    mag = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    packed = densify_clone_split(
+        torch, means, quats, f_dc, log_scales, logit, mag,
+        thresh=0.5, split_scale=0.1, max_clone=16, max_gaussians=100,
+    )
+    assert packed is not None
+    means2, _, _, _, logit2, n_spawned = packed
+    assert int(means2.shape[0]) == 6
+    assert int(n_spawned) == 2
+    assert logit2.ndim == 1
+    assert int(logit2.shape[0]) == 6
+
+    logit_col = torch.zeros(n, 1, requires_grad=True)
+    packed_col = densify_clone_split(
+        torch, means, quats, f_dc, log_scales, logit_col, mag,
+        thresh=0.5, split_scale=0.1, max_clone=16, max_gaussians=100,
+    )
+    assert packed_col is not None
+    assert packed_col[4].shape == (6, 1)
 
 
 def test_visprune_apply_until_densify_only_first_chunk():

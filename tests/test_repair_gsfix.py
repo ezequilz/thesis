@@ -108,6 +108,7 @@ def test_list_repair_backends_includes_auto_and_mlx():
     vis = next(b for b in info["backends"] if b["id"] == "gsfix-gsplat-visprune")
     assert vis["available"] is paper["available"]
     assert "error mask" in vis["detail"].replace("error-mask", "error mask")
+    assert "Occlusion freeze is off" in vis["detail"]
 
 
 def test_make_repair_backend_falls_back_without_cuda():

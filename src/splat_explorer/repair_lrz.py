@@ -1898,7 +1898,7 @@ class LrzRemoteRepair:
         }
         if str(self.method) in ("gsfix-gsplat-visprune", "visprune"):
             params.update(
-                freeze_occluded=True,
+                freeze_occluded=False,
                 error_prune=True,
                 error_thresh=0.12,
                 prune_max_frac=0.02,

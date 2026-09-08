@@ -9,7 +9,6 @@ import pytest
 
 from splat_explorer.repair_gsfix3d import (
     GsplatGsfix3dRepair,
-    _repeat_along_n,
     _viewspace_grad_norm,
     densify_clone_split,
     instantiate_cuda_repair,
@@ -76,29 +75,27 @@ def test_instantiate_cuda_repair_dispatches_baseline():
     assert vis.iters == 11
     assert vis._result_backend() == "gsfix-gsplat-visprune"
     assert not isinstance(paper, GsplatGsfix3dVisPruneRepair)
+    assert not hasattr(GsplatGsfix3dRepair, "_setup_anchors")
+    assert not hasattr(GsplatGsfix3dRepair, "_updatable_mask")
+    assert not hasattr(GsplatGsfix3dRepair, "_error_mask_prune_tensors")
+    assert hasattr(GsplatGsfix3dVisPruneRepair, "_setup_anchors")
+    assert hasattr(GsplatGsfix3dVisPruneRepair, "_error_mask_prune_tensors")
+    paper_src = inspect.getsource(GsplatGsfix3dRepair._apply)
+    assert "_setup_anchors" not in paper_src
+    assert "_error_mask_prune_tensors" not in paper_src
+    assert "_augment_loss" not in paper_src
 
 
-def test_viewspace_grad_norm_unpacked_and_packed():
+def test_viewspace_grad_norm_unpacked():
     torch = pytest.importorskip("torch")
     g = torch.zeros(1, 4, 2)
     g[0, 1, 0] = 0.4
     means2d = type("M", (), {"grad": g, "absgrad": None})()
-    mag = _viewspace_grad_norm(means2d, 4, torch, width=100, height=80)
+    mag = _viewspace_grad_norm(means2d, 4, torch)
     assert mag is not None
     assert mag.shape == (4,)
-    assert float(mag[1]) == pytest.approx(0.4 * 50.0)
+    assert float(mag[1]) == pytest.approx(0.4)
     assert float(mag[0]) == 0.0
-
-    nnz = torch.tensor([[0.1, 0.0], [0.2, 0.0]])
-    packed = type("M", (), {"grad": nnz, "absgrad": None})()
-    ids = torch.tensor([2, 0])
-    mag2 = _viewspace_grad_norm(
-        packed, 4, torch, info={"gaussian_ids": ids}, width=10, height=10,
-    )
-    assert mag2 is not None
-    assert float(mag2[2]) == pytest.approx(0.1 * 5.0)
-    assert float(mag2[0]) == pytest.approx(0.2 * 5.0)
-    assert float(mag2[1]) == 0.0
 
 
 def test_rgb_sh_roundtrip_numpy():
@@ -114,29 +111,6 @@ def test_rgb_sh_roundtrip():
     assert torch.allclose(out, rgb, atol=1e-5)
 
 
-def test_repeat_along_n_does_not_promote_1d():
-    """``.repeat(2, 1)`` on (K,) prepends a dim; densify cat then dies 1 vs 2."""
-
-    class _Fake:
-        def __init__(self, ndim):
-            self.ndim = ndim
-            self.sizes = None
-
-        def repeat(self, sizes):
-            self.sizes = sizes
-            return self
-
-    t1 = _Fake(1)
-    assert _repeat_along_n(t1, 2) is t1
-    assert t1.sizes == (2,)
-    t2 = _Fake(2)
-    _repeat_along_n(t2, 2)
-    assert t2.sizes == (2, 1)
-    t3 = _Fake(3)
-    _repeat_along_n(t3, 2)
-    assert t3.sizes == (2, 1, 1)
-
-
 def test_densify_clone_split_small_vs_large():
     torch = pytest.importorskip("torch")
     n = 4
@@ -145,7 +119,8 @@ def test_densify_clone_split_small_vs_large():
     f_dc = torch.zeros(n, 3, requires_grad=True)
     scales = torch.tensor([[0.01, 0.01, 0.01], [0.01, 0.01, 0.01], [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]])
     log_scales = torch.log(scales).requires_grad_(True)
-    logit = torch.zeros(n, requires_grad=True)
+    # Paper densify uses ``.repeat(2, 1)``, which expects a trailing dim.
+    logit = torch.zeros(n, 1, requires_grad=True)
     mag = torch.tensor([1.0, 0.0, 1.0, 0.0])
     packed = densify_clone_split(
         torch, means, quats, f_dc, log_scales, logit, mag,
@@ -156,17 +131,7 @@ def test_densify_clone_split_small_vs_large():
     # clone gaussian 0 (+1) and split gaussian 2 into 2 (+1 net) → 6
     assert int(means2.shape[0]) == 6
     assert int(n_spawned) == 2
-    # PLY opacities are (N,); split must not promote them to (2, K) via repeat(2, 1)
-    assert logit2.ndim == 1
-    assert int(logit2.shape[0]) == 6
-
-    logit_col = torch.zeros(n, 1, requires_grad=True)
-    packed_col = densify_clone_split(
-        torch, means, quats, f_dc, log_scales, logit_col, mag,
-        thresh=0.5, split_scale=0.1, max_clone=16, max_gaussians=100,
-    )
-    assert packed_col is not None
-    assert packed_col[4].shape == (6, 1)
+    assert logit2.shape == (6, 1)
 
 
 @pytest.mark.skipif(

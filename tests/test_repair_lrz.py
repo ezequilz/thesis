@@ -152,7 +152,7 @@ def test_make_repair_backend_lrz(monkeypatch):
 def test_lrz_visprune_params_include_experimental_flags():
     packed = LrzRemoteRepair(method="gsfix-gsplat-visprune")._params()
     assert packed["method"] == "gsfix-gsplat-visprune"
-    assert packed["freeze_occluded"] is True
+    assert packed["freeze_occluded"] is False
     assert packed["error_prune"] is True
     assert packed["anchor_weight"] == 0.3
     paper = LrzRemoteRepair(method="gsfix-gsplat")._params()
