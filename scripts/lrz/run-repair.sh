@@ -17,10 +17,12 @@ if [ ! -d "$JOB_DIR" ]; then
 fi
 
 SOCK="${LRZ_SSH_CONTROL_PATH:-$HOME/.ssh/cm-lrz}"
+SSH="${LRZ_SSH_BIN:-/usr/bin/ssh}"
 ASKPASS=""
 TARGET=""
 
-eval "$(JOB_ID="$JOB_ID" PYTHONPATH="$ROOT/src" python3 -c "
+if [ -x "$ROOT/.venv/bin/python" ]; then PY="$ROOT/.venv/bin/python"; else PY=python3; fi
+eval "$(JOB_ID="$JOB_ID" PYTHONPATH="$ROOT/src" "$PY" -c "
 from splat_explorer.repair_lrz import load_lrz_config, lrz_configured, remote_job_dir, srun_worker_command
 import os, shlex, sys
 c = load_lrz_config()
@@ -45,19 +47,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ssh -o ControlPath="$SOCK" -O check "$TARGET" >/dev/null 2>&1; then
+if "$SSH" -o ControlPath="$SOCK" -O check "$TARGET" >/dev/null 2>&1; then
   echo "==> Reusing ControlMaster $SOCK (from scripts/lrz/ssh-session.sh)"
 else
-  SSH_MASTER=(
-    ssh -4 -F /dev/null
-    -o PubkeyAuthentication=no
-    -o PreferredAuthentications=password
-    -o NumberOfPasswordPrompts=3
-    -o StrictHostKeyChecking=accept-new
-    -o ControlMaster=yes
-    -o ControlPath="$SOCK"
-    -o ControlPersist=8h
-  )
   if [ -n "${LRZ_SSH_PASSWORD:-}" ]; then
     ASKPASS="$(mktemp /tmp/lrz-askpass-XXXXXX)"
     printf '#!/bin/sh\nprintf "%%s\\n" "$LRZ_SSH_PASSWORD"\n' > "$ASKPASS"
@@ -65,18 +57,33 @@ else
     export SSH_ASKPASS="$ASKPASS" SSH_ASKPASS_REQUIRE=force
     export DISPLAY="${DISPLAY:-:0}"
     echo "==> Connecting to $TARGET (password from this repair run)…"
-    "${SSH_MASTER[@]}" -fN "$TARGET" </dev/null
+    "$SSH" -4 -F /dev/null \
+      -o PubkeyAuthentication=no \
+      -o PreferredAuthentications=password \
+      -o NumberOfPasswordPrompts=1 \
+      -o ControlMaster=yes \
+      -o ControlPath="$SOCK" \
+      -o ControlPersist=8h \
+      "$TARGET" "echo session-ok" </dev/null
   else
-    echo "==> Connecting to $TARGET — type your LRZ password (or run scripts/lrz/ssh-session.sh first)."
-    "${SSH_MASTER[@]}" -fN "$TARGET"
+    echo "==> Connecting to $TARGET with $SSH — type your LRZ password once."
+    echo "(Prefer scripts/lrz/ssh-session.sh first so this is a no-op.)"
+    "$SSH" -4 -F /dev/null \
+      -o PubkeyAuthentication=no \
+      -o PreferredAuthentications=password \
+      -o NumberOfPasswordPrompts=1 \
+      -o ControlMaster=yes \
+      -o ControlPath="$SOCK" \
+      -o ControlPersist=8h \
+      "$TARGET" "echo session-ok"
   fi
 fi
 
-SSH=(ssh -4 -F /dev/null -o ControlPath="$SOCK" -o ControlMaster=no)
-RSYNC_E="ssh -4 -F /dev/null -o ControlPath=$SOCK -o ControlMaster=no"
+SSH_CMD=("$SSH" -4 -F /dev/null -o ControlPath="$SOCK" -o ControlMaster=no)
+RSYNC_E="$SSH -4 -F /dev/null -o ControlPath=$SOCK -o ControlMaster=no"
 
 echo "==> Checking Slurm job $LRZ_JOB_ID (one squeue call)"
-STATE="$("${SSH[@]}" "$LRZ_USER@$LRZ_HOST" "squeue --me --job=${LRZ_JOB_ID} -h -o %T" | awk '{print $1}')"
+STATE="$("${SSH_CMD[@]}" "$LRZ_USER@$LRZ_HOST" "squeue --me --job=${LRZ_JOB_ID} -h -o %t" | awk '{print $1}')"
 if [ "$STATE" != "R" ]; then
   echo "Job $LRZ_JOB_ID is '${STATE:-unknown}', not running."
   echo "Allocate a GPU (sbatch) and put the new id in configs/lrz.local.yaml"
@@ -84,7 +91,7 @@ if [ "$STATE" != "R" ]; then
 fi
 
 echo "==> Uploading code + job $JOB_ID"
-"${SSH[@]}" "$LRZ_USER@$LRZ_HOST" \
+"${SSH_CMD[@]}" "$LRZ_USER@$LRZ_HOST" \
   "mkdir -p '$LRZ_WORKSPACE/inputs/$JOB_ID' '$LRZ_WORKSPACE/code' '$LRZ_WORKSPACE/outputs' '$LRZ_WORKSPACE/logs' '$LRZ_WORKSPACE/containers'"
 rsync -az --delete -e "$RSYNC_E" "$ROOT/src/" "$LRZ_USER@$LRZ_HOST:$LRZ_WORKSPACE/code/src/"
 if [ -f "$ROOT/pyproject.toml" ]; then
@@ -93,7 +100,7 @@ fi
 rsync -az -e "$RSYNC_E" --exclude status.json "$JOB_DIR/" "$LRZ_USER@$LRZ_HOST:$LRZ_WORKSPACE/inputs/$JOB_ID/"
 
 echo "==> srun CUDA refine on the allocated GPU"
-"${SSH[@]}" "$LRZ_USER@$LRZ_HOST" "$LRZ_SRUN"
+"${SSH_CMD[@]}" "$LRZ_USER@$LRZ_HOST" "$LRZ_SRUN"
 
 echo "==> Downloading repaired splat"
 rsync -az -e "$RSYNC_E" "$LRZ_USER@$LRZ_HOST:$LRZ_WORKSPACE/inputs/$JOB_ID/" "$JOB_DIR/"
@@ -104,7 +111,7 @@ if [ ! -f "$JOB_DIR/scene_repaired.ply" ] || [ ! -f "$JOB_DIR/metrics.json" ]; t
   exit 4
 fi
 
-JOB_DIR="$JOB_DIR" PYTHONPATH="$ROOT/src" python3 -c "
+JOB_DIR="$JOB_DIR" PYTHONPATH="$ROOT/src" "$PY" -c "
 from pathlib import Path
 import os
 from splat_explorer.repair_lrz import write_status

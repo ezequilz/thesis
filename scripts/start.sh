@@ -163,11 +163,18 @@ if [ "$HOST_DASHBOARD" = 1 ] && [ "$DASH_FREE" = 1 ]; then
   echo $! > outputs/dashboard.pid
   echo "    Host dashboard pid $(cat outputs/dashboard.pid)  (logs: outputs/dashboard.log)"
   printf "    Waiting for host dashboard"
+  DASH_UP=0
   for _ in $(seq 1 40); do
-    if curl -s -o /dev/null "http://127.0.0.1:8090"; then echo "  up"; break; fi
+    if curl -s -o /dev/null "http://127.0.0.1:8090"; then echo "  up"; DASH_UP=1; break; fi
     printf "."
     sleep 0.5
   done
+  if [ "$DASH_UP" != 1 ]; then
+    echo "  ERROR"
+    echo "    Host dashboard did not bind :8090. Last log lines:"
+    tail -n 40 outputs/dashboard.log || true
+    exit 1
+  fi
   printf "    Waiting for catalog scene"
   for _ in $(seq 1 60); do
     status=$(curl -s "http://127.0.0.1:8090/api/state" | python3 -c "import json,sys; print((json.load(sys.stdin).get('scene') or {}).get('status') or '')" 2>/dev/null || true)

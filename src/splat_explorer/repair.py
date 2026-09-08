@@ -33,6 +33,7 @@ ORIGINAL_PLY = "scene_original.ply"
 REPAIRED_PLY = "scene_repaired.ply"
 HIGHLIGHT_PLY = "scene_repaired_highlight.ply"
 REPAIR_LOG = "repair_log.json"
+METRICS_JSON = "metrics.json"
 HIGHLIGHT_COLOR = np.array([1.0, 0.08, 0.08], dtype=np.float32)
 
 # Matches the 3DGS / GSFix3D photometric mix (Kerbl et al. use λ ≈ 0.2).
@@ -799,6 +800,10 @@ class RepairResult:
             "n_iters": self.n_iters,
             "l1_before": self.l1_before,
             "l1_after": self.l1_after,
+            "l1_improved": (
+                None if self.l1_after is None
+                else bool(self.l1_after < self.l1_before)
+            ),
             "backend": self.backend,
             "train_width": self.train_width,
             "train_height": self.train_height,
@@ -975,6 +980,7 @@ class SceneRepairer:
         if episode_dir is None:
             return
         _write_json(episode_dir / repair_meta_name(result.step), result.to_json())
+        _write_json(episode_dir / METRICS_JSON, result.to_json())
         _write_json(
             episode_dir / REPAIR_LOG,
             {

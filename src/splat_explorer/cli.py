@@ -262,6 +262,12 @@ def cmd_viewer(cfg, args) -> None:
     )
 
 
+def cmd_dashboard(cfg, args) -> None:
+    from .web.server import serve_dashboard
+
+    serve_dashboard(cfg, host=cfg.dashboard.host, port=args.port or cfg.dashboard.port)
+
+
 def cmd_repair_job(cfg, args) -> None:
     from .repair_lrz import apply_packed_job
 

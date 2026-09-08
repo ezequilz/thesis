@@ -19,6 +19,7 @@ Endpoints:
   GET  /repair            3D repair review: original vs repaired splat, replay past runs
   GET  /api/repair        repair-studio snapshot (optional ?episode=)
   GET  /api/repair/episodes     past runs with regen counts / ply flags
+  GET  /api/repair/metrics      download metrics.json (?episode=&step=)
   POST /api/repair/start   replay 3D lift {episode, reload_code, backend, step, resume}
   POST /api/repair/stop   stop a replay
   POST /api/repair/reset  copy scene_original.ply over scene_repaired.ply
@@ -758,6 +759,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
             query = parse_qs(urlsplit(self.path).query)
             episode = (query.get("episode") or [None])[0]
             self._send_json(studio.snapshot(episode or None))
+            return
+        if path == "/api/repair/metrics":
+            query = parse_qs(urlsplit(self.path).query)
+            episode = (query.get("episode") or [None])[0]
+            step_raw = (query.get("step") or [None])[0]
+            if not episode or "/" in str(episode):
+                self._send_json({"error": "not found"}, 404)
+                return
+            step = None
+            if step_raw not in (None, ""):
+                try:
+                    step = int(step_raw)
+                except (TypeError, ValueError):
+                    self._send_json({"error": "bad step"}, 400)
+                    return
+            payload, filename = studio.metrics_payload(str(episode), step)
+            if payload is None:
+                self._send_json({"error": "not found"}, 404)
+                return
+            raw = json.dumps(payload, indent=2).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(raw)
             return
         if path == "/api/repair/episodes":
             self._send_json({"episodes": studio.list_episodes()})

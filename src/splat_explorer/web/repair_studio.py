@@ -14,11 +14,14 @@ from pathlib import Path
 
 from ..repair import (
     HIGHLIGHT_PLY,
+    METRICS_JSON,
     ORIGINAL_PLY,
     REPAIRED_PLY,
+    REPAIR_LOG,
     discover_repair_views,
     list_repair_backends,
     reload_repair_module,
+    repair_meta_name,
     replay_episode_repairs,
 )
 from ..scene.catalog import SceneSpec, publish_live_scene
@@ -135,6 +138,10 @@ class RepairStudio:
             del view["rendered_path"]
             del view["repaired_path"]
         log = self.app._read_json(d / "repair_log.json")
+        has_metrics = (d / METRICS_JSON).is_file() or any(
+            isinstance(v.get("repair"), dict) and v["repair"].get("l1_after") is not None
+            for v in views
+        )
         return {
             "id": ep_id,
             "meta": meta,
@@ -143,7 +150,50 @@ class RepairStudio:
             "original_ply": _ply_info(d / ORIGINAL_PLY),
             "repaired_ply": _ply_info(d / REPAIRED_PLY),
             "repair_log": log,
+            "has_metrics": has_metrics,
+            "metrics_url": f"/api/repair/metrics?episode={ep_id}",
         }
+
+    def metrics_payload(
+        self, episode_id: str, step: int | None = None,
+    ) -> tuple[dict | None, str]:
+        """JSON for the metrics.json download (latest repair, or one step)."""
+        d = self.app.episode_path(episode_id)
+        filename = "metrics.json"
+        if d is None:
+            return None, filename
+        body = None
+        if step is not None:
+            filename = f"step_{int(step):03d}_metrics.json"
+            meta = self.app._read_json(d / repair_meta_name(int(step)))
+            if isinstance(meta, dict):
+                body = meta
+        if body is None and step is None:
+            latest = self.app._read_json(d / METRICS_JSON)
+            if isinstance(latest, dict):
+                body = latest
+                filename = "metrics.json"
+        if body is None:
+            log = self.app._read_json(d / REPAIR_LOG)
+            repairs = log.get("repairs") if isinstance(log, dict) else None
+            if isinstance(repairs, list):
+                if step is not None:
+                    for row in reversed(repairs):
+                        if isinstance(row, dict) and int(row.get("step", -1)) == int(step):
+                            body = row
+                            break
+                elif repairs and isinstance(repairs[-1], dict):
+                    body = repairs[-1]
+        if not isinstance(body, dict):
+            return None, filename
+        out = dict(body)
+        before, after = out.get("l1_before"), out.get("l1_after")
+        if out.get("l1_improved") is None and before is not None and after is not None:
+            try:
+                out["l1_improved"] = float(after) < float(before)
+            except (TypeError, ValueError):
+                pass
+        return out, filename
 
     def start_replay(
         self,

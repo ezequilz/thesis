@@ -20,6 +20,7 @@ from splat_explorer.repair_lrz import (
     lrz_session_alive,
     pack_refine_job,
     session_required_message,
+    srun_worker_command,
     ssh_argv,
     wait_for_job_results,
 )
@@ -100,6 +101,7 @@ def test_ssh_argv_uses_control_path(monkeypatch, tmp_path):
     argv = ssh_argv({"user": "go73kaf2", "host": "login.ai.lrz.de"}, multiplex=True)
     assert any("ControlMaster=no" == a for a in argv)
     assert any(str(sock) in a for a in argv)
+    assert argv[0] in ("ssh", "/usr/bin/ssh") or argv[0].endswith("/ssh")
 
 
 def test_lrz_apply_requires_session(monkeypatch, tmp_path):
@@ -130,6 +132,22 @@ def test_make_repair_backend_lrz(monkeypatch):
     monkeypatch.setattr("splat_explorer.repair_lrz.lrz_configured", lambda: True)
     backend = make_repair_backend("gsfix-gsplat")
     assert isinstance(backend, LrzRemoteRepair)
+
+
+def test_srun_worker_overlaps_sleep_hold():
+    cmd = srun_worker_command(
+        {
+            "job_id": "5777469",
+            "cpus": 4,
+            "workspace": "/dss/ws",
+            "container": "/dss/ws/containers/pytorch.sqsh",
+            "container_name": "splat-repair",
+        },
+        "abc",
+    )
+    assert "--overlap" in cmd
+    assert "--jobid=5777469" in cmd
+    assert "--gres=gpu:1" in cmd
 
 
 def test_example_yaml_alone_is_not_configured(monkeypatch):

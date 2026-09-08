@@ -154,7 +154,7 @@ def lrz_session_alive(cfg: dict | None = None) -> bool:
     cfg = cfg or load_lrz_config()
     result = subprocess.run(
         [
-            "ssh", "-o", f"ControlPath={sock}", "-O", "check",
+            _ssh_bin(), "-o", f"ControlPath={sock}", "-O", "check",
             f"{cfg['user']}@{cfg['host']}",
         ],
         capture_output=True,
@@ -330,25 +330,29 @@ def job_results_ready(job_dir: Path) -> bool:
     return (job_dir / OUT_PLY).is_file() and (job_dir / METRICS_JSON).is_file()
 
 
+def _ssh_bin() -> str:
+    return os.environ.get("LRZ_SSH_BIN") or "/usr/bin/ssh"
+
+
 def ssh_argv(cfg: dict | None = None, *, multiplex: bool | None = None) -> list[str]:
     """SSH argv. Default: reuse ControlMaster at ``control_path()``."""
     cfg = cfg or load_lrz_config()
     target = f"{cfg['user']}@{cfg['host']}"
+    ssh = _ssh_bin()
     if multiplex is None:
         multiplex = lrz_session_alive(cfg)
     if multiplex:
         return [
-            "ssh", "-4", "-F", "/dev/null",
+            ssh, "-4", "-F", "/dev/null",
             "-o", "ControlMaster=no",
             "-o", f"ControlPath={control_path()}",
             target,
         ]
     return [
-        "ssh", "-4", "-F", "/dev/null",
+        ssh, "-4", "-F", "/dev/null",
         "-o", "PubkeyAuthentication=no",
         "-o", "PreferredAuthentications=password",
-        "-o", "NumberOfPasswordPrompts=3",
-        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "NumberOfPasswordPrompts=1",
         "-o", "KbdInteractiveAuthentication=no",
         target,
     ]
@@ -370,10 +374,11 @@ def srun_worker_command(cfg: dict, job_id: str) -> str:
     name = cfg.get("container_name") or "splat-repair"
     inner = (
         "export PYTHONPATH=/workspace/code/src${PYTHONPATH:+:$PYTHONPATH}; "
+        "export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-8.0}; "
         f"python -m splat_explorer.repair_lrz --job-dir /workspace/inputs/{job_id}"
     )
     return (
-        f"srun --jobid={shlex.quote(str(cfg['job_id']))} "
+        f"srun --jobid={shlex.quote(str(cfg['job_id']))} --overlap "
         f"--nodes=1 --ntasks=1 --cpus-per-task={int(cfg['cpus'])} --gres=gpu:1 "
         f"--container-image={shlex.quote(str(image))} "
         f"--container-name={shlex.quote(str(name))} "
@@ -408,7 +413,7 @@ def probe_job(cfg: dict | None = None, *, password: str | None = None) -> str:
     mux = lrz_session_alive(cfg)
     if not mux and not password:
         raise RuntimeError(session_required_message())
-    argv = ssh_argv(cfg, multiplex=mux) + [f"squeue --me --job={cfg['job_id']} -h -o %T"]
+    argv = ssh_argv(cfg, multiplex=mux) + [f"squeue --me --job={cfg['job_id']} -h -o %t"]
     env = os.environ.copy()
     helper = None
     if password and not mux:

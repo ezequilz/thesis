@@ -49,6 +49,14 @@
   #stats { display: flex; gap: 18px; padding: 8px 16px; font-size: 12px; color: var(--dim);
            border-bottom: 1px solid var(--border); flex: none; flex-wrap: wrap; align-items: center; }
   #stats b { color: var(--text); font-family: var(--mono); font-weight: 600; }
+  #st-l1.ok b { color: var(--ok); }
+  #st-l1.err b { color: var(--err); }
+  #st-l1.busy b { color: var(--warn); }
+  #btn-metrics {
+    font-size: 11px; color: var(--dim); font-weight: 500;
+    text-decoration: underline; text-underline-offset: 2px;
+  }
+  #btn-metrics[hidden] { display: none; }
   #btn-highlight {
     margin-left: auto; padding: 4px 11px; font-size: 11px; font-weight: 600;
     background: var(--panel2); color: var(--dim); border: 1px solid var(--border) !important;
@@ -211,6 +219,8 @@
   <span>repaired ply <b id="st-rep">–</b></span>
   <span>scene <b id="st-scene">–</b></span>
   <span>lift <b id="st-backend">–</b></span>
+  <span id="st-l1">L1 <b>–</b></span>
+  <a id="btn-metrics" href="#" download="metrics.json" hidden title="Download this repair's metrics.json">metrics.json</a>
   <button type="button" id="btn-highlight" title="On the Repaired 3D view, paint every gaussian that changed or was added versus the original bright red. Original always stays the real original splat.">highlight repair</button>
 </div>
 <div id="msg"></div>
@@ -366,6 +376,34 @@ function bindViewClicks(box) {
       maybeLook();
     };
   });
+}
+
+function fmtL1(n) {
+  if (n == null || n === "") return null;
+  const x = Number(n);
+  return Number.isFinite(x) ? x.toFixed(4) : null;
+}
+function viewRepair(v) {
+  if (!v) return {};
+  return (snapshot?.job?.results || []).find(x => x.step === v.step) || v.repair || {};
+}
+function l1Info(r) {
+  const before = fmtL1(r?.l1_before);
+  const after = fmtL1(r?.l1_after);
+  if (before == null && after == null) return null;
+  const improved = after != null && Number(r.l1_after) < Number(r.l1_before);
+  const worse = after != null && Number(r.l1_after) > Number(r.l1_before);
+  const arrow = after == null ? before : `${before} → ${after}`;
+  const mark = after == null ? "" : (improved ? " ↓" : worse ? " ↑" : " =");
+  return {
+    text: arrow + mark,
+    cls: after == null ? "busy" : (improved ? "ok" : "err"),
+    title: improved
+      ? `Photometric L1 dropped (${before} → ${after})`
+      : worse
+        ? `Photometric L1 rose (${before} → ${after})`
+        : `Photometric L1 ${before}${after != null ? " → " + after : ""}`,
+  };
 }
 
 function renderStats() {

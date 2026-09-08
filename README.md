@@ -242,6 +242,13 @@ though the SOG spec says y-up — `camera.up_axis` in the config handles this.
 Keep `.ply` assets out of git pushes to GitHub (100MB file limit) — track
 only the compact `.sog` or use Git LFS.
 
+## LRZ CUDA repair (GSFix3D on an allocated GPU)
+
+Mac hosts have no CUDA. The repair page can ship a view to an LRZ A100 when
+you have eduVPN, a ControlMaster SSH session, and a running GPU hold job.
+Step-by-step (password login, `sbatch`, `--overlap`, Enroot/NGC import):
+[`docs/lrz.md`](docs/lrz.md).
+
 ## Roadmap / open stubs
 
 - [ ] `gsplat` renderer: validate on a CUDA machine, wire up SH decoding
