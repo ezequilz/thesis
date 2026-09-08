@@ -397,7 +397,8 @@ class RepairStudio:
                     " Open scripts/lrz/ssh-session.sh once if ControlMaster is down."
                     if str(backend_name) in (
                         "gsfix-gsplat", "gsfix-gsplat-baseline",
-                        "cuda", "gsplat", "gsfix",
+                        "gsfix-gsplat-visprune",
+                        "cuda", "gsplat", "gsfix", "visprune",
                     )
                     else ""
                 ),

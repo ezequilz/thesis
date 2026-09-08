@@ -9,6 +9,7 @@ import pytest
 
 from splat_explorer.repair_gsfix3d import (
     GsplatGsfix3dRepair,
+    _repeat_along_n,
     _viewspace_grad_norm,
     densify_clone_split,
     instantiate_cuda_repair,
@@ -69,6 +70,12 @@ def test_instantiate_cuda_repair_dispatches_baseline():
     base = instantiate_cuda_repair(method="gsfix-gsplat-baseline", iters=3)
     assert isinstance(base, GsplatPhotometricRepair)
     assert base.iters == 3
+    from splat_explorer.repair_gsfix3d_visprune import GsplatGsfix3dVisPruneRepair
+    vis = instantiate_cuda_repair(method="gsfix-gsplat-visprune", iters=11)
+    assert isinstance(vis, GsplatGsfix3dVisPruneRepair)
+    assert vis.iters == 11
+    assert vis._result_backend() == "gsfix-gsplat-visprune"
+    assert not isinstance(paper, GsplatGsfix3dVisPruneRepair)
 
 
 def test_viewspace_grad_norm_unpacked_and_packed():
@@ -107,6 +114,29 @@ def test_rgb_sh_roundtrip():
     assert torch.allclose(out, rgb, atol=1e-5)
 
 
+def test_repeat_along_n_does_not_promote_1d():
+    """``.repeat(2, 1)`` on (K,) prepends a dim; densify cat then dies 1 vs 2."""
+
+    class _Fake:
+        def __init__(self, ndim):
+            self.ndim = ndim
+            self.sizes = None
+
+        def repeat(self, sizes):
+            self.sizes = sizes
+            return self
+
+    t1 = _Fake(1)
+    assert _repeat_along_n(t1, 2) is t1
+    assert t1.sizes == (2,)
+    t2 = _Fake(2)
+    _repeat_along_n(t2, 2)
+    assert t2.sizes == (2, 1)
+    t3 = _Fake(3)
+    _repeat_along_n(t3, 2)
+    assert t3.sizes == (2, 1, 1)
+
+
 def test_densify_clone_split_small_vs_large():
     torch = pytest.importorskip("torch")
     n = 4
@@ -122,10 +152,21 @@ def test_densify_clone_split_small_vs_large():
         thresh=0.5, split_scale=0.1, max_clone=16, max_gaussians=100,
     )
     assert packed is not None
-    means2, _, _, _, _, n_spawned = packed
+    means2, _, _, _, logit2, n_spawned = packed
     # clone gaussian 0 (+1) and split gaussian 2 into 2 (+1 net) → 6
     assert int(means2.shape[0]) == 6
     assert int(n_spawned) == 2
+    # PLY opacities are (N,); split must not promote them to (2, K) via repeat(2, 1)
+    assert logit2.ndim == 1
+    assert int(logit2.shape[0]) == 6
+
+    logit_col = torch.zeros(n, 1, requires_grad=True)
+    packed_col = densify_clone_split(
+        torch, means, quats, f_dc, log_scales, logit_col, mag,
+        thresh=0.5, split_scale=0.1, max_clone=16, max_gaussians=100,
+    )
+    assert packed_col is not None
+    assert packed_col[4].shape == (6, 1)
 
 
 @pytest.mark.skipif(

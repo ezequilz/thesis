@@ -46,6 +46,10 @@ def test_explicit_backend_requires_availability():
         assert isinstance(focused, GsplatGsfix3dRepair)
         assert focused.max_chunks == 0
         assert isinstance(make_repair_backend("gsfix-gsplat-baseline"), GsplatPhotometricRepair)
+        vis = make_repair_backend("gsfix-gsplat-visprune")
+        from splat_explorer.repair_gsfix3d_visprune import GsplatGsfix3dVisPruneRepair
+        assert isinstance(vis, GsplatGsfix3dVisPruneRepair)
+        assert vis.max_chunks == 1
     else:
         from splat_explorer.repair_lrz import LrzRemoteRepair, lrz_configured
         if lrz_configured():
@@ -58,11 +62,17 @@ def test_explicit_backend_requires_availability():
             base = make_repair_backend("gsfix-gsplat-baseline")
             assert isinstance(base, LrzRemoteRepair)
             assert base.method == "gsfix-gsplat-baseline"
+            vis = make_repair_backend("gsfix-gsplat-visprune")
+            assert isinstance(vis, LrzRemoteRepair)
+            assert vis.method == "gsfix-gsplat-visprune"
+            assert vis.max_chunks == 1
         else:
             with pytest.raises(RuntimeError, match="CUDA"):
                 make_repair_backend("gsfix-gsplat")
             with pytest.raises(RuntimeError, match="CUDA"):
                 make_repair_backend("gsfix-gsplat-baseline")
+            with pytest.raises(RuntimeError, match="CUDA"):
+                make_repair_backend("gsfix-gsplat-visprune")
     if mlx_refine_available():
         from splat_explorer.repair_mlx import MlxPhotometricRepair
         assert isinstance(make_repair_backend("gsplat-mlx"), MlxPhotometricRepair)
@@ -83,9 +93,11 @@ def test_list_repair_backends_includes_auto_and_mlx():
     info = list_repair_backends()
     ids = [b["id"] for b in info["backends"]]
     assert info["detected"] in {"gsfix-gsplat", "gsplat-mlx", "cpu-project"}
+    assert info["detected"] != "gsfix-gsplat-visprune"
     assert ids[0] == "auto"
     assert ids[1] == "gsfix-gsplat"
     assert ids[2] == "gsfix-gsplat-baseline"
+    assert ids[3] == "gsfix-gsplat-visprune"
     assert "gsplat-mlx" in ids
     auto = info["backends"][0]
     assert auto["available"] is True
@@ -93,6 +105,9 @@ def test_list_repair_backends_includes_auto_and_mlx():
     assert "color stamp" in stamp["label"]
     paper = next(b for b in info["backends"] if b["id"] == "gsfix-gsplat")
     assert "No color stamp" in paper["detail"]
+    vis = next(b for b in info["backends"] if b["id"] == "gsfix-gsplat-visprune")
+    assert vis["available"] is paper["available"]
+    assert "error mask" in vis["detail"].replace("error-mask", "error mask")
 
 
 def test_make_repair_backend_falls_back_without_cuda():

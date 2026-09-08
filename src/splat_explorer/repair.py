@@ -65,6 +65,8 @@ _BACKEND_ALIASES = {
     "gsfix3d": "gsfix-gsplat",
     "gsfix-gsplat-baseline": "gsfix-gsplat-baseline",
     "baseline": "gsfix-gsplat-baseline",
+    "gsfix-gsplat-visprune": "gsfix-gsplat-visprune",
+    "visprune": "gsfix-gsplat-visprune",
     "cpu": "cpu-project",
     "cpu-project": "cpu-project",
     "project": "cpu-project",
@@ -178,6 +180,17 @@ def list_repair_backends() -> dict:
                 ),
             },
             {
+                "id": "gsfix-gsplat-visprune",
+                "label": "gsplat CUDA (GSFix3D + vis-prune)",
+                "available": bool(cuda or lrz_ok),
+                "detail": (
+                    f"{cuda_detail}. Experimental: freeze occluded Gaussians, "
+                    "prune floaters on the |original−fixed| error mask, and "
+                    "anchor nearby original-scene yaw/pitch views. Densify only "
+                    "the first 20-iter chunk. Not the paper default."
+                ),
+            },
+            {
                 "id": "gsplat-mlx",
                 "label": "gsplat-mlx (Apple Silicon / Metal)",
                 "available": mlx,
@@ -262,7 +275,8 @@ def make_repair_backend(
     12 hours). CUDA ``gsfix-gsplat`` uses uncapped 20-iter chunks in that
     mode; episode replay still does the paper's single 20-iter pass. The
     stamp backend paints regen RGB first. ``gsfix-gsplat-baseline`` is the
-    frozen pre-paper CUDA lift.
+    frozen pre-paper CUDA lift. ``gsfix-gsplat-visprune`` is the experimental
+    occlusion-freeze / error-mask prune / micro-rotation-anchor variant.
     """
     key = _normalize_backend_name(name)
     if key == "auto":
@@ -292,6 +306,14 @@ def _cuda_max_chunks(key: str, *, focused: bool) -> int:
     if focused or key == "gsfix-gsplat-baseline":
         return 0
     return 1
+
+
+_CUDA_BACKENDS = ("gsfix-gsplat", "gsfix-gsplat-baseline", "gsfix-gsplat-visprune")
+_CUDA_LABELS = {
+    "gsfix-gsplat": "GSFix3D paper",
+    "gsfix-gsplat-baseline": "GSFix CUDA baseline",
+    "gsfix-gsplat-visprune": "GSFix3D + vis-prune",
+}
 
 
 def _mlx_repair_kwargs(*, stamp: bool, studio: bool, focused: bool) -> dict:
@@ -327,7 +349,7 @@ def _mlx_repair_kwargs(*, stamp: bool, studio: bool, focused: bool) -> dict:
 
 
 def _build_repair_backend(key: str, *, studio: bool, focused: bool, required: bool):
-    if key in ("gsfix-gsplat", "gsfix-gsplat-baseline"):
+    if key in _CUDA_BACKENDS:
         from .repair_gsfix import gsplat_refine_available
 
         if gsplat_refine_available():
@@ -335,7 +357,7 @@ def _build_repair_backend(key: str, *, studio: bool, focused: bool, required: bo
 
             logger.info(
                 "3D repair backend: %s (gsplat / CUDA, local)",
-                "GSFix3D paper" if key == "gsfix-gsplat" else "GSFix CUDA baseline",
+                _CUDA_LABELS.get(key, key),
             )
             return instantiate_cuda_repair(
                 method=key,
@@ -346,7 +368,7 @@ def _build_repair_backend(key: str, *, studio: bool, focused: bool, required: bo
         if lrz_configured():
             logger.info(
                 "3D repair backend: %s (gsplat / CUDA via LRZ)",
-                "GSFix3D paper" if key == "gsfix-gsplat" else "GSFix CUDA baseline",
+                _CUDA_LABELS.get(key, key),
             )
             return LrzRemoteRepair(
                 method=key,
@@ -1304,6 +1326,7 @@ def reload_repair_module():
     for extra in (
         "splat_explorer.repair_gsfix",
         "splat_explorer.repair_gsfix3d",
+        "splat_explorer.repair_gsfix3d_visprune",
         "splat_explorer.repair_mlx",
         "splat_explorer.repair_lrz",
     ):

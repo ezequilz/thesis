@@ -295,6 +295,7 @@ def sbatch_hold_command(
     job_name: str | None = None,
     after_job: str | None = None,
     begin: str | None = None,
+    nodelist: str | None = None,
     cpus: int = 4,
     mem: str = "32G",
     gres: str = "gpu:1",
@@ -316,6 +317,9 @@ def sbatch_hold_command(
         f"--time={slurm_time_limit(hours)}",
         f"--output={name}-%j.log",
     ]
+    nodes = ",".join(n.strip() for n in str(nodelist or "").split(",") if n.strip())
+    if nodes:
+        parts.append(f"--nodelist={nodes}")
     if begin_spec:
         parts.append(f"--begin={begin_spec}")
     if after_job:
@@ -733,6 +737,108 @@ def summarize_gpu_availability(nodes: list[dict[str, Any]]) -> list[dict[str, An
     return list(by_id.values())
 
 
+A100_PARTITION_IDS = ("lrz-hgx-a100-80x4", "lrz-dgx-a100-80x8")
+
+
+def _free_gpu_nodes(nodes: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    return [
+        n for n in (nodes or [])
+        if not n.get("down") and int(n.get("gpu_free") or 0) > 0 and n.get("name")
+    ]
+
+
+def partitions_already_wide(partition: str | None) -> bool:
+    parts = {p.strip() for p in str(partition or "").split(",") if p.strip()}
+    return set(A100_PARTITION_IDS).issubset(parts)
+
+
+def placement_for_reserve(
+    requested: str | None,
+    nodes: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Pick partitions + nodes that currently show a free GPU.
+
+    Prefer the caller's selection when those partitions have idle GPUs;
+    otherwise fall back to A100, then any free partition (H100/V100).
+    """
+    requested_ids = [
+        p.strip() for p in str(requested or DEFAULT_PARTITION).split(",") if p.strip()
+    ]
+    free = _free_gpu_nodes(nodes)
+
+    def pick(allowed: set[str]) -> tuple[list[str], list[dict[str, Any]]]:
+        hit = [n for n in free if n.get("partition") in allowed]
+        parts = list(dict.fromkeys(str(n.get("partition")) for n in hit if n.get("partition")))
+        return parts, hit
+
+    parts, hit = pick(set(requested_ids))
+    adapted = False
+    if not hit:
+        parts, hit = pick(set(A100_PARTITION_IDS))
+        adapted = bool(hit)
+    if not hit:
+        parts, hit = pick({str(n.get("partition")) for n in free if n.get("partition")})
+        adapted = bool(hit)
+    if not parts:
+        parts = requested_ids or list(A100_PARTITION_IDS)
+    names = [str(n["name"]) for n in hit]
+    return {
+        "partition": ",".join(parts),
+        "nodelist": ",".join(names) if names else None,
+        "nodes": hit,
+        "adapted": adapted,
+        "gpu_free": sum(int(n.get("gpu_free") or 0) for n in hit),
+    }
+
+
+def pending_slurm_action(
+    *,
+    job_id: str,
+    slurm: dict,
+    jobs: list[dict[str, Any]] | None = None,
+    nodes: list[dict[str, Any]] | None = None,
+) -> str:
+    reason = slurm.get("reason") or ""
+    partition = slurm.get("partition") or ""
+    running = [
+        j for j in (jobs or [])
+        if j.get("state") == "R" and str(j.get("job_id")) != str(job_id)
+    ]
+    free = _free_gpu_nodes(nodes)
+    idle = sum(int(n.get("gpu_free") or 0) for n in free)
+    if slurm.get("state") == "PD" and running:
+        extra = ""
+        if idle:
+            extra = (
+                f" {idle} GPU(s) look idle ({', '.join(n['name'] for n in free[:3])}), "
+                "but LRZ often delays a second GPU behind a job you already hold. "
+                "Click Place on free GPUs to pin this pending job to those nodes, "
+                "or reserve with “queue after current job”."
+            )
+        return (
+            f"Job {job_id} is PD ({reason or 'Priority'}) because "
+            f"{running[0]['job_id']} is already running.{extra}"
+        )
+    if slurm.get("state") == "PD" and reason == "Priority" and not partitions_already_wide(partition):
+        return (
+            "Job is pending on one partition while another A100 pool may be free. "
+            f"Widen once: scontrol update JobId={job_id} Partition={DEFAULT_PARTITION}"
+        )
+    if slurm.get("state") == "PD" and idle:
+        names = ", ".join(n["name"] for n in free[:4])
+        return (
+            f"Job is PD ({reason or 'queued'}) while {names} show free GPUs. "
+            "Click Place on free GPUs to retarget onto those nodes. "
+            "Widening does nothing if both A100 partitions are already listed."
+        )
+    if slurm.get("state") == "PD":
+        return (
+            f"Job {job_id} is pending ({reason or 'PD'}). Wait in the queue — "
+            "do not loop squeue."
+        )
+    return "Reserve a new GPU from /repair/gpu (or scripts/lrz/allocate.sh 2h)."
+
+
 def review_command() -> str:
     """One SSH script: sinfo summary + scontrol GPU counts. Not a poll loop."""
     parts = REVIEW_PARTITIONS
@@ -910,12 +1016,8 @@ def build_connection_checks(
         state = slurm["state"]
         reason = slurm.get("reason")
         extra = f" ({reason})" if reason else ""
-        action = (
-            "Job is pending. Widen A100 partitions once "
-            f"(scripts/lrz/allocate.sh --widen, or scontrol update JobId={job_id} "
-            f"Partition={DEFAULT_PARTITION})."
-            if state == "PD" else
-            "Reserve a new 8h or 24h GPU from /repair/gpu (or scripts/lrz/allocate.sh 8h)."
+        action = pending_slurm_action(
+            job_id=str(job_id), slurm=slurm, jobs=jobs, nodes=nodes,
         )
         checks.append({
             "id": "slurm", "ok": False, "label": "Slurm job",
@@ -1772,7 +1874,7 @@ class LrzRemoteRepair:
     should_stop: Callable[[], bool] | None = None
 
     def _params(self) -> dict:
-        return {
+        params = {
             "method": str(self.method),
             "iters": int(self.iters),
             "kf_iters": int(self.kf_iters),
@@ -1794,6 +1896,20 @@ class LrzRemoteRepair:
             "white_background": bool(self.white_background),
             "max_chunks": int(self.max_chunks),
         }
+        if str(self.method) in ("gsfix-gsplat-visprune", "visprune"):
+            params.update(
+                freeze_occluded=True,
+                error_prune=True,
+                error_thresh=0.12,
+                prune_max_frac=0.02,
+                prune_min_keep=32,
+                depth_margin=0.05,
+                contrib_thresh=0.05,
+                anchor_weight=0.3,
+                yaw_offset_deg=12.0,
+                pitch_offset_deg=8.0,
+            )
+        return params
 
     def apply(
         self,
@@ -1844,27 +1960,34 @@ class LrzRemoteRepair:
         password = get_ssh_password() or os.environ.get("LRZ_SSH_PASSWORD")
         once = not lrz_session_alive() and not bool(password)
         limit = int(self.max_chunks)
-        while True:
-            if should_stop is not None and should_stop():
-                break
-            if deadline is not None and time.time() >= deadline:
-                break
-            if limit > 0 and chunk >= limit:
-                break
-            last = self.apply(scene, camera, rendered_rgb, repaired_rgb)
-            chunk += 1
-            if l1_before is None:
-                l1_before = last.get("l1_before")
-            total_iters += int(last.get("n_iters") or 0)
-            last = dict(last)
-            last["n_iters"] = total_iters
-            last["n_chunks"] = chunk
-            last["n_stamped"] = int(last.get("n_stamped") or 0)
-            last["l1_before"] = l1_before
-            if on_checkpoint is not None:
-                on_checkpoint(last)
-            if once:
-                break
+        saved_densify = self.densify
+        visprune = str(self.method) in ("gsfix-gsplat-visprune", "visprune")
+        try:
+            while True:
+                if should_stop is not None and should_stop():
+                    break
+                if deadline is not None and time.time() >= deadline:
+                    break
+                if limit > 0 and chunk >= limit:
+                    break
+                last = self.apply(scene, camera, rendered_rgb, repaired_rgb)
+                chunk += 1
+                if visprune:
+                    self.densify = False
+                if l1_before is None:
+                    l1_before = last.get("l1_before")
+                total_iters += int(last.get("n_iters") or 0)
+                last = dict(last)
+                last["n_iters"] = total_iters
+                last["n_chunks"] = chunk
+                last["n_stamped"] = int(last.get("n_stamped") or 0)
+                last["l1_before"] = l1_before
+                if on_checkpoint is not None:
+                    on_checkpoint(last)
+                if once:
+                    break
+        finally:
+            self.densify = saved_densify
         if last is None:
             return {
                 "backend": str(self.method),

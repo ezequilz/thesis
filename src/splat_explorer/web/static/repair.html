@@ -234,10 +234,11 @@
     <select id="in-ep"></select>
   </label>
   <label>backend
-    <select id="in-backend" title="Which 3D lift to run. Default is gsplat CUDA GSFix3D (paper §3.3, no color stamp). Baseline is the frozen pre-paper CUDA lift. Auto uses CUDA/LRZ when a job is configured, else gsplat-mlx, else the CPU stamp. Pick (w. color stamp) only to inspect painted updates.">
+    <select id="in-backend" title="Which 3D lift to run. Default is gsplat CUDA GSFix3D (paper §3.3, no color stamp). Baseline is the frozen pre-paper CUDA lift. GSFix3D + vis-prune is experimental (freeze occluded, error-mask prune, original micro-rotation anchors). Auto uses CUDA/LRZ when a job is configured, else gsplat-mlx, else the CPU stamp. Pick (w. color stamp) only to inspect painted updates.">
       <option value="auto">Auto (best available)</option>
       <option value="gsfix-gsplat" selected>gsplat CUDA (GSFix3D)</option>
       <option value="gsfix-gsplat-baseline">gsplat CUDA (baseline)</option>
+      <option value="gsfix-gsplat-visprune">gsplat CUDA (GSFix3D + vis-prune)</option>
       <option value="gsplat-mlx">gsplat-mlx (Apple Silicon / Metal)</option>
       <option value="gsplat-mlx-stamp">gsplat-mlx (w. color stamp)</option>
       <option value="cpu-project">CPU color stamp</option>
