@@ -29,7 +29,7 @@ cp configs/lrz.example.yaml configs/lrz.local.yaml
 The repeatable path is the GPU dashboard after `./scripts/start.sh`:
 [http://localhost:8090/repair/gpu](http://localhost:8090/repair/gpu)
 (8h/24h Reserve, jobs list, VRAM free, setup checks, one-shot partition
-review). Auto-refresh is at most once per 30s and only while that tab is
+review). Auto-refresh is at most once per 2.5 min and only while that tab is
 visible. Scripts below do the same work from a terminal.
 
 ## Every session (laptop)
@@ -230,7 +230,7 @@ hold, run `ssh-session.sh` again if the mux drops.
 4. Back on <http://localhost:8090/repair>, backend **gsplat CUDA (GSFix3D)**.
    Repairs rsync the packed view and `srun --overlap` on `job_id`.
 
-The GPU page auto-probes at most once per 30s **while that tab is visible**.
+The GPU page auto-probes at most once per 2.5 min **while that tab is visible**.
 Hidden tabs keep the last snapshot and send nothing. Use Probe GPU to refresh
 manually.
 

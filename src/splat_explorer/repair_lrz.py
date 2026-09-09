@@ -565,7 +565,7 @@ def job_results_ready(job_dir: Path) -> bool:
     return (job_dir / OUT_PLY).is_file() and (job_dir / METRICS_JSON).is_file()
 
 
-PROBE_TTL_S = 30.0  # LRZ treats automated squeue loops as a DoS.
+PROBE_TTL_S = 150.0  # 2.5 min. LRZ treats tighter squeue loops as a DoS.
 PROBE_TIMEOUT_S = 25.0
 SMI_TIMEOUT_S = 35.0
 SESSION_CHECK_TIMEOUT_S = 5.0
@@ -1806,7 +1806,7 @@ def lrz_dashboard_snapshot(
         "hold_hours": list(HOLD_HOURS),
         "max_hold_hours": MAX_HOLD_HOURS,
         "partition": status.get("partition") or DEFAULT_PARTITION,
-        "hint": "Slurm is queried at most once per 30s while this page is visible. sinfo only on Review partitions.",
+        "hint": "Slurm is queried at most once per 2.5 min while this page is visible. sinfo only on Review partitions.",
     }
 
 

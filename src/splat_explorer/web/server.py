@@ -20,7 +20,7 @@ Endpoints:
   GET  /repair/gpu        LRZ SSH + GPU connection dashboard
   GET  /api/repair        repair-studio snapshot (optional ?episode=)
   GET  /api/repair/gpu    LRZ connection, cached GPU probe, current repair stats
-  POST /api/repair/gpu/probe  one-shot remote GPU/Slurm probe (rate-limited, 30s)
+  POST /api/repair/gpu/probe  one-shot remote GPU/Slurm probe (rate-limited, 2.5 min)
   POST /api/repair/gpu/allocate  submit 8h/24h sleep hold {hours, after}
   POST /api/repair/gpu/use      point configs/lrz.local.yaml at {job_id}
   POST /api/repair/gpu/setup    load PyTorch/Pyxis container + gsplat onto the current job

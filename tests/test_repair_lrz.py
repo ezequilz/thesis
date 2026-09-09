@@ -354,7 +354,7 @@ def test_dashboard_snapshot_ssh_down(monkeypatch, tmp_path):
     assert body["scripts"]["setup"] == "scripts/lrz/load-setup.sh"
     assert "setup" in body
     assert body["setup"]["ok"] is False
-    assert "30s" in body["hint"]
+    assert "2.5 min" in body["hint"]
 
 
 def test_dashboard_snapshot_lists_packed_jobs(monkeypatch, tmp_path):

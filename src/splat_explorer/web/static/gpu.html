@@ -122,7 +122,7 @@
   <h1>splat-explorer <span>· GPU / LRZ</span></h1>
   <span id="pill-ready" class="pill">checking…</span>
   <span id="pill-job" class="pill">repair: idle</span>
-  <span id="pill-watch" class="pill">auto: 30s</span>
+  <span id="pill-watch" class="pill">auto: 2.5m</span>
   <span class="spacer"></span>
   <a href="/repair">repair review</a>
   <a href="/">episode dashboard</a>
@@ -153,7 +153,7 @@
     <button id="btn-review" class="ghost">Refresh availability</button>
     <button id="btn-setup" title="Once per allocation: start the named Pyxis container from DSS pytorch.sqsh and install gsplat onto the shared drive. Later repairs reuse it.">Load GPU setup</button>
     <button id="btn-probe">Probe GPU</button>
-    <span id="probe-meta" class="hint">At most one remote probe per 30s while this tab is visible. Availability is a separate one-shot sinfo/scontrol.</span>
+    <span id="probe-meta" class="hint">At most one remote probe per 2.5 min while this tab is visible. Availability is a separate one-shot sinfo/scontrol.</span>
   </div>
 </div>
 <div id="note"></div>
@@ -200,7 +200,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const AUTO_MS = 30000;
+const AUTO_MS = 150000; // 2.5 min — LRZ throttles tighter squeue loops.
 let snap = null;
 let tickBusy = false;
 let hoursMode = 2;
@@ -676,7 +676,7 @@ function renderChrome() {
     watch.textContent = "auto: paused";
     watch.className = "pill paused";
   } else {
-    watch.textContent = "auto: 30s";
+    watch.textContent = "auto: 2.5m";
     watch.className = "pill";
   }
   const blocked = snap?.next_action;
@@ -695,13 +695,14 @@ function renderChrome() {
     : hidden
       ? `Last probe ${ageText(age)}. Tab hidden, no requests.`
       : `Last probe ${ageText(age)}. `;
-  const busy = Boolean(snap?.probing) || Boolean(snap?.setup?.inflight) || tickBusy;
-  $("btn-probe").disabled = busy;
-  $("btn-alloc").disabled = busy || !session;
-  $("btn-widen").disabled = busy || !session;
-  $("btn-review").disabled = busy || !session;
+  const probeBusy = Boolean(snap?.probing) || tickBusy;
+  const setupBusy = Boolean(snap?.setup?.inflight);
+  $("btn-probe").disabled = probeBusy || setupBusy;
+  $("btn-alloc").disabled = setupBusy || !session;
+  $("btn-widen").disabled = setupBusy || !session;
+  $("btn-review").disabled = setupBusy || !session;
   const canSetup = session && snap?.slurm?.state === "R";
-  $("btn-setup").disabled = busy || !canSetup;
+  $("btn-setup").disabled = probeBusy || setupBusy || !canSetup;
   $("btn-setup").textContent = snap?.setup?.inflight
     ? "Loading GPU setup…"
     : (snap?.setup?.ok ? "Reload GPU setup" : "Load GPU setup");
