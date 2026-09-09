@@ -26,6 +26,7 @@ print('LRZ_HOST=' + shlex.quote(c['host']))
 print('LRZ_JOB_ID=' + shlex.quote(str(c.get('job_id') or '')))
 print('LRZ_WORKSPACE=' + shlex.quote(c['workspace']))
 print('LRZ_CONTAINER=' + shlex.quote(str(c.get('container') or '')))
+print('LRZ_CONTAINER_NAME=' + shlex.quote(str(c.get('container_name') or 'splat-repair')))
 print('LRZ_CPUS=' + shlex.quote(str(int(c.get('cpus') or 4))))
 ")"
   TARGET="$LRZ_USER@$LRZ_HOST"

@@ -178,30 +178,42 @@ enroot import -o containers/pytorch.sqsh docker://pytorch/pytorch:2.5.1-cuda12.4
 
 Driver on the A100 nodes has been CUDA 13.0; a CUDA 12.x image is fine.
 
-## Once per allocation: named Pyxis container
+## Once per allocation: Load GPU setup
 
-Still on the GPU node, after the `.sqsh` exists. `--overlap` again:
+The squashfs lives on DSS and survives job changes. The **named Pyxis
+container** does not — a new `sbatch` (new node) needs one load.
+
+From the dashboard (preferred), after **Use** on the running job:
+
+1. Keep eduVPN + `scripts/lrz/ssh-session.sh` (ControlMaster) up.
+2. Open <http://localhost:8090/repair/gpu> and click **Load GPU setup**.
+
+That rsyncs `src/` to DSS, starts `--container-name=splat-repair` from
+`containers/pytorch.sqsh`, and installs `gsplat` into
+`/workspace/python` on the shared drive if it is missing. First compile
+on a node is slow (10–20 min). Later repairs reuse it and do **not**
+reload the container.
+
+Same from a terminal:
+
+```bash
+scripts/lrz/load-setup.sh
+```
+
+Equivalent `srun` (needs `--overlap` because the hold job is `sleep`):
 
 ```bash
 srun --jobid=<JOBID> --overlap --gres=gpu:1 \
   --container-image=/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000/go73kaf2/splat-explorer/containers/pytorch.sqsh \
   --container-name=splat-repair \
   --container-mounts=/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000/go73kaf2/splat-explorer:/workspace \
-  --pty bash
-```
-
-Inside the container (first time this job; compiles `gsplat`, slow):
-
-```bash
-python -c 'import torch; print(torch.cuda.get_device_name(0), torch.version.cuda)'
-# code/ is rsynced by the first dashboard repair; PYTHONPATH is enough:
-#   PYTHONPATH=/workspace/code/src
+  bash -lc 'export PYTHONPATH=/workspace/code/src:/workspace/python; python -m splat_explorer.repair_lrz --setup'
 ```
 
 The dashboard worker is:
 
 ```text
-PYTHONPATH=/workspace/code/src python -m splat_explorer.repair_lrz --job-dir /workspace/inputs/<id>
+PYTHONPATH=/workspace/code/src:/workspace/python python -m splat_explorer.repair_lrz --job-dir /workspace/inputs/<id>
 ```
 
 ## Dashboard (after squashfs exists)
@@ -213,17 +225,20 @@ hold, run `ssh-session.sh` again if the mux drops.
 2. **Reserve GPU** 8h or 24h (optional “queue after current job”). Widen
    partitions if the job sits in `PD (Priority)`. **Probe GPU** for VRAM
    free / utilization. **Review partitions** is one `sinfo`, never looped.
-3. Open a GPU shell if you still need Enroot/bootstrap:
-   `scripts/lrz/gpu-shell.sh`
+3. Click **Use** on the running job, then **Load GPU setup** once
+   (named Pyxis container + gsplat on DSS). Same button on `/repair`.
 4. Back on <http://localhost:8090/repair>, backend **gsplat CUDA (GSFix3D)**.
-   First run rsyncs `src/` to DSS, then `srun --overlap` on `job_id`.
+   Repairs rsync the packed view and `srun --overlap` on `job_id`.
 
 The GPU page auto-probes at most once per 30s **while that tab is visible**.
 Hidden tabs keep the last snapshot and send nothing. Use Probe GPU to refresh
 manually.
 
 If the socket is gone: `scripts/lrz/ssh-session.sh` again. If the job is
-not `R`, reserve a new one (or **Use** an already-running row).
+not `R`, the GPU page still loads login-node data (availability, reserved
+jobs, estimated `squeue --start` times). Connected GPU / current repair stay
+empty until a row is `ST=R`. Reserve a new hold (or **Use** an already-running
+row), then **Load GPU setup**.
 
 ## Scripts
 
@@ -236,6 +251,7 @@ not `R`, reserve a new one (or **Use** an already-running row).
 | `scripts/lrz/allocate.sh --use ID` | Point `lrz.local.yaml` at an existing job |
 | `scripts/lrz/status.sh [--sinfo]` | One `squeue --me` (+ optional one `sinfo`) |
 | `scripts/lrz/gpu-shell.sh [id]` | `srun --overlap --pty bash` on the allocated node |
+| `scripts/lrz/load-setup.sh` | Once per allocation: named container + gsplat on DSS |
 | `scripts/lrz/bootstrap.sh` | Prints/checks workspace + the import commands above |
 | `scripts/lrz/run-repair.sh` | Manual rsync + remote worker (dashboard usually does this) |
 

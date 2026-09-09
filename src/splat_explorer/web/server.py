@@ -23,6 +23,7 @@ Endpoints:
   POST /api/repair/gpu/probe  one-shot remote GPU/Slurm probe (rate-limited, 30s)
   POST /api/repair/gpu/allocate  submit 8h/24h sleep hold {hours, after}
   POST /api/repair/gpu/use      point configs/lrz.local.yaml at {job_id}
+  POST /api/repair/gpu/setup    load PyTorch/Pyxis container + gsplat onto the current job
   POST /api/repair/gpu/widen    one scontrol to both A100 partitions
   POST /api/repair/gpu/review   one sinfo snapshot
   GET  /api/repair/episodes     past runs with regen counts / ply flags
@@ -715,7 +716,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_json(self, obj: dict, code: int = 200) -> None:
-        self._send(code, json.dumps(obj).encode(), "application/json")
+        self._send(code, json.dumps(obj, default=str).encode(), "application/json")
 
     def do_GET(self) -> None:  # noqa: N802 (stdlib API)
         path = urlsplit(self.path).path
@@ -774,7 +775,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/repair/gpu":
             query = parse_qs(urlsplit(self.path).query)
             probe = (query.get("probe") or ["0"])[0] in ("1", "true", "yes")
-            self._send_json(studio.gpu_snapshot(probe=probe))
+            try:
+                self._send_json(studio.gpu_snapshot(probe=probe))
+            except Exception as exc:
+                logger.exception("GPU dashboard snapshot failed")
+                self._send_json({
+                    "ok": False,
+                    "message": str(exc),
+                    "ready": False,
+                    "gpu_running": False,
+                    "gpu": None,
+                    "jobs": [],
+                    "checks": [],
+                    "repair": {},
+                    "connection": {},
+                    "next_action": str(exc),
+                })
             return
         if path == "/api/repair/metrics":
             query = parse_qs(urlsplit(self.path).query)
@@ -891,9 +907,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(payload, 200 if ok else 409)
             return
         elif path == "/api/repair/gpu/probe":
-            snap = studio.gpu_snapshot(
-                probe=True, force=bool(body.get("force", True)),
-            )
+            try:
+                snap = studio.gpu_snapshot(
+                    probe=True, force=bool(body.get("force", True)),
+                )
+            except Exception as exc:
+                logger.exception("GPU probe snapshot failed")
+                self._send_json({"ok": False, "message": str(exc)}, 409)
+                return
             self._send_json(snap)
             return
         elif path == "/api/repair/gpu/allocate":
@@ -917,6 +938,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             try:
                 snap = studio.gpu_use_job(job_id)
+            except (RuntimeError, ValueError) as exc:
+                self._send_json({"ok": False, "message": str(exc)}, 409)
+                return
+            self._send_json(snap)
+            return
+        elif path == "/api/repair/gpu/setup":
+            try:
+                snap = studio.gpu_load_setup(force=bool(body.get("force", True)))
             except (RuntimeError, ValueError) as exc:
                 self._send_json({"ok": False, "message": str(exc)}, 409)
                 return

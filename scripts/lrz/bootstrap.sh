@@ -35,11 +35,15 @@ echo
 echo "  # No NGC key: public CUDA devel image (includes nvcc for gsplat):"
 echo "  enroot import -o containers/pytorch.sqsh docker://pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel"
 echo
-echo "Then named Pyxis container (once per allocation):"
+echo "Then named Pyxis container + gsplat (once per allocation):"
+echo "  scripts/lrz/load-setup.sh"
+echo "  # or Load GPU setup on http://localhost:8090/repair/gpu"
+echo
+echo "  # Manual equivalent:"
 echo "  srun --jobid=$LRZ_JOB_ID --overlap --gres=gpu:1 \\"
 echo "    --container-image=$LRZ_CONTAINER \\"
-echo "    --container-name=splat-repair \\"
-echo "    --container-mounts=$LRZ_WORKSPACE:/workspace --pty bash"
-echo "  python -c 'import torch; print(torch.cuda.get_device_name(0), torch.version.cuda)'"
+echo "    --container-name=${LRZ_CONTAINER_NAME:-splat-repair} \\"
+echo "    --container-mounts=$LRZ_WORKSPACE:/workspace \\"
+echo "    bash -lc 'export PYTHONPATH=/workspace/code/src:/workspace/python; python -m splat_explorer.repair_lrz --setup'"
 echo
 echo "Full write-up: docs/lrz.md"

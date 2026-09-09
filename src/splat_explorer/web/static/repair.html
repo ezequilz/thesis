@@ -31,6 +31,7 @@
   a.pill.err { color: var(--err); }
   .spacer { flex: 1; }
   a { color: var(--accent); text-decoration: none; }
+  header button.ghost { padding: 4px 10px; font-size: 12px; }
   button { border: 0; border-radius: 6px; padding: 7px 16px; font-size: 13px;
            font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .45; cursor: default; }
@@ -243,6 +244,7 @@
   <span id="pill-show" class="pill">viser: catalog</span>
   <a id="pill-lrz" class="pill" href="/repair/gpu" title="Open GPU / LRZ dashboard">LRZ: …</a>
   <span class="spacer"></span>
+  <button id="btn-gpu-setup" class="ghost" hidden title="Once per allocation: start the named Pyxis container from DSS pytorch.sqsh and install gsplat onto the shared drive.">Load GPU setup</button>
   <a href="/repair/gpu" title="SSH session, Slurm job, connected GPU, and current CUDA repair stats">GPU / LRZ</a>
   <a href="/">episode dashboard</a>
   <a href="/spectator" target="_blank">spectator (HD) ↗</a>
@@ -507,11 +509,20 @@ function lrzPill() {
   if (!el) return;
   const lrz = snapshot?.backends?.lrz;
   const cuda = (snapshot?.backends?.backends || []).find(b => b.id === "gsfix-gsplat");
+  const setup = lrz?.setup || {};
+  const btn = $("btn-gpu-setup");
   if (!lrz) {
     el.textContent = "LRZ: …";
     el.className = "pill";
     el.title = "";
+    if (btn) btn.hidden = true;
     return;
+  }
+  if (btn) {
+    const need = Boolean(lrz.configured && lrz.session && !setup.ok);
+    btn.hidden = !need && !setup.inflight;
+    btn.disabled = Boolean(setup.inflight) || !lrz.session;
+    btn.textContent = setup.inflight ? "Loading GPU setup…" : "Load GPU setup";
   }
   if (!lrz.configured) {
     el.textContent = "LRZ: no job id";
@@ -521,6 +532,14 @@ function lrzPill() {
     el.textContent = "LRZ: SSH down";
     el.className = "pill err";
     el.title = cuda?.detail || "Run scripts/lrz/ssh-session.sh";
+  } else if (setup.inflight) {
+    el.textContent = `LRZ: loading setup`;
+    el.className = "pill busy";
+    el.title = setup.message || "Starting PyTorch container on the allocated GPU…";
+  } else if (!setup.ok) {
+    el.textContent = `LRZ: job ${lrz.job_id} · setup needed`;
+    el.className = "pill busy";
+    el.title = "Click Load GPU setup once on this allocation (PyTorch + gsplat from DSS).";
   } else if (cuda && cuda.available) {
     el.textContent = `LRZ: job ${lrz.job_id}`;
     el.className = "pill ok";
@@ -530,6 +549,29 @@ function lrzPill() {
     el.className = "pill busy";
     el.title = cuda?.detail || "SSH is up; probe GPU on /repair/gpu";
   }
+}
+
+let setupPoll = null;
+function watchGpuSetup() {
+  if (setupPoll) return;
+  setupPoll = setInterval(async () => {
+    try {
+      const r = await fetch("/api/repair/gpu");
+      const gpu = await r.json();
+      const s = gpu.setup || {};
+      if (snapshot?.backends?.lrz) snapshot.backends.lrz.setup = s;
+      lrzPill();
+      if (s.message) $("msg").textContent = s.message;
+      if (!s.inflight) {
+        clearInterval(setupPoll);
+        setupPoll = null;
+        tick();
+      }
+    } catch {
+      clearInterval(setupPoll);
+      setupPoll = null;
+    }
+  }, 2000);
 }
 
 function renderBackends() {
@@ -1197,6 +1239,18 @@ if (window.ResizeObserver) {
 window.addEventListener("resize", () => { lastVisorLayoutKey = ""; layoutVisor(); });
 
 refreshEpisodes().then(() => tick());
+
+$("btn-gpu-setup")?.addEventListener("click", async () => {
+  const btn = $("btn-gpu-setup");
+  if (!btn) return;
+  btn.disabled = true;
+  const data = await post("/api/repair/gpu/setup", { force: true });
+  if (snapshot?.backends?.lrz) {
+    snapshot.backends.lrz.setup = data.setup || { inflight: true, message: data.message };
+  }
+  lrzPill();
+  watchGpuSetup();
+});
 </script>
 </body>
 </html>

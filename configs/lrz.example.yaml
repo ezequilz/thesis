@@ -13,4 +13,5 @@ container: /dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000/go73kaf2/splat-explorer/conta
 cpus: 4
 mem: 32G
 # Pyxis name reused for the rest of this allocation (persists compiled gsplat).
+# Start it once per job with Load GPU setup on /repair/gpu (or scripts/lrz/load-setup.sh).
 container_name: splat-repair

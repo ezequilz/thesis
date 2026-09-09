@@ -32,6 +32,7 @@
            font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .45; cursor: default; }
   #btn-probe { background: var(--accent); color: #0b1220; }
+  #btn-setup { background: var(--ok); color: #0b1220; }
   .ghost { background: var(--panel2); color: var(--text); border: 1px solid var(--border) !important; }
   .danger { background: transparent; color: var(--warn); border: 1px solid var(--border) !important; }
   #toolbar { display: flex; gap: 10px; align-items: center; padding: 8px 16px;
@@ -63,7 +64,7 @@
   #note.err { display: block; color: var(--err); background: rgba(239,106,106,.06); }
   #note.info { display: block; color: var(--text); background: var(--panel); }
   #main { flex: 1; min-height: 0; overflow: auto; padding: 16px; }
-  .pipeline { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 16px; }
+  .pipeline { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 16px; }
   .check {
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     padding: 12px 14px; min-height: 92px;
@@ -150,6 +151,7 @@
   <div class="row">
     <button id="btn-widen" class="ghost">Widen selected partitions</button>
     <button id="btn-review" class="ghost">Refresh availability</button>
+    <button id="btn-setup" title="Once per allocation: start the named Pyxis container from DSS pytorch.sqsh and install gsplat onto the shared drive. Later repairs reuse it.">Load GPU setup</button>
     <button id="btn-probe">Probe GPU</button>
     <span id="probe-meta" class="hint">At most one remote probe per 30s while this tab is visible. Availability is a separate one-shot sinfo/scontrol.</span>
   </div>
@@ -174,7 +176,7 @@
   </div>
   <div class="grid" style="margin-top:12px">
     <div class="card">
-      <h2>Reserved jobs <span class="sub">squeue --me</span></h2>
+      <h2>Reserved jobs <span class="sub">squeue --start --me</span></h2>
       <div id="jobs"><div class="empty">No probe yet.</div></div>
     </div>
     <div class="card">
@@ -209,6 +211,7 @@ let lastNote = "";
 let autoTimer = null;
 let inflight = null;
 let reviewedOnce = false;
+let autoMs = AUTO_MS;
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -235,6 +238,28 @@ function ageText(age) {
   if (age < 2) return "just now";
   if (age < 60) return `${Math.round(age)}s ago`;
   return `${Math.round(age / 60)}m ago`;
+}
+function fmtStart(s) {
+  if (s == null || s === "") return "–";
+  const raw = String(s).trim();
+  if (!raw || /^(n\/a|none|unknown|\(null\)|null)$/i.test(raw)) return "–";
+  const t = raw.replace("T", " ");
+  return t.length >= 16 ? t.slice(0, 16) : t;
+}
+function hasRunningJob(data) {
+  const src = data || snap;
+  if (src?.gpu_running) return true;
+  return src?.slurm?.state === "R";
+}
+function hasPendingJob(data) {
+  const src = data || snap;
+  if (src?.slurm?.state === "PD") return true;
+  return (src?.jobs || []).some(j => j.state === "PD");
+}
+function anyRunningJob(data) {
+  const src = data || snap;
+  if (hasRunningJob(src)) return true;
+  return (src?.jobs || []).some(j => j.state === "R");
 }
 function pageVisible() {
   return document.visibilityState === "visible";
@@ -324,20 +349,28 @@ function renderPipeline() {
 
 function renderGpu() {
   const card = $("gpu-card");
-  const gpus = snap?.gpu || [];
+  const running = hasRunningJob();
+  const gpus = running ? (snap?.gpu || []) : [];
   const g = gpus[0];
   const slurm = snap?.slurm;
   if (!g) {
-    const err = snap?.gpu_error;
+    const err = running ? snap?.gpu_error : null;
     const probing = snap?.probing;
+    const pending = (snap?.jobs || []).filter(j => j.state === "PD");
+    const soonest = pending.map(j => j.start_time).filter(Boolean).sort()[0];
+    let empty;
+    if (probing && running) empty = "Probing the allocated node…";
+    else if (err) empty = err;
+    else if (running) empty = "Job is running, but nvidia-smi has not returned yet.";
+    else if (!snap?.connection?.session) empty = "No GPU probe yet. Open the SSH session, then click Probe GPU.";
+    else if (pending.length) {
+      empty = `No GPU allocated (no job in ST=R). ${pending.length} job(s) pending`
+        + (soonest ? ` · earliest start ${fmtStart(soonest)}` : " (Priority / queue).");
+    } else {
+      empty = "No running GPU allocation (ST=R). Reserve a job above, or wait until a pending job starts.";
+    }
     card.innerHTML = `<h2>Connected GPU</h2>
-      <div class="empty">${esc(
-        probing ? "Probing the allocated node…"
-        : err ? err
-        : slurm?.state === "R"
-          ? "Job is running, but nvidia-smi has not returned yet."
-          : "No GPU probe yet. Open the SSH session, then click Probe GPU."
-      )}</div>`;
+      <div class="empty">${esc(empty)}</div>`;
     return;
   }
   const memPct = Number(g.memory_pct || 0);
@@ -404,6 +437,11 @@ function repairStats(job, packed, remote) {
 
 function renderRepair() {
   const card = $("repair-card");
+  if (!hasRunningJob()) {
+    card.innerHTML = `<h2>Current repair</h2>
+      <div class="empty">No CUDA repair running. Needs a job in ST=R.</div>`;
+    return;
+  }
   const s = repairStats(snap?.repair || {}, snap?.current_packed, snap?.remote_status);
   const l1 = s.l1_after || s.l1;
   const l1Text = s.l1_before && l1 ? `${s.l1_before} → ${l1}` : (l1 || s.l1_before || "–");
@@ -439,21 +477,24 @@ function renderJobs() {
   }
   const current = snap?.connection?.job_id;
   box.innerHTML = `<table>
-    <thead><tr><th>id</th><th>name</th><th>st</th><th>partition</th><th>time</th><th>node</th><th></th></tr></thead>
+    <thead><tr><th>id</th><th>name</th><th>st</th><th>partition</th><th>time</th><th>est. start</th><th>node</th><th></th></tr></thead>
     <tbody>${jobs.map(j => {
       const on = j.job_id === current;
       const reason = j.reason && j.state !== "R" ? ` ${j.reason}` : "";
+      const start = j.state === "R" ? (j.start_time ? fmtStart(j.start_time) : "running") : fmtStart(j.start_time);
       return `<tr class="${on ? "current" : ""}">
         <td>${esc(j.job_id)}</td>
         <td>${esc(j.name || "–")}</td>
         <td>${esc(j.state)}${esc(reason)}</td>
         <td>${esc(j.partition || "–")}</td>
         <td>${esc(j.elapsed || "–")} / ${esc(j.timelimit || "–")}</td>
+        <td>${esc(start)}</td>
         <td>${esc(j.node || "–")}</td>
         <td>${on ? "using" : `<button type="button" class="ghost tiny" data-use="${esc(j.job_id)}">use</button>`}</td>
       </tr>`;
     }).join("")}</tbody>
-  </table>`;
+  </table>
+  <div class="empty" style="padding-top:8px">Start times are cluster local (Europe/Berlin) from one squeue --start --me.</div>`;
 }
 
 function renderSetup() {
@@ -471,14 +512,28 @@ function renderSetup() {
     ${$("in-after").checked ? cmdRow("Queue the next hold until the current job ends.", s.allocate_after || "scripts/lrz/allocate.sh 8h --after") : ""}
     ${pending ? cmdRow("If PD (Priority), add DGX+HGX A100 once.", s.widen || "scripts/lrz/allocate.sh --widen") : ""}
     ${cmdRow("Interactive shell on the GPU node (needs --overlap).", s.gpu_shell || "scripts/lrz/gpu-shell.sh")}
+    ${cmdRow("Once per allocation: named Pyxis container + gsplat on DSS.", s.setup || "scripts/lrz/load-setup.sh")}
     ${cmdRow("Workspace dirs + Enroot import reminders.", s.bootstrap || "scripts/lrz/bootstrap.sh")}
     <div class="kv" style="margin-top:10px">
       <span class="k">SSH mux</span><span class="v">${c.session ? "alive" : "down"}</span>
       <span class="k">workspace</span><span class="v">${snap?.workspace_ok === true ? "ok" : snap?.workspace_ok === false ? "missing" : "–"}</span>
       <span class="k">pytorch.sqsh</span><span class="v">${snap?.container?.ok ? "loaded" : snap?.container?.ok === false ? "missing — import once on the GPU node" : "–"}</span>
       <span class="k">NGC creds</span><span class="v">${snap?.ngc === true ? "present" : snap?.ngc === false ? "missing (ok for Docker Hub image)" : "–"}</span>
-      <span class="k">named container</span><span class="v">${esc(c.container_name || "splat-repair")} · once per allocation via bootstrap</span>
+      <span class="k">GPU setup</span><span class="v">${setupLabel()}</span>
+      <span class="k">named container</span><span class="v">${esc(c.container_name || "splat-repair")} · Load GPU setup once per allocation</span>
     </div>`;
+}
+
+function setupLabel() {
+  const s = snap?.setup || {};
+  if (s.inflight) return s.message || "loading…";
+  if (s.ok) {
+    const g = s.detail?.gpu || "";
+    return g ? `ready · ${g}` : (s.message || "ready");
+  }
+  if (s.error) return s.error;
+  if (snap?.slurm?.state === "R") return "not loaded — click Load GPU setup";
+  return "–";
 }
 
 function renderAvail() {
@@ -574,6 +629,7 @@ function renderConn() {
     <span class="k">workspace</span><span class="v">${esc(c.workspace || "–")}</span>
     <span class="k">container</span><span class="v">${esc(c.container || "–")}</span>
     <span class="k">container name</span><span class="v">${esc(c.container_name || "–")}</span>
+    <span class="k">GPU setup</span><span class="v">${esc(setupLabel())}</span>
     <span class="k">ControlMaster</span><span class="v">${esc(c.control_path || "–")}${c.session ? " · alive" : " · down"}</span>
     <span class="k">default partition</span><span class="v">${esc(snap?.partition || c.partition || "–")}</span>
   `;
@@ -589,17 +645,27 @@ function setNote(kind, text) {
 
 function renderChrome() {
   const ready = $("pill-ready");
+  const session = Boolean(snap?.connection?.session);
   if (snap?.ready) {
     ready.textContent = "pipeline ready";
     ready.className = "pill ok";
   } else if (snap?.probing) {
     ready.textContent = "probing…";
     ready.className = "pill busy";
+  } else if (session && anyRunningJob()) {
+    ready.textContent = "GPU allocated";
+    ready.className = "pill busy";
+  } else if (session && hasPendingJob()) {
+    ready.textContent = "queued";
+    ready.className = "pill busy";
+  } else if (session) {
+    ready.textContent = "no GPU";
+    ready.className = "pill";
   } else {
     ready.textContent = "blocked";
     ready.className = "pill err";
   }
-  const job = snap?.repair || {};
+  const job = hasRunningJob() ? (snap?.repair || {}) : {};
   const pj = $("pill-job");
   const st = job.status || "idle";
   pj.textContent = "repair: " + st;
@@ -614,21 +680,32 @@ function renderChrome() {
     watch.className = "pill";
   }
   const blocked = snap?.next_action;
-  if (!snap?.ready && blocked) setNote("warn", blocked);
+  if (snap?.setup?.inflight) setNote("info", snap.setup.message || "Loading GPU setup…");
+  else if (snap?.setup?.error) setNote("err", snap.setup.error);
+  else if (snap?.probe_error) setNote("warn", snap.probe_error);
+  else if (!snap?.ready && blocked) setNote("warn", blocked);
   else if (lastNote && !blocked) { /* keep allocate/use message until next probe */ }
   else setNote("", "");
   const age = snap?.probe_age_s;
   const hidden = !pageVisible();
-  $("probe-meta").textContent = snap?.probing
-    ? "Probing login node + GPU (one squeue, then nvidia-smi)."
+  $("probe-meta").textContent = snap?.setup?.inflight
+    ? (snap.setup.message || "Loading GPU setup on the allocated node…")
+    : snap?.probing
+    ? (hasRunningJob() ? "Probing login node + GPU" : "Probing login node (no GPU job in ST=R)")
     : hidden
-      ? `Last probe ${ageText(age)}. Tab hidden — last snapshot kept, no requests.`
-      : `Last probe ${ageText(age)}. Auto-refresh every 30s while this tab is visible.`;
-  const busy = Boolean(snap?.probing) || tickBusy;
+      ? `Last probe ${ageText(age)}. Tab hidden, no requests.`
+      : `Last probe ${ageText(age)}. `;
+  const busy = Boolean(snap?.probing) || Boolean(snap?.setup?.inflight) || tickBusy;
   $("btn-probe").disabled = busy;
-  $("btn-alloc").disabled = busy || !snap?.connection?.session;
-  $("btn-widen").disabled = busy || !snap?.connection?.session;
-  $("btn-review").disabled = busy || !snap?.connection?.session;
+  $("btn-alloc").disabled = busy || !session;
+  $("btn-widen").disabled = busy || !session;
+  $("btn-review").disabled = busy || !session;
+  const canSetup = session && snap?.slurm?.state === "R";
+  $("btn-setup").disabled = busy || !canSetup;
+  $("btn-setup").textContent = snap?.setup?.inflight
+    ? "Loading GPU setup…"
+    : (snap?.setup?.ok ? "Reload GPU setup" : "Load GPU setup");
+  syncAutoInterval();
 }
 
 function render() {
@@ -688,12 +765,23 @@ async function tick({ probe = false, force = false } = {}) {
   try {
     if (probe) lastRemoteAt = Date.now();
     const r = await fetch("/api/repair/gpu" + (probe ? "?probe=1" : ""), { signal: inflight.signal });
-    snap = await r.json();
+    const text = await r.text();
+    let data;
+    try { data = JSON.parse(text); }
+    catch {
+      throw new Error(r.status ? `${r.status} ${r.statusText}` : "invalid JSON");
+    }
+    snap = data;
     render();
     maybeReviewOnce();
   } catch (err) {
     if (err.name === "AbortError") return;
-    setNote("err", "Dashboard API error: " + err.message);
+    if (snap) {
+      setNote("warn", "Dashboard refresh failed: " + err.message + " — showing last snapshot.");
+      render();
+    } else {
+      setNote("err", "Dashboard API error: " + err.message);
+    }
   } finally {
     tickBusy = false;
     inflight = null;
@@ -711,8 +799,16 @@ function startAuto() {
   stopAuto();
   autoTimer = setInterval(() => {
     if (!pageVisible()) return;
-    tick({ probe: true });
-  }, AUTO_MS);
+    const setupBusy = Boolean(snap?.setup?.inflight);
+    tick({ probe: !setupBusy });
+  }, autoMs);
+}
+
+function syncAutoInterval() {
+  const want = snap?.setup?.inflight ? 2000 : AUTO_MS;
+  if (want === autoMs && autoTimer) return;
+  autoMs = want;
+  if (pageVisible()) startAuto();
 }
 
 document.addEventListener("visibilitychange", () => {
@@ -734,6 +830,19 @@ $("btn-probe").onclick = async () => {
     render();
   } catch (err) {
     setNote("err", "Probe failed: " + err.message);
+  }
+};
+
+$("btn-setup").onclick = async () => {
+  $("btn-setup").disabled = true;
+  try {
+    snap = await postJson("/api/repair/gpu/setup", { force: true });
+    setNote("info", snap.message || "Loading GPU setup on the current job…");
+    render();
+    syncAutoInterval();
+  } catch (err) {
+    setNote("err", err.message);
+    renderChrome();
   }
 };
 

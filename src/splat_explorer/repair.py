@@ -134,10 +134,22 @@ def list_repair_backends() -> dict:
         )
         lrz_ok = False
     elif lrz_ok:
-        cuda_detail = (
-            f"LRZ A100 via ControlMaster — job {lrz.get('job_id')} @ {lrz.get('host')}. "
-            "Socket ~/.ssh/cm-lrz (scripts/lrz/ssh-session.sh)."
-        )
+        setup = lrz.get("setup") or {}
+        if setup.get("inflight"):
+            cuda_detail = setup.get("message") or (
+                f"Loading GPU setup on LRZ job {lrz.get('job_id')}…"
+            )
+        elif not setup.get("ok"):
+            cuda_detail = (
+                f"LRZ job {lrz.get('job_id')} SSH is up, but the PyTorch container "
+                "is not loaded on this allocation. Click Load GPU setup on /repair "
+                "or /repair/gpu (once per job)."
+            )
+        else:
+            cuda_detail = (
+                f"LRZ A100 via ControlMaster — job {lrz.get('job_id')} @ {lrz.get('host')}. "
+                "Socket ~/.ssh/cm-lrz (scripts/lrz/ssh-session.sh)."
+            )
     else:
         cuda_detail = (
             "Needs an NVIDIA GPU (pip install -e '.[gpu]') or LRZ: copy "

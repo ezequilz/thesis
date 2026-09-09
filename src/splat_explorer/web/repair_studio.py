@@ -282,6 +282,16 @@ class RepairStudio:
         snap["message"] = result.get("message")
         return snap
 
+    def gpu_load_setup(self, *, force: bool = True) -> dict:
+        from ..repair_lrz import request_lrz_setup
+
+        result = request_lrz_setup(force=force)
+        snap = self.gpu_snapshot()
+        snap["ok"] = True
+        snap["setup"] = result
+        snap["message"] = result.get("message") or "Loading GPU setup…"
+        return snap
+
     def gpu_widen(self, job_id: str | None = None, partition: str | None = None) -> dict:
         from ..repair_lrz import widen_lrz_job
 

@@ -250,6 +250,9 @@ Mac hosts have no CUDA. The repair page can ship a view to an LRZ A100 when
 you have eduVPN, a ControlMaster SSH session, and a running GPU hold job
 (8h or 24h sleep allocation). Reserve, inspect VRAM/jobs, and reconnect from
 [http://localhost:8090/repair/gpu](http://localhost:8090/repair/gpu).
+After **Use** on a running job, click **Load GPU setup** once (named Pyxis
+container from DSS `pytorch.sqsh` + gsplat on the shared drive). Later
+repairs reuse that load.
 Step-by-step (password login, `sbatch`, `--overlap`, Enroot/NGC import):
 [`docs/lrz.md`](docs/lrz.md).
 
