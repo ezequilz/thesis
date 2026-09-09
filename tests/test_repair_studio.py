@@ -15,7 +15,11 @@ from splat_explorer.web.repair_studio import (
     RepairStudio,
     focused_cap_label,
     focused_finish_message,
+    list_repaired_saves,
+    next_repaired_save_index,
     pick_interactive_camera,
+    repaired_save_index,
+    repaired_save_name,
 )
 
 
@@ -516,3 +520,97 @@ def test_add_view_blocked_while_episode_runs(tmp_path: Path):
     assert ok is False
     assert extra == {}
     assert "episode" in message.lower()
+
+
+def test_repaired_save_names_skip_highlight():
+    assert repaired_save_name(1) == "scene_repaired_1.ply"
+    assert repaired_save_index("scene_repaired_1.ply") == 1
+    assert repaired_save_index("scene_repaired_12.ply") == 12
+    assert repaired_save_index("scene_repaired.ply") is None
+    assert repaired_save_index("scene_repaired_highlight.ply") is None
+    assert repaired_save_index("scene_repaired_1_highlight.ply") is None
+
+
+def test_save_repair_numbers_copies_and_survives_reset(tmp_path, monkeypatch):
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_session_alive", lambda cfg=None: False)
+    monkeypatch.chdir(tmp_path)
+    ep = tmp_path / "outputs" / "episodes" / "20260901_190223"
+    ep.mkdir(parents=True)
+    (ep / "meta.json").write_text(json.dumps({
+        "params": {"scene": "venetian-balcony", "scene_label": "Venetian Balcony"},
+    }))
+    _tiny_ply(ep / "scene_original.ply", (0.2, 0.4, 0.8))
+    _tiny_ply(ep / "scene_repaired.ply", (0.9, 0.1, 0.1))
+    (ep / "scene_repaired_highlight.ply").write_bytes(b"ply\n")
+    app = _FakeApp(ep, scene_id="venetian-balcony")
+    studio = RepairStudio(app)
+
+    ok, message, extra = studio.save_repair(ep.name)
+    assert ok, message
+    assert extra["save"] == 1
+    assert extra["name"] == "scene_repaired_1.ply"
+    assert next_repaired_save_index(ep) == 2
+    ok, message, extra = studio.save_repair(ep.name)
+    assert ok, message
+    assert extra["save"] == 2
+    assert [n for n, _ in list_repaired_saves(ep)] == [1, 2]
+
+    from splat_explorer.scene import load_ply
+
+    snap1 = load_ply(ep / "scene_repaired_1.ply")
+    np.testing.assert_allclose(snap1.colors[0], [0.9, 0.1, 0.1], atol=1e-4)
+
+    ok, message = studio.reset_repair(ep.name)
+    assert ok, message
+    restored = load_ply(ep / "scene_repaired.ply")
+    np.testing.assert_allclose(restored.colors[0], [0.2, 0.4, 0.8], atol=1e-4)
+    assert (ep / "scene_repaired_1.ply").is_file()
+    assert (ep / "scene_repaired_2.ply").is_file()
+    assert "saved snapshot" in message.lower()
+    assert studio.showing_save is None
+
+    review = studio.episode_review(ep.name)
+    assert [s["id"] for s in review["repaired_saves"]] == [1, 2]
+    assert review["repaired_saves"][0]["name"] == "scene_repaired_1.ply"
+    snap = studio.snapshot(ep.name)
+    assert snap["showing_save"] is None
+    assert snap["episode"]["repaired_saves"][0]["id"] == 1
+
+    ok, message = studio.show(ep.name, "repaired", save=1)
+    assert ok, message
+    assert studio.showing == "repaired"
+    assert studio.showing_save == 1
+    live = json.loads((tmp_path / "outputs" / "live" / "scene.json").read_text())
+    assert live["path"] == "outputs/episodes/20260901_190223/scene_repaired_1.ply"
+    assert live["id"] == "repair-save-1"
+    shown = load_ply(ep / "scene_repaired_1.ply")
+    np.testing.assert_allclose(shown.colors[0], [0.9, 0.1, 0.1], atol=1e-4)
+
+    ok, message = studio.show(ep.name, "repaired")
+    assert ok, message
+    assert studio.showing_save is None
+    live = json.loads((tmp_path / "outputs" / "live" / "scene.json").read_text())
+    assert live["path"].endswith("scene_repaired.ply")
+
+
+def test_save_repair_requires_working_ply(tmp_path: Path):
+    ep = _episode(tmp_path)
+    app = _FakeApp(ep, scene_id="venetian-balcony")
+    studio = RepairStudio(app)
+    ok, message, extra = studio.save_repair(ep.name)
+    assert ok is False
+    assert extra == {}
+    assert "scene_repaired.ply" in message
+
+
+def test_save_repair_blocked_while_running(tmp_path: Path):
+    ep = _episode(tmp_path)
+    _tiny_ply(ep / "scene_repaired.ply")
+    app = _FakeApp(ep, scene_id="venetian-balcony")
+    studio = RepairStudio(app)
+    studio.job = {**studio._idle_job(ep.name), "status": "running"}
+    ok, message, extra = studio.save_repair(ep.name)
+    assert ok is False
+    assert extra == {}
+    assert "stop" in message.lower()
+    assert not (ep / "scene_repaired_1.ply").is_file()

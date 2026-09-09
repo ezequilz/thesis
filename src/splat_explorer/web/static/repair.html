@@ -38,6 +38,7 @@
   #btn-view { background: #2d6a4f; color: #fff; }
   #btn-add { background: #2a6f97; color: #fff; }
   #btn-reset { background: var(--panel2); color: var(--text); border: 1px solid var(--border) !important; }
+  #btn-save { background: var(--panel2); color: var(--accent); border: 1px solid var(--border) !important; }
   #btn-stop { background: var(--err); color: #fff; }
   .ghost { background: var(--panel2); color: var(--text); border: 1px solid var(--border) !important; }
   .toggle { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
@@ -48,9 +49,10 @@
               background: var(--panel); border-bottom: 1px solid var(--border);
               flex: none; flex-wrap: wrap; }
   #controls label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--dim); }
-  #controls input[type="password"] {
+  #controls select {
     background: var(--panel2); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 6px 8px; font-size: 13px; min-width: 160px; }
+  #controls select:focus { outline: 1px solid var(--accent); }
   #stats { display: flex; gap: 18px; padding: 8px 16px; font-size: 12px; color: var(--dim);
            border-bottom: 1px solid var(--border); flex: none; flex-wrap: wrap; align-items: center; }
   #stats b { color: var(--text); font-family: var(--mono); font-weight: 600; }
@@ -245,10 +247,10 @@
       <option value="cpu-photometric">CPU photometric (no rasterizer)</option>
     </select>
   </label>
-  <label>LRZ password
-    <input id="in-lrz-pw" type="password" autocomplete="off" spellcheck="false"
-      placeholder="optional fallback"
-      title="Usually unused. Prefer scripts/lrz/ssh-session.sh (password once). This field is a one-run fallback and is never stored.">
+  <label>saved repair
+    <select id="in-save" title="View the working repaired ply, or a numbered snapshot from Save repair. Reset restores the working ply and leaves snapshots in this list.">
+      <option value="current">Current repair</option>
+    </select>
   </label>
   <label class="chk" title="Re-import splat_explorer.repair so code edits apply without restarting the dashboard process.">
     <input type="checkbox" id="in-reload" checked>
@@ -258,7 +260,8 @@
     <button id="btn-replay">Replay all views</button>
     <button id="btn-view" title="Photometric-refine this regenerated view until you press Stop (max 12 hours). CUDA GSFix3D keeps repeating the paper's 20-iter photometric lift (no color stamp). Replay all views still does one 20-iter pass per view. Continues from scene_repaired.ply when it exists.">Repair this view</button>
     <button id="btn-add" title="Save the current 3D visor camera as a custom test view at the end of this list and queue an image repair. Does not change the agent episode or harness.">Add view</button>
-    <button id="btn-reset" title="Copy scene_original.ply over scene_repaired.ply, show the original splat, and clear the last job error banner.">Reset repair</button>
+    <button id="btn-save" title="Copy the working scene_repaired.ply to scene_repaired_N.ply. Reset does not delete these snapshots.">Save repair</button>
+    <button id="btn-reset" title="Copy scene_original.ply over scene_repaired.ply, show the original splat, and clear the last job error banner. Numbered snapshots stay in the saved-repair list.">Reset repair</button>
     <button id="btn-stop" disabled>Stop</button>
   </div>
   <div class="toggle" id="show-toggle" title="Swap the 3D visor between the frozen original copy and the repaired PLY. Blocked while an episode is capturing.">
@@ -353,6 +356,47 @@ function fmtBytes(n) {
 function jobActive(job) {
   const st = job?.status;
   return st === "running" || st === "stopping";
+}
+function selectedSaveId() {
+  const sel = $("in-save");
+  const v = sel?.value;
+  if (!v || v === "current") return null;
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 1 ? n : null;
+}
+function selectCurrentSave() {
+  const sel = $("in-save");
+  if (!sel) return;
+  sel.value = "current";
+  sel.dataset.user = "current";
+}
+function saveOptionLabel(save) {
+  const size = save?.bytes ? ` · ${fmtBytes(save.bytes)}` : "";
+  return `Save ${save.id}${size}`;
+}
+function renderSaves() {
+  const sel = $("in-save");
+  if (!sel) return;
+  const ep = snapshot?.episode;
+  const saves = ep?.repaired_saves || [];
+  const hasCurrent = Boolean(ep?.repaired_ply);
+  const sig = `${selectedEp || ""}:${hasCurrent ? 1 : 0}:${saves.map(s => s.id).join(",")}`;
+  const prev = sel.dataset.user || sel.value || "current";
+  if (sel.dataset.sig === sig && sel.options.length) {
+    if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+    return;
+  }
+  sel.dataset.sig = sig;
+  const opts = ['<option value="current">Current repair</option>'];
+  for (const save of saves) {
+    opts.push(`<option value="${esc(String(save.id))}" title="${esc(save.name || "")}">${esc(saveOptionLabel(save))}</option>`);
+  }
+  sel.innerHTML = opts.join("");
+  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  else {
+    sel.value = "current";
+    sel.dataset.user = "current";
+  }
 }
 function setPolling(on) {
   if (on) {
@@ -701,18 +745,27 @@ function setCompareKind(which, { syncViser = false } = {}) {
 
 async function showVisorPly(which, { force = false } = {}) {
   const ep = snapshot?.episode;
-  const hasPly = which === "repaired" ? ep?.repaired_ply : ep?.original_ply;
+  const saveId = which === "repaired" ? selectedSaveId() : null;
+  const saveMeta = saveId != null
+    ? (ep?.repaired_saves || []).find(s => s.id === saveId)
+    : null;
+  const hasPly = which === "repaired"
+    ? (saveId != null ? Boolean(saveMeta) : ep?.repaired_ply)
+    : ep?.original_ply;
   const highlight = Boolean(highlightRepair && which === "repaired");
   if (!selectedEp || !hasPly) {
     $("msg").textContent = which === "repaired"
-      ? "No repaired PLY yet — run Replay 3D repair first."
+      ? (saveId != null
+        ? `Save ${saveId} is not on disk.`
+        : "No repaired PLY yet — run Replay 3D repair first.")
       : "No original PLY yet — run Replay 3D repair first.";
     return;
   }
-  const publishedKey = which + (highlight ? "-hl" : "");
+  const publishedKey = which + (highlight ? "-hl" : "") + (saveId != null ? `-s${saveId}` : "");
   if (!force && visorPublished === publishedKey && snapshot?.showing === which
       && snapshot?.showing_episode === selectedEp
-      && Boolean(snapshot?.showing_highlight) === highlight) {
+      && Boolean(snapshot?.showing_highlight) === highlight
+      && (which !== "repaired" || (snapshot?.showing_save ?? null) === saveId)) {
     visorPly = which;
     renderShow();
     return;
@@ -720,9 +773,9 @@ async function showVisorPly(which, { force = false } = {}) {
   const seq = ++visorSeq;
   visorPly = which;
   renderShow();
-  const data = await post("/api/repair/show", {
-    episode: selectedEp, which, force, highlight,
-  }, { silent: true });
+  const body = { episode: selectedEp, which, force, highlight };
+  if (which === "repaired" && saveId != null) body.save = saveId;
+  const data = await post("/api/repair/show", body, { silent: true });
   if (seq !== visorSeq) return;
   if (data && data.ok === false) {
     visorPly = snapshot?.showing || visorPly;
@@ -760,10 +813,12 @@ async function syncEpisodeScene() {
   }
   if (visorPly) {
     const wantHl = Boolean(highlightRepair && visorPly === "repaired");
+    const wantSave = visorPly === "repaired" ? selectedSaveId() : null;
     const showingThis = snapshot.showing_episode === selectedEp
       && snapshot.showing === visorPly
-      && Boolean(snapshot.showing_highlight) === wantHl;
-    if (showingThis) visorPublished = visorPly + (wantHl ? "-hl" : "");
+      && Boolean(snapshot.showing_highlight) === wantHl
+      && (visorPly !== "repaired" || (snapshot.showing_save ?? null) === wantSave);
+    if (showingThis) visorPublished = visorPly + (wantHl ? "-hl" : "") + (wantSave != null ? `-s${wantSave}` : "");
     else await showVisorPly(visorPly, { force: false });
     maybeLook();
     return;
@@ -789,26 +844,32 @@ function renderShow() {
   const label = snapshot?.episode_scene_label || snapshot?.episode_scene;
   const visorWhich = visorPly || ((which && sameEp) ? which : null);
   const visorHl = visorWhich === "repaired" && highlightRepair;
+  const saveId = visorWhich === "repaired" ? selectedSaveId() : null;
+  const visorLabel = visorWhich === "repaired" && saveId != null
+    ? `save ${saveId}`
+    : visorWhich;
   $("pill-show").textContent = visorWhich
-    ? `viser: ${visorWhich} ply${visorHl ? " · highlight" : ""}`
+    ? `viser: ${visorLabel} ply${visorHl ? " · highlight" : ""}`
     : (label ? `viser: ${label}` : "viser: catalog");
   $("pill-show").className = "pill" + (visorWhich || catalogOk ? " ok" : "");
   const hint = $("viser-hint");
   if (hint) {
     hint.textContent = visorWhich
-      ? `${visorWhich} ply${visorHl ? " · changed splats in red" : ""} · click Original / Repaired to swap`
+      ? `${visorLabel} ply${visorHl ? " · changed splats in red" : ""} · click Original / Repaired to swap`
       : (label ? `catalog: ${label}` : "original / repaired toggle");
   }
   const ep = snapshot?.episode;
   document.querySelectorAll("#show-toggle button").forEach(btn => {
     const target = btn.dataset.which;
     btn.classList.toggle("on", target === visorWhich);
-    btn.disabled = target === "repaired" ? !ep?.repaired_ply : !ep?.original_ply;
+    btn.disabled = target === "repaired"
+      ? !(ep?.repaired_ply || (ep?.repaired_saves || []).length)
+      : !ep?.original_ply;
   });
   const hlBtn = $("btn-highlight");
   if (hlBtn) {
     hlBtn.classList.toggle("on", highlightRepair);
-    hlBtn.disabled = !ep?.repaired_ply || !ep?.original_ply;
+    hlBtn.disabled = !(ep?.repaired_ply || (ep?.repaired_saves || []).length) || !ep?.original_ply;
   }
   const busy = snapshot?.job?.status === "running" || snapshot?.job?.status === "stopping";
   const episodeBusy = snapshot?.run_status === "running" || snapshot?.run_status === "stopping";
@@ -818,8 +879,12 @@ function renderShow() {
   if (viewBtn) viewBtn.disabled = busy || !selectedEp || selectedStep == null || !cur?.repaired_url;
   const addBtn = $("btn-add");
   if (addBtn) addBtn.disabled = busy || episodeBusy || !selectedEp;
+  const saveBtn = $("btn-save");
+  if (saveBtn) saveBtn.disabled = busy || !selectedEp || !ep?.repaired_ply;
   const resetBtn = $("btn-reset");
   if (resetBtn) resetBtn.disabled = busy || !selectedEp || !ep?.original_ply;
+  const saveSel = $("in-save");
+  if (saveSel) saveSel.disabled = busy || !selectedEp;
   $("btn-stop").disabled = !busy;
 }
 
@@ -849,6 +914,7 @@ async function tick({ poll = false } = {}) {
     jobPill(snapshot.job);
     lrzPill();
     renderBackends();
+    renderSaves();
     if (snapshot?.job?.message) $("msg").textContent = snapshot.job.message;
     const status = snapshot?.job?.status || "idle";
     const wasActive = jobActive({ status: lastJobStatus });
@@ -886,25 +952,40 @@ $("in-ep").onchange = () => {
   looked = { ep: "", step: null };
   compareKind = "original";
   seenCustomRepaired = new Set();
+  selectCurrentSave();
+  const saveSel = $("in-save");
+  if (saveSel) saveSel.dataset.sig = "";
   $("msg").textContent = "";
   tick();
 };
-$("btn-replay").onclick = async () => {
+$("in-save").onchange = () => {
+  const sel = $("in-save");
+  sel.dataset.user = sel.value;
   if (!selectedEp) return;
   visorPly = "repaired";
+  compareKind = "repaired";
+  visorPublished = null;
+  renderCompare();
+  showVisorPly("repaired", { force: true });
+};
+$("btn-replay").onclick = async () => {
+  if (!selectedEp) return;
+  selectCurrentSave();
+  visorPly = "repaired";
+  visorPublished = null;
   await post("/api/repair/start", {
     episode: selectedEp,
     reload_code: $("in-reload").checked,
     backend: $("in-backend").value || "gsfix-gsplat",
     resume: true,
-    ssh_password: $("in-lrz-pw")?.value || "",
   });
-  if ($("in-lrz-pw")) $("in-lrz-pw").value = "";
   tick();
 };
 $("btn-view").onclick = async () => {
   if (!selectedEp || selectedStep == null) return;
+  selectCurrentSave();
   visorPly = "repaired";
+  visorPublished = null;
   compareKind = "repaired";
   await post("/api/repair/start", {
     episode: selectedEp,
@@ -913,9 +994,7 @@ $("btn-view").onclick = async () => {
     reload_code: $("in-reload").checked,
     backend: $("in-backend").value || "gsfix-gsplat",
     resume: true,
-    ssh_password: $("in-lrz-pw")?.value || "",
   });
-  if ($("in-lrz-pw")) $("in-lrz-pw").value = "";
   tick();
 };
 $("btn-add").onclick = async () => {
@@ -933,9 +1012,20 @@ $("btn-add").onclick = async () => {
   const el = document.querySelector(`.view[data-step="${selectedStep}"]`);
   if (el) el.scrollIntoView({ block: "end" });
 };
+$("btn-save").onclick = async () => {
+  if (!selectedEp) return;
+  const saveBtn = $("btn-save");
+  if (saveBtn) saveBtn.disabled = true;
+  await post("/api/repair/save", { episode: selectedEp });
+  const saveSel = $("in-save");
+  if (saveSel) saveSel.dataset.sig = "";
+  await tick();
+};
 $("btn-reset").onclick = async () => {
   if (!selectedEp) return;
+  selectCurrentSave();
   visorPly = "original";
+  visorPublished = null;
   compareKind = "original";
   sceneSyncedEp = selectedEp;
   await post("/api/repair/reset", { episode: selectedEp });

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import threading
 import time
@@ -39,6 +40,43 @@ logger = logging.getLogger(__name__)
 FOCUSED_REPAIR_MAX_SECONDS = 12 * 3600
 _SPECTATOR_ASPECT = 16.0 / 9.0
 _SPECTATOR_ASPECT_TOL = 0.08
+_REPAIRED_SAVE_RE = re.compile(r"^scene_repaired_(\d+)\.ply$")
+
+
+def repaired_save_name(index: int) -> str:
+    return f"scene_repaired_{int(index)}.ply"
+
+
+def repaired_save_index(name: str) -> int | None:
+    match = _REPAIRED_SAVE_RE.fullmatch(Path(name).name)
+    return int(match.group(1)) if match else None
+
+
+def list_repaired_saves(episode_dir: Path) -> list[tuple[int, Path]]:
+    found: list[tuple[int, Path]] = []
+    for path in Path(episode_dir).glob("scene_repaired_*.ply"):
+        index = repaired_save_index(path.name)
+        if index is not None and path.is_file():
+            found.append((index, path))
+    found.sort(key=lambda item: item[0])
+    return found
+
+
+def next_repaired_save_index(episode_dir: Path) -> int:
+    saves = list_repaired_saves(episode_dir)
+    return (saves[-1][0] + 1) if saves else 1
+
+
+def parse_repaired_save_id(value) -> int | None:
+    if value in (None, "", "current", "repaired", 0, "0"):
+        return None
+    try:
+        index = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("save must be a positive integer.") from exc
+    if index < 1:
+        raise ValueError("save must be a positive integer.")
+    return index
 
 
 def pick_interactive_camera(cameras: list[dict]) -> dict | None:
@@ -117,6 +155,7 @@ class RepairStudio:
         self.showing: str | None = None  # original | repaired | None (catalog)
         self.showing_episode: str | None = None
         self.showing_highlight: bool = False
+        self.showing_save: int | None = None  # numbered snapshot, or None = working ply
         self._last_preview_at: float = 0.0
         self._regenerator = None
         self._regenerator_lock = threading.Lock()
@@ -156,6 +195,7 @@ class RepairStudio:
             showing = self.showing
             showing_episode = self.showing_episode
             showing_highlight = self.showing_highlight
+            showing_save = self.showing_save
         ep = episode_id or job.get("episode") or live_ep
         detail = self.episode_review(ep) if ep else None
         episode_scene = None
@@ -170,6 +210,7 @@ class RepairStudio:
             "showing": showing,
             "showing_episode": showing_episode,
             "showing_highlight": showing_highlight,
+            "showing_save": showing_save,
             "live_episode": live_ep,
             "run_status": run_status,
             "scene_status": scene_status,
@@ -284,6 +325,13 @@ class RepairStudio:
             isinstance(v.get("repair"), dict) and v["repair"].get("l1_after") is not None
             for v in views
         )
+        repaired_saves = []
+        for index, path in list_repaired_saves(d):
+            info = _ply_info(path)
+            if info is None:
+                continue
+            info["id"] = index
+            repaired_saves.append(info)
         return {
             "id": ep_id,
             "meta": meta,
@@ -291,6 +339,7 @@ class RepairStudio:
             "views": views,
             "original_ply": _ply_info(d / ORIGINAL_PLY),
             "repaired_ply": _ply_info(d / REPAIRED_PLY),
+            "repaired_saves": repaired_saves,
             "repair_log": log,
             "has_metrics": has_metrics,
             "metrics_url": f"/api/repair/metrics?episode={ep_id}",
@@ -429,7 +478,10 @@ class RepairStudio:
         return True, "Stop requested."
 
     def reset_repair(self, episode_id: str) -> tuple[bool, str]:
-        """Copy scene_original.ply back over scene_repaired.ply."""
+        """Copy scene_original.ply back over scene_repaired.ply.
+
+        Numbered snapshots from Save repair stay on disk for the dropdown.
+        """
         with self._lock:
             if self.job["status"] == "running":
                 return False, "Stop the current repair before resetting."
@@ -442,7 +494,10 @@ class RepairStudio:
             return False, "No scene_original.ply yet — run a repair once to snapshot the catalog."
         shutil.copy2(original, repaired)
         logger.info("Reset %s from %s", repaired.name, original.name)
+        n_saves = len(list_repaired_saves(d))
         note = f"Restored {repaired.name} from original."
+        if n_saves:
+            note = f"{note} {n_saves} saved snapshot(s) still available."
         ok, message = self.show(episode_id, "original", force=True)
         if not ok:
             note = f"{note} {message}"
@@ -450,7 +505,32 @@ class RepairStudio:
             # Drop the last job's traceback so /repair does not keep showing
             # a failed LRZ run after the splat has been restored.
             self.job = {**self._idle_job(episode_id), "message": note}
+            self.showing_save = None
         return True, note
+
+    def save_repair(self, episode_id: str) -> tuple[bool, str, dict]:
+        """Copy the working repaired ply to the next numbered snapshot."""
+        extra: dict = {}
+        with self._lock:
+            if self.job["status"] == "running":
+                return False, "Stop the current repair before saving a snapshot.", extra
+        d = self.app.episode_path(episode_id)
+        if d is None:
+            return False, f"Episode {episode_id} not found.", extra
+        repaired = d / REPAIRED_PLY
+        if not repaired.is_file():
+            return False, "No scene_repaired.ply yet — run a repair first.", extra
+        index = next_repaired_save_index(d)
+        dest = d / repaired_save_name(index)
+        shutil.copy2(repaired, dest)
+        logger.info("Saved repair snapshot %s -> %s", index, dest.name)
+        extra = {
+            "save": index,
+            "name": dest.name,
+            "bytes": dest.stat().st_size,
+            "mtime": dest.stat().st_mtime,
+        }
+        return True, f"Saved snapshot {index} as {dest.name}.", extra
 
     def add_view(self, episode_id: str) -> tuple[bool, str, dict]:
         """Capture the live visor camera as a dashboard-only repair view.
@@ -658,14 +738,20 @@ class RepairStudio:
             self.showing = None
             self.showing_episode = None
             self.showing_highlight = False
+            self.showing_save = None
         return True, f"Viser restored to {spec.id}."
 
     def show(
-        self, episode_id: str, which: str, *, force: bool = False, highlight: bool = False,
+        self, episode_id: str, which: str, *, force: bool = False,
+        highlight: bool = False, save: int | str | None = None,
     ) -> tuple[bool, str]:
         which = str(which or "").strip().lower()
         if which not in ("original", "repaired"):
             return False, "which must be 'original' or 'repaired'."
+        try:
+            save_id = parse_repaired_save_id(save) if which == "repaired" else None
+        except ValueError as exc:
+            return False, str(exc)
         use_highlight = bool(highlight) and which == "repaired"
         with self.app.lock:
             if self.app.run and self.app.run["status"] in ("running", "stopping"):
@@ -676,23 +762,35 @@ class RepairStudio:
         d = self.app.episode_path(episode_id)
         if d is None:
             return False, f"Episode {episode_id} not found."
+        if which == "original":
+            ply = d / ORIGINAL_PLY
+        elif save_id is not None:
+            ply = d / repaired_save_name(save_id)
+        else:
+            ply = d / REPAIRED_PLY
         if use_highlight:
             try:
-                ply = self._highlight_ply(d)
+                ply = self._highlight_ply(d, repaired=ply)
             except Exception as exc:
                 return False, f"Could not build highlight splat: {exc}"
-        else:
-            ply = d / (ORIGINAL_PLY if which == "original" else REPAIRED_PLY)
-            if not ply.is_file():
-                return False, f"{ply.name} is not on disk yet — run a replay first."
+        elif not ply.is_file():
+            if save_id is not None:
+                return False, f"{ply.name} is not on disk."
+            return False, f"{ply.name} is not on disk yet — run a replay first."
         with self._lock:
             already = (
                 self.showing == which
                 and self.showing_episode == episode_id
                 and bool(self.showing_highlight) == bool(use_highlight)
+                and (which != "repaired" or self.showing_save == save_id)
             )
         if already and not force:
-            label = "repaired highlight" if use_highlight else which
+            if use_highlight:
+                label = "repaired highlight"
+            elif save_id is not None:
+                label = f"save {save_id}"
+            else:
+                label = which
             return True, f"Viser already showing {label}."
         with self.app.lock:
             spec = self.app._scene_spec
@@ -706,7 +804,12 @@ class RepairStudio:
         catalog_id = episode_scene or (
             spec.id if spec is not None and not str(spec.id).startswith("repair-") else None
         )
-        tag = "highlight" if use_highlight else which
+        if use_highlight:
+            tag = "highlight"
+        elif save_id is not None:
+            tag = f"save-{save_id}"
+        else:
+            tag = which
         preview = SceneSpec(
             id=f"repair-{tag}",
             label=f"{episode_id} ({tag})",
@@ -718,26 +821,33 @@ class RepairStudio:
             self.showing = which
             self.showing_episode = episode_id
             self.showing_highlight = use_highlight
+            if which == "repaired":
+                self.showing_save = save_id
         logger.info("Viser preview %s -> %s (generation %s)", tag, ply, generation)
         if use_highlight:
             return True, f"Viser showing repaired splat with changed gaussians in red ({ply.name})."
+        if save_id is not None:
+            return True, f"Viser showing save {save_id} ({ply.name})."
         return True, f"Viser showing {which} splat ({ply.name})."
 
-    def _highlight_ply(self, episode_dir: Path) -> Path:
+    def _highlight_ply(self, episode_dir: Path, repaired: Path | None = None) -> Path:
         """Build (or reuse) a red overlay of gaussians that differ from original."""
         from ..repair import highlight_repaired_scene
         from ..scene import load_ply, save_ply
 
         original = Path(episode_dir) / ORIGINAL_PLY
-        repaired = Path(episode_dir) / REPAIRED_PLY
-        out = Path(episode_dir) / HIGHLIGHT_PLY
+        repaired = Path(repaired) if repaired is not None else Path(episode_dir) / REPAIRED_PLY
+        if repaired_save_index(repaired.name) is not None:
+            out = Path(episode_dir) / f"{repaired.stem}_highlight.ply"
+        else:
+            out = Path(episode_dir) / HIGHLIGHT_PLY
         if not original.is_file():
             raise FileNotFoundError(
                 "scene_original.ply is missing — need it to mark changed gaussians."
             )
         if not repaired.is_file():
             raise FileNotFoundError(
-                "scene_repaired.ply is not on disk yet — run a replay first."
+                f"{repaired.name} is not on disk yet — run a replay first."
             )
         src_mtime = max(original.stat().st_mtime, repaired.stat().st_mtime)
         if out.is_file() and out.stat().st_mtime >= src_mtime:

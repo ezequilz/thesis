@@ -29,8 +29,9 @@ Endpoints:
   GET  /api/repair/metrics      download metrics.json (?episode=&step=)
   POST /api/repair/start   replay 3D lift {episode, reload_code, backend, step, resume}
   POST /api/repair/stop   stop a replay
-  POST /api/repair/reset  copy scene_original.ply over scene_repaired.ply
-  POST /api/repair/show   point viser at {episode, which: original|repaired, highlight?}
+  POST /api/repair/reset  copy scene_original.ply over scene_repaired.ply (keeps numbered snapshots)
+  POST /api/repair/save   copy scene_repaired.ply to scene_repaired_N.ply
+  POST /api/repair/show   point viser at {episode, which: original|repaired, highlight?, save?}
   POST /api/repair/focus  load that episode's catalog scene into the shared visor
   POST /api/repair/add-view  capture visor camera as a dashboard-only test view
   POST /api/repair/look   point viser frustum at a regenerated step
@@ -847,6 +848,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "message": "Missing episode id."}, 400)
                 return
             ok, message = studio.reset_repair(str(ep))
+        elif path == "/api/repair/save":
+            ep = body.get("episode") or body.get("id")
+            if not ep:
+                self._send_json({"ok": False, "message": "Missing episode id."}, 400)
+                return
+            ok, message, extra = studio.save_repair(str(ep))
+            payload = {"ok": ok, "message": message, **(extra or {})}
+            self._send_json(payload, 200 if ok else 409)
+            return
         elif path == "/api/repair/show":
             ep = body.get("episode") or body.get("id")
             if not ep:
@@ -857,6 +867,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 str(body.get("which") or ""),
                 force=bool(body.get("force", False)),
                 highlight=bool(body.get("highlight", False)),
+                save=body.get("save"),
             )
         elif path == "/api/repair/focus":
             ep = body.get("episode") or body.get("id")
