@@ -23,6 +23,7 @@ Endpoints:
   POST /api/repair/gpu/probe  one-shot remote GPU/Slurm probe (rate-limited, 2.5 min)
   POST /api/repair/gpu/allocate  submit 8h/24h sleep hold {hours, after}
   POST /api/repair/gpu/use      point configs/lrz.local.yaml at {job_id}
+  POST /api/repair/gpu/cancel   scancel {job_id}; running ST=R requires {confirm: true}
   POST /api/repair/gpu/setup    load PyTorch/Pyxis container + gsplat onto the current job
   POST /api/repair/gpu/widen    one scontrol to both A100 partitions
   POST /api/repair/gpu/review   one sinfo snapshot
@@ -938,6 +939,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             try:
                 snap = studio.gpu_use_job(job_id)
+            except (RuntimeError, ValueError) as exc:
+                self._send_json({"ok": False, "message": str(exc)}, 409)
+                return
+            self._send_json(snap)
+            return
+        elif path == "/api/repair/gpu/cancel":
+            job_id = str(body.get("job_id") or "").strip()
+            if not job_id.isdigit():
+                self._send_json({"ok": False, "message": "Missing numeric job_id."}, 400)
+                return
+            try:
+                snap = studio.gpu_cancel_job(
+                    job_id, confirm=bool(body.get("confirm", False)),
+                )
             except (RuntimeError, ValueError) as exc:
                 self._send_json({"ok": False, "message": str(exc)}, 409)
                 return

@@ -282,6 +282,16 @@ class RepairStudio:
         snap["message"] = result.get("message")
         return snap
 
+    def gpu_cancel_job(self, job_id: str, *, confirm: bool = False) -> dict:
+        from ..repair_lrz import cancel_lrz_job
+
+        result = cancel_lrz_job(job_id, confirm=confirm)
+        snap = self.gpu_snapshot(probe=True, force=True)
+        snap["ok"] = True
+        snap["message"] = result.get("message")
+        snap["cancel"] = result
+        return snap
+
     def gpu_load_setup(self, *, force: bool = True) -> dict:
         from ..repair_lrz import request_lrz_setup
 

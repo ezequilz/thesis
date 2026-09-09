@@ -239,6 +239,7 @@ def lrz_scripts(hours: int = 8, *, after: bool = False, begin: str | None = None
         "allocate_24h": "scripts/lrz/allocate.sh 24h",
         "allocate_after": f"scripts/lrz/allocate.sh {hours}h --after",
         "widen": "scripts/lrz/allocate.sh --widen",
+        "cancel": "scancel <job-id>",
         "status": "scripts/lrz/status.sh",
         "status_sinfo": "scripts/lrz/status.sh --sinfo",
         "gpu_shell": "scripts/lrz/gpu-shell.sh",
@@ -358,7 +359,7 @@ def lrz_local_config_path() -> Path:
 def write_lrz_job_id(job_id: str, path: Path | None = None) -> Path:
     """Rewrite ``job_id`` in configs/lrz.local.yaml. Password is never written."""
     job_id = str(job_id).strip()
-    if not job_id.isdigit():
+    if job_id and not job_id.isdigit():
         raise ValueError("job_id must be a numeric Slurm id.")
     path = Path(path) if path is not None else lrz_local_config_path()
     if not path.is_file():
@@ -1555,6 +1556,54 @@ def allocate_lrz_gpu(
     finally:
         with _ALLOCATE["lock"]:
             _ALLOCATE["inflight"] = False
+
+
+def scancel_command(job_id: str) -> str:
+    job = str(job_id).strip()
+    if not job.isdigit():
+        raise ValueError("job_id must be a numeric Slurm id.")
+    return f"scancel {job}"
+
+
+def cancel_lrz_job(job_id: str, *, confirm: bool = False, cfg: dict | None = None) -> dict[str, Any]:
+    """One ``scancel``. Running (ST=R) jobs require confirm=True."""
+    cfg = cfg or load_lrz_config()
+    if not lrz_session_alive(cfg):
+        raise RuntimeError(session_required_message())
+    job = str(job_id).strip()
+    command = scancel_command(job)
+    with _PROBE["lock"]:
+        cached = _PROBE["body"] if isinstance(_PROBE["body"], dict) else None
+    jobs = list((cached or {}).get("jobs") or [])
+    row = next((j for j in jobs if str(j.get("job_id")) == job), None)
+    if row and slurm_job_is_running(row) and not confirm:
+        raise RuntimeError(
+            f"Job {job} is running (ST=R). Click cancel? to confirm scancel."
+        )
+    result = _ssh_run(cfg, command, timeout=PROBE_TIMEOUT_S)
+    output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+    if result.returncode != 0:
+        raise RuntimeError(output or f"scancel {job} failed.")
+    cleared = False
+    current = str(cfg.get("job_id") or "").strip()
+    if current == job:
+        write_lrz_job_id("")
+        cleared = True
+    reset_gpu_probe_cache()
+    state = (row or {}).get("state") or "queued"
+    return {
+        "ok": True,
+        "job_id": job,
+        "command": command,
+        "stdout": output,
+        "cleared": cleared,
+        "was_running": slurm_job_is_running(row),
+        "message": (
+            f"Cancelled {'running' if slurm_job_is_running(row) else state} job {job}. "
+            + ("Cleared job_id in configs/lrz.local.yaml. " if cleared else "")
+            + "Probe once — do not loop squeue."
+        ),
+    }
 
 
 def use_lrz_job(job_id: str) -> dict[str, Any]:

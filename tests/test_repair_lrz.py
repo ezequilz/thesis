@@ -445,6 +445,8 @@ def test_write_lrz_job_id(tmp_path):
     path.write_text('user: go73kaf2\njob_id: ""\n')
     write_lrz_job_id("5777470", path)
     assert 'job_id: "5777470"' in path.read_text()
+    write_lrz_job_id("", path)
+    assert 'job_id: ""' in path.read_text()
 
 
 def test_allocate_one_sbatch_no_wait(monkeypatch, tmp_path):
@@ -702,4 +704,69 @@ def test_session_check_timeout_is_down(monkeypatch, tmp_path):
         "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "",
         "workspace": "/dss/ws",
     }) is False
+
+
+def test_scancel_command_and_pending_cancel(monkeypatch, tmp_path):
+    from splat_explorer.repair_lrz import cancel_lrz_job, reset_gpu_probe_cache, scancel_command
+
+    assert scancel_command("5777728") == "scancel 5777728"
+    reset_gpu_probe_cache()
+    cfg_path = tmp_path / "configs" / "lrz.local.yaml"
+    cfg_path.parent.mkdir()
+    cfg_path.write_text('user: go73kaf2\nhost: login.ai.lrz.de\njob_id: "5778174"\n')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_session_alive", lambda cfg=None: True)
+    monkeypatch.setattr("splat_explorer.repair_lrz.load_lrz_config", lambda: {
+        "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "5778174",
+        "workspace": "/dss/ws", "container": "/dss/ws/containers/pytorch.sqsh",
+        "cpus": 4, "mem": "32G",
+    })
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz._ssh_run",
+        lambda cfg, remote, timeout=25: type("R", (), {
+            "returncode": 0, "stdout": "", "stderr": "",
+        })(),
+    )
+    body = cancel_lrz_job("5778174")
+    assert body["job_id"] == "5778174"
+    assert body["command"] == "scancel 5778174"
+    assert body["cleared"] is True
+    assert 'job_id: ""' in cfg_path.read_text()
+
+
+def test_cancel_running_job_requires_confirm(monkeypatch, tmp_path):
+    import time
+
+    from splat_explorer.repair_lrz import _PROBE, cancel_lrz_job, reset_gpu_probe_cache
+
+    reset_gpu_probe_cache()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "lrz.local.yaml").write_text(
+        'user: go73kaf2\nhost: login.ai.lrz.de\njob_id: "5778400"\n'
+    )
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_session_alive", lambda cfg=None: True)
+    monkeypatch.setattr("splat_explorer.repair_lrz.load_lrz_config", lambda: {
+        "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "5778400",
+        "workspace": "/dss/ws",
+    })
+    with _PROBE["lock"]:
+        _PROBE["body"] = {
+            "jobs": [{"job_id": "5778400", "state": "R", "name": "gs-6h"}],
+            "slurm": {"job_id": "5778400", "state": "R"},
+        }
+        _PROBE["at"] = time.time()
+    with pytest.raises(RuntimeError, match="cancel\\?"):
+        cancel_lrz_job("5778400")
+    called = []
+
+    def fake_ssh(cfg, remote, timeout=25):
+        called.append(remote)
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr("splat_explorer.repair_lrz._ssh_run", fake_ssh)
+    body = cancel_lrz_job("5778400", confirm=True)
+    assert called == ["scancel 5778400"]
+    assert body["was_running"] is True
+    assert body["cleared"] is True
 

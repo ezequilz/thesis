@@ -111,6 +111,13 @@
   .cmd span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cmd button { padding: 3px 8px; font-size: 11px; }
   .tiny { padding: 4px 9px; font-size: 11px; }
+  td.acts { white-space: nowrap; }
+  td.acts button { margin-left: 6px; }
+  .tiny.cancel-confirm {
+    background: var(--err) !important;
+    color: #1a0808;
+    border-color: var(--err) !important;
+  }
   @media (max-width: 1100px) {
     .pipeline { grid-template-columns: 1fr 1fr; }
     .grid { grid-template-columns: 1fr; }
@@ -212,6 +219,8 @@ let autoTimer = null;
 let inflight = null;
 let reviewedOnce = false;
 let autoMs = AUTO_MS;
+let cancelArmed = null;
+let cancelArmedTimer = null;
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -482,6 +491,13 @@ function renderJobs() {
       const on = j.job_id === current;
       const reason = j.reason && j.state !== "R" ? ` ${j.reason}` : "";
       const start = j.state === "R" ? (j.start_time ? fmtStart(j.start_time) : "running") : fmtStart(j.start_time);
+      const running = j.state === "R";
+      const armed = running && cancelArmed === j.job_id;
+      const use = on
+        ? `<span>using</span>`
+        : `<button type="button" class="ghost tiny" data-use="${esc(j.job_id)}">use</button>`;
+      const cancelCls = armed ? "ghost tiny cancel-confirm" : "ghost tiny";
+      const cancelLabel = armed ? "cancel?" : "cancel";
       return `<tr class="${on ? "current" : ""}">
         <td>${esc(j.job_id)}</td>
         <td>${esc(j.name || "–")}</td>
@@ -490,11 +506,11 @@ function renderJobs() {
         <td>${esc(j.elapsed || "–")} / ${esc(j.timelimit || "–")}</td>
         <td>${esc(start)}</td>
         <td>${esc(j.node || "–")}</td>
-        <td>${on ? "using" : `<button type="button" class="ghost tiny" data-use="${esc(j.job_id)}">use</button>`}</td>
+        <td class="acts">${use}<button type="button" class="${cancelCls}" data-cancel="${esc(j.job_id)}" data-running="${running ? "1" : "0"}">${cancelLabel}</button></td>
       </tr>`;
     }).join("")}</tbody>
   </table>
-  <div class="empty" style="padding-top:8px">Start times are cluster local (Europe/Berlin) from one squeue --start --me.</div>`;
+  <div class="empty" style="padding-top:8px">Start times are cluster local (Europe/Berlin) from one squeue --start --me. Cancel runs scancel once.</div>`;
 }
 
 function renderSetup() {
@@ -805,6 +821,20 @@ function startAuto() {
   }, autoMs);
 }
 
+function clearCancelArmed() {
+  cancelArmed = null;
+  if (cancelArmedTimer) { clearTimeout(cancelArmedTimer); cancelArmedTimer = null; }
+}
+function armCancel(jobId) {
+  clearCancelArmed();
+  cancelArmed = jobId;
+  cancelArmedTimer = setTimeout(() => {
+    cancelArmed = null;
+    cancelArmedTimer = null;
+    if (snap) renderJobs();
+  }, 8000);
+}
+
 function syncAutoInterval() {
   const want = snap?.setup?.inflight ? 2000 : AUTO_MS;
   if (want === autoMs && autoTimer) return;
@@ -912,14 +942,36 @@ $("avail").onchange = (ev) => {
 };
 
 $("jobs").onclick = async (ev) => {
-  const btn = ev.target.closest("[data-use]");
+  const useBtn = ev.target.closest("[data-use]");
+  if (useBtn) {
+    try {
+      snap = await postJson("/api/repair/gpu/use", { job_id: useBtn.dataset.use });
+      lastRemoteAt = Date.now();
+      setNote("info", snap.message || `Using job ${useBtn.dataset.use}.`);
+      render();
+    } catch (err) {
+      setNote("err", err.message);
+    }
+    return;
+  }
+  const btn = ev.target.closest("[data-cancel]");
   if (!btn) return;
+  const jobId = btn.dataset.cancel;
+  const running = btn.dataset.running === "1";
+  if (running && cancelArmed !== jobId) {
+    armCancel(jobId);
+    renderJobs();
+    return;
+  }
+  btn.disabled = true;
   try {
-    snap = await postJson("/api/repair/gpu/use", { job_id: btn.dataset.use });
+    snap = await postJson("/api/repair/gpu/cancel", { job_id: jobId, confirm: running });
     lastRemoteAt = Date.now();
-    setNote("info", snap.message || `Using job ${btn.dataset.use}.`);
+    clearCancelArmed();
+    setNote("info", snap.message || `Cancelled job ${jobId}.`);
     render();
   } catch (err) {
+    btn.disabled = false;
     setNote("err", err.message);
   }
 };
