@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import io
 import json
-import urllib.error
 from pathlib import Path
 
 import numpy as np
@@ -236,6 +235,14 @@ class _FakeClient:
         self.images = _FakeImages(payload)
 
 
+class _BoomChat:
+    def __init__(self):
+        self.completions = self
+
+    def create(self, **kwargs):
+        raise AssertionError(f"chat.completions must not be used: {kwargs}")
+
+
 def test_regenerator_uses_gpt_image_2_edits(tmp_path: Path):
     png = _tiny_png_bytes((9, 8, 7), (5, 5))
     b64 = base64.b64encode(png).decode()
@@ -259,99 +266,23 @@ def test_regenerator_uses_gpt_image_2_edits(tmp_path: Path):
     assert sent["model"] == "gpt-image-2"
     assert sent["prompt"].startswith("Please regenerate and fix this image")
     assert "image" in sent
+    assert "size" not in sent
 
 
-def test_image_edit_size_is_divisible_by_16():
-    from splat_explorer.agent.regenerate import image_edit_size
+def test_ask_regenerate_is_images_edit_not_chat(tmp_path: Path):
+    from splat_explorer.agent.regenerate import IMAGE_MODEL, REGENERATE_PROMPT, ask_regenerate
 
-    assert image_edit_size(960, 720) == "960x720"
-    assert image_edit_size(5, 5) == "16x16"
-    assert image_edit_size(1024, 768) == "1024x768"
-
-
-class _HttpClient:
-    def __init__(self):
-        self.base_url = "http://localhost:8317/v1"
-        self.api_key = "sk-test"
-        self.chat = _BoomChat()
-        self.images = None
-
-
-class _BoomChat:
-    def __init__(self):
-        self.completions = self
-
-    def create(self, **kwargs):
-        raise AssertionError(f"chat.completions must not be used: {kwargs}")
-
-
-def test_ask_regenerate_posts_multipart_images_edit(tmp_path: Path, monkeypatch):
-    from splat_explorer.agent.regenerate import (
-        IMAGE_MODEL,
-        REGENERATE_PROMPT,
-        ask_regenerate,
-    )
-
-    png = _tiny_png_bytes((9, 8, 7), (32, 24))
+    png = _tiny_png_bytes((9, 8, 7), (8, 6))
     src = tmp_path / "step_030.png"
     src.write_bytes(png)
     b64 = base64.b64encode(png).decode()
-    captured = {}
-
-    class _Resp:
-        def read(self):
-            return json.dumps({"data": [{"b64_json": b64}]}).encode()
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            return False
-
-    def fake_urlopen(req, timeout=None):
-        captured["url"] = req.full_url
-        captured["timeout"] = timeout
-        captured["content_type"] = req.get_header("Content-type")
-        captured["auth"] = req.get_header("Authorization")
-        captured["body"] = req.data
-        return _Resp()
-
-    monkeypatch.setattr("splat_explorer.agent.regenerate.urllib.request.urlopen", fake_urlopen)
-    payload, error = ask_regenerate(_HttpClient(), IMAGE_MODEL, src, timeout_s=12)
+    client = _FakeClient({"data": [{"b64_json": b64}]})
+    client.chat = _BoomChat()
+    payload, error = ask_regenerate(client, IMAGE_MODEL, src)
     assert error is None
     assert payload["data"]
-    assert captured["url"] == "http://localhost:8317/v1/images/edits"
-    assert captured["auth"] == "Bearer sk-test"
-    assert "multipart/form-data" in captured["content_type"]
-    body = captured["body"]
-    assert b'name="model"' in body
-    assert b"gpt-image-2" in body
-    assert REGENERATE_PROMPT.encode() in body
-    assert b'name="image"' in body
-    assert b"step_030.png" in body
-    assert b"32x16" in body
-
-
-def test_ask_regenerate_does_not_fall_back_to_chat(tmp_path: Path, monkeypatch):
-    from splat_explorer.agent.regenerate import IMAGE_MODEL, ask_regenerate
-
-    src = tmp_path / "step_030.png"
-    Image.fromarray(np.full((32, 32, 3), 4, dtype=np.uint8)).save(src)
-    client = _HttpClient()
-
-    def boom_urlopen(req, timeout=None):
-        raise urllib.error.HTTPError(
-            req.full_url, 400, "Bad Request", hdrs=None, fp=io.BytesIO(
-                json.dumps({
-                    "error": {
-                        "message": "{\"detail\":\"The 'gpt-5.4-mini' model is not supported\"}",
-                        "type": "invalid_request_error",
-                    }
-                }).encode()
-            ),
-        )
-
-    monkeypatch.setattr("splat_explorer.agent.regenerate.urllib.request.urlopen", boom_urlopen)
-    payload, error = ask_regenerate(client, IMAGE_MODEL, src)
-    assert payload == {}
-    assert error
-    assert "400" in error
-    assert "gpt-5.4-mini" in error
+    sent = client.images.calls[0]
+    assert sent["model"] == IMAGE_MODEL
+    assert sent["prompt"] == REGENERATE_PROMPT
+    assert "size" not in sent
+    assert "n" not in sent
