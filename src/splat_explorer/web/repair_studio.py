@@ -200,11 +200,25 @@ class RepairStudio:
         detail = self.episode_review(ep) if ep else None
         episode_scene = None
         episode_scene_label = None
+        capture_width, capture_height = 960, 720
+        params = None
         if detail and isinstance(detail.get("meta"), dict):
             params = detail["meta"].get("params")
             if isinstance(params, dict):
                 episode_scene = params.get("scene")
                 episode_scene_label = params.get("scene_label") or episode_scene
+        if not isinstance(params, dict):
+            renderer = getattr(self.app.cfg, "renderer", None)
+            if isinstance(renderer, dict):
+                params = renderer
+            elif renderer is not None:
+                params = {
+                    "width": getattr(renderer, "width", None),
+                    "height": getattr(renderer, "height", None),
+                }
+        if isinstance(params, dict):
+            capture_width = int(params.get("width") or capture_width)
+            capture_height = int(params.get("height") or capture_height)
         return {
             "job": job,
             "showing": showing,
@@ -217,6 +231,8 @@ class RepairStudio:
             "scene_id": scene_id,
             "episode_scene": episode_scene,
             "episode_scene_label": episode_scene_label,
+            "capture_width": capture_width,
+            "capture_height": capture_height,
             "up_axis": up_axis,
             "backends": list_repair_backends(),
             "episode": detail,

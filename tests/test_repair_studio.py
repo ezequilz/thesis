@@ -126,6 +126,8 @@ def test_snapshot_reports_episode_scene(tmp_path: Path, monkeypatch):
     assert snap["episode_scene"] == "venetian-balcony"
     assert snap["episode_scene_label"] == "Venetian Balcony"
     assert snap["scene_id"] == "arch-interiors"
+    assert snap["capture_width"] == 960
+    assert snap["capture_height"] == 720
     assert "backends" in snap
     assert snap["gpu_url"] == "/repair/gpu"
     gpu = studio.gpu_snapshot()
@@ -482,6 +484,7 @@ def test_add_view_is_dashboard_only_and_queues_image_repair(tmp_path: Path, monk
     assert extra["queued"] is True
     assert regen.submitted == [("step_005.png", ep, 5)]
     assert (ep / "step_005.png").is_file()
+    assert Image.open(ep / "step_005.png").size == (960, 720)
     assert (ep / "repair_custom_views.jsonl").is_file()
     assert (ep / "actions.jsonl").read_text() == actions
     assert (ep / "meta.json").read_text() == meta

@@ -30,6 +30,9 @@ import os
 import re
 import threading
 import time
+import urllib.error
+import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -200,50 +203,176 @@ def _message_text(payload: dict) -> str:
     return ""
 
 
-def _file_data_url(path: Path) -> str:
-    data = path.read_bytes()
-    suffix = path.suffix.lower()
-    mime = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/png"
-    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+def image_edit_size(width: int, height: int) -> str:
+    """gpt-image-2 size string: both edges divisible by 16."""
+    w = max(16, (int(width) // 16) * 16)
+    h = max(16, (int(height) // 16) * 16)
+    return f"{w}x{h}"
+
+
+def _client_base_url(client) -> str:
+    url = getattr(client, "base_url", None)
+    if url is None:
+        return ""
+    return str(url).rstrip("/")
+
+
+def _client_api_key(client) -> str:
+    key = getattr(client, "api_key", None)
+    if not key:
+        key = os.environ.get("CLIRELAY_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+    return str(key or "sk-unauthenticated")
+
+
+def _multipart_form(
+    fields: dict[str, str],
+    files: list[tuple[str, str, bytes, str]],
+) -> tuple[bytes, str]:
+    boundary = "----SplatRegen" + uuid.uuid4().hex
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode()
+        )
+    for name, filename, data, content_type in files:
+        chunks.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"; '
+                f'filename="{filename}"\r\n'
+                f"Content-Type: {content_type}\r\n\r\n"
+            ).encode()
+        )
+        chunks.append(data)
+        chunks.append(b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode())
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
+def _format_http_error(exc: urllib.error.HTTPError) -> str:
+    detail = exc.read().decode("utf-8", errors="replace")[:800]
+    try:
+        body = json.loads(detail)
+        message = (
+            (body.get("error") or {}).get("message")
+            if isinstance(body.get("error"), dict)
+            else body.get("detail") or body.get("error") or detail
+        )
+    except json.JSONDecodeError:
+        message = detail
+    return f"HTTP {exc.code}: {message}"
+
+
+def _http_images_edit(
+    client,
+    model: str,
+    image_path: Path,
+    timeout_s: float,
+    size: str | None = None,
+) -> tuple[dict, str | None]:
+    """POST multipart to CliRelay `/v1/images/edits`.
+
+    Chat Completions / Responses rewrites gpt-image-2 to the Codex bridge
+    model gpt-5.4-mini, which ChatGPT-account Codex channels reject.
+    """
+    base = _client_base_url(client)
+    if not base:
+        return {}, "no base_url"
+    fields = {
+        "model": model,
+        "prompt": REGENERATE_PROMPT,
+        "n": "1",
+    }
+    if size:
+        fields["size"] = size
+    body, content_type = _multipart_form(
+        fields,
+        [("image", image_path.name, image_path.read_bytes(), "image/png")],
+    )
+    url = f"{base}/images/edits"
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", content_type)
+    req.add_header("Authorization", f"Bearer {_client_api_key(client)}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        logger.exception("Regenerate CliRelay POST %s failed", url)
+        return {}, _format_http_error(exc)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        logger.exception("Regenerate CliRelay POST %s failed", url)
+        return {}, f"{type(exc).__name__}: {exc}"
+    try:
+        payload = json.loads(raw.decode())
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {}, f"images.edits returned non-JSON: {exc}"
+    if not isinstance(payload, dict):
+        return {}, "images.edits returned a non-object payload"
+    return payload, None
 
 
 def ask_regenerate(client, model: str, image_path: Path,
                    timeout_s: float = REQUEST_TIMEOUT_S) -> tuple[dict, str | None]:
     """Send the RGB frame + static repair prompt to gpt-image-2.
 
-    Prefers CliRelay `/v1/images/edits` (native image I/O). Falls back to
-    chat.completions with the same model if the images endpoint is missing.
+    Posts CliRelay `/v1/images/edits` (native image I/O). Does not fall back
+    to chat.completions: that path remaps gpt-image-2 onto gpt-5.4-mini.
     Returns (response dict, error).
     """
+    size = None
+    try:
+        with Image.open(image_path) as img:
+            size = image_edit_size(img.width, img.height)
+    except OSError:
+        size = None
+    payload, error = _http_images_edit(
+        client, model, image_path, timeout_s, size=size,
+    )
+    if error is None:
+        return payload, None
+    if error != "no base_url":
+        return {}, error
     edit = getattr(getattr(client, "images", None), "edit", None)
-    if edit is not None:
-        payload, error = _images_edit(edit, model, image_path, timeout_s)
-        if error is None or "TypeError" not in (error or ""):
-            return payload, error
-        logger.warning("images.edit rejected args (%s); trying chat.completions", error)
-    return _chat_regenerate(client, model, image_path, timeout_s)
+    if edit is None:
+        return {}, (
+            "CliRelay images.edit is unavailable (no base_url on the client). "
+            "Refusing chat.completions — that remaps gpt-image-2 to gpt-5.4-mini."
+        )
+    payload, sdk_error = _images_edit(
+        edit, model, image_path, timeout_s, size=size,
+    )
+    return payload, sdk_error
 
 
 def _images_edit(edit, model: str, image_path: Path,
-                 timeout_s: float) -> tuple[dict, str | None]:
+                 timeout_s: float, size: str | None = None) -> tuple[dict, str | None]:
     attempts = (
-        {"image": "file", "timeout": True},
-        {"image": "file", "timeout": False},
-        {"image": "list", "timeout": False},
+        {"image": "file", "timeout": True, "size": True},
+        {"image": "file", "timeout": True, "size": False},
+        {"image": "file", "timeout": False, "size": False},
+        {"image": "list", "timeout": False, "size": False},
     )
     last_error = None
+    blob = image_path.read_bytes()
     for spec in attempts:
         try:
-            with image_path.open("rb") as fh:
-                image = [fh] if spec["image"] == "list" else fh
-                kwargs: dict[str, Any] = {
-                    "model": model,
-                    "image": image,
-                    "prompt": REGENERATE_PROMPT,
-                }
-                if spec["timeout"]:
-                    kwargs["timeout"] = timeout_s
-                return response_to_dict(edit(**kwargs)), None
+            image = [(image_path.name, blob, "image/png")] if spec["image"] == "list" \
+                else (image_path.name, blob, "image/png")
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "image": image,
+                "prompt": REGENERATE_PROMPT,
+                "n": 1,
+            }
+            if spec["timeout"]:
+                kwargs["timeout"] = timeout_s
+            if spec["size"] and size:
+                kwargs["size"] = size
+            return response_to_dict(edit(**kwargs)), None
         except TypeError as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             continue
@@ -251,33 +380,6 @@ def _images_edit(edit, model: str, image_path: Path,
             logger.exception("Regenerate CliRelay images.edit failed")
             return {}, f"{type(exc).__name__}: {exc}"
     return {}, last_error
-
-
-def _chat_regenerate(client, model: str, image_path: Path,
-                     timeout_s: float) -> tuple[dict, str | None]:
-    content = [
-        {"type": "text", "text": REGENERATE_PROMPT},
-        {"type": "image_url", "image_url": {"url": _file_data_url(image_path)}},
-    ]
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": content}],
-            timeout=timeout_s,
-        )
-    except TypeError:
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": content}],
-            )
-        except Exception as exc:
-            logger.exception("Regenerate CliRelay request failed")
-            return {}, f"{type(exc).__name__}: {exc}"
-    except Exception as exc:
-        logger.exception("Regenerate CliRelay request failed")
-        return {}, f"{type(exc).__name__}: {exc}"
-    return response_to_dict(response), None
 
 
 def write_meta(episode_dir: Path, result: RegenerateResult, payload: dict | None = None) -> None:

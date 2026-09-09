@@ -1266,6 +1266,7 @@ def _view_from_record(
         "repair_status": repair_meta.get("status"),
         "repair": repair_meta or None,
         "regen_status": regen_meta.get("status") or rec.get("regen_status"),
+        "regen_error": regen_meta.get("error"),
         "custom": bool(custom or rec.get("custom")),
         "lift_name": repaired_render_name(step) if (episode_dir / repaired_render_name(step)).is_file() else None,
     }

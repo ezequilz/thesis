@@ -148,11 +148,11 @@
   .view .act { font-family: var(--mono); font-size: 12px; }
   .view .times { color: var(--dim); font-size: 11px; }
   #compare {
-    display: flex; flex-direction: column; min-width: 0; min-height: 0;
-    overflow-y: auto; background: #000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-width: 0; min-height: 0; overflow: hidden; background: #000;
   }
   #compare-stage {
-    position: relative; flex: 1 0 100%; min-height: 100%; background: #000;
+    position: relative; flex: none; background: #000;
   }
   #compare-img {
     position: absolute; inset: 0; width: 100%; height: 100%;
@@ -182,8 +182,8 @@
   #compare-nav button.on { color: var(--accent); border-color: var(--accent) !important; }
   #compare-nav[hidden] { display: none; }
   #compare-meta {
-    flex: none; margin: 0; border: 0; border-top: 1px solid var(--border);
-    border-radius: 0; background: var(--panel);
+    flex: none; align-self: stretch; width: 100%; margin: 0; border: 0;
+    border-top: 1px solid var(--border); border-radius: 0; background: var(--panel);
   }
   #compare-meta summary {
     padding: 8px 14px; cursor: pointer; font-size: 12px; color: var(--dim);
@@ -196,15 +196,24 @@
         font-size: 13px; margin: 0; padding: 4px 14px 14px; }
   .kv .k { color: var(--dim); }
   .kv .v { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
-  #viser-wrap { display: flex; flex-direction: column; min-width: 0; position: relative;
-                border-left: 1px solid var(--border); }
+  #viser-wrap { display: flex; flex-direction: column; min-width: 0; min-height: 0;
+                position: relative; border-left: 1px solid var(--border); background: #000; }
   #viser-wrap .bar {
     position: absolute; top: 0; left: 0; right: 0; z-index: 2;
     display: flex; align-items: center; gap: 8px; padding: 6px 10px;
     background: linear-gradient(to bottom, rgba(16,19,24,.82), transparent);
     font-size: 11px; color: var(--dim); pointer-events: none;
   }
-  #viser-wrap iframe { flex: 1; width: 100%; border: 0; background: #000; }
+  /* Real visor iframe stays at the episode capture size (usually 960×720).
+     The fit box is only a CSS-scaled window so the page can stay ~50/50 with
+     the RGB pane without stretching WebGL away from 4:3. */
+  #viser-body {
+    flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
+    overflow: hidden; background: #000;
+  }
+  #viser-fit { flex: none; overflow: hidden; background: #000; }
+  #viser-stage { transform-origin: top left; }
+  #viser-wrap iframe { border: 0; display: block; background: #000; }
   .empty { color: var(--dim); padding: 30px; text-align: center; }
   .badge { display: inline-block; font-size: 10px; border-radius: 4px; padding: 0 5px;
            margin-left: 5px; font-weight: 700; }
@@ -214,8 +223,16 @@
   .badge.queued { background: var(--warn); color: #1a1406; }
   .hint { font-size: 11px; color: var(--dim); max-width: 420px; }
   @media (max-width: 1100px) {
-    #layout { grid-template-columns: 240px 1fr; }
-    #viser-wrap { display: none; }
+    #layout {
+      grid-template-columns: 240px 1fr;
+      grid-template-rows: minmax(0, 1fr) minmax(220px, 38vh);
+    }
+    #views { grid-row: 1 / 3; }
+    #compare { grid-column: 2; grid-row: 1; }
+    #viser-wrap {
+      grid-column: 2; grid-row: 2;
+      border-left: 0; border-top: 1px solid var(--border);
+    }
   }
 </style>
 </head>
@@ -318,8 +335,14 @@
     </details>
   </div>
   <div id="viser-wrap">
-    <div class="bar"><b>3D visor</b><span class="spacer"></span><span id="viser-hint">original / repaired toggle</span></div>
-    <iframe id="viser" title="Viser splat view" allow="autoplay"></iframe>
+    <div class="bar"><b>3D visor</b> · <span id="viser-res">960×720</span><span class="spacer"></span><span id="viser-hint">original / repaired toggle</span></div>
+    <div id="viser-body">
+      <div id="viser-fit">
+        <div id="viser-stage">
+          <iframe id="viser" title="Viser splat view" allow="autoplay"></iframe>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -341,6 +364,58 @@ let sceneSyncedEp = "";
 let lastJobStatus = "";
 let pollTimer = null;
 let seenCustomRepaired = new Set();
+let lastVisorLayoutKey = "";
+
+function captureRes() {
+  const w = Number(snapshot?.capture_width) || 960;
+  const h = Number(snapshot?.capture_height) || 720;
+  return { w: Math.max(16, w), h: Math.max(16, h) };
+}
+
+function layoutVisor() {
+  const { w, h } = captureRes();
+  const label = $("viser-res");
+  if (label) label.textContent = w + "×" + h;
+  const body = $("viser-body");
+  const fit = $("viser-fit");
+  const stage = $("viser-stage");
+  const frame = $("viser");
+  if (body && fit && stage && frame) {
+    const availW = body.clientWidth;
+    const availH = body.clientHeight;
+    if (availW >= 2 && availH >= 2) {
+      const scale = Math.min(availW / w, availH / h);
+      const visW = Math.max(1, Math.round(w * scale));
+      const visH = Math.max(1, Math.round(h * scale));
+      const key = `${w}x${h}:${availW}x${availH}:${visW}x${visH}`;
+      if (key !== lastVisorLayoutKey) {
+        lastVisorLayoutKey = key;
+        frame.style.width = w + "px";
+        frame.style.height = h + "px";
+        stage.style.width = w + "px";
+        stage.style.height = h + "px";
+        stage.style.transform = "scale(" + (visW / w) + ")";
+        fit.style.width = visW + "px";
+        fit.style.height = visH + "px";
+      }
+    }
+  }
+  const compare = $("compare");
+  const cmpStage = $("compare-stage");
+  if (!compare || !cmpStage) return;
+  const meta = $("compare-meta");
+  const metaH = meta ? meta.offsetHeight : 0;
+  const availW = compare.clientWidth;
+  const availH = Math.max(1, compare.clientHeight - metaH);
+  const scale = Math.min(availW / w, availH / h);
+  const visW = Math.max(1, Math.round(w * scale));
+  const visH = Math.max(1, Math.round(h * scale));
+  const cmpKey = `cmp:${w}x${h}:${availW}x${availH}:${visW}x${visH}`;
+  if (cmpStage.dataset.layout === cmpKey) return;
+  cmpStage.dataset.layout = cmpKey;
+  cmpStage.style.width = visW + "px";
+  cmpStage.style.height = visH + "px";
+}
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -702,7 +777,7 @@ function renderCompare() {
   const r = viewRepair(v);
   const kvKey = [
     v.step, compareKind, src, r.status, r.backend, r.n_iters, r.seconds,
-    r.l1_before, r.l1_after, r.error || "", v.custom ? "c" : "", v.regen_status || "",
+    r.l1_before, r.l1_after, r.error || "", v.custom ? "c" : "", v.regen_status || "", v.regen_error || "",
   ].join("|");
   if ($("compare-kv").dataset.key === kvKey) return;
   $("compare-kv").dataset.key = kvKey;
@@ -711,6 +786,7 @@ function renderCompare() {
       <span class="k">pose</span><span class="v">${esc(v.pose || "")}</span>
       ${v.custom ? `<span class="k">source</span><span class="v">custom visor (dashboard only)</span>` : ""}
       <span class="k">image repair</span><span class="v">${esc(v.regen_status || (v.repaired_url ? "ok" : "not run"))}</span>
+      ${v.regen_error ? `<span class="k">image error</span><span class="v">${esc(v.regen_error)}</span>` : ""}
       <span class="k">3D repair</span><span class="v">${esc(r.status || "not run")}</span>
       <span class="k">backend</span><span class="v">${esc(r.backend || "–")}</span>
       <span class="k">iters</span><span class="v">${r.n_iters ?? "–"}</span>
@@ -927,6 +1003,7 @@ async function tick({ poll = false } = {}) {
     renderShow();
     renderViews();
     renderCompare();
+    layoutVisor();
     if (!poll) await syncEpisodeScene();
     if (wasActive && !nowActive && visorPly === "repaired" && snapshot?.episode?.repaired_ply) {
       await showVisorPly("repaired", { force: true });
@@ -1103,7 +1180,21 @@ document.addEventListener("keydown", e => {
 
 fetch("/api/state").then(r => r.json()).then(s => {
   $("viser").src = s.defaults?.viewer_url || "http://localhost:8080";
-}).catch(() => { $("viser").src = "http://localhost:8080"; });
+  lastVisorLayoutKey = "";
+  layoutVisor();
+}).catch(() => {
+  $("viser").src = "http://localhost:8080";
+  lastVisorLayoutKey = "";
+  layoutVisor();
+});
+
+if (window.ResizeObserver) {
+  const visorBody = $("viser-body");
+  if (visorBody) new ResizeObserver(() => { lastVisorLayoutKey = ""; layoutVisor(); }).observe(visorBody);
+  const compare = $("compare");
+  if (compare) new ResizeObserver(() => layoutVisor()).observe(compare);
+}
+window.addEventListener("resize", () => { lastVisorLayoutKey = ""; layoutVisor(); });
 
 refreshEpisodes().then(() => tick());
 </script>
