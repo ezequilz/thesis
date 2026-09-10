@@ -39,7 +39,15 @@ AUTH=(
   -o KbdInteractiveAuthentication=no
 )
 
-if "$SSH" -o ControlPath="$SOCK" -O check "$TARGET" >/dev/null 2>&1; then
+MUX_OPTS=(
+  -o ControlPath="$SOCK"
+  -o ControlMaster=no
+  -o ConnectTimeout=8
+  -o ServerAliveInterval=5
+  -o ServerAliveCountMax=2
+)
+
+if "$SSH" -o ControlPath="$SOCK" -o ConnectTimeout=8 -O check "$TARGET" >/dev/null 2>&1; then
   echo "ControlMaster already up: $SOCK"
 else
   echo "Connecting to $TARGET with $SSH (interactive, same as your working login)."
@@ -52,8 +60,24 @@ else
   echo "Session stored at $SOCK (ControlPersist 8h)."
 fi
 
-echo "==> squeue --me (one call)"
-"$SSH" -4 -F /dev/null -o ControlPath="$SOCK" -o ControlMaster=no "$TARGET" "squeue --me"
+echo "==> squeue --me (one call, 12s cap — a busy mux must not hang this shell)"
+set +e
+"$PY" -c "
+import subprocess, sys
+try:
+    r = subprocess.run(sys.argv[1:], timeout=12)
+    sys.exit(r.returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+" "$SSH" -4 -F /dev/null "${MUX_OPTS[@]}" "$TARGET" "timeout 10 squeue --me"
+sq=$?
+set -e
+if [ "$sq" -eq 124 ]; then
+  echo "squeue did not return in 12s (ControlMaster busy or login node slow)."
+  echo "Wait for the GPU dashboard probe to finish, then retry. Do not loop squeue."
+elif [ "$sq" -ne 0 ]; then
+  echo "squeue exited $sq (non-fatal). Dashboard can still use this socket."
+fi
 echo
 echo "Dashboard CUDA repair can use this socket now."
 echo "Close with: $SSH -o ControlPath=$SOCK -O exit $TARGET"

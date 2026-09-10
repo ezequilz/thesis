@@ -328,12 +328,14 @@ class RepairStudio:
 
         result = review_lrz_partitions(force=force)
         snap = self.gpu_snapshot()
-        snap["partitions"] = result.get("partitions")
-        snap["nodes"] = result.get("nodes")
-        snap["summary"] = result.get("summary")
-        snap["default_free"] = result.get("default_free")
+        if not (result.get("inflight") and not result.get("nodes") and not result.get("partitions")):
+            snap["partitions"] = result.get("partitions")
+            snap["nodes"] = result.get("nodes")
+            snap["summary"] = result.get("summary")
+            snap["default_free"] = result.get("default_free")
         snap["ok"] = True
         snap["message"] = result.get("message")
+        snap["reviewing"] = bool(result.get("inflight") or snap.get("reviewing"))
         return snap
 
     def list_episodes(self) -> list[dict]:

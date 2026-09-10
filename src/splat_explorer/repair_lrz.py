@@ -164,25 +164,49 @@ def control_path() -> Path:
     return Path.home() / ".ssh" / "cm-lrz"
 
 
-def lrz_session_alive(cfg: dict | None = None) -> bool:
-    """True when ``scripts/lrz/ssh-session.sh`` left a working ControlMaster."""
+def lrz_session_alive(cfg: dict | None = None, *, force: bool = False) -> bool:
+    """True when ``scripts/lrz/ssh-session.sh`` left a working ControlMaster.
+
+    ``ssh -O check`` shares ControlMaster with probes. Cache it and skip the
+    check while a mux command is already running so reloads cannot pile up.
+    """
     sock = control_path()
     if not sock.exists():
+        _remember_session(False)
         return False
-    cfg = cfg or load_lrz_config()
+    cached = _cached_session(force)
+    if cached is not None:
+        return cached
+    acquired = _MUX["lock"].acquire(blocking=False)
+    if not acquired:
+        cached = _cached_session(False)
+        if cached is not None:
+            return cached
+        return True
     try:
-        result = subprocess.run(
-            [
-                _ssh_bin(), "-o", f"ControlPath={sock}", "-O", "check",
-                f"{cfg['user']}@{cfg['host']}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=SESSION_CHECK_TIMEOUT_S,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return False
-    return result.returncode == 0
+        _mux_stagger_locked()
+        cfg = cfg or load_lrz_config()
+        try:
+            result = subprocess.run(
+                [
+                    _ssh_bin(),
+                    "-o", f"ControlPath={sock}",
+                    "-o", f"ConnectTimeout={int(SSH_CONNECT_TIMEOUT_S)}",
+                    "-O", "check",
+                    f"{cfg['user']}@{cfg['host']}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=SESSION_CHECK_TIMEOUT_S,
+            )
+            alive = result.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            alive = False
+        _mux_mark_locked()
+        _remember_session(alive)
+        return alive
+    finally:
+        _MUX["lock"].release()
 
 
 def session_required_message() -> str:
@@ -570,7 +594,12 @@ def job_results_ready(job_dir: Path) -> bool:
 PROBE_TTL_S = 600.0  # 10 min. LRZ treats tighter squeue loops as a DoS.
 PROBE_TIMEOUT_S = 25.0
 SMI_TIMEOUT_S = 35.0
-SESSION_CHECK_TIMEOUT_S = 5.0
+SESSION_CHECK_TIMEOUT_S = 2.0
+SESSION_ALIVE_TTL_S = 20.0
+SESSION_DOWN_TTL_S = 4.0
+SSH_STAGGER_S = 0.4
+SSH_CONNECT_TIMEOUT_S = 8
+SINFO_TTL_S = 600.0  # Same as probe. Reloads must not re-run sinfo.
 SETUP_TIMEOUT_S = 1800.0  # First gsplat compile on a node can take 10–20 min.
 HISTORY_DEFAULT_DAYS = 14
 SACCT_FORMAT = (
@@ -626,6 +655,7 @@ _SINFO = {
     "at": 0.0,
     "body": None,
     "error": None,
+    "inflight": False,
 }
 _ALLOCATE = {"lock": threading.Lock(), "inflight": False}
 _SETUP = {
@@ -638,6 +668,46 @@ _SETUP = {
     "error": None,
     "detail": None,
 }
+_SESSION = {
+    "lock": threading.Lock(),
+    "at": 0.0,
+    "alive": False,
+    "checked": False,
+}
+_MUX = {
+    "lock": threading.Lock(),
+    "last_at": 0.0,
+}
+
+
+def _remember_session(alive: bool) -> None:
+    with _SESSION["lock"]:
+        _SESSION["alive"] = bool(alive)
+        _SESSION["checked"] = True
+        _SESSION["at"] = time.time()
+
+
+def _cached_session(force: bool) -> bool | None:
+    if force:
+        return None
+    now = time.time()
+    with _SESSION["lock"]:
+        if not _SESSION["checked"]:
+            return None
+        ttl = SESSION_ALIVE_TTL_S if _SESSION["alive"] else SESSION_DOWN_TTL_S
+        if (now - float(_SESSION["at"] or 0)) < ttl:
+            return bool(_SESSION["alive"])
+    return None
+
+
+def _mux_stagger_locked() -> None:
+    gap = SSH_STAGGER_S - (time.time() - float(_MUX["last_at"] or 0))
+    if gap > 0:
+        time.sleep(gap)
+
+
+def _mux_mark_locked() -> None:
+    _MUX["last_at"] = time.time()
 
 
 def _squeue_blank(raw: str | None) -> str | None:
@@ -1373,21 +1443,26 @@ def next_action_from_checks(checks: list[dict[str, Any]]) -> str | None:
 
 
 def _ssh_run(cfg: dict, remote: str, *, timeout: float = PROBE_TIMEOUT_S) -> subprocess.CompletedProcess:
+    """One ControlMaster channel at a time, with a short gap between commands."""
     argv = ssh_argv(cfg, multiplex=True) + [remote]
-    try:
-        return subprocess.run(
-            argv,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"SSH command timed out after {timeout:.0f}s "
-            "(login node busy, or a stale GPU job blocked srun)."
-        ) from exc
+    with _MUX["lock"]:
+        _mux_stagger_locked()
+        try:
+            return subprocess.run(
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                stdin=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"SSH command timed out after {timeout:.0f}s "
+                "(login node busy, or a stale GPU job blocked srun)."
+            ) from exc
+        finally:
+            _mux_mark_locked()
 
 
 def _login_probe_script(
@@ -1425,8 +1500,6 @@ def _login_probe_script(
         "date '+%F %T %Z %z' || true\n"
         "echo UID\n"
         "id -u || true\n"
-        "echo SQUEUE_LONG\n"
-        "squeue --me --long || true\n"
         "echo SACCT\n"
         f"{history} || true\n"
     )
@@ -1484,7 +1557,6 @@ def _login_probe_body(cfg: dict, parsed: dict[str, str]) -> dict[str, Any]:
         "history_jobs": parse_sacct_lines(parsed.get("sacct") or ""),
         "cluster_time": (parsed.get("date") or "").strip() or None,
         "uid": uid_raw or None,
-        "squeue_long": (parsed.get("squeue_long") or "").strip() or None,
         "gpu": None,
         "gpu_error": None,
     }
@@ -1645,6 +1717,12 @@ def reset_gpu_probe_cache() -> None:
         _SINFO["at"] = 0.0
         _SINFO["body"] = None
         _SINFO["error"] = None
+        _SINFO["inflight"] = False
+    with _SESSION["lock"]:
+        _SESSION["at"] = 0.0
+        _SESSION["alive"] = False
+        _SESSION["checked"] = False
+    _MUX["last_at"] = 0.0
     reset_setup_cache()
 
 
@@ -1870,7 +1948,28 @@ def review_lrz_partitions(*, force: bool = False, cfg: dict | None = None) -> di
     with _SINFO["lock"]:
         age = now - float(_SINFO["at"] or 0)
         cached = _SINFO["body"]
-        if not force and isinstance(cached, dict) and age < 60:
+        inflight = bool(_SINFO.get("inflight"))
+        if inflight:
+            if isinstance(cached, dict):
+                return {
+                    "ok": True,
+                    **cached,
+                    "cached": True,
+                    "inflight": True,
+                    "age_s": round(age, 1) if _SINFO["at"] else None,
+                    "message": "Availability review already running.",
+                }
+            return {
+                "ok": True,
+                "partitions": [],
+                "nodes": [],
+                "summary": [],
+                "default_free": None,
+                "cached": True,
+                "inflight": True,
+                "message": "Availability review already running.",
+            }
+        if not force and isinstance(cached, dict) and age < SINFO_TTL_S:
             return {
                 "ok": True,
                 **cached,
@@ -1878,49 +1977,54 @@ def review_lrz_partitions(*, force: bool = False, cfg: dict | None = None) -> di
                 "age_s": round(age, 1),
                 "message": "Using cached sinfo (LRZ forbids sinfo loops).",
             }
-    command = review_command()
-    result = _ssh_run(cfg, command, timeout=max(PROBE_TIMEOUT_S, 60.0))
-    output = (result.stdout or "").strip()
-    err = (result.stderr or "").strip()
-    if result.returncode != 0:
-        message = err or output or "sinfo/scontrol failed."
+        _SINFO["inflight"] = True
+    try:
+        command = review_command()
+        result = _ssh_run(cfg, command, timeout=max(PROBE_TIMEOUT_S, 60.0))
+        output = (result.stdout or "").strip()
+        err = (result.stderr or "").strip()
+        if result.returncode != 0:
+            message = err or output or "sinfo/scontrol failed."
+            with _SINFO["lock"]:
+                _SINFO["at"] = time.time()
+                _SINFO["error"] = message
+            raise RuntimeError(message)
+        sections = _review_sections(output)
+        partitions = parse_sinfo_lines(sections.get("sinfo") or "")
+        nodes = parse_scontrol_nodes(sections.get("scontrol") or "")
+        summary = summarize_gpu_availability(nodes)
+        default_free = sum(row["gpu_free"] for row in summary if row.get("default"))
+        other_free = [row for row in summary if not row.get("default") and row.get("has_free")]
+        if default_free == 0 and other_free:
+            hint = (
+                "Default A100 partitions look full. "
+                + ", ".join(f"{r['label']} has {r['gpu_free']} free" for r in other_free)
+                + " — select those below."
+            )
+        elif default_free:
+            hint = f"{default_free} A100 GPU(s) free on the default partitions. MIXED nodes can still have a slot."
+        else:
+            hint = "No free GPUs counted on reviewed nodes. Queue anyway or pick another start time."
+        body = {
+            "partitions": partitions,
+            "nodes": nodes,
+            "summary": summary,
+            "default_free": default_free,
+        }
         with _SINFO["lock"]:
             _SINFO["at"] = time.time()
-            _SINFO["error"] = message
-        raise RuntimeError(message)
-    sections = _review_sections(output)
-    partitions = parse_sinfo_lines(sections.get("sinfo") or "")
-    nodes = parse_scontrol_nodes(sections.get("scontrol") or "")
-    summary = summarize_gpu_availability(nodes)
-    default_free = sum(row["gpu_free"] for row in summary if row.get("default"))
-    other_free = [row for row in summary if not row.get("default") and row.get("has_free")]
-    if default_free == 0 and other_free:
-        hint = (
-            "Default A100 partitions look full. "
-            + ", ".join(f"{r['label']} has {r['gpu_free']} free" for r in other_free)
-            + " — select those below."
-        )
-    elif default_free:
-        hint = f"{default_free} A100 GPU(s) free on the default partitions. MIXED nodes can still have a slot."
-    else:
-        hint = "No free GPUs counted on reviewed nodes. Queue anyway or pick another start time."
-    body = {
-        "partitions": partitions,
-        "nodes": nodes,
-        "summary": summary,
-        "default_free": default_free,
-    }
-    with _SINFO["lock"]:
-        _SINFO["at"] = time.time()
-        _SINFO["body"] = body
-        _SINFO["error"] = None
-    return {
-        "ok": True,
-        **body,
-        "cached": False,
-        "command": command,
-        "message": hint,
-    }
+            _SINFO["body"] = body
+            _SINFO["error"] = None
+        return {
+            "ok": True,
+            **body,
+            "cached": False,
+            "command": command,
+            "message": hint,
+        }
+    finally:
+        with _SINFO["lock"]:
+            _SINFO["inflight"] = False
 
 
 def lrz_dashboard_snapshot(
@@ -1982,6 +2086,7 @@ def lrz_dashboard_snapshot(
         sinfo_body = _SINFO["body"]
         partitions_at = float(_SINFO["at"] or 0)
         partitions_error = _SINFO["error"]
+        reviewing = bool(_SINFO.get("inflight"))
     if isinstance(sinfo_body, dict):
         sinfo_nodes = list(sinfo_body.get("nodes") or [])
     setup = lrz_setup_status(probe_setup=(cached or {}).get("setup"))
@@ -2053,6 +2158,7 @@ def lrz_dashboard_snapshot(
         "packed_jobs": packed,
         "current_packed": latest,
         "probing": inflight,
+        "reviewing": reviewing,
         "probed_at": probed_at or None,
         "probe_age_s": round(time.time() - probed_at, 1) if probed_at else None,
         "scripts": lrz_scripts(),
@@ -2069,8 +2175,9 @@ def lrz_dashboard_snapshot(
             "default_days": HISTORY_DEFAULT_DAYS,
         },
         "hint": (
-            "Slurm (squeue + sacct) is queried at most once per 10 min while this "
-            "page is visible. Hidden tabs send nothing. sinfo only on Refresh availability."
+            "Slurm (one squeue --me + one sacct) is queried at most once per 10 min "
+            "while this page is visible. Hidden tabs send nothing. sinfo only on "
+            "Refresh availability, and never at the same time as a probe."
         ),
     }
 
@@ -2092,6 +2199,9 @@ def ssh_argv(cfg: dict | None = None, *, multiplex: bool | None = None) -> list[
             "-o", "ControlMaster=no",
             "-o", f"ControlPath={control_path()}",
             "-o", "BatchMode=yes",
+            "-o", f"ConnectTimeout={int(SSH_CONNECT_TIMEOUT_S)}",
+            "-o", "ServerAliveInterval=5",
+            "-o", "ServerAliveCountMax=2",
             target,
         ]
     return [

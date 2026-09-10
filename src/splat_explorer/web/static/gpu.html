@@ -184,7 +184,7 @@
     <button id="btn-widen" class="ghost">Widen selected partitions</button>
     <button id="btn-review" class="ghost">Refresh availability</button>
     <button id="btn-setup" title="Once per allocation: start the named Pyxis container from DSS pytorch.sqsh and install gsplat onto the shared drive. Later repairs reuse it.">Load GPU setup</button>
-    <span id="probe-meta" class="hint">At most one remote probe per 10 min while this tab is visible. Availability is a separate one-shot sinfo.</span>
+    <span id="probe-meta" class="hint">At most one remote probe per 10 min while this tab is visible. Reloads reuse cache; availability is a separate one-shot sinfo after the probe finishes.</span>
   </div>
 </div>
 <div id="note"></div>
@@ -260,6 +260,7 @@ let reviewedOnce = false;
 let autoMs = AUTO_MS;
 let cancelArmed = null;
 let cancelArmedTimer = null;
+let loadProbeTimer = null;
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -854,11 +855,13 @@ function renderChrome() {
   $("probe-meta").textContent = snap?.setup?.inflight
     ? (snap.setup.message || "Loading GPU setup on the allocated node…")
     : snap?.probing
-    ? (hasRunningJob() ? "Probing login node + GPU" : "Probing login node (no GPU job in ST=R)")
+    ? (hasRunningJob() ? "Probing the login node + GPU" : "Probing the login node (no GPU job in ST=R)")
+    : snap?.reviewing
+      ? "Loading availability (sinfo) after the probe…"
     : hidden
       ? `Last probe ${ageText(age)}. Tab hidden, no requests.`
       : `Last probe ${ageText(age)}. `;
-  const probeBusy = Boolean(snap?.probing) || tickBusy;
+  const probeBusy = Boolean(snap?.probing) || Boolean(snap?.reviewing) || tickBusy;
   const setupBusy = Boolean(snap?.setup?.inflight);
   $("btn-refresh").disabled = probeBusy || setupBusy;
   $("btn-refresh").classList.toggle("busy", probeBusy);
@@ -907,17 +910,22 @@ async function maybeReviewOnce() {
   if (reviewedOnce) return;
   if (!pageVisible()) return;
   if (!snap?.connection?.session) return;
+  if (snap?.probing || snap?.reviewing) return;
   if ((snap?.nodes || []).length) {
     reviewedOnce = true;
     return;
   }
   reviewedOnce = true;
+  await new Promise(resolve => setTimeout(resolve, 700));
+  if (!pageVisible() || snap?.probing || snap?.reviewing) {
+    reviewedOnce = false;
+    return;
+  }
   try {
     const data = await postJson("/api/repair/gpu/review", { force: false });
     snap = Object.assign(snap || {}, data);
     render();
   } catch (err) {
-    reviewedOnce = false;
     setNote("warn", err.message);
   }
 }
@@ -925,7 +933,9 @@ async function maybeReviewOnce() {
 async function tick({ probe = false, force = false } = {}) {
   if (tickBusy) return;
   if (!pageVisible() && probe) return;
-  if (probe && !force && lastRemoteAt && (Date.now() - lastRemoteAt) < AUTO_MS) return;
+  if (probe && !force && lastRemoteAt && (Date.now() - lastRemoteAt) < AUTO_MS) {
+    probe = false;
+  }
   tickBusy = true;
   if (inflight) inflight.abort();
   inflight = new AbortController();
@@ -944,7 +954,7 @@ async function tick({ probe = false, force = false } = {}) {
     }
     snap = data;
     render();
-    maybeReviewOnce();
+    if (!snap?.probing) maybeReviewOnce();
   } catch (err) {
     if (err.name === "AbortError") return;
     if (snap) {
@@ -962,6 +972,7 @@ async function tick({ probe = false, force = false } = {}) {
 
 function stopAuto() {
   if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  if (loadProbeTimer) { clearTimeout(loadProbeTimer); loadProbeTimer = null; }
   if (inflight) { inflight.abort(); inflight = null; }
   tickBusy = false;
 }
@@ -970,8 +981,8 @@ function startAuto() {
   stopAuto();
   autoTimer = setInterval(() => {
     if (!pageVisible()) return;
-    const setupBusy = Boolean(snap?.setup?.inflight);
-    tick({ probe: !setupBusy });
+    const remoteBusy = Boolean(snap?.setup?.inflight || snap?.probing || snap?.reviewing);
+    tick({ probe: !remoteBusy });
   }, autoMs);
 }
 
@@ -990,10 +1001,19 @@ function armCancel(jobId) {
 }
 
 function syncAutoInterval() {
-  const want = snap?.setup?.inflight ? 2000 : AUTO_MS;
+  const want = (snap?.setup?.inflight || snap?.probing || snap?.reviewing) ? 2000 : AUTO_MS;
   if (want === autoMs && autoTimer) return;
   autoMs = want;
   if (pageVisible()) startAuto();
+}
+
+async function waitForRemoteIdle(ms) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    if (!snap?.probing && !snap?.reviewing) return;
+    await new Promise(resolve => setTimeout(resolve, 800));
+    await tick({ probe: false });
+  }
 }
 
 document.addEventListener("visibilitychange", () => {
@@ -1017,6 +1037,8 @@ $("btn-refresh").onclick = async () => {
     });
     lastRemoteAt = Date.now();
     render();
+    await waitForRemoteIdle(90000);
+    await new Promise(resolve => setTimeout(resolve, 400));
     try {
       snap = await postJson("/api/repair/gpu/review", { force: true });
       reviewedOnce = true;
@@ -1169,7 +1191,10 @@ $("jobs").onclick = async (ev) => {
 
 if (pageVisible()) startAuto();
 syncHistUI();
-tick({ probe: true, force: true });
+tick({ probe: false }).then(() => {
+  if (!pageVisible()) return;
+  loadProbeTimer = setTimeout(() => tick({ probe: true }), 450);
+});
 window.addEventListener("pagehide", stopAuto);
 window.addEventListener("beforeunload", stopAuto);
 </script>

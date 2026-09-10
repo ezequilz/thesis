@@ -101,6 +101,8 @@ def test_ssh_argv_uses_control_path(monkeypatch, tmp_path):
     argv = ssh_argv({"user": "go73kaf2", "host": "login.ai.lrz.de"}, multiplex=True)
     assert any("ControlMaster=no" == a for a in argv)
     assert "BatchMode=yes" in argv
+    assert any(a.startswith("ConnectTimeout=") for a in argv)
+    assert "ServerAliveInterval=5" in argv
     assert any(str(sock) in a for a in argv)
     assert argv[0] in ("ssh", "/usr/bin/ssh") or argv[0].endswith("/ssh")
 
@@ -489,12 +491,13 @@ def test_login_probe_lists_all_jobs_once():
     assert "squeue --me" in script
     assert "%S" in script
     assert "squeue --me --start" not in script
+    assert "squeue --me --long" not in script
+    assert script.count("squeue") == 1
     assert "--job=" not in script
     assert "setup-5777469.json" in script
     assert "echo SETUP" in script
     assert "date '+%F %T %Z %z'" in script
     assert "id -u" in script
-    assert "squeue --me --long" in script
     assert "sacct" in script
     assert "--allocations" in script
     assert "--duplicates" in script
@@ -715,8 +718,9 @@ def test_connection_checks_stale_job_points_at_queued_rows():
 def test_session_check_timeout_is_down(monkeypatch, tmp_path):
     import subprocess
 
-    from splat_explorer.repair_lrz import lrz_session_alive
+    from splat_explorer.repair_lrz import lrz_session_alive, reset_gpu_probe_cache
 
+    reset_gpu_probe_cache()
     monkeypatch.setattr(
         "splat_explorer.repair_lrz.control_path",
         lambda: tmp_path / "cm-lrz",
@@ -724,7 +728,7 @@ def test_session_check_timeout_is_down(monkeypatch, tmp_path):
     (tmp_path / "cm-lrz").write_text("")
 
     def boom(*args, **kwargs):
-        raise subprocess.TimeoutExpired("ssh", 5)
+        raise subprocess.TimeoutExpired("ssh", 2)
 
     monkeypatch.setattr("splat_explorer.repair_lrz.subprocess.run", boom)
     assert lrz_session_alive({
@@ -880,7 +884,7 @@ def test_probe_parses_sacct_history(monkeypatch):
     assert body["history_jobs"][0]["state"] == "COMPLETED"
     assert body["cluster_time"] == "2026-09-10 16:16:00 CEST +0200"
     assert body["uid"] == "12345"
-    assert body["squeue_long"]
+    assert "squeue_long" not in body
 
 
 def test_dashboard_snapshot_includes_history(monkeypatch, tmp_path):
@@ -933,4 +937,184 @@ def test_dashboard_snapshot_includes_history(monkeypatch, tmp_path):
     assert body["history"]["start"] == "2026-09-08"
     assert body["history"]["cluster_time"].startswith("2026-09-10")
     assert body["history"]["uid"] == "12345"
+    assert body["reviewing"] is False
+
+
+def test_session_alive_is_cached(monkeypatch, tmp_path):
+    from splat_explorer.repair_lrz import lrz_session_alive, reset_gpu_probe_cache
+
+    reset_gpu_probe_cache()
+    sock = tmp_path / "cm-lrz"
+    sock.write_text("")
+    monkeypatch.setattr("splat_explorer.repair_lrz.control_path", lambda: sock)
+    calls: list[int] = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(1)
+        return _Proc(returncode=0, stdout="", stderr="Master running")
+
+    monkeypatch.setattr("splat_explorer.repair_lrz.subprocess.run", fake_run)
+    cfg = {"user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "", "workspace": "/dss/ws"}
+    assert lrz_session_alive(cfg) is True
+    assert lrz_session_alive(cfg) is True
+    assert len(calls) == 1
+
+
+def test_ssh_run_serializes_concurrent_calls(monkeypatch):
+    import threading
+    import time
+
+    from splat_explorer.repair_lrz import _ssh_run, reset_gpu_probe_cache
+
+    reset_gpu_probe_cache()
+    inflight = 0
+    max_in = 0
+    lock = threading.Lock()
+
+    def fake_run(*args, **kwargs):
+        nonlocal inflight, max_in
+        with lock:
+            inflight += 1
+            max_in = max(max_in, inflight)
+        time.sleep(0.12)
+        with lock:
+            inflight -= 1
+        return _Proc(returncode=0, stdout="ok")
+
+    monkeypatch.setattr("splat_explorer.repair_lrz.subprocess.run", fake_run)
+    cfg = {"user": "go73kaf2", "host": "login.ai.lrz.de"}
+    threads = [
+        threading.Thread(target=lambda: _ssh_run(cfg, "true"))
+        for _ in range(3)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert max_in == 1
+
+
+def test_probe_and_review_do_not_overlap_ssh(monkeypatch):
+    import threading
+    import time
+
+    from splat_explorer.repair_lrz import probe_lrz_gpu, reset_gpu_probe_cache, review_lrz_partitions
+
+    reset_gpu_probe_cache()
+    inflight = 0
+    max_in = 0
+    lock = threading.Lock()
+
+    def fake_run(*args, **kwargs):
+        nonlocal inflight, max_in
+        argv = args[0] if args else []
+        remote = argv[-1] if argv else ""
+        with lock:
+            inflight += 1
+            max_in = max(max_in, inflight)
+        time.sleep(0.12)
+        with lock:
+            inflight -= 1
+        if "sinfo" in str(remote):
+            return _Proc(stdout="SINFO\nlrz-hgx-a100-80x4|up|14-00:00:0|1|mix|n1\nSCONTROL\n")
+        return _Proc(stdout=_login_stdout(
+            "5778174|PD|lrz-hgx-a100-80x4||0:00|24:00:00|Priority|gs-24h|2026-09-10T03:10:58\n"
+        ))
+
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz.lrz_session_alive",
+        lambda cfg=None, force=False: True,
+    )
+    monkeypatch.setattr("splat_explorer.repair_lrz.subprocess.run", fake_run)
+    cfg = {
+        "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "5777731",
+        "workspace": "/dss/ws", "container": "/dss/ws/containers/pytorch.sqsh",
+        "cpus": 4, "mem": "32G", "container_name": "splat-repair",
+    }
+    errors: list[BaseException] = []
+
+    def run_probe():
+        try:
+            probe_lrz_gpu(cfg)
+        except BaseException as exc:  # noqa: BLE001 — collect for the parent thread
+            errors.append(exc)
+
+    def run_review():
+        try:
+            review_lrz_partitions(force=True, cfg=cfg)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    first = threading.Thread(target=run_probe)
+    second = threading.Thread(target=run_review)
+    first.start()
+    time.sleep(0.03)
+    second.start()
+    first.join()
+    second.join()
+    assert errors == []
+    assert max_in == 1
+
+
+def test_review_uses_ten_minute_cache(monkeypatch):
+    from splat_explorer.repair_lrz import reset_gpu_probe_cache, review_lrz_partitions
+
+    reset_gpu_probe_cache()
+    calls: list[str] = []
+
+    def fake_ssh(cfg, remote, timeout=25):
+        calls.append(remote)
+        return _Proc(stdout="SINFO\nlrz-hgx-a100-80x4|up|14-00:00:0|1|mix|n1\nSCONTROL\n")
+
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz.lrz_session_alive",
+        lambda cfg=None, force=False: True,
+    )
+    monkeypatch.setattr("splat_explorer.repair_lrz._ssh_run", fake_ssh)
+    first = review_lrz_partitions(force=True, cfg={"user": "go73kaf2", "host": "login.ai.lrz.de"})
+    second = review_lrz_partitions(force=False, cfg={"user": "go73kaf2", "host": "login.ai.lrz.de"})
+    assert first["cached"] is False
+    assert second["cached"] is True
+    assert len(calls) == 1
+
+
+def test_dashboard_snapshot_skips_ssh_when_probe_cached(monkeypatch, tmp_path):
+    import time
+
+    from splat_explorer.repair_lrz import (
+        _PROBE,
+        lrz_dashboard_snapshot,
+        reset_gpu_probe_cache,
+    )
+
+    reset_gpu_probe_cache()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("splat_explorer.repair_lrz.load_lrz_config", lambda: {
+        "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "5777731",
+        "workspace": "/dss/ws", "container": "/dss/ws/containers/pytorch.sqsh",
+        "cpus": 4, "mem": "32G", "container_name": "splat-repair",
+    })
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_configured", lambda: True)
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz.lrz_session_alive",
+        lambda cfg=None, force=False: True,
+    )
+
+    def boom(*args, **kwargs):
+        raise AssertionError("cached snapshot must not open SSH")
+
+    monkeypatch.setattr("splat_explorer.repair_lrz._ssh_run", boom)
+    monkeypatch.setattr("splat_explorer.repair_lrz.subprocess.run", boom)
+    with _PROBE["lock"]:
+        _PROBE["body"] = {
+            "slurm": None, "jobs": [], "container": {"ok": True, "bytes": 1},
+            "gpu": None, "gpu_error": None, "ngc": False, "workspace_ok": True,
+            "setup": {"ok": False}, "history_jobs": [],
+        }
+        _PROBE["at"] = time.time()
+        _PROBE["error"] = None
+        _PROBE["inflight"] = False
+    body = lrz_dashboard_snapshot(repair_job={"status": "idle"})
+    assert body["probing"] is False
+    assert body["jobs"] == []
 

@@ -225,8 +225,10 @@ hold, run `ssh-session.sh` again if the mux drops.
 1. Local stack: `./scripts/start.sh` → <http://localhost:8090/repair/gpu>
 2. **Reserve GPU** 8h or 24h (optional “queue after current job”). Widen
    partitions if the job sits in `PD (Priority)`. The refresh icon (right of
-   Reserve) re-runs squeue/sacct/nvidia-smi plus one sinfo. **Refresh
-   availability** is sinfo/scontrol only, never looped.
+   Reserve) re-runs one login probe (squeue + sacct, then nvidia-smi if the
+   job is `R`) and only afterwards one sinfo. Reloads reuse the 10 min cache
+   and never stack SSH on ControlMaster. **Refresh availability** is
+   sinfo/scontrol only, never looped, and waits if a probe is still running.
    **Past jobs** is one `sacct` (completed allocations, including restarts).
    Initial window is the last 14 days through now; switch to a start date
    through now, or a custom start/end range. Same 10 min cadence as squeue —
@@ -237,10 +239,13 @@ hold, run `ssh-session.sh` again if the mux drops.
    Repairs rsync the packed view and `srun --overlap` on `job_id`.
 
 The GPU page auto-probes at most once per 10 min **while that tab is visible**.
-Hidden tabs keep the last snapshot and send nothing. Use the refresh icon (or
+Hidden tabs keep the last snapshot and send nothing. Reloads paint from cache
+first; a probe starts ~0.5s later only if that cache is stale. SSH through
+`~/.ssh/cm-lrz` is single-flight with a short stagger — overlapping dashboard
+tabs cannot open 5–10 mux channels at once. Use the refresh icon (or
 Load history) to refresh manually. Each probe is one SSH: `squeue --me`,
-`squeue --me --long`, `date`, `id -u`, and `sacct --allocations --duplicates`
-for the selected window. The refresh icon also runs one `sinfo`.
+`date`, `id -u`, and `sacct --allocations --duplicates` for the selected
+window. The refresh icon then runs one `sinfo` after that probe finishes.
 
 If the socket is gone: `scripts/lrz/ssh-session.sh` again. If the job is
 not `R`, the GPU page still loads login-node data (availability, reserved
