@@ -482,8 +482,9 @@ def test_login_probe_lists_all_jobs_once():
          "container": "/dss/ws/containers/pytorch.sqsh"},
         None,
     )
-    assert "squeue --start --me" in script
+    assert "squeue --me" in script
     assert "%S" in script
+    assert "--start" not in script
     assert "--job=" not in script
     assert "setup-5777469.json" in script
     assert "echo SETUP" in script

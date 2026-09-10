@@ -633,7 +633,7 @@ def gpu_attach_error_is_stale(message: str | None) -> bool:
 
 
 def parse_squeue_line(line: str) -> dict | None:
-    """Parse `squeue --start --me -o '%i|%t|%P|%N|%M|%l|%r|%j|%S'` (name/start optional)."""
+    """Parse `squeue --me -o '%i|%t|%P|%N|%M|%l|%r|%j|%S'` (name/start optional)."""
     text = (line or "").strip()
     if not text:
         return None
@@ -1278,7 +1278,7 @@ def _login_probe_script(cfg: dict, packed_id: str | None) -> str:
         status_block = "echo NONE"
     return (
         "echo SQUEUE\n"
-        "squeue --start --me -h -o '%i|%t|%P|%N|%M|%l|%r|%j|%S' || true\n"
+        "squeue --me -h -o '%i|%t|%P|%N|%M|%l|%r|%j|%S' || true\n"
         "echo CONTAINER\n"
         f"if [ -f {container} ]; then echo OK $(stat -c%s {container}); else echo MISSING; fi\n"
         "echo NGC\n"
@@ -1354,7 +1354,7 @@ def _store_probe_partial(body: dict[str, Any]) -> None:
 
 
 def probe_lrz_gpu(cfg: dict | None = None, *, packed_id: str | None = None) -> dict[str, Any]:
-    """One SSH login probe (squeue --start --me) plus nvidia-smi only if a job is R."""
+    """One SSH login probe (squeue --me including %S start times) plus nvidia-smi only if a job is R."""
     cfg = cfg or load_lrz_config()
     if not lrz_session_alive(cfg):
         raise RuntimeError(session_required_message())

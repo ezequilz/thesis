@@ -183,7 +183,7 @@
   </div>
   <div class="grid" style="margin-top:12px">
     <div class="card">
-      <h2>Reserved jobs <span class="sub">squeue --start --me</span></h2>
+      <h2>Reserved jobs <span class="sub">squeue --me · %S start</span></h2>
       <div id="jobs"><div class="empty">No probe yet.</div></div>
     </div>
     <div class="card">
@@ -510,7 +510,7 @@ function renderJobs() {
       </tr>`;
     }).join("")}</tbody>
   </table>
-  <div class="empty" style="padding-top:8px">Start times are cluster local (Europe/Berlin) from one squeue --start --me. Cancel runs scancel once.</div>`;
+  <div class="empty" style="padding-top:8px">Start times are cluster local (Europe/Berlin) from one squeue --me (%S). Cancel runs scancel once.</div>`;
 }
 
 function renderSetup() {

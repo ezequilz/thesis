@@ -236,7 +236,7 @@ manually.
 
 If the socket is gone: `scripts/lrz/ssh-session.sh` again. If the job is
 not `R`, the GPU page still loads login-node data (availability, reserved
-jobs, estimated `squeue --start` times). Connected GPU / current repair stay
+jobs, estimated start times). Connected GPU / current repair stay
 empty until a row is `ST=R`. Reserve a new hold (or **Use** an already-running
 row), then **Load GPU setup**. **Cancel** on a reserved row runs one `scancel`;
 a running (`ST=R`) job asks **cancel?** in red before it fires.
