@@ -248,13 +248,24 @@ class RepairStudio:
             "gpu_url": "/repair/gpu",
         }
 
-    def gpu_snapshot(self, *, probe: bool = False, force: bool = False) -> dict:
+    def gpu_snapshot(
+        self,
+        *,
+        probe: bool = False,
+        force: bool = False,
+        history_start: str | None = None,
+        history_end: str | None = None,
+    ) -> dict:
         from ..repair_lrz import lrz_dashboard_snapshot
 
         with self._lock:
             job = dict(self.job)
         return lrz_dashboard_snapshot(
-            repair_job=job, request_probe=probe, force_probe=force,
+            repair_job=job,
+            request_probe=probe,
+            force_probe=force,
+            history_start=history_start,
+            history_end=history_end,
         )
 
     def gpu_allocate(

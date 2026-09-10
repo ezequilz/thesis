@@ -28,9 +28,10 @@ cp configs/lrz.example.yaml configs/lrz.local.yaml
 
 The repeatable path is the GPU dashboard after `./scripts/start.sh`:
 [http://localhost:8090/repair/gpu](http://localhost:8090/repair/gpu)
-(8h/24h Reserve, jobs list, VRAM free, setup checks, one-shot partition
-review). Auto-refresh is at most once per 2.5 min and only while that tab is
-visible. Scripts below do the same work from a terminal.
+(8h/24h Reserve, jobs list, past allocations via sacct, VRAM free, setup
+checks, one-shot partition review). Auto-refresh is at most once per 10 min
+and only while that tab is visible. Scripts below do the same work from a
+terminal.
 
 ## Every session (laptop)
 
@@ -223,20 +224,27 @@ hold, run `ssh-session.sh` again if the mux drops.
 
 1. Local stack: `./scripts/start.sh` → <http://localhost:8090/repair/gpu>
 2. **Reserve GPU** 8h or 24h (optional “queue after current job”). Widen
-   partitions if the job sits in `PD (Priority)`. **Probe GPU** for VRAM
-   free / utilization. **Review partitions** is one `sinfo`, never looped.
+   partitions if the job sits in `PD (Priority)`. The refresh icon (right of
+   Reserve) re-runs squeue/sacct/nvidia-smi plus one sinfo. **Refresh
+   availability** is sinfo/scontrol only, never looped.
+   **Past jobs** is one `sacct` (completed allocations, including restarts).
+   Initial window is the last 14 days through now; switch to a start date
+   through now, or a custom start/end range. Same 10 min cadence as squeue —
+   hidden tabs send nothing.
 3. Click **Use** on the running job, then **Load GPU setup** once
    (named Pyxis container + gsplat on DSS). Same button on `/repair`.
 4. Back on <http://localhost:8090/repair>, backend **gsplat CUDA (GSFix3D)**.
    Repairs rsync the packed view and `srun --overlap` on `job_id`.
 
-The GPU page auto-probes at most once per 2.5 min **while that tab is visible**.
-Hidden tabs keep the last snapshot and send nothing. Use Probe GPU to refresh
-manually.
+The GPU page auto-probes at most once per 10 min **while that tab is visible**.
+Hidden tabs keep the last snapshot and send nothing. Use the refresh icon (or
+Load history) to refresh manually. Each probe is one SSH: `squeue --me`,
+`squeue --me --long`, `date`, `id -u`, and `sacct --allocations --duplicates`
+for the selected window. The refresh icon also runs one `sinfo`.
 
 If the socket is gone: `scripts/lrz/ssh-session.sh` again. If the job is
 not `R`, the GPU page still loads login-node data (availability, reserved
-jobs, estimated start times). Connected GPU / current repair stay
+jobs, past allocations, estimated start times). Connected GPU / current repair stay
 empty until a row is `ST=R`. Reserve a new hold (or **Use** an already-running
 row), then **Load GPU setup**. **Cancel** on a reserved row runs one `scancel`;
 a running (`ST=R`) job asks **cancel?** in red before it fires.

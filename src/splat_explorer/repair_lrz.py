@@ -26,6 +26,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -566,11 +567,32 @@ def job_results_ready(job_dir: Path) -> bool:
     return (job_dir / OUT_PLY).is_file() and (job_dir / METRICS_JSON).is_file()
 
 
-PROBE_TTL_S = 150.0  # 2.5 min. LRZ treats tighter squeue loops as a DoS.
+PROBE_TTL_S = 600.0  # 10 min. LRZ treats tighter squeue loops as a DoS.
 PROBE_TIMEOUT_S = 25.0
 SMI_TIMEOUT_S = 35.0
 SESSION_CHECK_TIMEOUT_S = 5.0
 SETUP_TIMEOUT_S = 1800.0  # First gsplat compile on a node can take 10–20 min.
+HISTORY_DEFAULT_DAYS = 14
+SACCT_FORMAT = (
+    "JobID,JobName,Partition,State%50,Submit,Start,End,Elapsed,Timelimit,ExitCode,NodeList"
+)
+_SACCT_KEYS = (
+    "job_id", "name", "partition", "state", "submit",
+    "start", "end", "elapsed", "timelimit", "exit_code", "node",
+)
+_SACCT_HEADER = {
+    "jobid": "job_id",
+    "jobname": "name",
+    "partition": "partition",
+    "state": "state",
+    "submit": "submit",
+    "start": "start",
+    "end": "end",
+    "elapsed": "elapsed",
+    "timelimit": "timelimit",
+    "exitcode": "exit_code",
+    "nodelist": "node",
+}
 REMOTE_PYTHONPATH = "/workspace/code/src:/workspace/python"
 _STALE_GPU_HINTS = (
     "forbidden",
@@ -596,6 +618,8 @@ _PROBE = {
     "body": None,
     "error": None,
     "inflight": False,
+    "history_start": None,
+    "history_end": None,
 }
 _SINFO = {
     "lock": threading.Lock(),
@@ -671,6 +695,103 @@ def parse_squeue_lines(text: str) -> list[dict[str, Any]]:
             continue
         seen.add(row["job_id"])
         rows.append(row)
+    return rows
+
+
+def default_history_start(days: int = HISTORY_DEFAULT_DAYS) -> str:
+    """Local calendar date ``days`` ago (YYYY-MM-DD), used as sacct --starttime."""
+    return (datetime.now().date() - timedelta(days=int(days))).isoformat()
+
+
+def normalize_sacct_time(raw: str | None, *, default: str) -> str:
+    """Accept now/today, YYYY-MM-DD, or YYYY-MM-DDTHH:MM[:SS] for sacct bounds."""
+    text = str(raw or "").strip()
+    if not text:
+        return default
+    lowered = text.lower()
+    if lowered in ("now", "today"):
+        return lowered
+    stamp = text.replace(" ", "T")
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", stamp):
+        return stamp
+    if re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$", stamp):
+        return stamp + ":00"
+    if re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", stamp):
+        return stamp
+    raise ValueError("History time must be now, today, YYYY-MM-DD, or YYYY-MM-DDTHH:MM.")
+
+
+def normalize_history_window(
+    start: str | None = None,
+    end: str | None = None,
+    *,
+    days: int = HISTORY_DEFAULT_DAYS,
+) -> tuple[str, str]:
+    """Default window is the last ``days`` through now (open-ended)."""
+    start_s = normalize_sacct_time(start, default=default_history_start(days))
+    end_s = normalize_sacct_time(end, default="now")
+    return start_s, end_s
+
+
+def requested_history_window(
+    start: str | None = None,
+    end: str | None = None,
+) -> tuple[str, str]:
+    """Honor an explicit window; otherwise reuse the last probed sacct bounds."""
+    if start is None and end is None:
+        with _PROBE["lock"]:
+            cached_s = _PROBE.get("history_start")
+            cached_e = _PROBE.get("history_end")
+        if cached_s and cached_e:
+            return str(cached_s), str(cached_e)
+    return normalize_history_window(start, end)
+
+
+def sacct_command(user: str, start: str, end: str) -> str:
+    """One sacct of this user's allocations, including completed jobs and restarts."""
+    return (
+        "sacct"
+        f" --user={shlex.quote(str(user))}"
+        f" --starttime={shlex.quote(start)}"
+        f" --endtime={shlex.quote(end)}"
+        " --allocations --duplicates --parsable2"
+        f" --format={SACCT_FORMAT}"
+    )
+
+
+def parse_sacct_lines(text: str) -> list[dict[str, Any]]:
+    """Parse ``sacct --parsable2`` (pipe-separated, optional header). Newest first.
+
+    Job steps (``123.batch``) are dropped; allocation restarts keep the same JobID.
+    """
+    rows: list[dict[str, Any]] = []
+    keys = list(_SACCT_KEYS)
+    for line in (text or "").splitlines():
+        raw = line.strip()
+        if not raw or raw.lower().startswith("sacct:"):
+            continue
+        parts = [p.strip() for p in raw.split("|")]
+        if not parts or not parts[0]:
+            continue
+        head = re.sub(r"[^a-z0-9]", "", parts[0].lower())
+        if head == "jobid":
+            mapped: list[str] = []
+            for part in parts:
+                token = re.sub(r"[^a-z0-9]", "", part.lower())
+                mapped.append(_SACCT_HEADER.get(token, token or part.lower()))
+            keys = mapped
+            continue
+        job_id = parts[0]
+        if "." in job_id or not re.match(r"^\d+", job_id):
+            continue
+        body: dict[str, Any] = {}
+        for i, key in enumerate(keys):
+            raw_val = parts[i] if i < len(parts) else ""
+            body[key] = _squeue_blank(raw_val)
+        if not body.get("job_id"):
+            continue
+        rows.append(body)
+    rows.sort(key=lambda r: str(r.get("start") or r.get("submit") or ""), reverse=True)
     return rows
 
 
@@ -953,7 +1074,10 @@ def parse_probe_bundle(text: str) -> dict[str, str]:
     sections: dict[str, str] = {}
     current: str | None = None
     buf: list[str] = []
-    markers = {"SQUEUE", "CONTAINER", "NGC", "WORKSPACE", "STATUS", "SETUP"}
+    markers = {
+        "SQUEUE", "CONTAINER", "NGC", "WORKSPACE", "STATUS", "SETUP",
+        "DATE", "UID", "SQUEUE_LONG", "SACCT",
+    }
     for line in (text or "").splitlines():
         key = line.strip()
         if key in markers:
@@ -1266,11 +1390,19 @@ def _ssh_run(cfg: dict, remote: str, *, timeout: float = PROBE_TIMEOUT_S) -> sub
         ) from exc
 
 
-def _login_probe_script(cfg: dict, packed_id: str | None) -> str:
+def _login_probe_script(
+    cfg: dict,
+    packed_id: str | None,
+    *,
+    history_start: str | None = None,
+    history_end: str | None = None,
+) -> str:
     container = shlex.quote(str(cfg.get("container") or "/nonexistent"))
     workspace = shlex.quote(str(cfg["workspace"]))
     job = str(cfg.get("job_id") or "none").strip() or "none"
     setup_marker = shlex.quote(f"{cfg['workspace']}/logs/setup-{job}.json")
+    start, end = normalize_history_window(history_start, history_end)
+    history = sacct_command(str(cfg.get("user") or _DEFAULTS["user"]), start, end)
     if packed_id:
         status = shlex.quote(f"{cfg['workspace']}/inputs/{packed_id}/{STATUS_JSON}")
         status_block = f"if [ -f {status} ]; then cat {status}; else echo NONE; fi"
@@ -1289,6 +1421,14 @@ def _login_probe_script(cfg: dict, packed_id: str | None) -> str:
         f"if [ -f {setup_marker} ]; then echo OK; cat {setup_marker}; else echo MISSING; fi\n"
         "echo STATUS\n"
         f"{status_block}\n"
+        "echo DATE\n"
+        "date '+%F %T %Z %z' || true\n"
+        "echo UID\n"
+        "id -u || true\n"
+        "echo SQUEUE_LONG\n"
+        "squeue --me --long || true\n"
+        "echo SACCT\n"
+        f"{history} || true\n"
     )
 
 
@@ -1330,6 +1470,7 @@ def _login_probe_body(cfg: dict, parsed: dict[str, str]) -> dict[str, Any]:
                 remote_status = loaded
         except json.JSONDecodeError:
             remote_status = {"raw": status_raw[:500]}
+    uid_raw = (parsed.get("uid") or "").strip()
     return {
         "slurm": slurm,
         "jobs": jobs,
@@ -1340,6 +1481,10 @@ def _login_probe_body(cfg: dict, parsed: dict[str, str]) -> dict[str, Any]:
         "setup": parse_setup_marker_text(
             parsed.get("setup") or "", job_id=str(cfg.get("job_id") or ""),
         ),
+        "history_jobs": parse_sacct_lines(parsed.get("sacct") or ""),
+        "cluster_time": (parsed.get("date") or "").strip() or None,
+        "uid": uid_raw or None,
+        "squeue_long": (parsed.get("squeue_long") or "").strip() or None,
         "gpu": None,
         "gpu_error": None,
     }
@@ -1353,16 +1498,31 @@ def _store_probe_partial(body: dict[str, Any]) -> None:
         _PROBE["at"] = time.time()
 
 
-def probe_lrz_gpu(cfg: dict | None = None, *, packed_id: str | None = None) -> dict[str, Any]:
+def probe_lrz_gpu(
+    cfg: dict | None = None,
+    *,
+    packed_id: str | None = None,
+    history_start: str | None = None,
+    history_end: str | None = None,
+) -> dict[str, Any]:
     """One SSH login probe (squeue --me including %S start times) plus nvidia-smi only if a job is R."""
     cfg = cfg or load_lrz_config()
     if not lrz_session_alive(cfg):
         raise RuntimeError(session_required_message())
-    result = _ssh_run(cfg, _login_probe_script(cfg, packed_id), timeout=PROBE_TIMEOUT_S)
+    start, end = normalize_history_window(history_start, history_end)
+    result = _ssh_run(
+        cfg,
+        _login_probe_script(
+            cfg, packed_id, history_start=start, history_end=end,
+        ),
+        timeout=PROBE_TIMEOUT_S,
+    )
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(err or "LRZ login probe failed.")
     body = _login_probe_body(cfg, parse_probe_bundle(result.stdout or ""))
+    body["history_start"] = start
+    body["history_end"] = end
     _store_probe_partial(body)
     slurm = body.get("slurm")
     smi_job = slurm.get("job_id") if slurm_job_is_running(slurm) else None
@@ -1394,11 +1554,18 @@ def probe_lrz_gpu(cfg: dict | None = None, *, packed_id: str | None = None) -> d
     return body
 
 
-def request_gpu_probe(*, force: bool = False, packed_id: str | None = None) -> dict[str, Any]:
+def request_gpu_probe(
+    *,
+    force: bool = False,
+    packed_id: str | None = None,
+    history_start: str | None = None,
+    history_end: str | None = None,
+) -> dict[str, Any]:
     """Start at most one background probe. Never loops squeue."""
     cfg = load_lrz_config()
     if not lrz_session_alive(cfg):
         return {"started": False, "reason": "ssh"}
+    start, end = normalize_history_window(history_start, history_end)
     now = time.time()
     inflight_limit = PROBE_TIMEOUT_S + SMI_TIMEOUT_S + 10.0
     with _PROBE["lock"]:
@@ -1408,23 +1575,49 @@ def request_gpu_probe(*, force: bool = False, packed_id: str | None = None) -> d
                 return {"started": False, "reason": "inflight"}
             logger.warning("LRZ GPU probe inflight watchdog reset after %.0fs", now - started)
         age = now - float(_PROBE["at"] or 0)
-        if not force and _PROBE["body"] is not None and age < PROBE_TTL_S:
+        cached_start = _PROBE.get("history_start")
+        cached_end = _PROBE.get("history_end")
+        range_changed = (
+            (cached_start not in (None, start) or cached_end not in (None, end))
+            if _PROBE["body"] is not None else False
+        )
+        if (
+            not force
+            and not range_changed
+            and _PROBE["body"] is not None
+            and age < PROBE_TTL_S
+        ):
             return {"started": False, "reason": "fresh", "age_s": round(age, 1)}
-        if not force and _PROBE["error"] and age < 8:
+        if not force and not range_changed and _PROBE["error"] and age < 8:
             return {"started": False, "reason": "backoff"}
         _PROBE["inflight"] = True
         _PROBE["started_at"] = now
+        _PROBE["history_start"] = start
+        _PROBE["history_end"] = end
     threading.Thread(
-        target=_run_probe_thread, args=(cfg, packed_id), daemon=True, name="lrz-gpu-probe",
+        target=_run_probe_thread,
+        args=(cfg, packed_id, start, end),
+        daemon=True,
+        name="lrz-gpu-probe",
     ).start()
     return {"started": True}
 
 
-def _run_probe_thread(cfg: dict, packed_id: str | None) -> None:
+def _run_probe_thread(
+    cfg: dict,
+    packed_id: str | None,
+    history_start: str | None = None,
+    history_end: str | None = None,
+) -> None:
     body = None
     err = None
     try:
-        body = probe_lrz_gpu(cfg, packed_id=packed_id)
+        body = probe_lrz_gpu(
+            cfg,
+            packed_id=packed_id,
+            history_start=history_start,
+            history_end=history_end,
+        )
     except Exception as exc:
         err = f"{type(exc).__name__}: {exc}"
         logger.warning("LRZ GPU probe failed: %s", err)
@@ -1446,6 +1639,8 @@ def reset_gpu_probe_cache() -> None:
         _PROBE["body"] = None
         _PROBE["error"] = None
         _PROBE["inflight"] = False
+        _PROBE["history_start"] = None
+        _PROBE["history_end"] = None
     with _SINFO["lock"]:
         _SINFO["at"] = 0.0
         _SINFO["body"] = None
@@ -1733,13 +1928,19 @@ def lrz_dashboard_snapshot(
     *,
     request_probe: bool = False,
     force_probe: bool = False,
+    history_start: str | None = None,
+    history_end: str | None = None,
 ) -> dict[str, Any]:
     """Local connection + current repair, plus a cached GPU probe."""
     status = lrz_status()
     packed = list_packed_jobs()
     packed_id = packed[0]["id"] if packed else None
+    hist_start, hist_end = requested_history_window(history_start, history_end)
     if request_probe or force_probe:
-        request_gpu_probe(force=force_probe, packed_id=packed_id)
+        request_gpu_probe(
+            force=force_probe, packed_id=packed_id,
+            history_start=hist_start, history_end=hist_end,
+        )
     with _PROBE["lock"]:
         inflight = bool(_PROBE["inflight"])
         cached = _PROBE["body"]
@@ -1751,7 +1952,10 @@ def lrz_dashboard_snapshot(
         and not inflight
         and not error
     ):
-        request_gpu_probe(force=False, packed_id=packed_id)
+        request_gpu_probe(
+            force=False, packed_id=packed_id,
+            history_start=hist_start, history_end=hist_end,
+        )
         with _PROBE["lock"]:
             inflight = bool(_PROBE["inflight"])
             cached = _PROBE["body"]
@@ -1855,7 +2059,19 @@ def lrz_dashboard_snapshot(
         "hold_hours": list(HOLD_HOURS),
         "max_hold_hours": MAX_HOLD_HOURS,
         "partition": status.get("partition") or DEFAULT_PARTITION,
-        "hint": "Slurm is queried at most once per 2.5 min while this page is visible. sinfo only on Review partitions.",
+        "history": {
+            "jobs": list((cached or {}).get("history_jobs") or []),
+            "start": (cached or {}).get("history_start") or hist_start,
+            "end": (cached or {}).get("history_end") or hist_end,
+            "cluster_time": (cached or {}).get("cluster_time"),
+            "uid": (cached or {}).get("uid"),
+            "squeue_long": (cached or {}).get("squeue_long"),
+            "default_days": HISTORY_DEFAULT_DAYS,
+        },
+        "hint": (
+            "Slurm (squeue + sacct) is queried at most once per 10 min while this "
+            "page is visible. Hidden tabs send nothing. sinfo only on Refresh availability."
+        ),
     }
 
 

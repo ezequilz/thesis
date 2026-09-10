@@ -31,8 +31,18 @@
   button { border: 0; border-radius: 6px; padding: 7px 14px; font-size: 13px;
            font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .45; cursor: default; }
-  #btn-probe { background: var(--accent); color: #0b1220; }
   #btn-setup { background: var(--ok); color: #0b1220; }
+  #btn-refresh {
+    margin-left: auto;
+    width: 32px; height: 32px; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: transparent; color: var(--dim);
+    border: 1px solid var(--border) !important;
+  }
+  #btn-refresh:hover:not(:disabled) { color: var(--text); background: var(--panel2); }
+  #btn-refresh svg { width: 15px; height: 15px; display: block; }
+  #btn-refresh.busy svg { animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .ghost { background: var(--panel2); color: var(--text); border: 1px solid var(--border) !important; }
   .danger { background: transparent; color: var(--warn); border: 1px solid var(--border) !important; }
   #toolbar { display: flex; gap: 10px; align-items: center; padding: 8px 16px;
@@ -47,12 +57,21 @@
   #reserve { display: flex; flex-direction: column; gap: 8px; padding: 8px 16px;
              background: var(--panel); border-bottom: 1px solid var(--border); flex: none; }
   #reserve .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  #in-hours, #in-begin {
+  #in-hours, #in-begin, #in-hist-start, #in-hist-end {
     background: var(--panel2); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 6px 8px; font: 12.5px var(--mono);
   }
   #in-hours { width: 76px; }
-  #in-hours[hidden], #in-begin[hidden] { display: none !important; }
+  #in-hours[hidden], #in-begin[hidden], #in-hist-start[hidden], #in-hist-end[hidden] {
+    display: none !important;
+  }
+  #hist-to[hidden] { display: none !important; }
+  #history { overflow-x: auto; }
+  #hist-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  #probe-meta { font-size: 12px; color: var(--dim); flex: 1; min-width: 180px; }
+  td.state-ok { color: var(--ok); }
+  td.state-err { color: var(--err); }
+  td.state-dim { color: var(--dim); }
   .free { color: var(--ok); }
   .full { color: var(--err); }
   .down { color: var(--dim); }
@@ -129,7 +148,7 @@
   <h1>splat-explorer <span>· GPU / LRZ</span></h1>
   <span id="pill-ready" class="pill">checking…</span>
   <span id="pill-job" class="pill">repair: idle</span>
-  <span id="pill-watch" class="pill">auto: 2.5m</span>
+  <span id="pill-watch" class="pill">auto: 10m</span>
   <span class="spacer"></span>
   <a href="/repair">repair review</a>
   <a href="/">episode dashboard</a>
@@ -154,13 +173,18 @@
       <input type="checkbox" id="in-after"> queue after current job
     </label>
     <button id="btn-alloc">Reserve GPU</button>
+    <button id="btn-refresh" class="ghost" title="Refresh jobs, GPU, history, and availability" aria-label="Refresh">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/>
+        <path d="M21 3v5h-5"/>
+      </svg>
+    </button>
   </div>
   <div class="row">
     <button id="btn-widen" class="ghost">Widen selected partitions</button>
     <button id="btn-review" class="ghost">Refresh availability</button>
     <button id="btn-setup" title="Once per allocation: start the named Pyxis container from DSS pytorch.sqsh and install gsplat onto the shared drive. Later repairs reuse it.">Load GPU setup</button>
-    <button id="btn-probe">Probe GPU</button>
-    <span id="probe-meta" class="hint">At most one remote probe per 2.5 min while this tab is visible. Availability is a separate one-shot sinfo/scontrol.</span>
+    <span id="probe-meta" class="hint">At most one remote probe per 10 min while this tab is visible. Availability is a separate one-shot sinfo.</span>
   </div>
 </div>
 <div id="note"></div>
@@ -174,22 +198,31 @@
   <div class="grid">
     <div class="card" id="gpu-card">
       <h2>Connected GPU</h2>
-      <div class="empty">No GPU probe yet. Open the SSH session, then click Probe GPU.</div>
+      <div class="empty">No GPU probe yet. Open the SSH session, then refresh.</div>
     </div>
     <div class="card" id="repair-card">
       <h2>Current repair</h2>
       <div class="empty">No CUDA repair running.</div>
     </div>
   </div>
-  <div class="grid" style="margin-top:12px">
-    <div class="card">
-      <h2>Reserved jobs <span class="sub">squeue --me · %S start</span></h2>
-      <div id="jobs"><div class="empty">No probe yet.</div></div>
+  <div class="card" style="margin-top:12px">
+    <h2>Reserved jobs <span class="sub">squeue --me · %S start</span></h2>
+    <div id="jobs"><div class="empty">No probe yet.</div></div>
+  </div>
+  <div class="card" style="margin-top:12px" id="hist-card">
+    <h2>Past jobs <span class="sub" id="hist-sub">sacct · last 14 days</span></h2>
+    <div id="hist-bar">
+      <div class="seg" id="seg-hist">
+        <button type="button" data-h="14d" class="on">Last 14 days</button>
+        <button type="button" data-h="since">Since date → now</button>
+        <button type="button" data-h="range">Date range</button>
+      </div>
+      <input id="in-hist-start" type="date" hidden title="Start date (cluster local)">
+      <span id="hist-to" hidden style="color:var(--dim)">to</span>
+      <input id="in-hist-end" type="date" hidden title="End date (inclusive)">
+      <button id="btn-hist" class="ghost">Load history</button>
     </div>
-    <div class="card">
-      <h2>Setup / connect</h2>
-      <div id="setup"></div>
-    </div>
+    <div id="history"><div class="empty">No history yet. Open the SSH session — sacct loads with the 10 min probe.</div></div>
   </div>
   <div class="card" style="margin-top:12px" id="part-card">
     <h2>sinfo rows <span class="sub">partition state groups</span></h2>
@@ -200,6 +233,10 @@
     <div id="packed"><div class="empty">No packed jobs in outputs/lrz-jobs. Start gsplat CUDA from the repair page.</div></div>
   </div>
   <div class="card" style="margin-top:12px">
+    <h2>Setup / connect</h2>
+    <div id="setup"></div>
+  </div>
+  <div class="card" style="margin-top:12px">
     <h2>Connection</h2>
     <div class="kv" id="conn-kv"></div>
   </div>
@@ -207,11 +244,13 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const AUTO_MS = 150000; // 2.5 min — LRZ throttles tighter squeue loops.
+const AUTO_MS = 600000; // 10 min — LRZ throttles tighter squeue loops.
+const HISTORY_DAYS = 14;
 let snap = null;
 let tickBusy = false;
 let hoursMode = 2;
 let beginMode = "now";
+let historyMode = "14d";
 let selectedParts = new Set(["lrz-hgx-a100-80x4", "lrz-dgx-a100-80x8"]);
 let lastRemoteAt = 0;
 let lastNote = "";
@@ -300,6 +339,35 @@ function beginValue() {
   if (beginMode === "tomorrow") return tomorrowNine();
   return $("in-begin").value || "";
 }
+function daysAgoISO(n) {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+function todayISO() {
+  return daysAgoISO(0);
+}
+function historyWindow() {
+  if (historyMode === "14d") return { start: daysAgoISO(HISTORY_DAYS), end: "now" };
+  if (historyMode === "since") {
+    return { start: $("in-hist-start").value || daysAgoISO(HISTORY_DAYS), end: "now" };
+  }
+  return {
+    start: $("in-hist-start").value || daysAgoISO(HISTORY_DAYS),
+    end: $("in-hist-end").value || todayISO(),
+  };
+}
+function historyQuery() {
+  const w = historyWindow();
+  return `start=${encodeURIComponent(w.start)}&end=${encodeURIComponent(w.end)}`;
+}
+function histStateCls(state) {
+  const s = String(state || "").toUpperCase();
+  if (s.startsWith("COMPLETED")) return "state-ok";
+  if (/FAIL|TIMEOUT|OUT_OF_MEMORY|NODE_FAIL|PREEMPT/.test(s)) return "state-err";
+  if (/CANCEL/.test(s)) return "state-dim";
+  return "";
+}
 function selectedPartition() {
   return [...selectedParts].join(",");
 }
@@ -319,6 +387,26 @@ function syncBeginUI() {
   $("in-begin").hidden = !pick;
   if (pick && !$("in-begin").value) $("in-begin").value = tomorrowNine();
 }
+function syncHistUI() {
+  for (const b of $("seg-hist").querySelectorAll("button")) {
+    b.classList.toggle("on", b.dataset.h === historyMode);
+  }
+  const since = historyMode === "since";
+  const range = historyMode === "range";
+  $("in-hist-start").hidden = historyMode === "14d";
+  $("hist-to").hidden = !range;
+  $("in-hist-end").hidden = !range;
+  if ((since || range) && !$("in-hist-start").value) $("in-hist-start").value = daysAgoISO(HISTORY_DAYS);
+  if (range && !$("in-hist-end").value) $("in-hist-end").value = todayISO();
+  const sub = $("hist-sub");
+  if (sub) {
+    sub.textContent = historyMode === "14d"
+      ? "sacct · last 14 days"
+      : historyMode === "since"
+        ? "sacct · since date → now"
+        : "sacct · custom range";
+  }
+}
 
 $("seg-hours").onclick = (ev) => {
   const btn = ev.target.closest("button[data-h]");
@@ -336,6 +424,13 @@ $("seg-begin").onclick = (ev) => {
   if (snap) renderSetup();
 };
 $("in-after").onchange = () => { if (snap) renderSetup(); };
+$("seg-hist").onclick = (ev) => {
+  const btn = ev.target.closest("button[data-h]");
+  if (!btn) return;
+  historyMode = btn.dataset.h;
+  syncHistUI();
+  if (historyMode === "14d") loadHistory();
+};
 
 document.body.addEventListener("click", async (ev) => {
   const btn = ev.target.closest("[data-copy]");
@@ -371,7 +466,7 @@ function renderGpu() {
     if (probing && running) empty = "Probing the allocated node…";
     else if (err) empty = err;
     else if (running) empty = "Job is running, but nvidia-smi has not returned yet.";
-    else if (!snap?.connection?.session) empty = "No GPU probe yet. Open the SSH session, then click Probe GPU.";
+    else if (!snap?.connection?.session) empty = "No GPU probe yet. Open the SSH session, then refresh.";
     else if (pending.length) {
       empty = `No GPU allocated (no job in ST=R). ${pending.length} job(s) pending`
         + (soonest ? ` · earliest start ${fmtStart(soonest)}` : " (Priority / queue).");
@@ -480,7 +575,7 @@ function renderJobs() {
     box.innerHTML = `<div class="empty">${esc(
       snap?.connection?.session
         ? "No jobs in squeue --me. Reserve 8h or 24h above."
-        : "Open scripts/lrz/ssh-session.sh, then Probe GPU."
+        : "Open scripts/lrz/ssh-session.sh, then refresh."
     )}</div>`;
     return;
   }
@@ -511,6 +606,58 @@ function renderJobs() {
     }).join("")}</tbody>
   </table>
   <div class="empty" style="padding-top:8px">Start times are cluster local (Europe/Berlin) from one squeue --me (%S). Cancel runs scancel once.</div>`;
+}
+
+function renderHistory() {
+  const box = $("history");
+  const hist = snap?.history || {};
+  const jobs = hist.jobs || [];
+  const current = snap?.connection?.job_id;
+  const w = historyWindow();
+  const clock = hist.cluster_time ? `cluster ${hist.cluster_time}` : "";
+  const uid = hist.uid ? `uid ${hist.uid}` : "";
+  const window = `${hist.start || w.start} → ${hist.end || w.end}`;
+  const meta = [clock, uid, window].filter(Boolean).join(" · ");
+  if (!snap?.connection?.session) {
+    box.innerHTML = `<div class="empty">Open scripts/lrz/ssh-session.sh, then refresh. sacct needs the SSH mux.</div>`;
+    return;
+  }
+  if (!jobs.length) {
+    const probing = snap?.probing;
+    box.innerHTML = `<div class="empty">${esc(
+      probing
+        ? "Loading sacct allocations…"
+        : (hist.start
+          ? `No allocations in ${window}. Completed jobs drop off squeue; widen the date range if you expected some.`
+          : "Waiting for the first sacct probe.")
+    )}</div>
+    ${meta ? `<div class="empty" style="padding-top:8px">${esc(meta)}</div>` : ""}`;
+    return;
+  }
+  box.innerHTML = `<table>
+    <thead><tr>
+      <th>id</th><th>name</th><th>state</th><th>partition</th>
+      <th>submit</th><th>start</th><th>end</th><th>elapsed</th>
+      <th>limit</th><th>exit</th><th>node</th>
+    </tr></thead>
+    <tbody>${jobs.map(j => {
+      const on = String(j.job_id || "") === String(current || "");
+      return `<tr class="${on ? "current" : ""}">
+        <td>${esc(j.job_id)}</td>
+        <td>${esc(j.name || "–")}</td>
+        <td class="${histStateCls(j.state)}">${esc(j.state || "–")}</td>
+        <td>${esc(j.partition || "–")}</td>
+        <td>${esc(fmtStart(j.submit))}</td>
+        <td>${esc(fmtStart(j.start))}</td>
+        <td>${esc(fmtStart(j.end))}</td>
+        <td>${esc(j.elapsed || "–")}</td>
+        <td>${esc(j.timelimit || "–")}</td>
+        <td>${esc(j.exit_code || "–")}</td>
+        <td>${esc(j.node || "–")}</td>
+      </tr>`;
+    }).join("")}</tbody>
+  </table>
+  <div class="empty" style="padding-top:8px">${esc(meta)}. ${jobs.length} allocation(s), including completed jobs and restarts. Same 10 min probe as reserved jobs — hidden tabs send nothing.</div>`;
 }
 
 function renderSetup() {
@@ -692,7 +839,7 @@ function renderChrome() {
     watch.textContent = "auto: paused";
     watch.className = "pill paused";
   } else {
-    watch.textContent = "auto: 2.5m";
+    watch.textContent = "auto: 10m";
     watch.className = "pill";
   }
   const blocked = snap?.next_action;
@@ -713,7 +860,8 @@ function renderChrome() {
       : `Last probe ${ageText(age)}. `;
   const probeBusy = Boolean(snap?.probing) || tickBusy;
   const setupBusy = Boolean(snap?.setup?.inflight);
-  $("btn-probe").disabled = probeBusy || setupBusy;
+  $("btn-refresh").disabled = probeBusy || setupBusy;
+  $("btn-refresh").classList.toggle("busy", probeBusy);
   $("btn-alloc").disabled = setupBusy || !session;
   $("btn-widen").disabled = setupBusy || !session;
   $("btn-review").disabled = setupBusy || !session;
@@ -722,6 +870,7 @@ function renderChrome() {
   $("btn-setup").textContent = snap?.setup?.inflight
     ? "Loading GPU setup…"
     : (snap?.setup?.ok ? "Reload GPU setup" : "Load GPU setup");
+  $("btn-hist").disabled = probeBusy || setupBusy || !session;
   syncAutoInterval();
 }
 
@@ -731,6 +880,7 @@ function render() {
   renderGpu();
   renderRepair();
   renderJobs();
+  renderHistory();
   renderSetup();
   renderAvail();
   renderParts();
@@ -781,7 +931,11 @@ async function tick({ probe = false, force = false } = {}) {
   inflight = new AbortController();
   try {
     if (probe) lastRemoteAt = Date.now();
-    const r = await fetch("/api/repair/gpu" + (probe ? "?probe=1" : ""), { signal: inflight.signal });
+    const q = historyQuery();
+    const r = await fetch(
+      "/api/repair/gpu" + (probe ? `?probe=1&${q}` : `?${q}`),
+      { signal: inflight.signal },
+    );
     const text = await r.text();
     let data;
     try { data = JSON.parse(text); }
@@ -852,15 +1006,29 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-$("btn-probe").onclick = async () => {
-  $("btn-probe").disabled = true;
+$("btn-refresh").onclick = async () => {
+  $("btn-refresh").disabled = true;
+  $("btn-refresh").classList.add("busy");
   lastRemoteAt = 0;
   try {
-    snap = await postJson("/api/repair/gpu/probe", { force: true });
+    const w = historyWindow();
+    snap = await postJson("/api/repair/gpu/probe", {
+      force: true, start: w.start, end: w.end,
+    });
     lastRemoteAt = Date.now();
     render();
+    try {
+      snap = await postJson("/api/repair/gpu/review", { force: true });
+      reviewedOnce = true;
+      render();
+    } catch (err) {
+      setNote("warn", err.message);
+    }
   } catch (err) {
-    setNote("err", "Probe failed: " + err.message);
+    setNote("err", "Refresh failed: " + err.message);
+  } finally {
+    $("btn-refresh").classList.remove("busy");
+    renderChrome();
   }
 };
 
@@ -933,6 +1101,29 @@ $("btn-review").onclick = async () => {
   }
 };
 
+async function loadHistory() {
+  const w = historyWindow();
+  if (!w.start) {
+    setNote("err", "Pick a start date for job history.");
+    return;
+  }
+  if (historyMode === "range" && !w.end) {
+    setNote("err", "Pick an end date, or use Since date → now.");
+    return;
+  }
+  $("btn-hist").disabled = true;
+  try {
+    snap = await postJson("/api/repair/gpu/history", { start: w.start, end: w.end });
+    lastRemoteAt = Date.now();
+    setNote("info", `Requested sacct ${w.start} → ${w.end}.`);
+    render();
+  } catch (err) {
+    setNote("err", err.message);
+    renderChrome();
+  }
+}
+$("btn-hist").onclick = () => loadHistory();
+
 $("avail").onchange = (ev) => {
   const box = ev.target.closest("[data-part]");
   if (!box) return;
@@ -977,6 +1168,7 @@ $("jobs").onclick = async (ev) => {
 };
 
 if (pageVisible()) startAuto();
+syncHistUI();
 tick({ probe: true, force: true });
 window.addEventListener("pagehide", stopAuto);
 window.addEventListener("beforeunload", stopAuto);

@@ -354,7 +354,11 @@ def test_dashboard_snapshot_ssh_down(monkeypatch, tmp_path):
     assert body["scripts"]["setup"] == "scripts/lrz/load-setup.sh"
     assert "setup" in body
     assert body["setup"]["ok"] is False
-    assert "2.5 min" in body["hint"]
+    assert "10 min" in body["hint"]
+    assert body["history"]["jobs"] == []
+    assert body["history"]["default_days"] == 14
+    assert body["history"]["end"] == "now"
+    assert "sacct" in body["hint"]
 
 
 def test_dashboard_snapshot_lists_packed_jobs(monkeypatch, tmp_path):
@@ -475,7 +479,7 @@ def test_allocate_one_sbatch_no_wait(monkeypatch, tmp_path):
 
 
 def test_login_probe_lists_all_jobs_once():
-    from splat_explorer.repair_lrz import _login_probe_script
+    from splat_explorer.repair_lrz import _login_probe_script, default_history_start
 
     script = _login_probe_script(
         {"job_id": "5777469", "workspace": "/dss/ws",
@@ -484,10 +488,28 @@ def test_login_probe_lists_all_jobs_once():
     )
     assert "squeue --me" in script
     assert "%S" in script
-    assert "--start" not in script
+    assert "squeue --me --start" not in script
     assert "--job=" not in script
     assert "setup-5777469.json" in script
     assert "echo SETUP" in script
+    assert "date '+%F %T %Z %z'" in script
+    assert "id -u" in script
+    assert "squeue --me --long" in script
+    assert "sacct" in script
+    assert "--allocations" in script
+    assert "--duplicates" in script
+    assert "--parsable2" in script
+    assert "--user=go73kaf2" in script
+    assert "--endtime=now" in script
+    assert f"--starttime={default_history_start()}" in script
+    custom = _login_probe_script(
+        {"job_id": "5777469", "workspace": "/dss/ws",
+         "container": "/dss/ws/containers/pytorch.sqsh", "user": "go73kaf2"},
+        None,
+        history_start="2026-09-08",
+        history_end="now",
+    )
+    assert "--starttime=2026-09-08" in custom
 
 
 def test_connection_checks_missing_job_points_at_allocate():
@@ -548,10 +570,14 @@ class _Proc:
         self.stderr = stderr
 
 
-def _login_stdout(squeue_lines: str) -> str:
+def _login_stdout(squeue_lines: str, sacct: str = "") -> str:
     return (
         "SQUEUE\n" + squeue_lines + "\n"
         "CONTAINER\nOK 12\nNGC\nMISSING\nWORKSPACE\nOK\nSETUP\nMISSING\nSTATUS\nNONE\n"
+        "DATE\n2026-09-10 16:16:00 CEST +0200\n"
+        "UID\n12345\n"
+        "SQUEUE_LONG\nJOBID PARTITION NAME\n"
+        "SACCT\n" + (sacct or "JobID|JobName|Partition|State|Submit|Start|End|Elapsed|Timelimit|ExitCode|NodeList\n")
     )
 
 
@@ -770,4 +796,141 @@ def test_cancel_running_job_requires_confirm(monkeypatch, tmp_path):
     assert called == ["scancel 5778400"]
     assert body["was_running"] is True
     assert body["cleared"] is True
+
+
+def test_parse_sacct_and_history_window():
+    from splat_explorer.repair_lrz import (
+        default_history_start,
+        normalize_history_window,
+        normalize_sacct_time,
+        parse_sacct_lines,
+        sacct_command,
+    )
+
+    assert normalize_sacct_time(None, default="now") == "now"
+    assert normalize_sacct_time("2026-09-08", default="now") == "2026-09-08"
+    assert normalize_sacct_time("2026-09-08T09:00", default="now") == "2026-09-08T09:00:00"
+    start, end = normalize_history_window(None, None)
+    assert start == default_history_start()
+    assert end == "now"
+    start, end = normalize_history_window("2026-09-08", "now")
+    assert start == "2026-09-08"
+    assert end == "now"
+    with pytest.raises(ValueError, match="History time"):
+        normalize_sacct_time("yesterday", default="now")
+    cmd = sacct_command("go73kaf2", "2026-09-08", "now")
+    assert "--user=go73kaf2" in cmd
+    assert "--starttime=2026-09-08" in cmd
+    assert "--endtime=now" in cmd
+    assert "--allocations" in cmd
+    assert "--duplicates" in cmd
+    assert "--parsable2" in cmd
+    assert "State%50" in cmd
+
+    rows = parse_sacct_lines(
+        "JobID|JobName|Partition|State|Submit|Start|End|Elapsed|Timelimit|ExitCode|NodeList\n"
+        "5778400|gs-6h|lrz-hgx-a100-80x4|COMPLETED|"
+        "2026-09-08T08:00:00|2026-09-08T08:00:12|2026-09-08T14:00:12|06:00:00|06:00:00|0:0|lrz-hgx-a100-004\n"
+        "5778400.batch|batch||COMPLETED|"
+        "2026-09-08T08:00:00|2026-09-08T08:00:12|2026-09-08T14:00:12|06:00:00|06:00:00|0:0|lrz-hgx-a100-004\n"
+        "5778174|gs-24h|lrz-hgx-a100-80x4|CANCELLED by 12345|"
+        "2026-09-09T01:00:00|2026-09-09T01:00:05|2026-09-09T03:10:00|02:09:55|24:00:00|0:0|lrz-hgx-a100-001\n"
+        "5777469|gs-8h|lrz-dgx-a100-80x8|NODE_FAIL|"
+        "2026-09-08T09:00:00|2026-09-08T09:00:05|2026-09-08T09:30:00|00:29:55|08:00:00|1:0|lrz-dgx-a100-002\n"
+        "5777469|gs-8h|lrz-dgx-a100-80x8|COMPLETED|"
+        "2026-09-08T10:00:00|2026-09-08T10:00:05|2026-09-08T18:00:05|08:00:00|08:00:00|0:0|lrz-dgx-a100-002\n"
+    )
+    ids = [r["job_id"] for r in rows]
+    assert "5778400.batch" not in ids
+    assert ids[0] == "5778174"
+    assert rows[0]["state"] == "CANCELLED by 12345"
+    assert ids.count("5777469") == 2
+    assert rows[-1]["job_id"] == "5778400"
+    assert rows[-1]["state"] == "COMPLETED"
+
+
+def test_probe_parses_sacct_history(monkeypatch):
+    from splat_explorer.repair_lrz import probe_lrz_gpu, reset_gpu_probe_cache
+
+    reset_gpu_probe_cache()
+    sacct = (
+        "JobID|JobName|Partition|State|Submit|Start|End|Elapsed|Timelimit|ExitCode|NodeList\n"
+        "5778400|gs-6h|lrz-hgx-a100-80x4|COMPLETED|"
+        "2026-09-08T08:00:00|2026-09-08T08:00:12|2026-09-08T14:00:12|06:00:00|06:00:00|0:0|lrz-hgx-a100-004\n"
+    )
+
+    def fake_ssh(cfg, remote, timeout=25):
+        if "sacct" in remote:
+            return _Proc(stdout=_login_stdout(
+                "5778174|PD|lrz-hgx-a100-80x4||0:00|24:00:00|Priority|gs-24h|2026-09-10T03:10:58\n",
+                sacct=sacct,
+            ))
+        raise AssertionError(f"unexpected ssh: {remote}")
+
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_session_alive", lambda cfg=None: True)
+    monkeypatch.setattr("splat_explorer.repair_lrz._ssh_run", fake_ssh)
+    body = probe_lrz_gpu({
+        "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "5777731",
+        "workspace": "/dss/ws", "container": "/dss/ws/containers/pytorch.sqsh",
+        "cpus": 4, "mem": "32G", "container_name": "splat-repair",
+    }, history_start="2026-09-08", history_end="now")
+    assert body["history_start"] == "2026-09-08"
+    assert body["history_end"] == "now"
+    assert body["history_jobs"][0]["job_id"] == "5778400"
+    assert body["history_jobs"][0]["state"] == "COMPLETED"
+    assert body["cluster_time"] == "2026-09-10 16:16:00 CEST +0200"
+    assert body["uid"] == "12345"
+    assert body["squeue_long"]
+
+
+def test_dashboard_snapshot_includes_history(monkeypatch, tmp_path):
+    import time
+
+    from splat_explorer.repair_lrz import (
+        _PROBE,
+        lrz_dashboard_snapshot,
+        reset_gpu_probe_cache,
+    )
+
+    reset_gpu_probe_cache()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("splat_explorer.repair_lrz.load_lrz_config", lambda: {
+        "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "5777731",
+        "workspace": "/dss/ws", "container": "/dss/ws/containers/pytorch.sqsh",
+        "cpus": 4, "mem": "32G", "container_name": "splat-repair",
+    })
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_configured", lambda: True)
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_session_alive", lambda cfg=None: True)
+    with _PROBE["lock"]:
+        _PROBE["body"] = {
+            "slurm": None,
+            "jobs": [],
+            "history_jobs": [{
+                "job_id": "5778400", "name": "gs-6h", "state": "COMPLETED",
+                "partition": "lrz-hgx-a100-80x4", "submit": "2026-09-08T08:00:00",
+                "start": "2026-09-08T08:00:12", "end": "2026-09-08T14:00:12",
+                "elapsed": "06:00:00", "timelimit": "06:00:00",
+                "exit_code": "0:0", "node": "lrz-hgx-a100-004",
+            }],
+            "history_start": "2026-09-08",
+            "history_end": "now",
+            "cluster_time": "2026-09-10 16:16:00 CEST +0200",
+            "uid": "12345",
+            "container": {"ok": True, "bytes": 12},
+            "gpu": None,
+            "gpu_error": None,
+            "ngc": False,
+            "workspace_ok": True,
+            "setup": {"ok": False},
+        }
+        _PROBE["at"] = time.time()
+        _PROBE["error"] = None
+        _PROBE["inflight"] = False
+        _PROBE["history_start"] = "2026-09-08"
+        _PROBE["history_end"] = "now"
+    body = lrz_dashboard_snapshot(repair_job={"status": "idle"})
+    assert body["history"]["jobs"][0]["job_id"] == "5778400"
+    assert body["history"]["start"] == "2026-09-08"
+    assert body["history"]["cluster_time"].startswith("2026-09-10")
+    assert body["history"]["uid"] == "12345"
 
