@@ -867,7 +867,7 @@ function renderChrome() {
   $("btn-refresh").classList.toggle("busy", probeBusy);
   $("btn-alloc").disabled = setupBusy || !session;
   $("btn-widen").disabled = setupBusy || !session;
-  $("btn-review").disabled = setupBusy || !session;
+  $("btn-review").disabled = setupBusy || probeBusy || !session;
   const canSetup = session && snap?.slurm?.state === "R";
   $("btn-setup").disabled = probeBusy || setupBusy || !canSetup;
   $("btn-setup").textContent = snap?.setup?.inflight
