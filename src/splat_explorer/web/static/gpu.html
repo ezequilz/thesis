@@ -95,6 +95,8 @@
   .check.err { box-shadow: inset 3px 0 0 var(--err); }
   .check.busy { box-shadow: inset 3px 0 0 var(--warn); }
   .grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 12px; }
+  .jobs-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  .jobs-row > .card { min-width: 0; overflow-x: auto; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
   .card h2 { margin: 0 0 10px; font-size: 13px; font-weight: 650; color: var(--dim);
              letter-spacing: .04em; text-transform: uppercase; display: flex;
@@ -140,6 +142,7 @@
   @media (max-width: 1100px) {
     .pipeline { grid-template-columns: 1fr 1fr; }
     .grid { grid-template-columns: 1fr; }
+    .jobs-row { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -205,9 +208,15 @@
       <div class="empty">No CUDA repair running.</div>
     </div>
   </div>
-  <div class="card" style="margin-top:12px">
-    <h2>Reserved jobs <span class="sub">squeue --me · %S start</span></h2>
-    <div id="jobs"><div class="empty">No probe yet.</div></div>
+  <div class="jobs-row">
+    <div class="card">
+      <h2>Reserved jobs <span class="sub">squeue --me · %S start</span></h2>
+      <div id="jobs"><div class="empty">No probe yet.</div></div>
+    </div>
+    <div class="card">
+      <h2>Packed LRZ jobs</h2>
+      <div id="packed"><div class="empty">No packed jobs in outputs/lrz-jobs. Start gsplat CUDA from the repair page.</div></div>
+    </div>
   </div>
   <div class="card" style="margin-top:12px" id="hist-card">
     <h2>Past jobs <span class="sub" id="hist-sub">sacct · last 14 days</span></h2>
@@ -227,10 +236,6 @@
   <div class="card" style="margin-top:12px" id="part-card">
     <h2>sinfo rows <span class="sub">partition state groups</span></h2>
     <div id="parts"><div class="empty">Same one-shot as availability above.</div></div>
-  </div>
-  <div class="card" style="margin-top:12px">
-    <h2>Packed LRZ jobs</h2>
-    <div id="packed"><div class="empty">No packed jobs in outputs/lrz-jobs. Start gsplat CUDA from the repair page.</div></div>
   </div>
   <div class="card" style="margin-top:12px">
     <h2>Setup / connect</h2>
