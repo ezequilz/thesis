@@ -639,7 +639,7 @@ function renderOccupancy() {
   const procs = occupancyProcesses();
   const banners = [];
   if (foreign.length) {
-    banners.push(`<div class="err-banner">${esc(occ.needs_overwrite || `Your allocated GPU has ${foreign.length} leftover process(es) that are not yours.`)} Click Load GPU setup, then overwrite prior setup? to wipe them and load splat-explorer.</div>`);
+    banners.push(`<div class="err-banner">${esc(occ.needs_overwrite || `Your reserved GPU still has ${foreign.length} leftover process(es) from another user (stale occupant).`)} Overwrite resets <b>only this reserved GPU</b>. Processes on other cards — even the same PID — are never signalled.</div>`);
   } else if (occ.needs_overwrite) {
     banners.push(`<div class="warn-banner">${esc(occ.needs_overwrite)}</div>`);
   } else if (warning) {
@@ -662,7 +662,7 @@ function renderOccupancy() {
     <thead><tr><th>GPU</th><th>pid</th><th>user</th><th>VRAM</th><th>process</th><th></th></tr></thead>
     <tbody>${procs.map(p => {
       const who = p.foreign ? "foreign" : (p.user ? "yours" : "");
-      const extra = p.allocated_gpu ? "" : " · other GPU";
+      const extra = p.allocated_gpu ? " · reserved GPU" : " · other GPU · never overwritten";
       return `<tr>
         <td>${esc(p.gpu_index ?? "–")}</td>
         <td>${esc(p.pid ?? "–")}</td>
@@ -1067,7 +1067,7 @@ function renderChrome() {
   }
   $("btn-setup").title = showOverwrite
     ? (armed
-      ? "Click again to reset THIS job's CUDA device and load splat-explorer. Other cards are left alone."
+      ? "Click again to reset ONLY this reserved GPU. Leftover processes on this card (including a previous occupant's) are cleared; other GPUs are never signalled."
       : (setupNeedsOverwrite() || "GPU is occupied. Click twice to overwrite."))
     : "Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh.";
   $("btn-hist").disabled = probeBusy || setupBusy || !session;

@@ -1347,11 +1347,46 @@ def test_wipe_gpu_command_resets_this_jobs_cuda_device():
     assert "fuser -k" in cmd
     assert "cudaDeviceReset" in cmd
     assert "--gpu-reset -i" in cmd
+    assert "REJECT_HINT_GPU0" in cmd
+    assert "SKIP_SHARED_PID" in cmd
     assert "kill -TERM" not in cmd
     assert "kill -KILL" not in cmd
-    assert "nvidia3" in cmd or "3" in cmd
+    assert "HINT=3" in cmd or "HINT='3'" in cmd
     assert "1111" not in cmd
     assert "2222" not in cmd
+
+
+def test_physical_wipe_indices_never_guess_gpu0_on_a_full_node():
+    from splat_explorer.repair_lrz import parse_gpu_occupancy_text, physical_indices_for_wipe
+
+    ours = parse_gpu_occupancy_text(
+        "GPUENV\nCUDA_VISIBLE_DEVICES=0\nSLURM_JOB_GPUS=3\nUSER=go73kaf2\n"
+        "GPUDEVS\n0\n1\n2\n3\n4\n5\n6\n7\nGPUCSV\n"
+        "0, GPU-aaa, NVIDIA A100-SXM4-80GB, 77773, 81920, 0, 0, 31, 60.00, 400.00, 8.0\n"
+        "3, GPU-ddd, NVIDIA A100-SXM4-80GB, 12, 81920, 0, 0, 31, 58.00, 400.00, 8.0\n"
+        "GPUAPPS\nGPU-aaa, 1111, python, 77000\n"
+        "GPUPROCS\n 1111 colleague /usr/bin/python train.py\n"
+    )
+    assert physical_indices_for_wipe(ours) == [3]
+    unscoped = parse_gpu_occupancy_text(
+        "GPUENV\nCUDA_VISIBLE_DEVICES=0\nSLURM_JOB_GPUS=\nUSER=go73kaf2\n"
+        "GPUDEVS\n0\n1\n2\n3\n4\n5\n6\n7\nGPUCSV\n"
+        "0, GPU-aaa, NVIDIA A100-SXM4-80GB, 77773, 81920, 0, 0, 31, 60.00, 400.00, 8.0\n"
+        "1, GPU-bbb, NVIDIA A100-SXM4-80GB, 12, 81920, 0, 0, 31, 58.00, 400.00, 8.0\n"
+        "3, GPU-ddd, NVIDIA A100-SXM4-80GB, 0, 81920, 0, 0, 31, 55.00, 400.00, 8.0\n"
+        "GPUAPPS\nGPU-aaa, 1111, python, 77000\n"
+        "GPUPROCS\n 1111 ge72fon2 /alphafold3_venv/bin/python3\n"
+    )
+    assert unscoped["scope"] == "node"
+    assert physical_indices_for_wipe(unscoped) == []
+    leftover_ours = parse_gpu_occupancy_text(
+        "GPUENV\nCUDA_VISIBLE_DEVICES=0\nSLURM_JOB_GPUS=0\nUSER=go73kaf2\n"
+        "GPUDEVS\n0\nGPUCSV\n"
+        "0, GPU-aaa, NVIDIA A100-SXM4-80GB, 77773, 81920, 0, 0, 31, 60.00, 400.00, 8.0\n"
+        "GPUAPPS\nGPU-aaa, 1111, python, 77000\n"
+        "GPUPROCS\n 1111 ge72fon2 /alphafold3_venv/bin/python3\n"
+    )
+    assert physical_indices_for_wipe(leftover_ours) == [0]
 
 
 def test_request_setup_requires_overwrite_when_alphafold_leftover(monkeypatch):
