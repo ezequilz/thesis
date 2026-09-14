@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Once per GPU allocation: start the named Pyxis container from DSS
-# pytorch.sqsh, rsync code, and install gsplat onto the shared drive.
-# Later dashboard repairs reuse that setup (they do not reload it).
+# Once per GPU allocation: check occupancy, start a job-scoped Pyxis
+# container from DSS pytorch.sqsh, rsync code, and install gsplat onto
+# YOUR shared drive (never a colleague's files). Refuses to run if a
+# process that is not yours is on the allocated GPU.
 #
 #   scripts/lrz/load-setup.sh
 #

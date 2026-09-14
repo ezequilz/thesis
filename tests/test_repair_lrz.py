@@ -181,7 +181,7 @@ def test_srun_worker_overlaps_sleep_hold():
     assert "--jobid=5777469" in cmd
     assert "--gres=gpu:1" in cmd
     assert "/workspace/python" in cmd
-    assert "--container-name=splat-repair" in cmd
+    assert "--container-name=splat-repair-5777469" in cmd
 
 
 def test_srun_setup_starts_named_container():
@@ -199,7 +199,7 @@ def test_srun_setup_starts_named_container():
     assert "--overlap" in cmd
     assert "--jobid=5777731" in cmd
     assert "--container-image=/dss/ws/containers/pytorch.sqsh" in cmd
-    assert "--container-name=splat-repair" in cmd
+    assert "--container-name=splat-repair-5777731" in cmd
     assert "repair_lrz --setup" in cmd
     assert "/workspace/python" in cmd
 
@@ -396,6 +396,9 @@ def test_nvidia_smi_command_overlaps_hold_job():
     assert "--jobid=5777469" in cmd
     assert "nvidia-smi" in cmd
     assert "--gres=gpu:1" in cmd
+    assert "GPUCSV" in cmd
+    assert "query-compute-apps" in cmd
+    assert "CUDA_VISIBLE_DEVICES" in cmd
 
 
 def test_sbatch_hold_8h_24h_and_after():
@@ -1117,4 +1120,211 @@ def test_dashboard_snapshot_skips_ssh_when_probe_cached(monkeypatch, tmp_path):
     body = lrz_dashboard_snapshot(repair_job={"status": "idle"})
     assert body["probing"] is False
     assert body["jobs"] == []
+
+
+def test_container_name_is_job_scoped():
+    from splat_explorer.repair_lrz import container_name_for_job
+
+    assert container_name_for_job({
+        "container_name": "splat-repair", "job_id": "5786047",
+    }) == "splat-repair-5786047"
+    assert container_name_for_job({"container_name": "splat-repair", "job_id": ""}) == "splat-repair"
+
+
+def test_occupancy_picks_slurm_gpu_not_full_gpu0():
+    from splat_explorer.repair_lrz import (
+        gpu_occupancy_summary,
+        occupancy_blocks_setup,
+        parse_gpu_occupancy_text,
+        pick_connected_gpu,
+    )
+
+    text = (
+        "GPUENV\n"
+        "CUDA_VISIBLE_DEVICES=0\n"
+        "SLURM_JOB_GPUS=3\n"
+        "SLURM_STEP_GPUS=3\n"
+        "NVIDIA_VISIBLE_DEVICES=\n"
+        "SLURM_JOB_ID=5786047\n"
+        "USER=go73kaf2\n"
+        "HOSTNAME=lrz-dgx-a100-002\n"
+        "GPUDEVS\n0\n1\n2\n3\n4\n5\n6\n7\n"
+        "GPUCSV\n"
+        "0, GPU-aaa, NVIDIA A100-SXM4-80GB, 77773, 81920, 0, 0, 31, 60.00, 400.00, 8.0\n"
+        "1, GPU-bbb, NVIDIA A100-SXM4-80GB, 100, 81920, 0, 0, 30, 55.00, 400.00, 8.0\n"
+        "2, GPU-ccc, NVIDIA A100-SXM4-80GB, 200, 81920, 0, 0, 30, 55.00, 400.00, 8.0\n"
+        "3, GPU-ddd, NVIDIA A100-SXM4-80GB, 12, 81920, 0, 0, 31, 58.00, 400.00, 8.0\n"
+        "4, GPU-eee, NVIDIA A100-SXM4-80GB, 0, 81920, 0, 0, 29, 52.00, 400.00, 8.0\n"
+        "5, GPU-fff, NVIDIA A100-SXM4-80GB, 0, 81920, 0, 0, 29, 52.00, 400.00, 8.0\n"
+        "6, GPU-ggg, NVIDIA A100-SXM4-80GB, 40000, 81920, 80, 70, 55, 250.00, 400.00, 8.0\n"
+        "7, GPU-hhh, NVIDIA A100-SXM4-80GB, 0, 81920, 0, 0, 29, 52.00, 400.00, 8.0\n"
+        "GPUAPPS\n"
+        "GPU-aaa, 1111, python, 77000\n"
+        "GPU-ggg, 2222, python, 39000\n"
+        "GPUPROCS\n"
+        " 1111 colleague /usr/bin/python train.py\n"
+        " 2222 otherlab /usr/bin/python train.py\n"
+    )
+    occ = parse_gpu_occupancy_text(text)
+    assert occ["scope"] == "allocated"
+    assert occ["gpus"][0]["allocated"] is False
+    assert occ["gpus"][0]["memory_pct"] == 94.9
+    assert occ["gpus"][3]["allocated"] is True
+    connected = pick_connected_gpu(occ["gpus"])
+    assert connected["index"] == 3
+    assert connected["memory_used_mib"] == 12
+    summary = gpu_occupancy_summary(occ)
+    assert summary["foreign_on_allocated"] == []
+    assert occupancy_blocks_setup(summary) is None
+    assert any(p["user"] == "colleague" and not p["allocated_gpu"] for p in summary["processes"])
+
+
+def test_occupancy_warns_when_nvidia_smi_is_node_wide():
+    from splat_explorer.repair_lrz import parse_gpu_occupancy_text, pick_connected_gpu
+
+    text = (
+        "GPUENV\n"
+        "CUDA_VISIBLE_DEVICES=0\n"
+        "SLURM_JOB_GPUS=\n"
+        "USER=go73kaf2\n"
+        "GPUDEVS\n0\n1\n2\n3\n4\n5\n6\n7\n"
+        "GPUCSV\n"
+        "0, GPU-aaa, NVIDIA A100-SXM4-80GB, 77773, 81920, 0, 0, 31, 60.00, 400.00, 8.0\n"
+        "1, GPU-bbb, NVIDIA A100-SXM4-80GB, 12, 81920, 0, 0, 31, 58.00, 400.00, 8.0\n"
+        "2, GPU-ccc, NVIDIA A100-SXM4-80GB, 0, 81920, 0, 0, 30, 55.00, 400.00, 8.0\n"
+        "GPUAPPS\n"
+        "GPUPROCS\n"
+    )
+    occ = parse_gpu_occupancy_text(text)
+    assert occ["scope"] == "node"
+    assert pick_connected_gpu(occ["gpus"]) is None
+    assert "GPU 0" in (occ.get("warning") or "")
+
+
+def test_occupancy_blocks_foreign_process_on_allocated_gpu():
+    from splat_explorer.repair_lrz import gpu_occupancy_summary, occupancy_blocks_setup, parse_gpu_occupancy_text
+
+    text = (
+        "GPUENV\nCUDA_VISIBLE_DEVICES=0\nSLURM_JOB_GPUS=0\nUSER=go73kaf2\n"
+        "GPUDEVS\n0\n"
+        "GPUCSV\n"
+        "0, GPU-aaa, NVIDIA A100-SXM4-80GB, 77773, 81920, 0, 0, 31, 60.00, 400.00, 8.0\n"
+        "GPUAPPS\n"
+        "GPU-aaa, 1111, python, 77000\n"
+        "GPUPROCS\n"
+        " 1111 colleague /usr/bin/python train.py\n"
+    )
+    occ = parse_gpu_occupancy_text(text)
+    summary = gpu_occupancy_summary(occ)
+    assert occ["gpus"][0]["allocated"] is True
+    assert summary["foreign_on_allocated"][0]["user"] == "colleague"
+    msg = occupancy_blocks_setup(summary)
+    assert msg and "colleague" in msg and "Refusing" in msg
+
+
+def test_setup_status_ignores_marker_while_inflight():
+    import time
+
+    from splat_explorer.repair_lrz import _SETUP, lrz_setup_status
+
+    with _SETUP["lock"]:
+        _SETUP["inflight"] = True
+        _SETUP["ok"] = False
+        _SETUP["job_id"] = "5786047"
+        _SETUP["at"] = time.time() - 125
+        _SETUP["message"] = "Starting named Pyxis container"
+        _SETUP["error"] = None
+        _SETUP["detail"] = None
+    try:
+        body = lrz_setup_status(
+            {
+                "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "5786047",
+                "workspace": "/dss/ws", "container": "/dss/ws/containers/pytorch.sqsh",
+                "cpus": 4, "mem": "32G", "container_name": "splat-repair",
+            },
+            probe_setup={"ok": True, "job_id": "5786047", "gpu": "NVIDIA A100-SXM4-80GB"},
+        )
+        assert body["inflight"] is True
+        assert body["ok"] is False
+        assert body["elapsed_s"] >= 120
+        assert "Pyxis" in body["message"]
+    finally:
+        with _SETUP["lock"]:
+            _SETUP["inflight"] = False
+            _SETUP["ok"] = False
+            _SETUP["message"] = ""
+            _SETUP["job_id"] = ""
+            _SETUP["error"] = None
+            _SETUP["detail"] = None
+            _SETUP["at"] = 0.0
+
+
+def test_detect_cuda_arch_respects_env(monkeypatch):
+    from splat_explorer.repair_lrz import detect_cuda_arch_list
+
+    monkeypatch.setenv("LRZ_CUDA_ARCH", "9.0")
+    assert detect_cuda_arch_list() == "9.0"
+    monkeypatch.delenv("LRZ_CUDA_ARCH")
+    monkeypatch.setenv("LRZ_CUDA_ARCH", "")
+    assert detect_cuda_arch_list() == "8.0"
+
+
+def test_dashboard_snapshot_uses_allocated_gpu_not_gpu0(monkeypatch, tmp_path):
+    import time
+
+    from splat_explorer.repair_lrz import (
+        _PROBE,
+        lrz_dashboard_snapshot,
+        parse_gpu_occupancy_text,
+        reset_gpu_probe_cache,
+    )
+
+    reset_gpu_probe_cache()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("splat_explorer.repair_lrz.load_lrz_config", lambda: {
+        "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "5786047",
+        "workspace": "/dss/ws", "container": "/dss/ws/containers/pytorch.sqsh",
+        "cpus": 4, "mem": "32G", "container_name": "splat-repair",
+    })
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_configured", lambda: True)
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_session_alive", lambda cfg=None: True)
+    occ = parse_gpu_occupancy_text(
+        "GPUENV\nCUDA_VISIBLE_DEVICES=0\nSLURM_JOB_GPUS=3\nUSER=go73kaf2\n"
+        "GPUCSV\n"
+        "0, GPU-aaa, NVIDIA A100-SXM4-80GB, 77773, 81920, 0, 0, 31, 60.00, 400.00, 8.0\n"
+        "3, GPU-ddd, NVIDIA A100-SXM4-80GB, 12, 81920, 0, 0, 31, 58.00, 400.00, 8.0\n"
+        "GPUAPPS\nGPUPROCS\n"
+    )
+    occ["node"] = "lrz-dgx-a100-002"
+    with _PROBE["lock"]:
+        _PROBE["body"] = {
+            "slurm": {
+                "job_id": "5786047", "state": "R", "node": "lrz-dgx-a100-002",
+                "partition": "lrz-dgx-a100-80x8", "elapsed": "5:00:00",
+                "timelimit": "2-00:00:00", "name": "gs-48h",
+            },
+            "jobs": [{
+                "job_id": "5786047", "state": "R", "node": "lrz-dgx-a100-002",
+                "partition": "lrz-dgx-a100-80x8", "elapsed": "5:00:00",
+                "timelimit": "2-00:00:00", "name": "gs-48h",
+            }],
+            "history_jobs": [],
+            "container": {"ok": True, "bytes": 17_700_000_000},
+            "gpu": occ,
+            "gpu_error": None,
+            "ngc": False,
+            "workspace_ok": True,
+            "setup": {"ok": False},
+        }
+        _PROBE["at"] = time.time()
+        _PROBE["error"] = None
+        _PROBE["inflight"] = False
+    body = lrz_dashboard_snapshot(repair_job={"status": "idle"})
+    assert body["gpu_free_mib"] == 81908
+    assert body["gpu_occupancy"]["allocated"][0]["index"] == 3
+    assert body["gpu"][0]["memory_used_mib"] == 77773
+    gpu_check = next(c for c in body["checks"] if c["id"] == "gpu")
+    assert gpu_check["ok"] is True
+    assert "GPU 3" in gpu_check["detail"]
+
 

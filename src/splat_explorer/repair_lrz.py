@@ -601,6 +601,7 @@ SSH_STAGGER_S = 0.4
 SSH_CONNECT_TIMEOUT_S = 8
 SINFO_TTL_S = 600.0  # Same as probe. Reloads must not re-run sinfo.
 SETUP_TIMEOUT_S = 1800.0  # First gsplat compile on a node can take 10–20 min.
+SETUP_POLL_S = 8.0
 HISTORY_DEFAULT_DAYS = 14
 SACCT_FORMAT = (
     "JobID,JobName,Partition,State%50,Submit,Start,End,Elapsed,Timelimit,ExitCode,NodeList"
@@ -640,6 +641,13 @@ _SMI_FIELDS = (
     "utilization_gpu", "utilization_memory", "temperature_c",
     "power_w", "power_limit_w", "compute_cap",
 )
+_SMI_FIELDS_UUID = (
+    "index", "uuid", "name", "memory_used_mib", "memory_total_mib",
+    "utilization_gpu", "utilization_memory", "temperature_c",
+    "power_w", "power_limit_w", "compute_cap",
+)
+_GPU_PROBE_MARKERS = ("GPUENV", "GPUDEVS", "GPUCSV", "GPUAPPS", "GPUPROCS")
+_CUDA_ARCH_MARKER = "python/.cuda-arch"
 _PROBE = {
     "lock": threading.Lock(),
     "at": 0.0,
@@ -1107,6 +1115,14 @@ def widen_command(job_id: str, partition: str | None = None) -> str:
     return f"scontrol update JobId={job} Partition={part}"
 
 
+def _smi_row_fields(cells: list[str]) -> tuple[str, ...]:
+    if len(cells) >= 11:
+        uuid = cells[1]
+        if uuid.upper().startswith("GPU-") or (" " not in uuid and uuid.count("-") >= 4):
+            return _SMI_FIELDS_UUID
+    return _SMI_FIELDS
+
+
 def parse_nvidia_smi_csv(text: str) -> list[dict]:
     """Parse `nvidia-smi --query-gpu=... --format=csv,noheader,nounits`."""
     gpus: list[dict] = []
@@ -1117,10 +1133,13 @@ def parse_nvidia_smi_csv(text: str) -> list[dict]:
         cells = [str(c).strip() for c in row]
         if cells[0].lower().startswith("index") or cells[0].lower().startswith("nvidia-smi"):
             continue
-        body: dict[str, Any] = {}
-        for i, key in enumerate(_SMI_FIELDS):
+        if cells[0].lower() in {"gpuenv", "gpudevs", "gpucsv", "gpuapps", "gpuprocs"}:
+            continue
+        fields = _smi_row_fields(cells)
+        body: dict[str, Any] = {"uuid": "", "allocated": False, "processes": []}
+        for i, key in enumerate(fields):
             raw = cells[i] if i < len(cells) else ""
-            if key in ("name", "compute_cap"):
+            if key in ("name", "compute_cap", "uuid"):
                 body[key] = raw
             elif key == "index":
                 body[key] = int(raw) if raw.isdigit() else 0
@@ -1138,6 +1157,266 @@ def parse_nvidia_smi_csv(text: str) -> list[dict]:
             body["memory_free_mib"] = None
         gpus.append(body)
     return gpus
+
+
+def _id_list(raw: str | None) -> list[str]:
+    text = str(raw or "").strip()
+    if not text or text.lower() in ("none", "void", "null", "n/a", "no_device"):
+        return []
+    return [part.strip() for part in text.replace(" ", "").split(",") if part.strip()]
+
+
+def parse_env_block(text: str) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for line in (text or "").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        env[key.strip()] = value.strip()
+    return env
+
+
+def parse_nvidia_dev_indices(text: str) -> list[int]:
+    found: list[int] = []
+    for line in (text or "").splitlines():
+        raw = line.strip().rsplit("nvidia", 1)[-1]
+        if raw.isdigit():
+            found.append(int(raw))
+    return found
+
+
+def parse_compute_apps_csv(text: str) -> list[dict[str, Any]]:
+    apps: list[dict[str, Any]] = []
+    reader = csv.reader(io.StringIO(text or ""))
+    for row in reader:
+        if not row or not any(str(c).strip() for c in row):
+            continue
+        cells = [str(c).strip() for c in row]
+        if cells[0].lower() in {"gpu_uuid", "uuid", "pid"}:
+            continue
+        if not cells[0] or cells[0].lower().startswith("nvidia-smi"):
+            continue
+        pid_raw = cells[1] if len(cells) > 1 else ""
+        mem_raw = cells[3] if len(cells) > 3 else ""
+        try:
+            mem = float(mem_raw)
+        except ValueError:
+            mem = None
+        apps.append({
+            "gpu_uuid": cells[0],
+            "pid": int(pid_raw) if pid_raw.isdigit() else pid_raw,
+            "name": cells[2] if len(cells) > 2 else "",
+            "memory_used_mib": mem,
+        })
+    return apps
+
+
+def parse_ps_lines(text: str) -> dict[int, dict[str, str]]:
+    by_pid: dict[int, dict[str, str]] = {}
+    for line in (text or "").splitlines():
+        match = re.match(r"^\s*(\d+)\s+(\S+)\s+(.*)$", line.strip())
+        if not match:
+            continue
+        by_pid[int(match.group(1))] = {
+            "user": match.group(2),
+            "args": match.group(3).strip(),
+        }
+    return by_pid
+
+
+def _looks_remapped_cuda_ids(cuda_ids: list[str], gpu_count: int) -> bool:
+    if gpu_count <= len(cuda_ids):
+        return False
+    if not cuda_ids or not all(part.isdigit() for part in cuda_ids):
+        return False
+    return {int(part) for part in cuda_ids} == set(range(len(cuda_ids)))
+
+
+def annotate_allocated_gpus(
+    gpus: list[dict[str, Any]],
+    *,
+    env: dict[str, str] | None = None,
+    device_nodes: list[int] | None = None,
+    processes: list[dict[str, Any]] | None = None,
+    proc_meta: dict[int, dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Mark which nvidia-smi rows belong to this Slurm step.
+
+    nvidia-smi ignores CUDA_VISIBLE_DEVICES and lists every card on a DGX.
+    The dashboard used to display row 0, which is often a colleague's GPU.
+    """
+    env = env or {}
+    our_user = str(env.get("USER") or "").strip()
+    cuda_ids = _id_list(env.get("CUDA_VISIBLE_DEVICES"))
+    slurm_ids = _id_list(env.get("SLURM_JOB_GPUS") or env.get("SLURM_STEP_GPUS"))
+    nvidia_ids = _id_list(env.get("NVIDIA_VISIBLE_DEVICES"))
+    allocated_idx: set[int] = set()
+    allocated_uuid: set[str] = set()
+    reason = ""
+    warning = None
+    if device_nodes and len(device_nodes) < max(len(gpus), 2):
+        allocated_idx = set(device_nodes)
+        reason = "/dev/nvidia*"
+    elif slurm_ids and all(part.isdigit() for part in slurm_ids):
+        allocated_idx = {int(part) for part in slurm_ids}
+        reason = "SLURM_JOB_GPUS"
+    elif len(gpus) == 1:
+        allocated_idx = {int(gpus[0].get("index") or 0)}
+        reason = "single visible GPU"
+    elif cuda_ids and all(part.isdigit() for part in cuda_ids) and not _looks_remapped_cuda_ids(cuda_ids, len(gpus)):
+        allocated_idx = {int(part) for part in cuda_ids}
+        reason = "CUDA_VISIBLE_DEVICES"
+    elif nvidia_ids:
+        for token in nvidia_ids:
+            if token.isdigit():
+                allocated_idx.add(int(token))
+            elif token.upper().startswith("GPU-"):
+                allocated_uuid.add(token)
+        reason = "NVIDIA_VISIBLE_DEVICES"
+    else:
+        reason = "nvidia-smi is node-wide"
+        warning = (
+            f"nvidia-smi listed {len(gpus)} GPUs on this node and CUDA_VISIBLE_DEVICES "
+            f"({','.join(cuda_ids) or 'unset'}) looks remapped. GPU 0 is often someone "
+            "else's card — do not treat that VRAM as yours."
+        )
+
+    uuid_map = {str(gpu.get("uuid") or ""): gpu for gpu in gpus}
+    for gpu in gpus:
+        idx = int(gpu.get("index") or 0)
+        uuid = str(gpu.get("uuid") or "")
+        gpu["allocated"] = idx in allocated_idx or (uuid in allocated_uuid if uuid else False)
+        gpu["processes"] = []
+
+    for app in processes or []:
+        gpu = uuid_map.get(str(app.get("gpu_uuid") or ""))
+        if gpu is None and len(gpus) == 1:
+            gpu = gpus[0]
+        if gpu is None:
+            continue
+        pid = app.get("pid")
+        meta = proc_meta.get(int(pid), {}) if isinstance(pid, int) and proc_meta else {}
+        user = str(meta.get("user") or "")
+        body = {
+            "pid": pid,
+            "name": app.get("name") or "",
+            "args": meta.get("args") or app.get("name") or "",
+            "user": user,
+            "memory_used_mib": app.get("memory_used_mib"),
+            "foreign": bool(our_user and user and user != our_user),
+        }
+        gpu.setdefault("processes", []).append(body)
+
+    if not any(gpu.get("allocated") for gpu in gpus) and gpus:
+        warning = warning or (
+            "Could not match this job to a GPU index. Showing every card on the node; "
+            "the nearly-full one is not necessarily yours."
+        )
+    return {
+        "gpus": gpus,
+        "env": env,
+        "scope": "allocated" if any(gpu.get("allocated") for gpu in gpus) else "node",
+        "scope_reason": reason,
+        "warning": warning,
+        "user": our_user,
+        "device_nodes": list(device_nodes or []),
+    }
+
+
+def parse_gpu_occupancy_text(text: str) -> dict[str, Any]:
+    """Parse the occupancy srun bundle, or a bare nvidia-smi GPU CSV."""
+    raw = text or ""
+    if any(marker in raw for marker in _GPU_PROBE_MARKERS):
+        sections = parse_probe_bundle_markers(raw, _GPU_PROBE_MARKERS)
+        env = parse_env_block(sections.get("gpuenv") or "")
+        gpus = parse_nvidia_smi_csv(sections.get("gpucsv") or "")
+        apps = parse_compute_apps_csv(sections.get("gpuapps") or "")
+        procs = parse_ps_lines(sections.get("gpuprocs") or "")
+        devices = parse_nvidia_dev_indices(sections.get("gpudevs") or "")
+        return annotate_allocated_gpus(
+            gpus, env=env, device_nodes=devices, processes=apps, proc_meta=procs,
+        )
+    gpus = parse_nvidia_smi_csv(raw)
+    return annotate_allocated_gpus(gpus)
+
+
+def parse_probe_bundle_markers(text: str, markers: tuple[str, ...]) -> dict[str, str]:
+    sections: dict[str, str] = {}
+    current: str | None = None
+    buf: list[str] = []
+    wanted = set(markers)
+    for line in (text or "").splitlines():
+        key = line.strip()
+        if key in wanted:
+            if current is not None:
+                sections[current] = "\n".join(buf).strip()
+            current = key.lower()
+            buf = []
+        elif current is not None:
+            buf.append(line)
+    if current is not None:
+        sections[current] = "\n".join(buf).strip()
+    return sections
+
+
+def gpu_occupancy_summary(gpu: dict | None) -> dict[str, Any]:
+    gpus = list((gpu or {}).get("gpus") or []) if isinstance(gpu, dict) else []
+    allocated = [row for row in gpus if row.get("allocated")]
+    others = [row for row in gpus if not row.get("allocated")]
+    processes: list[dict[str, Any]] = []
+    for row in gpus:
+        for proc in row.get("processes") or []:
+            processes.append({
+                **proc,
+                "gpu_index": row.get("index"),
+                "gpu_uuid": row.get("uuid"),
+                "gpu_name": row.get("name"),
+                "allocated_gpu": bool(row.get("allocated")),
+            })
+    foreign = [proc for proc in processes if proc.get("foreign") and proc.get("allocated_gpu")]
+    allocated_procs = [proc for proc in processes if proc.get("allocated_gpu")]
+    used = float((allocated[0].get("memory_used_mib") or 0) if allocated else 0)
+    return {
+        "scope": (gpu or {}).get("scope") if isinstance(gpu, dict) else None,
+        "scope_reason": (gpu or {}).get("scope_reason") if isinstance(gpu, dict) else None,
+        "warning": (gpu or {}).get("warning") if isinstance(gpu, dict) else None,
+        "env": (gpu or {}).get("env") if isinstance(gpu, dict) else {},
+        "user": (gpu or {}).get("user") if isinstance(gpu, dict) else "",
+        "allocated": allocated,
+        "others": others,
+        "processes": processes,
+        "foreign_on_allocated": foreign,
+        "high_vram_no_apps": bool(allocated and used >= 1024 and not allocated_procs),
+    }
+
+
+def occupancy_blocks_setup(occupancy: dict | None) -> str | None:
+    """Refuse Load GPU setup when a colleague's process is on OUR card."""
+    foreign = list((occupancy or {}).get("foreign_on_allocated") or [])
+    if not foreign:
+        return None
+    bits = []
+    for proc in foreign[:4]:
+        bits.append(
+            f"{proc.get('user') or '?'} pid {proc.get('pid')} "
+            f"{proc.get('name') or proc.get('args') or ''} "
+            f"({int(proc.get('memory_used_mib') or 0)} MiB)"
+        )
+    return (
+        "Allocated GPU has processes that are not yours: "
+        + "; ".join(bits)
+        + ". Refusing Load GPU setup so those jobs are not disturbed."
+    )
+
+
+def pick_connected_gpu(gpus: list[dict] | None) -> dict | None:
+    rows = list(gpus or [])
+    allocated = [row for row in rows if row.get("allocated")]
+    if allocated:
+        return allocated[0]
+    if len(rows) == 1:
+        return rows[0]
+    return None
 
 
 def parse_probe_bundle(text: str) -> dict[str, str]:
@@ -1407,15 +1686,39 @@ def build_connection_checks(
         })
 
     gpus = (gpu or {}).get("gpus") if isinstance(gpu, dict) else gpu
-    if isinstance(gpus, list) and gpus:
-        g0 = gpus[0]
-        used = g0.get("memory_used_mib")
-        total = g0.get("memory_total_mib")
+    rows = gpus if isinstance(gpus, list) else []
+    connected = pick_connected_gpu(rows)
+    occupancy = gpu_occupancy_summary(gpu if isinstance(gpu, dict) else {"gpus": rows})
+    if connected is not None:
+        used = connected.get("memory_used_mib")
+        total = connected.get("memory_total_mib")
         mem = f"{int(used)}/{int(total)} MiB" if used is not None and total else ""
+        idx = connected.get("index")
+        label = f"GPU {idx}" if idx is not None else None
+        nproc = len(connected.get("processes") or [])
+        procs = f"{nproc} compute proc" + ("s" if nproc != 1 else "")
+        foreign_n = len(occupancy.get("foreign_on_allocated") or [])
+        detail = " · ".join(x for x in (label, connected.get("name"), mem, procs) if x)
+        if foreign_n:
+            checks.append({
+                "id": "gpu", "ok": False, "label": "GPU",
+                "detail": f"{detail} · {foreign_n} process(es) are not yours",
+                "action": occupancy_blocks_setup(occupancy),
+            })
+        else:
+            checks.append({
+                "id": "gpu", "ok": True, "label": "GPU",
+                "detail": detail,
+                "action": None,
+            })
+    elif rows:
         checks.append({
-            "id": "gpu", "ok": True, "label": "GPU",
-            "detail": " · ".join(x for x in (g0.get("name"), mem) if x),
-            "action": None,
+            "id": "gpu", "ok": None, "label": "GPU",
+            "detail": (
+                occupancy.get("warning")
+                or f"nvidia-smi saw {len(rows)} GPUs on the node; GPU 0 is not necessarily yours."
+            ),
+            "action": "Refresh occupancy on /repair/gpu before Load GPU setup.",
         })
     elif probed and slurm and slurm.get("state") == "R":
         checks.append({
@@ -1506,16 +1809,37 @@ def _login_probe_script(
 
 
 def nvidia_smi_command(cfg: dict) -> str:
+    """Occupancy probe: env + /dev/nvidia* + every card + compute apps.
+
+    nvidia-smi does not honor CUDA_VISIBLE_DEVICES, so a DGX A100 ×8 node
+    returns eight rows. The parser marks which index this job actually owns.
+    """
     job = shlex.quote(str(cfg["job_id"]))
-    inner = (
-        "nvidia-smi --query-gpu=index,name,memory.used,memory.total,"
-        "utilization.gpu,utilization.memory,temperature.gpu,power.draw,power.limit,compute_cap "
-        "--format=csv,noheader,nounits"
-    )
+    inner = """
+echo GPUENV
+printf 'CUDA_VISIBLE_DEVICES=%s\\n' "${CUDA_VISIBLE_DEVICES-}"
+printf 'SLURM_JOB_GPUS=%s\\n' "${SLURM_JOB_GPUS-}"
+printf 'SLURM_STEP_GPUS=%s\\n' "${SLURM_STEP_GPUS-}"
+printf 'NVIDIA_VISIBLE_DEVICES=%s\\n' "${NVIDIA_VISIBLE_DEVICES-}"
+printf 'SLURM_JOB_ID=%s\\n' "${SLURM_JOB_ID-}"
+printf 'USER=%s\\n' "$(id -un 2>/dev/null || whoami)"
+printf 'HOSTNAME=%s\\n' "$(hostname -s 2>/dev/null || hostname)"
+echo GPUDEVS
+ls -1 /dev/nvidia[0-9]* 2>/dev/null | sed 's|.*/nvidia||' || true
+echo GPUCSV
+nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.total,utilization.gpu,utilization.memory,temperature.gpu,power.draw,power.limit,compute_cap --format=csv,noheader,nounits
+echo GPUAPPS
+nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits || true
+echo GPUPROCS
+pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | tr -d ' ' | grep -E '^[0-9]+$' | sort -u | paste -sd, -)
+if [ -n "$pids" ]; then
+  ps -ww -p "$pids" -o pid=,user=,args= 2>/dev/null || true
+fi
+"""
     return (
         f"srun --jobid={job} --overlap --nodes=1 --ntasks=1 "
         f"--cpus-per-task=1 --gres=gpu:1 --quiet "
-        f"bash -lc {shlex.quote(inner)}"
+        f"bash -lc {shlex.quote(inner.strip())}"
     )
 
 
@@ -1608,12 +1932,10 @@ def probe_lrz_gpu(
         body["gpu_error"] = str(exc)[:400]
         return body
     if smi.returncode == 0:
-        gpu_body = {
-            "gpus": parse_nvidia_smi_csv(smi.stdout or ""),
-            "node": slurm.get("node") if slurm else None,
-        }
-        if gpu_body["gpus"]:
-            body["gpu"] = gpu_body
+        occupancy = parse_gpu_occupancy_text(smi.stdout or "")
+        occupancy["node"] = slurm.get("node") if slurm else None
+        if occupancy.get("gpus"):
+            body["gpu"] = occupancy
         else:
             body["gpu_error"] = (smi.stdout or smi.stderr or "empty nvidia-smi").strip()[:400]
     else:
@@ -2113,9 +2435,9 @@ def lrz_dashboard_snapshot(
     )
     latest = packed[0] if packed else None
     gpus = (gpu or {}).get("gpus") if isinstance(gpu, dict) else None
-    free_mib = None
-    if isinstance(gpus, list) and gpus:
-        free_mib = gpus[0].get("memory_free_mib")
+    occupancy = gpu_occupancy_summary(gpu if isinstance(gpu, dict) else None)
+    connected = pick_connected_gpu(gpus if isinstance(gpus, list) else None)
+    free_mib = connected.get("memory_free_mib") if connected else None
     if isinstance(sinfo_body, dict):
         partitions = sinfo_body.get("partitions")
         nodes = sinfo_body.get("nodes") or []
@@ -2152,6 +2474,10 @@ def lrz_dashboard_snapshot(
         "gpu_error": gpu_error,
         "gpu_free_mib": free_mib if gpu_running else None,
         "gpu_running": gpu_running,
+        "gpu_scope": (gpu or {}).get("scope") if isinstance(gpu, dict) and gpu_running else None,
+        "gpu_warning": (gpu or {}).get("warning") if isinstance(gpu, dict) and gpu_running else None,
+        "gpu_env": (gpu or {}).get("env") if isinstance(gpu, dict) and gpu_running else None,
+        "gpu_occupancy": occupancy if gpu_running else None,
         "remote_status": (cached or {}).get("remote_status") if gpu_running else None,
         "repair": repair_job,
         "probe_error": probe_error,
@@ -2234,14 +2560,23 @@ def _code_src() -> Path:
 def _remote_pythonpath_exports() -> str:
     return (
         f"export PYTHONPATH={REMOTE_PYTHONPATH}${{PYTHONPATH:+:$PYTHONPATH}}; "
-        "export TORCH_CUDA_ARCH_LIST=8.0; "
+        "if [ -z \"${LRZ_CUDA_ARCH:-}\" ] && [ -f /workspace/python/.cuda-arch ]; then "
+        "LRZ_CUDA_ARCH=$(cat /workspace/python/.cuda-arch); fi; "
+        "export TORCH_CUDA_ARCH_LIST=\"${LRZ_CUDA_ARCH:-8.0}\"; "
         "export MAX_JOBS=4; "
     )
 
 
+def container_name_for_job(cfg: dict) -> str:
+    """Per-allocation Pyxis name so A100/H100 jobs do not reuse a stale container."""
+    base = str(cfg.get("container_name") or "splat-repair").strip() or "splat-repair"
+    job = str(cfg.get("job_id") or "").strip()
+    return f"{base}-{job}" if job.isdigit() else base
+
+
 def container_srun_prefix(cfg: dict) -> str:
     image = cfg.get("container") or f"{cfg['workspace']}/containers/pytorch.sqsh"
-    name = cfg.get("container_name") or "splat-repair"
+    name = container_name_for_job(cfg)
     return (
         f"srun --jobid={shlex.quote(str(cfg['job_id']))} --overlap "
         f"--nodes=1 --ntasks=1 --cpus-per-task={int(cfg['cpus'])} --gres=gpu:1 "
@@ -2312,41 +2647,61 @@ def lrz_setup_status(cfg: dict | None = None, *, probe_setup: dict | None = None
             "detail": _SETUP.get("detail"),
             "at": _SETUP.get("at") or None,
         }
+    started = float(_SETUP.get("at") or 0)
+    if body["inflight"] and started:
+        body["elapsed_s"] = round(time.time() - started, 1)
     marker = probe_setup if isinstance(probe_setup, dict) else None
     marker_ok = bool(marker and marker.get("ok"))
     marker_job = str((marker or {}).get("job_id") or job)
-    if marker_ok and (not job or marker_job == job or not marker.get("job_id")):
+    if (
+        marker_ok
+        and not body["inflight"]
+        and (not job or marker_job == job or not marker.get("job_id"))
+    ):
         body["ok"] = True
         body["detail"] = marker
-        if not body["message"] and not body["inflight"]:
+        if not body["message"]:
             gpu_name = marker.get("gpu") or "CUDA"
             body["message"] = (
                 f"Pyxis container ready: {gpu_name} "
-                f"(torch {marker.get('torch') or '?'}, gsplat {marker.get('gsplat') or '?'})"
+                f"(torch {marker.get('torch') or '?'}, gsplat {marker.get('gsplat') or '?'}"
+                f"{', sm ' + str(marker.get('cuda_arch')) if marker.get('cuda_arch') else ''})"
             )
-        if not body["inflight"]:
-            with _SETUP["lock"]:
-                if not _SETUP["inflight"]:
-                    _SETUP["ok"] = True
-                    _SETUP["job_id"] = job or marker_job
-                    _SETUP["detail"] = marker
-                    if not _SETUP.get("message"):
-                        _SETUP["message"] = body["message"]
-                    _SETUP["error"] = None
+        with _SETUP["lock"]:
+            if not _SETUP["inflight"]:
+                _SETUP["ok"] = True
+                _SETUP["job_id"] = job or marker_job
+                _SETUP["detail"] = marker
+                if not _SETUP.get("message"):
+                    _SETUP["message"] = body["message"]
+                _SETUP["error"] = None
     return body
 
 
 def _set_setup_message(message: str) -> None:
     with _SETUP["lock"]:
         _SETUP["message"] = message
-        _SETUP["at"] = time.time()
+
+
+def detect_cuda_arch_list(*, device: int = 0) -> str:
+    """sm_80 A100, sm_90 H100, sm_70 V100 — native arch of CUDA device 0."""
+    forced = (os.environ.get("LRZ_CUDA_ARCH") or "").strip()
+    if forced:
+        return forced
+    try:
+        import torch
+        if torch.cuda.is_available():
+            major, minor = torch.cuda.get_device_capability(device)
+            return f"{major}.{minor}"
+    except Exception:
+        pass
+    return "8.0"
 
 
 def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
     """Inside the Pyxis container: verify torch/CUDA and install gsplat onto DSS."""
     import sys
 
-    os.environ["TORCH_CUDA_ARCH_LIST"] = os.environ.get("LRZ_CUDA_ARCH") or "8.0"
     root = Path(workspace)
     python_dir = root / "python"
     logs = root / "logs"
@@ -2362,23 +2717,37 @@ def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
 
     if not torch.cuda.is_available():
         raise RuntimeError("torch.cuda is not available in this container.")
+    arch = detect_cuda_arch_list()
+    os.environ["TORCH_CUDA_ARCH_LIST"] = arch
     gpu = torch.cuda.get_device_name(0)
+    cap = torch.cuda.get_device_capability(0)
     torch_ver = torch.__version__
     cuda_ver = torch.version.cuda
-    logger.info("torch %s cuda %s gpu %s", torch_ver, cuda_ver, gpu)
+    logger.info("torch %s cuda %s gpu %s arch %s", torch_ver, cuda_ver, gpu, arch)
 
-    installed = False
+    arch_file = root / _CUDA_ARCH_MARKER
+    prev_arch = arch_file.read_text().strip() if arch_file.is_file() else ""
+    gsplat_ver = None
     try:
         import gsplat  # noqa: F401
         gsplat_ver = getattr(gsplat, "__version__", "?")
+        need_gsplat = prev_arch != arch
     except ImportError:
+        need_gsplat = True
+
+    installed = False
+    if need_gsplat:
         installed = True
-        cmd = [
-            sys.executable, "-m", "pip", "install", "--target", site,
-            "ninja",
-            "numpy>=1.26", "pillow>=10.0", "pyyaml>=6.0", "scipy>=1.11",
-            "gsplat>=1.4",
-        ]
+        cmd = [sys.executable, "-m", "pip", "install", "--target", site]
+        if prev_arch and prev_arch != arch:
+            logger.info("gsplat was built for sm_%s, rebuilding for sm_%s", prev_arch, arch)
+            cmd += ["--upgrade", "--force-reinstall", "gsplat>=1.4"]
+        else:
+            cmd += [
+                "ninja",
+                "numpy>=1.26", "pillow>=10.0", "pyyaml>=6.0", "scipy>=1.11",
+                "gsplat>=1.4",
+            ]
         logger.info("pip install --target %s gsplat …", site)
         subprocess.check_call(cmd)
         import importlib
@@ -2387,6 +2756,7 @@ def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
             sys.path.insert(0, site)
         import gsplat  # noqa: F401
         gsplat_ver = getattr(gsplat, "__version__", "?")
+    arch_file.write_text(arch + "\n")
 
     job_id = os.environ.get("SLURM_JOB_ID") or os.environ.get("LRZ_JOB_ID") or "unknown"
     body = {
@@ -2398,14 +2768,125 @@ def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
         "gsplat": str(gsplat_ver),
         "installed": installed,
         "python": site,
+        "cuda_arch": arch,
+        "compute_cap": f"{cap[0]}.{cap[1]}",
     }
     (logs / f"setup-{job_id}.json").write_text(json.dumps(body, indent=2) + "\n")
     print("SETUP_OK " + json.dumps(body), flush=True)
     return body
 
 
+def probe_gpu_occupancy(cfg: dict | None = None) -> dict[str, Any]:
+    """nvidia-smi occupancy only — does not re-run squeue."""
+    cfg = cfg or load_lrz_config()
+    smi = _ssh_run(cfg, nvidia_smi_command(cfg), timeout=SMI_TIMEOUT_S)
+    if smi.returncode != 0:
+        err = (smi.stderr or smi.stdout or "nvidia-smi occupancy probe failed").strip()[:400]
+        raise RuntimeError(err)
+    occupancy = parse_gpu_occupancy_text(smi.stdout or "")
+    with _PROBE["lock"]:
+        body = dict(_PROBE["body"]) if isinstance(_PROBE["body"], dict) else {}
+        slurm = body.get("slurm") if isinstance(body.get("slurm"), dict) else None
+        occupancy["node"] = (slurm or {}).get("node")
+        body["gpu"] = occupancy
+        body["gpu_error"] = None
+        _PROBE["body"] = body
+        _PROBE["error"] = None
+        _PROBE["at"] = time.time()
+    return occupancy
+
+
+def _remote_setup_paths(cfg: dict) -> tuple[str, str]:
+    job = str(cfg["job_id"])
+    logs = f"{cfg['workspace']}/logs"
+    return f"{logs}/setup-{job}.json", f"{logs}/setup-{job}.log"
+
+
+def launch_detached_setup(cfg: dict) -> str:
+    """Start srun setup on the login node so the SSH mux is not held for 30 min."""
+    marker, log = _remote_setup_paths(cfg)
+    srun = srun_setup_command(cfg)
+    inner = f"{srun} >{shlex.quote(log)} 2>&1; echo SETUP_EXIT:$? >>{shlex.quote(log)}"
+    remote = (
+        f"mkdir -p {shlex.quote(str(Path(log).parent))} && "
+        f"rm -f {shlex.quote(marker)} && "
+        f"nohup sh -c {shlex.quote(inner)} </dev/null >/dev/null 2>&1 & "
+        "echo SETUP_PID $!"
+    )
+    result = _ssh_run(cfg, remote, timeout=45)
+    out = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+    if result.returncode != 0:
+        raise RuntimeError(out[-1500:] or "Failed to start detached GPU setup.")
+    pid = ""
+    for line in out.splitlines():
+        if "SETUP_PID" in line:
+            pid = line.strip().split()[-1]
+    logger.info("detached GPU setup pid %s job %s", pid, cfg.get("job_id"))
+    return pid
+
+
+def _setup_message_from_log(text: str) -> str:
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    interesting = [
+        ln for ln in lines
+        if not ln.startswith("SETUP_EXIT") and not ln.startswith("SETUP_PID")
+    ]
+    tokens = ("error", "install", "gsplat", "torch", "pyxis", "enroot", "cuda", "compiling", "building")
+    for ln in reversed(interesting):
+        if any(tok in ln.lower() for tok in tokens):
+            return ln[-240:]
+    return (interesting[-1] if interesting else "Starting named Pyxis container…")[-240:]
+
+
+def poll_detached_setup(cfg: dict, *, timeout: float = SETUP_TIMEOUT_S) -> dict[str, Any]:
+    marker, log = _remote_setup_paths(cfg)
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        elapsed = int(time.time() - t0)
+        script = (
+            f"if [ -f {shlex.quote(marker)} ]; then echo MARKER; cat {shlex.quote(marker)}; "
+            f"elif grep -q '^SETUP_EXIT:' {shlex.quote(log)} 2>/dev/null; then echo FAILED; "
+            f"tail -n 100 {shlex.quote(log)}; "
+            f"else echo RUNNING; tail -n 16 {shlex.quote(log)} 2>/dev/null; fi"
+        )
+        result = _ssh_run(cfg, script, timeout=25)
+        text = (result.stdout or "") + "\n" + (result.stderr or "")
+        stripped = text.lstrip()
+        if stripped.startswith("MARKER"):
+            payload = text.split("MARKER", 1)[-1].strip()
+            try:
+                loaded = json.loads(payload)
+            except json.JSONDecodeError:
+                loaded = parse_setup_ok_output(payload) or {}
+            if isinstance(loaded, dict) and loaded.get("ok"):
+                return loaded
+            raise RuntimeError(payload[-1800:] or "Setup marker was not OK.")
+        if stripped.startswith("FAILED"):
+            rest = text.split("FAILED", 1)[-1]
+            detail = parse_setup_ok_output(rest)
+            if detail and detail.get("ok"):
+                return detail
+            raise RuntimeError(rest[-2500:] or "GPU setup srun failed.")
+        rest = text.split("RUNNING", 1)[-1] if "RUNNING" in text else text
+        msg = _setup_message_from_log(rest)
+        mins, secs = divmod(elapsed, 60)
+        _set_setup_message(
+            f"{msg} ({mins}m {secs}s; first container start/compile on a new node "
+            "can take 10–20 min)"
+        )
+        time.sleep(SETUP_POLL_S)
+    raise RuntimeError(
+        "GPU setup timed out waiting for the Pyxis container. "
+        "gsplat CUDA compile can take 10–20 min — click Load GPU setup again."
+    )
+
+
 def setup_lrz_gpu(cfg: dict | None = None) -> dict[str, Any]:
-    """Blocking: rsync code, start named Pyxis container, verify torch/gsplat."""
+    """Rsync code, start named Pyxis container, verify torch/gsplat.
+
+    The container srun is detached so the SSH mux stays free for occupancy
+    polls and the dashboard can show live setup log lines.
+    """
     cfg = cfg or load_lrz_config()
     if not lrz_session_alive(cfg):
         raise RuntimeError(session_required_message())
@@ -2415,31 +2896,45 @@ def setup_lrz_gpu(cfg: dict | None = None) -> dict[str, Any]:
             "(or scripts/lrz/allocate.sh --use <id>)."
         )
     probe_job(cfg)
-    _set_setup_message("Uploading splat-explorer code to DSS…")
-    sync_code_to_dss(cfg)
-    _set_setup_message(
-        "Starting named Pyxis container from pytorch.sqsh "
-        "(first gsplat compile on this node is slow)…"
-    )
+    _set_setup_message("Checking who is using the allocated GPU…")
+    occ = None
     try:
-        result = _ssh_run(cfg, srun_setup_command(cfg), timeout=SETUP_TIMEOUT_S)
-    except (subprocess.TimeoutExpired, RuntimeError) as exc:
-        if isinstance(exc, RuntimeError) and "timed out" not in str(exc).lower():
-            raise
-        raise RuntimeError(
-            "GPU setup timed out waiting for the Pyxis container. "
-            "gsplat CUDA compile can take 10–20 min — click Load GPU setup again."
-        ) from exc
-    out = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
-    if result.returncode != 0:
-        raise RuntimeError(out[-2500:] or "GPU setup srun failed.")
-    detail = parse_setup_ok_output(out)
-    if not detail or not detail.get("ok"):
-        raise RuntimeError(
-            "Setup finished without SETUP_OK. "
-            + (out[-1800:] if out else "empty srun output")
+        occ = probe_gpu_occupancy(cfg)
+    except RuntimeError as exc:
+        logger.warning("occupancy probe before setup failed: %s", exc)
+        _set_setup_message(
+            "Could not list GPU processes; srun --gres=gpu:1 still targets only "
+            "this job's card. Uploading splat-explorer code to DSS…"
         )
-    return detail
+    if occ:
+        summary = gpu_occupancy_summary(occ)
+        blocker = occupancy_blocks_setup(summary)
+        if blocker:
+            raise RuntimeError(blocker)
+        connected = pick_connected_gpu(occ.get("gpus"))
+        bits = []
+        if connected:
+            bits.append(
+                f"Allocated GPU {connected.get('index')} "
+                f"{connected.get('name')} sm {connected.get('compute_cap') or '?'}"
+            )
+            if summary.get("high_vram_no_apps"):
+                bits.append(
+                    f"VRAM is {int(connected.get('memory_used_mib') or 0)} MiB with no "
+                    "compute processes (leftover context, not a live colleague job)"
+                )
+        elif summary.get("warning"):
+            bits.append(str(summary["warning"]))
+        bits.append("Uploading splat-explorer code to DSS…")
+        _set_setup_message(". ".join(bits))
+    sync_code_to_dss(cfg)
+    name = container_name_for_job(cfg)
+    _set_setup_message(
+        f"Starting Pyxis container {name} from pytorch.sqsh on this allocation "
+        "(first extract/compile on a new A100/H100 node can take 10–20 min)…"
+    )
+    launch_detached_setup(cfg)
+    return poll_detached_setup(cfg)
 
 
 def request_lrz_setup(*, force: bool = True) -> dict[str, Any]:
@@ -2492,6 +2987,10 @@ def _run_setup_thread(cfg: dict) -> None:
             _SETUP["message"] = f"GPU setup ready on {gpu}{extra}."
             _SETUP["at"] = time.time()
             _SETUP["inflight"] = False
+        try:
+            request_gpu_probe(force=True)
+        except Exception:
+            logger.warning("post-setup GPU probe failed", exc_info=True)
     except Exception as exc:
         logger.warning("LRZ GPU setup failed: %s", exc)
         with _SETUP["lock"]:
@@ -2871,11 +3370,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    os.environ["TORCH_CUDA_ARCH_LIST"] = os.environ.get("LRZ_CUDA_ARCH") or "8.0"
     if args.setup:
         stats = apply_gpu_setup()
         logger.info("gpu setup done: %s", stats)
         return
+    os.environ["TORCH_CUDA_ARCH_LIST"] = os.environ.get("LRZ_CUDA_ARCH") or "8.0"
     if not args.job_dir:
         parser.error("one of --job-dir or --setup is required")
     stats = apply_packed_job(Path(args.job_dir))

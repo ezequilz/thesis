@@ -139,10 +139,27 @@
     color: #1a0808;
     border-color: var(--err) !important;
   }
+  .occ { display: flex; flex-direction: column; gap: 8px; }
+  .occ-row {
+    display: grid; grid-template-columns: minmax(120px, 170px) 1fr minmax(140px, 190px);
+    gap: 10px; align-items: center; font-size: 12px;
+  }
+  .occ-row .lab { font-family: var(--mono); }
+  .occ-row.mine .lab { color: var(--ok); }
+  .occ-row.other .lab { color: var(--dim); }
+  .occ-row.other .bar > i { background: #5a6578; }
+  .warn-banner, .err-banner {
+    margin: 0 0 10px; padding: 8px 10px; border-radius: 8px; font-size: 12.5px;
+  }
+  .warn-banner { border: 1px solid rgba(230,180,80,.45); color: var(--warn); background: rgba(230,180,80,.06); }
+  .err-banner { border: 1px solid rgba(239,106,106,.45); color: var(--err); background: rgba(239,106,106,.06); }
+  td.foreign { color: var(--err); }
+  td.mine-user { color: var(--ok); }
   @media (max-width: 1100px) {
     .pipeline { grid-template-columns: 1fr 1fr; }
     .grid { grid-template-columns: 1fr; }
     .jobs-row { grid-template-columns: 1fr; }
+    .occ-row { grid-template-columns: 1fr; gap: 4px; }
   }
 </style>
 </head>
@@ -186,7 +203,7 @@
   <div class="row">
     <button id="btn-widen" class="ghost">Widen selected partitions</button>
     <button id="btn-review" class="ghost">Refresh availability</button>
-    <button id="btn-setup" title="Once per allocation: start the named Pyxis container from DSS pytorch.sqsh and install gsplat onto the shared drive. Later repairs reuse it.">Load GPU setup</button>
+    <button id="btn-setup" title="Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh and install gsplat onto YOUR shared drive. Refuses to run if a colleague's process is on the allocated GPU.">Load GPU setup</button>
     <span id="probe-meta" class="hint">At most one remote probe per 10 min while this tab is visible. Reloads reuse cache; availability is a separate one-shot sinfo after the probe finishes.</span>
   </div>
 </div>
@@ -207,6 +224,10 @@
       <h2>Current repair</h2>
       <div class="empty">No CUDA repair running.</div>
     </div>
+  </div>
+  <div class="card" style="margin-top:12px" id="occ-card">
+    <h2>GPU occupancy <span class="sub">every card nvidia-smi can see · yours vs other jobs</span></h2>
+    <div id="occupancy"><div class="empty">No occupancy probe yet. Open the SSH session, then refresh.</div></div>
   </div>
   <div class="jobs-row">
     <div class="card">
@@ -457,11 +478,42 @@ function renderPipeline() {
   }).join("");
 }
 
+function gpuRows() {
+  return hasRunningJob() ? (snap?.gpu || []) : [];
+}
+function connectedGpu() {
+  const rows = gpuRows();
+  const mine = rows.filter(g => g.allocated);
+  if (mine.length) return mine[0];
+  if (rows.length === 1) return rows[0];
+  return null;
+}
+function occupancyProcesses() {
+  const occ = snap?.gpu_occupancy;
+  if (occ?.processes?.length) return occ.processes;
+  const out = [];
+  for (const g of gpuRows()) {
+    for (const p of (g.processes || [])) {
+      out.push({...p, gpu_index: g.index, allocated_gpu: Boolean(g.allocated)});
+    }
+  }
+  return out;
+}
+function fmtElapsed(s) {
+  const n = Number(s);
+  if (!Number.isFinite(n) || n < 0) return "";
+  if (n < 60) return `${Math.round(n)}s`;
+  const m = Math.floor(n / 60);
+  const sec = Math.round(n % 60);
+  if (m < 60) return `${m}m ${sec}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
 function renderGpu() {
   const card = $("gpu-card");
   const running = hasRunningJob();
-  const gpus = running ? (snap?.gpu || []) : [];
-  const g = gpus[0];
+  const gpus = gpuRows();
+  const g = connectedGpu();
   const slurm = snap?.slurm;
   if (!g) {
     const err = running ? snap?.gpu_error : null;
@@ -471,6 +523,10 @@ function renderGpu() {
     let empty;
     if (probing && running) empty = "Probing the allocated node…";
     else if (err) empty = err;
+    else if (running && gpus.length) {
+      empty = snap?.gpu_warning
+        || "nvidia-smi listed every GPU on this node; GPU 0 is not necessarily yours. See occupancy below.";
+    }
     else if (running) empty = "Job is running, but nvidia-smi has not returned yet.";
     else if (!snap?.connection?.session) empty = "No GPU probe yet. Open the SSH session, then refresh.";
     else if (pending.length) {
@@ -491,9 +547,11 @@ function renderGpu() {
   const free = g.memory_free_mib != null ? Math.round(g.memory_free_mib) : Math.max(0, total - used);
   const node = snap.gpu_node || slurm?.node || "–";
   const part = slurm?.partition || "–";
+  const nproc = (g.processes || []).length;
+  const idx = g.index != null ? `GPU ${g.index}` : "GPU";
   card.innerHTML = `<h2>Connected GPU</h2>
     <div class="gpu-name">${esc(g.name || "GPU")}</div>
-    <div class="gpu-sub">${esc(node)} · ${esc(part)} · sm ${esc(g.compute_cap || "–")} · job ${esc(slurm?.job_id || "–")}</div>
+    <div class="gpu-sub">${esc(idx)} · ${esc(node)} · ${esc(part)} · sm ${esc(g.compute_cap || "–")} · job ${esc(slurm?.job_id || "–")}</div>
     <div class="meters">
       <div class="meter">
         <div class="row"><span class="k">VRAM</span>
@@ -511,8 +569,74 @@ function renderGpu() {
       <span class="k">power</span><span class="v">${g.power_w != null ? esc(Number(g.power_w).toFixed(0)) + " / " + esc(Number(g.power_limit_w || 0).toFixed(0)) + " W" : "–"}</span>
       <span class="k">job time</span><span class="v">${esc(slurm?.elapsed || "–")} / ${esc(slurm?.timelimit || "–")}</span>
       <span class="k">compute cap</span><span class="v">${esc(g.compute_cap || "–")}</span>
+      <span class="k">compute procs</span><span class="v">${esc(nproc)}</span>
       <span class="k">name</span><span class="v">${esc(slurm?.name || "–")}</span>
     </div>`;
+}
+
+function renderOccupancy() {
+  const box = $("occupancy");
+  if (!box) return;
+  if (!hasRunningJob()) {
+    box.innerHTML = `<div class="empty">Needs a job in ST=R. nvidia-smi is only run on the allocated node.</div>`;
+    return;
+  }
+  const occ = snap?.gpu_occupancy || {};
+  const rows = gpuRows();
+  if (!rows.length) {
+    box.innerHTML = `<div class="empty">${esc(snap?.gpu_error || "Waiting for nvidia-smi occupancy…")}</div>`;
+    return;
+  }
+  const env = occ.env || snap.gpu_env || {};
+  const warning = occ.warning || snap.gpu_warning;
+  const foreign = occ.foreign_on_allocated || [];
+  const procs = occupancyProcesses();
+  const banners = [];
+  if (foreign.length) {
+    banners.push(`<div class="err-banner">Your allocated GPU has ${esc(foreign.length)} process(es) that are not yours. Load GPU setup is blocked so those jobs are not overwritten.</div>`);
+  } else if (warning) {
+    banners.push(`<div class="warn-banner">${esc(warning)}</div>`);
+  } else if (occ.high_vram_no_apps) {
+    banners.push(`<div class="warn-banner">Allocated GPU has VRAM in use but nvidia-smi lists no compute processes. That is leftover driver context, not a live colleague job. Load GPU setup only starts your Pyxis container on this job's card and writes to your DSS workspace.</div>`);
+  }
+  const chart = rows.map(g => {
+    const pct = Number(g.memory_pct || 0);
+    const mine = Boolean(g.allocated);
+    const memCls = pct >= 90 ? "err" : pct >= 70 ? "warn" : "";
+    const tag = mine ? "yours" : "other job";
+    const used = Math.round(g.memory_used_mib || 0);
+    const total = Math.round(g.memory_total_mib || 0);
+    return `<div class="occ-row ${mine ? "mine" : "other"}">
+      <span class="lab">GPU ${esc(g.index)} · ${tag}</span>
+      <div class="bar ${memCls}"><i style="width:${Math.min(100, pct)}%"></i></div>
+      <span class="v">${esc(used)} / ${esc(total)} MiB · ${esc(Math.round(g.utilization_gpu || 0))}% util</span>
+    </div>`;
+  }).join("");
+  const procTable = procs.length ? `<table style="margin-top:12px">
+    <thead><tr><th>GPU</th><th>pid</th><th>user</th><th>VRAM</th><th>process</th><th></th></tr></thead>
+    <tbody>${procs.map(p => {
+      const who = p.foreign ? "foreign" : (p.user ? "yours" : "");
+      const extra = p.allocated_gpu ? "" : " · other GPU";
+      return `<tr>
+        <td>${esc(p.gpu_index ?? "–")}</td>
+        <td>${esc(p.pid ?? "–")}</td>
+        <td class="${p.foreign ? "foreign" : "mine-user"}">${esc(p.user || "–")}</td>
+        <td>${esc(p.memory_used_mib != null ? Math.round(p.memory_used_mib) + " MiB" : "–")}</td>
+        <td title="${esc(p.args || p.name || "")}">${esc(p.name || p.args || "–")}</td>
+        <td>${esc(who)}${esc(extra)}</td>
+      </tr>`;
+    }).join("")}</tbody>
+  </table>` : `<div class="empty" style="padding-top:10px">No compute processes on any GPU nvidia-smi can see. A sleep-hold job uses 0 VRAM — high VRAM without a PID is leftover context or another card on the node.</div>`;
+  const meta = [
+    occ.scope ? `scope ${occ.scope}${occ.scope_reason ? " · " + occ.scope_reason : ""}` : "",
+    env.CUDA_VISIBLE_DEVICES ? `CUDA_VISIBLE_DEVICES=${env.CUDA_VISIBLE_DEVICES}` : "",
+    env.SLURM_JOB_GPUS ? `SLURM_JOB_GPUS=${env.SLURM_JOB_GPUS}` : "",
+    env.USER ? `user ${env.USER}` : "",
+  ].filter(Boolean).join(" · ");
+  box.innerHTML = `${banners.join("")}
+    <div class="occ">${chart}</div>
+    ${procTable}
+    ${meta ? `<div class="empty" style="padding-top:8px">${esc(meta)}</div>` : ""}`;
 }
 
 function repairStats(job, packed, remote) {
@@ -681,7 +805,7 @@ function renderSetup() {
     ${$("in-after").checked ? cmdRow("Queue the next hold until the current job ends.", s.allocate_after || "scripts/lrz/allocate.sh 8h --after") : ""}
     ${pending ? cmdRow("If PD (Priority), add DGX+HGX A100 once.", s.widen || "scripts/lrz/allocate.sh --widen") : ""}
     ${cmdRow("Interactive shell on the GPU node (needs --overlap).", s.gpu_shell || "scripts/lrz/gpu-shell.sh")}
-    ${cmdRow("Once per allocation: named Pyxis container + gsplat on DSS.", s.setup || "scripts/lrz/load-setup.sh")}
+    ${cmdRow("Once per allocation: job-scoped Pyxis container + gsplat on YOUR DSS (never a colleague's GPU).", s.setup || "scripts/lrz/load-setup.sh")}
     ${cmdRow("Workspace dirs + Enroot import reminders.", s.bootstrap || "scripts/lrz/bootstrap.sh")}
     <div class="kv" style="margin-top:10px">
       <span class="k">SSH mux</span><span class="v">${c.session ? "alive" : "down"}</span>
@@ -695,10 +819,14 @@ function renderSetup() {
 
 function setupLabel() {
   const s = snap?.setup || {};
-  if (s.inflight) return s.message || "loading…";
+  if (s.inflight) {
+    const elapsed = fmtElapsed(s.elapsed_s);
+    return (s.message || "loading…") + (elapsed ? ` · ${elapsed}` : "");
+  }
   if (s.ok) {
     const g = s.detail?.gpu || "";
-    return g ? `ready · ${g}` : (s.message || "ready");
+    const arch = s.detail?.cuda_arch ? ` sm ${s.detail.cuda_arch}` : "";
+    return g ? `ready · ${g}${arch}` : (s.message || "ready");
   }
   if (s.error) return s.error;
   if (snap?.slurm?.state === "R") return "not loaded — click Load GPU setup";
@@ -874,10 +1002,14 @@ function renderChrome() {
   $("btn-widen").disabled = setupBusy || !session;
   $("btn-review").disabled = setupBusy || probeBusy || !session;
   const canSetup = session && snap?.slurm?.state === "R";
-  $("btn-setup").disabled = probeBusy || setupBusy || !canSetup;
+  const foreign = (snap?.gpu_occupancy?.foreign_on_allocated || []).length;
+  $("btn-setup").disabled = probeBusy || setupBusy || !canSetup || foreign > 0;
   $("btn-setup").textContent = snap?.setup?.inflight
-    ? "Loading GPU setup…"
+    ? (snap.setup.elapsed_s ? `Loading GPU setup… ${fmtElapsed(snap.setup.elapsed_s)}` : "Loading GPU setup…")
     : (snap?.setup?.ok ? "Reload GPU setup" : "Load GPU setup");
+  $("btn-setup").title = foreign
+    ? "Blocked: a process that is not yours is on the allocated GPU."
+    : "Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh. Refuses to run if a colleague's process is on this GPU.";
   $("btn-hist").disabled = probeBusy || setupBusy || !session;
   syncAutoInterval();
 }
@@ -886,6 +1018,7 @@ function render() {
   renderChrome();
   renderPipeline();
   renderGpu();
+  renderOccupancy();
   renderRepair();
   renderJobs();
   renderHistory();
