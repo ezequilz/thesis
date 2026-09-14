@@ -25,10 +25,11 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import numpy as np
 from PIL import Image
@@ -58,7 +59,7 @@ _DEFAULTS = {
     "workspace": "/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000/go73kaf2/splat-explorer",
     "container": "/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000/go73kaf2/splat-explorer/containers/pytorch.sqsh",
     "cpus": 4,
-    "mem": "32G",
+    "mem": "64G",
     "container_name": "splat-repair",
 }
 
@@ -330,7 +331,7 @@ def sbatch_hold_command(
     begin: str | None = None,
     nodelist: str | None = None,
     cpus: int = 4,
-    mem: str = "32G",
+    mem: str = "64G",
     gres: str = "gpu:1",
 ) -> str:
     """One sleep hold job. Does not wait in the queue."""
@@ -686,6 +687,11 @@ _MUX = {
     "lock": threading.Lock(),
     "last_at": 0.0,
 }
+_GPU_WORK = {
+    "lock": threading.Lock(),
+    "owner": "",
+}
+_OURS_PROCESS_HINTS = ("splat_explorer", "splat-explorer", "repair_lrz", "gsplat")
 
 
 def _remember_session(alive: bool) -> None:
@@ -716,6 +722,26 @@ def _mux_stagger_locked() -> None:
 
 def _mux_mark_locked() -> None:
     _MUX["last_at"] = time.time()
+
+
+@contextmanager
+def _gpu_exclusive(owner: str, *, timeout: float = 8.0) -> Iterator[None]:
+    """One setup or repair on the allocated GPU at a time."""
+    if not _GPU_WORK["lock"].acquire(timeout=max(0.1, float(timeout))):
+        current = str(_GPU_WORK.get("owner") or "another GPU task")
+        raise RuntimeError(
+            f"GPU is busy with {current}. Wait for that to finish before starting {owner}."
+        )
+    _GPU_WORK["owner"] = owner
+    try:
+        yield
+    finally:
+        _GPU_WORK["owner"] = ""
+        _GPU_WORK["lock"].release()
+
+
+def gpu_work_owner() -> str:
+    return str(_GPU_WORK.get("owner") or "")
 
 
 def _squeue_blank(raw: str | None) -> str | None:
@@ -1242,8 +1268,10 @@ def annotate_allocated_gpus(
 ) -> dict[str, Any]:
     """Mark which nvidia-smi rows belong to this Slurm step.
 
-    nvidia-smi ignores CUDA_VISIBLE_DEVICES and lists every card on a DGX.
-    The dashboard used to display row 0, which is often a colleague's GPU.
+    nvidia-smi often lists every card on a DGX. Inside ``srun --gres=gpu:1``
+    some nodes instead remap the allocated card to index 0 while
+    ``SLURM_STEP_GPUS`` still holds the physical index. Treat a single visible
+    nvidia-smi row as this job's GPU; keep Slurm IDs for /dev/nvidia wipe.
     """
     env = env or {}
     our_user = str(env.get("USER") or "").strip()
@@ -1254,15 +1282,22 @@ def annotate_allocated_gpus(
     allocated_uuid: set[str] = set()
     reason = ""
     warning = None
-    if device_nodes and len(device_nodes) < max(len(gpus), 2):
+    physical_gpus: list[int] = []
+    if slurm_ids and all(part.isdigit() for part in slurm_ids):
+        physical_gpus = [int(part) for part in slurm_ids]
+    elif device_nodes and len(device_nodes) == 1:
+        physical_gpus = [int(device_nodes[0])]
+    if len(gpus) == 1:
+        allocated_idx = {int(gpus[0].get("index") or 0)}
+        reason = "single visible GPU"
+        if physical_gpus:
+            reason = f"single visible GPU (slurm {','.join(str(i) for i in physical_gpus)})"
+    elif device_nodes and len(device_nodes) < max(len(gpus), 2):
         allocated_idx = set(device_nodes)
         reason = "/dev/nvidia*"
     elif slurm_ids and all(part.isdigit() for part in slurm_ids):
         allocated_idx = {int(part) for part in slurm_ids}
         reason = "SLURM_JOB_GPUS"
-    elif len(gpus) == 1:
-        allocated_idx = {int(gpus[0].get("index") or 0)}
-        reason = "single visible GPU"
     elif cuda_ids and all(part.isdigit() for part in cuda_ids) and not _looks_remapped_cuda_ids(cuda_ids, len(gpus)):
         allocated_idx = {int(part) for part in cuda_ids}
         reason = "CUDA_VISIBLE_DEVICES"
@@ -1307,11 +1342,6 @@ def annotate_allocated_gpus(
         }
         gpu.setdefault("processes", []).append(body)
 
-    if not any(gpu.get("allocated") for gpu in gpus) and gpus:
-        warning = warning or (
-            "Could not match this job to a GPU index. Showing every card on the node; "
-            "the nearly-full one is not necessarily yours."
-        )
     return {
         "gpus": gpus,
         "env": env,
@@ -1320,6 +1350,7 @@ def annotate_allocated_gpus(
         "warning": warning,
         "user": our_user,
         "device_nodes": list(device_nodes or []),
+        "physical_gpus": physical_gpus,
     }
 
 
@@ -1363,6 +1394,7 @@ def gpu_occupancy_summary(gpu: dict | None) -> dict[str, Any]:
     gpus = list((gpu or {}).get("gpus") or []) if isinstance(gpu, dict) else []
     allocated = [row for row in gpus if row.get("allocated")]
     others = [row for row in gpus if not row.get("allocated")]
+    body_user = str((gpu or {}).get("user") or "") if isinstance(gpu, dict) else ""
     processes: list[dict[str, Any]] = []
     for row in gpus:
         for proc in row.get("processes") or []:
@@ -1374,6 +1406,10 @@ def gpu_occupancy_summary(gpu: dict | None) -> dict[str, Any]:
                 "allocated_gpu": bool(row.get("allocated")),
             })
     foreign = [proc for proc in processes if proc.get("foreign") and proc.get("allocated_gpu")]
+    ours = [
+        proc for proc in processes
+        if proc.get("allocated_gpu") and process_is_ours(proc, str(body_user))
+    ]
     allocated_procs = [proc for proc in processes if proc.get("allocated_gpu")]
     used = float((allocated[0].get("memory_used_mib") or 0) if allocated else 0)
     body = {
@@ -1381,11 +1417,13 @@ def gpu_occupancy_summary(gpu: dict | None) -> dict[str, Any]:
         "scope_reason": (gpu or {}).get("scope_reason") if isinstance(gpu, dict) else None,
         "warning": (gpu or {}).get("warning") if isinstance(gpu, dict) else None,
         "env": (gpu or {}).get("env") if isinstance(gpu, dict) else {},
-        "user": (gpu or {}).get("user") if isinstance(gpu, dict) else "",
+        "user": body_user,
+        "physical_gpus": list((gpu or {}).get("physical_gpus") or []) if isinstance(gpu, dict) else [],
         "allocated": allocated,
         "others": others,
         "processes": processes,
         "foreign_on_allocated": foreign,
+        "ours_on_allocated": ours,
         "high_vram_no_apps": bool(allocated and used >= 1024 and not allocated_procs),
         "needs_overwrite": None,
     }
@@ -1393,57 +1431,37 @@ def gpu_occupancy_summary(gpu: dict | None) -> dict[str, Any]:
     return body
 
 
+def process_is_ours(proc: dict | None, our_user: str = "") -> bool:
+    """True when a compute app belongs to this account's splat-explorer worker."""
+    proc = proc or {}
+    if proc.get("foreign"):
+        return False
+    user = str(proc.get("user") or "")
+    if our_user and user and user != our_user:
+        return False
+    args = str(proc.get("args") or proc.get("name") or "").lower()
+    if any(hint in args for hint in _OURS_PROCESS_HINTS):
+        return True
+    return bool(our_user and user == our_user)
+
+
 def occupancy_needs_overwrite(occupancy: dict | None) -> str | None:
-    """Why Load GPU setup needs a second-click overwrite, or None if the card is empty."""
+    """Foreign leftover on THIS reserved GPU, or None.
+
+    Our own splat-explorer / sleep-hold processes are the pipeline — they are
+    not overwritten. Busy VRAM on other cards is ignored.
+    """
     if not occupancy:
         return None
     foreign = list(occupancy.get("foreign_on_allocated") or [])
-    procs_all = list(occupancy.get("processes") or [])
-    procs = [proc for proc in procs_all if proc.get("allocated_gpu")]
-    allocated = list(occupancy.get("allocated") or [])
-    if foreign:
-        bits = [_process_brief(proc) for proc in foreign[:4]]
-        return (
-            "Allocated GPU is occupied by another user: "
-            + "; ".join(bits)
-            + ". That leftover is on THIS reserved GPU only. Click again to reset "
-            "this card (other GPUs on the node are never signalled)."
-        )
-    if procs:
-        bits = [_process_brief(proc) for proc in procs[:4]]
-        return (
-            "Allocated GPU still has compute processes: "
-            + "; ".join(bits)
-            + ". Click again to reset it and load a fresh setup."
-        )
-    for gpu in allocated:
-        used = float(gpu.get("memory_used_mib") or 0)
-        if used >= 256:
-            return (
-                f"Allocated GPU {gpu.get('index')} has {int(used)} MiB VRAM in use. "
-                "Click again to reset this job's CUDA device and load splat-explorer."
-            )
-    if occupancy.get("scope") != "allocated" and procs_all:
-        bits = [_process_brief(proc) for proc in procs_all[:4]]
-        return (
-            "This node still has GPU processes "
-            f"({'; '.join(bits)}) and nvidia-smi did not pin which card is yours. "
-            "Click again to reset THIS job's CUDA device only (other cards are left alone)."
-        )
-    if occupancy.get("scope") != "allocated":
-        busy = [
-            gpu for gpu in (occupancy.get("others") or occupancy.get("allocated") or [])
-            if float(gpu.get("memory_used_mib") or 0) >= 1024
-        ]
-        gpus = list(occupancy.get("allocated") or []) + list(occupancy.get("others") or [])
-        if not busy:
-            busy = [gpu for gpu in gpus if float(gpu.get("memory_used_mib") or 0) >= 1024]
-        if busy:
-            return (
-                "nvidia-smi shows busy VRAM on this node and could not pin your GPU index. "
-                "Click again to reset THIS job's CUDA device only."
-            )
-    return None
+    if not foreign:
+        return None
+    bits = [_process_brief(proc) for proc in foreign[:4]]
+    return (
+        "Allocated GPU still has leftover process(es) from another user: "
+        + "; ".join(bits)
+        + ". Load GPU setup will clear only this reserved card, then start splat-explorer."
+    )
 
 
 class SetupNeedsOverwrite(RuntimeError):
@@ -1463,26 +1481,19 @@ def _cached_occupancy_raw() -> tuple[dict | None, float]:
     return gpu, at
 
 
-def occupancy_reason_for_setup(*, overwrite: bool, refresh_if_missing: bool = True) -> str | None:
-    """Live occupancy check so a dashboard restart cannot skip the overwrite confirm."""
+def occupancy_reason_for_setup(*, overwrite: bool = False, refresh_if_missing: bool = True) -> str | None:
+    """Foreign leftover on this GPU, if any. Setup is no longer blocked on confirm."""
+    del overwrite
     gpu, _at = _cached_occupancy_raw()
     if gpu is None and refresh_if_missing:
         try:
             gpu = probe_gpu_occupancy()
         except RuntimeError as exc:
-            if not overwrite:
-                raise SetupNeedsOverwrite(
-                    "Could not list GPU occupancy. Click again to reset THIS job's "
-                    "CUDA device and load splat-explorer. "
-                    f"({exc})"
-                ) from exc
-            return f"occupancy unknown ({exc})"
-    reason = occupancy_needs_overwrite(
+            logger.warning("occupancy probe before setup failed: %s", exc)
+            return None
+    return occupancy_needs_overwrite(
         gpu_occupancy_summary(gpu if isinstance(gpu, dict) else None)
     )
-    if reason and not overwrite:
-        raise SetupNeedsOverwrite(reason)
-    return reason
 
 
 def _process_brief(proc: dict) -> str:
@@ -1495,23 +1506,42 @@ def _process_brief(proc: dict) -> str:
 
 
 def physical_indices_for_wipe(occupancy: dict | None) -> list[int]:
-    """Physical nvidia-smi indices for THIS job only.
+    """Physical /dev/nvidiaN indices for THIS job only.
 
-    Empty when occupancy is node-wide: we must not guess GPU 0.
-    CUDA_VISIBLE_DEVICES=0 on a DGX is remapped and is never used as a hint.
+    Prefer SLURM_JOB_GPUS / SLURM_STEP_GPUS. nvidia-smi index 0 on a DGX is
+    often a remapped CUDA device, not physical GPU 0.
     """
     occupancy = occupancy or {}
-    gpus = list(occupancy.get("gpus") or [])
-    devices = [int(idx) for idx in (occupancy.get("device_nodes") or []) if str(idx).isdigit() or isinstance(idx, int)]
+    env = occupancy.get("env") if isinstance(occupancy.get("env"), dict) else {}
+    slurm_ids = _id_list(env.get("SLURM_JOB_GPUS") or env.get("SLURM_STEP_GPUS"))
+    if slurm_ids and all(part.isdigit() for part in slurm_ids):
+        return [int(part) for part in slurm_ids]
+    stored = occupancy.get("physical_gpus") or []
+    if stored:
+        out: list[int] = []
+        for idx in stored:
+            try:
+                out.append(int(idx))
+            except (TypeError, ValueError):
+                continue
+        if out:
+            return out
+    devices = [
+        int(idx) for idx in (occupancy.get("device_nodes") or [])
+        if str(idx).isdigit() or isinstance(idx, int)
+    ]
     if len(devices) == 1:
         return devices
+    gpus = list(occupancy.get("gpus") or [])
     allocated = [gpu for gpu in gpus if gpu.get("allocated")]
     if not allocated:
         return []
     reason = str(occupancy.get("scope_reason") or "")
-    if reason == "CUDA_VISIBLE_DEVICES" and len(gpus) > len(allocated):
+    if reason.startswith("single visible GPU"):
         return []
-    out: list[int] = []
+    if "CUDA_VISIBLE_DEVICES" in reason and len(gpus) > len(allocated):
+        return []
+    out = []
     for gpu in allocated:
         try:
             out.append(int(gpu.get("index")))
@@ -1659,9 +1689,8 @@ def wipe_gpu_srun_command(cfg: dict, *, gpu_indices: list[int], pids: list[int])
     """Reset THIS job's reserved GPU from inside srun --gres=gpu:1.
 
     Pins the card via cgroup / NVIDIA UUID / SLURM_JOB_GPUS / CUDA device 0
-    UUID (not remapped CUDA_VISIBLE_DEVICES=0). Never kills by PID. nvidia-smi
-    failures must not skip the reset: leftover occupants on OUR card are
-    fuser'd and gpu-reset; other cards are not touched.
+    UUID (not remapped CUDA_VISIBLE_DEVICES=0). Foreign PIDs on THIS card are
+    signalled; our splat-explorer worker is kept. Other cards are not touched.
     """
     del pids
     job = shlex.quote(str(cfg["job_id"]))
@@ -1698,21 +1727,34 @@ PY
   fi
 fi
 python3 -c 'import ctypes; ctypes.CDLL("libcudart.so").cudaDeviceReset()' 2>/dev/null && echo CUDA_RESET_OK || echo CUDA_RESET_SKIP
+OUR=$(id -un 2>/dev/null || whoami)
 if [ -n "$ALLOWED" ] && [ "$SHARED" != "1" ]; then
   IFS=,
   for i in $ALLOWED; do
     [ -e "/dev/nvidia$i" ] || continue
     echo FUSER "/dev/nvidia$i"
     fuser -v "/dev/nvidia$i" 2>&1 || true
-    fuser -k "/dev/nvidia$i" 2>&1 || echo FUSER_EPERM "$i"
+    for pid in $(fuser "/dev/nvidia$i" 2>/dev/null | tr -s '[:space:]' '\\n' | grep -E '^[0-9]+$' || true); do
+      owner=$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')
+      if [ -n "$owner" ] && [ "$owner" != "$OUR" ]; then
+        echo KILL_FOREIGN "$pid" "$owner"
+        kill -TERM "$pid" 2>/dev/null || echo KILL_EPERM "$pid"
+      else
+        echo KEEP_OURS "$pid" "${{owner:-$OUR}}"
+      fi
+    done
   done
   unset IFS
 fi
-if [ -n "$ALLOWED" ] && [ "$SHARED" != "1" ]; then
-  echo RESET "$ALLOWED"
-  timeout 30 nvidia-smi --gpu-reset -i "$ALLOWED" && echo RESET_OK || echo RESET_FAIL
+SMI_IDX=$(timeout 15 nvidia-smi --query-gpu=index --format=csv,noheader,nounits 2>/dev/null | awk 'NR==1{{gsub(/ /,""); print}}')
+OURS_LEFT=$(printf '%s\\n' "$(timeout 15 nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null || true)" | grep -cE '^[0-9]+$' || true)
+if [ -n "$SMI_IDX" ] && [ "$SHARED" != "1" ] && [ "${{OURS_LEFT:-0}}" = "0" ]; then
+  echo RESET_SMI "$SMI_IDX"
+  timeout 30 nvidia-smi --gpu-reset -i "$SMI_IDX" && echo RESET_OK || echo RESET_FAIL
 elif [ -z "$ALLOWED" ]; then
   echo SKIP_PHYSICAL
+else
+  echo SKIP_RESET_OURS
 fi
 echo APPS
 timeout 15 nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits || true
@@ -1730,7 +1772,8 @@ echo WIPE_DONE
 def _wipe_summary(out: str) -> str:
     keys = (
         "ALLOWED_FROM", "ALLOWED_IDX", "ALLOWED ", "CUDA_UUID", "FUSER",
-        "FUSER_EPERM", "RESET ", "RESET_OK", "RESET_FAIL", "SKIP_PHYSICAL",
+        "FUSER_EPERM", "KILL_FOREIGN", "KEEP_OURS", "RESET ", "RESET_SMI",
+        "RESET_OK", "RESET_FAIL", "SKIP_PHYSICAL", "SKIP_RESET_OURS",
         "SKIP_FUSER_SHARED", "SKIP_SHARED_PID", "REJECT_HINT_GPU0", "WIPE_DONE",
     )
     hits = []
@@ -2055,7 +2098,7 @@ def build_connection_checks(
                 "detail": f"{detail} · {foreign_n} leftover process(es) are not yours",
                 "action": (
                     occupancy.get("needs_overwrite")
-                    or "Click Load GPU setup, then overwrite prior setup? to wipe leftovers."
+                    or "Load GPU setup will clear leftover processes on this reserved GPU only."
                 ),
             })
         elif occupancy.get("needs_overwrite"):
@@ -2170,8 +2213,8 @@ def _login_probe_script(
 def nvidia_smi_command(cfg: dict) -> str:
     """Occupancy probe: env + /dev/nvidia* + every card + compute apps.
 
-    nvidia-smi does not honor CUDA_VISIBLE_DEVICES, so a DGX A100 ×8 node
-    returns eight rows. The parser marks which index this job actually owns.
+    nvidia-smi may list every card on a DGX, or only the remapped allocated
+    GPU as index 0 (``SLURM_STEP_GPUS`` still has the physical index).
     """
     job = shlex.quote(str(cfg["job_id"]))
     inner = """
@@ -2463,7 +2506,7 @@ def allocate_lrz_gpu(
         after_job=after_job,
         begin=begin_spec,
         cpus=int(cfg.get("cpus") or 4),
-        mem=str(cfg.get("mem") or "32G"),
+        mem=str(cfg.get("mem") or "64G"),
     )
     with _ALLOCATE["lock"]:
         if _ALLOCATE["inflight"]:
@@ -2570,8 +2613,8 @@ def use_lrz_job(job_id: str) -> dict[str, Any]:
         "job_id": str(job_id).strip(),
         "path": str(path),
         "message": (
-            f"Now using job {job_id}. Click Load GPU setup once on this allocation "
-            "(PyTorch container + gsplat from DSS), then start a repair."
+            f"Now using job {job_id}. /repair will attach on the next CUDA run "
+            "(Load GPU setup only if the PyTorch container is missing on this allocation)."
         ),
     }
 
@@ -3054,6 +3097,28 @@ def lrz_setup_status(cfg: dict | None = None, *, probe_setup: dict | None = None
                 if not _SETUP.get("message"):
                     _SETUP["message"] = body["message"]
                 _SETUP["error"] = None
+    if not body["ok"] and not body["inflight"]:
+        gpu, _at = _cached_occupancy_raw()
+        summary = gpu_occupancy_summary(gpu if isinstance(gpu, dict) else None)
+        if summary.get("ours_on_allocated"):
+            body["ok"] = True
+            if not body["message"]:
+                gpu_name = ""
+                allocated = summary.get("allocated") or []
+                if allocated:
+                    gpu_name = str(allocated[0].get("name") or "")
+                body["message"] = (
+                    "splat-explorer is already on this reserved GPU"
+                    + (f" ({gpu_name})" if gpu_name else "")
+                    + ". /repair can use this allocation."
+                )
+            with _SETUP["lock"]:
+                if not _SETUP["inflight"] and not _SETUP["ok"]:
+                    _SETUP["ok"] = True
+                    _SETUP["job_id"] = job
+                    if not _SETUP.get("message"):
+                        _SETUP["message"] = body["message"]
+                    _SETUP["error"] = None
     return body
 
 
@@ -3273,11 +3338,86 @@ def poll_detached_setup(cfg: dict, *, timeout: float = SETUP_TIMEOUT_S) -> dict[
     )
 
 
+def read_remote_setup_marker(cfg: dict | None = None) -> dict[str, Any]:
+    """One SSH cat of logs/setup-<job>.json on DSS (survives dashboard restarts)."""
+    cfg = cfg or load_lrz_config()
+    marker, _log = _remote_setup_paths(cfg)
+    result = _ssh_run(
+        cfg,
+        f"if [ -f {shlex.quote(marker)} ]; then cat {shlex.quote(marker)}; else echo MISSING; fi",
+        timeout=20,
+    )
+    return parse_setup_marker_text(
+        result.stdout or "", job_id=str(cfg.get("job_id") or ""),
+    )
+
+
+def wait_for_lrz_setup(cfg: dict | None = None, *, timeout: float = SETUP_TIMEOUT_S) -> dict[str, Any]:
+    cfg = cfg or load_lrz_config()
+    deadline = time.time() + max(30.0, float(timeout))
+    last = lrz_setup_status(cfg)
+    while time.time() < deadline:
+        last = lrz_setup_status(cfg)
+        if last.get("ok") and not last.get("inflight"):
+            return last
+        if not last.get("inflight") and last.get("error"):
+            raise RuntimeError(str(last["error"]))
+        time.sleep(2.0)
+    raise RuntimeError(
+        last.get("message")
+        or "Timed out waiting for GPU setup. Open /repair/gpu and check Load GPU setup."
+    )
+
+
+def remember_setup_ok(cfg: dict, detail: dict[str, Any], message: str) -> dict[str, Any]:
+    job = str(cfg.get("job_id") or detail.get("job_id") or "")
+    with _SETUP["lock"]:
+        _SETUP["ok"] = True
+        _SETUP["inflight"] = False
+        _SETUP["error"] = None
+        _SETUP["detail"] = detail
+        _SETUP["job_id"] = job
+        _SETUP["message"] = message
+        _SETUP["at"] = time.time()
+    return lrz_setup_status(cfg)
+
+
+def ensure_lrz_gpu_ready(cfg: dict | None = None) -> dict[str, Any]:
+    """Bind this allocation for CUDA repair: reuse marker / our process, else load setup.
+
+    Called from the /repair pipeline so a dashboard restart or a new GPU job
+    does not require a second-click overwrite before the first refine.
+    """
+    cfg = cfg or load_lrz_config()
+    if not lrz_session_alive(cfg):
+        raise RuntimeError(session_required_message())
+    probe_job(cfg)
+    status = lrz_setup_status(cfg)
+    if status.get("inflight"):
+        _set_setup_message("Waiting for GPU setup to finish before starting the repair…")
+        return wait_for_lrz_setup(cfg)
+    if status.get("ok"):
+        return status
+    try:
+        marker = read_remote_setup_marker(cfg)
+    except RuntimeError as exc:
+        logger.warning("setup marker read failed: %s", exc)
+        marker = {"ok": False}
+    if marker.get("ok"):
+        gpu_name = marker.get("gpu") or "CUDA"
+        return remember_setup_ok(
+            cfg, marker,
+            f"Reusing GPU setup on {gpu_name} (DSS marker for job {cfg.get('job_id')}).",
+        )
+    request_lrz_setup(force=True, overwrite=False)
+    return wait_for_lrz_setup(cfg)
+
+
 def setup_lrz_gpu(cfg: dict | None = None, *, overwrite: bool = False) -> dict[str, Any]:
     """Rsync code, start named Pyxis container, verify torch/gsplat.
 
-    The container srun is detached so the SSH mux stays free for occupancy
-    polls and the dashboard can show live setup log lines.
+    Foreign leftovers on THIS reserved GPU are cleared automatically. Our own
+    splat-explorer process is never killed — that is the /repair pipeline.
     """
     cfg = cfg or load_lrz_config()
     if not lrz_session_alive(cfg):
@@ -3287,45 +3427,66 @@ def setup_lrz_gpu(cfg: dict | None = None, *, overwrite: bool = False) -> dict[s
             "No job_id. Click Use on a running reserved job first "
             "(or scripts/lrz/allocate.sh --use <id>)."
         )
+    if gpu_work_owner() == "repair":
+        raise RuntimeError(
+            "A CUDA repair is using this GPU. Stop it on /repair before reloading setup."
+        )
     probe_job(cfg)
+    with _gpu_exclusive("setup", timeout=8.0):
+        return _setup_lrz_gpu_locked(cfg, overwrite=overwrite)
+
+
+def _setup_lrz_gpu_locked(cfg: dict, *, overwrite: bool = False) -> dict[str, Any]:
     _set_setup_message("Checking who is using the allocated GPU…")
     occ = None
     try:
         occ = probe_gpu_occupancy(cfg)
     except RuntimeError as exc:
         logger.warning("occupancy probe before setup failed: %s", exc)
-        if not overwrite:
-            raise SetupNeedsOverwrite(
-                "Could not list GPU occupancy. Click again to reset THIS job's "
-                "CUDA device and load splat-explorer. "
-                f"({exc})"
-            ) from exc
         occ = None
-    summary = gpu_occupancy_summary(occ) if occ else None
-    reason = occupancy_needs_overwrite(summary)
-    if reason and not overwrite:
-        raise SetupNeedsOverwrite(reason)
+    summary = gpu_occupancy_summary(occ) if occ else {}
+    foreign = bool(summary.get("foreign_on_allocated"))
+    ours = bool(summary.get("ours_on_allocated"))
     leftover_note = ""
-    if overwrite and (reason or occ is None):
+    if ours and not foreign:
         _set_setup_message(
-            "Overwrite confirmed — resetting this job's CUDA device "
-            "(other cards on the node are left alone)…"
+            "splat-explorer is already on this reserved GPU — uploading latest "
+            "code, not resetting the card."
+        )
+        sync_code_to_dss(cfg)
+        try:
+            marker = read_remote_setup_marker(cfg)
+        except RuntimeError:
+            marker = {"ok": False}
+        if marker.get("ok"):
+            marker = dict(marker)
+            marker["reused"] = True
+            return marker
+        connected = pick_connected_gpu((occ or {}).get("gpus") if occ else None)
+        return {
+            "ok": True,
+            "reused": True,
+            "job_id": str(cfg.get("job_id") or ""),
+            "gpu": (connected or {}).get("name") or "CUDA",
+            "compute_cap": (connected or {}).get("compute_cap"),
+        }
+    if foreign:
+        _set_setup_message(
+            "Clearing leftover process(es) on THIS reserved GPU only, then loading splat-explorer…"
         )
         wipe_out = wipe_allocated_gpu(cfg, occ)
+        leftover_note = " Wipe: " + _wipe_summary(wipe_out) + "."
         try:
             occ = probe_gpu_occupancy(cfg)
             leftover = occupancy_needs_overwrite(gpu_occupancy_summary(occ))
             if leftover:
-                leftover_note = (
-                    " After wipe: " + leftover
-                    + " Processes on other cards were not signalled."
-                )
+                leftover_note += " After wipe: " + leftover
         except RuntimeError as exc:
             logger.warning("occupancy probe after wipe failed: %s", exc)
-            leftover_note = " Could not re-read occupancy after wipe (" + str(exc)[:160] + ")."
+            leftover_note += " Could not re-read occupancy after wipe (" + str(exc)[:160] + ")."
             occ = None
-        if wipe_out:
-            leftover_note = (" Wipe: " + _wipe_summary(wipe_out) + ".") + leftover_note
+    elif overwrite:
+        _set_setup_message("Reloading GPU setup on this reserved card…")
     connected = pick_connected_gpu((occ or {}).get("gpus") if occ else None)
     bits = []
     if connected:
@@ -3333,8 +3494,8 @@ def setup_lrz_gpu(cfg: dict | None = None, *, overwrite: bool = False) -> dict[s
             f"Allocated GPU {connected.get('index')} "
             f"{connected.get('name')} sm {connected.get('compute_cap') or '?'}"
         )
-        if overwrite and (reason or leftover_note):
-            bits.append("this job's CUDA device was reset")
+        if foreign:
+            bits.append("cleared leftover occupant")
     elif occ and gpu_occupancy_summary(occ).get("warning"):
         bits.append(str(gpu_occupancy_summary(occ)["warning"]))
     bits.append("Uploading splat-explorer code to DSS…" + leftover_note)
@@ -3368,7 +3529,12 @@ def request_lrz_setup(*, force: bool = True, overwrite: bool = False) -> dict[st
             f"Job {job} is {state}, not running. Load GPU setup after the allocation "
             "is ST=R (or click Use on a running row)."
         )
-    reason = occupancy_reason_for_setup(overwrite=overwrite)
+    owner = gpu_work_owner()
+    if owner == "repair":
+        raise RuntimeError(
+            "A CUDA repair is using this GPU. Stop it on /repair before reloading setup."
+        )
+    reason = occupancy_reason_for_setup(overwrite=overwrite, refresh_if_missing=True)
     with _SETUP["lock"]:
         if _SETUP["inflight"]:
             return lrz_setup_status(cfg)
@@ -3381,8 +3547,8 @@ def request_lrz_setup(*, force: bool = True, overwrite: bool = False) -> dict[st
         _SETUP["job_id"] = job
         _SETUP["at"] = time.time()
         _SETUP["message"] = (
-            "Overwrite confirmed — resetting this job's CUDA device…"
-            if overwrite and reason
+            "Clearing leftover occupant on this reserved GPU, then loading splat-explorer…"
+            if reason
             else "Uploading code to DSS, then starting the PyTorch container…"
         )
     threading.Thread(
@@ -3484,7 +3650,22 @@ def _mux_run(argv: list[str], *, check: bool = True) -> subprocess.CompletedProc
     result = subprocess.run(argv, check=False, capture_output=True, text=True)
     if check and result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip()
-        raise RuntimeError(f"command failed ({result.returncode}): {' '.join(argv[:8])}… {err}")
+        extra = ""
+        blob = err.lower()
+        if (
+            result.returncode in (137, 143)
+            or "killed" in blob
+            or "force terminated" in blob
+        ):
+            extra = (
+                " GPU step was killed. Load GPU setup must not run while a repair "
+                "is on the card; retry the repair after setup is idle. "
+                "If this repeats, the hold job may be out of host RAM "
+                "(new allocations use 64G)."
+            )
+        raise RuntimeError(
+            f"command failed ({result.returncode}): {' '.join(argv[:8])}… {err}{extra}"
+        )
     return result
 
 
@@ -3503,26 +3684,29 @@ def sync_code_and_job(job_dir: Path, *, password: str | None = None) -> None:
         raise RuntimeError(session_required_message())
     cfg = load_lrz_config()
     probe_job(cfg)
+    write_status(job_dir, phase="gpu_ready", message="Connecting this repair to the reserved GPU…")
+    ensure_lrz_gpu_ready(cfg)
     job_id = job_dir.name
     remote = f"{cfg['user']}@{cfg['host']}"
     ssh_e = rsync_ssh_cmd(cfg)
     write_status(job_dir, phase="rsync_up", message="Uploading scene + code to DSS…")
-    sync_code_to_dss(cfg)
-    _mux_run(ssh_argv(cfg, multiplex=True) + [
-        f"mkdir -p {shlex.quote(remote_job_dir(cfg, job_id))}"
-    ])
-    _mux_run([
-        "rsync", "-az", "-e", ssh_e, "--exclude", STATUS_JSON,
-        f"{job_dir}/", f"{remote}:{remote_job_dir(cfg, job_id)}/",
-    ])
-    write_status(job_dir, phase="srun", message="Running GSFix CUDA refine on the A100…")
-    _mux_run(ssh_argv(cfg, multiplex=True) + [srun_worker_command(cfg, job_id)])
-    write_status(job_dir, phase="rsync_down", message="Downloading repaired splat…")
-    _mux_run([
-        "rsync", "-az", "-e", ssh_e,
-        f"{remote}:{remote_job_dir(cfg, job_id)}/",
-        f"{job_dir}/",
-    ])
+    with _gpu_exclusive("repair", timeout=SETUP_TIMEOUT_S):
+        sync_code_to_dss(cfg)
+        _mux_run(ssh_argv(cfg, multiplex=True) + [
+            f"mkdir -p {shlex.quote(remote_job_dir(cfg, job_id))}"
+        ])
+        _mux_run([
+            "rsync", "-az", "-e", ssh_e, "--exclude", STATUS_JSON,
+            f"{job_dir}/", f"{remote}:{remote_job_dir(cfg, job_id)}/",
+        ])
+        write_status(job_dir, phase="srun", message="Running GSFix CUDA refine on the reserved GPU…")
+        _mux_run(ssh_argv(cfg, multiplex=True) + [srun_worker_command(cfg, job_id)])
+        write_status(job_dir, phase="rsync_down", message="Downloading repaired splat…")
+        _mux_run([
+            "rsync", "-az", "-e", ssh_e,
+            f"{remote}:{remote_job_dir(cfg, job_id)}/",
+            f"{job_dir}/",
+        ])
     if not job_results_ready(job_dir):
         raise RuntimeError(
             f"Remote job {job_id} finished without {OUT_PLY} / {METRICS_JSON}."

@@ -418,6 +418,7 @@ def test_sbatch_hold_8h_24h_and_after():
     assert "--job-name=gs-8h" in eight
     assert "lrz-hgx-a100-80x4,lrz-dgx-a100-80x8" in eight
     assert "--gres=gpu:1" in eight
+    assert "--mem=64G" in eight
     six = sbatch_hold_command(6, begin="2026-09-10T09:00", partition="lrz-hgx-h100-94x4")
     assert "--time=06:00:00" in six
     assert "sleep 21600" in six
@@ -1205,8 +1206,7 @@ def test_occupancy_warns_when_nvidia_smi_is_node_wide():
     assert pick_connected_gpu(occ["gpus"]) is None
     assert "GPU 0" in (occ.get("warning") or "")
     summary = gpu_occupancy_summary(occ)
-    msg = occupancy_needs_overwrite(summary)
-    assert msg and "busy VRAM" in msg
+    assert occupancy_needs_overwrite(summary) is None
 
 
 def test_occupancy_requires_overwrite_for_foreign_process():
@@ -1228,8 +1228,31 @@ def test_occupancy_requires_overwrite_for_foreign_process():
     assert summary["foreign_on_allocated"][0]["user"] == "ge72fon2"
     msg = occupancy_needs_overwrite(summary)
     assert msg and "ge72fon2" in msg and "alphafold3_venv" in msg
-    assert "Click again" in msg
+    assert "this reserved" in msg.lower() or "Load GPU setup" in msg
     assert summary["needs_overwrite"] == msg
+
+
+def test_occupancy_ignores_our_repair_process():
+    from splat_explorer.repair_lrz import gpu_occupancy_summary, occupancy_needs_overwrite, parse_gpu_occupancy_text
+
+    text = (
+        "GPUENV\nCUDA_VISIBLE_DEVICES=0\nSLURM_STEP_GPUS=1\nUSER=go73kaf2\n"
+        "GPUDEVS\n0\n1\n2\n3\n4\n5\n6\n7\n"
+        "GPUCSV\n"
+        "0, GPU-ours, NVIDIA A100-SXM4-80GB, 574, 81920, 0, 0, 31, 58.00, 400.00, 8.0\n"
+        "GPUAPPS\n"
+        "GPU-ours, 2839766, python, 574\n"
+        "GPUPROCS\n"
+        " 2839766 go73kaf2 python -m splat_explorer.repair_lrz --job-dir /workspace/inputs/abc\n"
+    )
+    occ = parse_gpu_occupancy_text(text)
+    assert occ["scope"] == "allocated"
+    assert occ["gpus"][0]["allocated"] is True
+    assert occ["physical_gpus"] == [1]
+    summary = gpu_occupancy_summary(occ)
+    assert occupancy_needs_overwrite(summary) is None
+    assert summary["ours_on_allocated"]
+    assert summary["ours_on_allocated"][0]["pid"] == 2839766
 
 
 def test_setup_status_ignores_marker_while_inflight():
@@ -1344,16 +1367,17 @@ def test_wipe_gpu_command_resets_this_jobs_cuda_device():
     cmd = wipe_gpu_srun_command({"job_id": "5786047"}, gpu_indices=[3], pids=[1111, 2222])
     assert "--overlap" in cmd
     assert "--jobid=5786047" in cmd
-    assert "fuser -k" in cmd
+    assert "fuser -v" in cmd
+    assert "KILL_FOREIGN" in cmd
+    assert "KEEP_OURS" in cmd
     assert "cudaDeviceReset" in cmd
-    assert "--gpu-reset -i" in cmd
+    assert "gpu-reset" in cmd
     assert "ALLOWED_IDX" in cmd
     assert "Device Minor" in cmd
     assert "NVIDIA_VISIBLE_DEVICES" in cmd
     assert "REJECT_HINT_GPU0" in cmd
     assert "SKIP_SHARED_PID" in cmd
-    assert "kill -TERM" not in cmd
-    assert "kill -KILL" not in cmd
+    assert "fuser -k" not in cmd
     assert "HINT=3" in cmd or "HINT='3'" in cmd
     assert "1111" not in cmd
     assert "2222" not in cmd
@@ -1393,11 +1417,22 @@ def test_physical_wipe_indices_never_guess_gpu0_on_a_full_node():
         "GPUPROCS\n 1111 ge72fon2 /alphafold3_venv/bin/python3\n"
     )
     assert physical_indices_for_wipe(leftover_ours) == [0]
+    remapped = parse_gpu_occupancy_text(
+        "GPUENV\nCUDA_VISIBLE_DEVICES=0\nSLURM_JOB_GPUS=\nSLURM_STEP_GPUS=1\n"
+        "USER=go73kaf2\nGPUDEVS\n0\n1\n2\n3\n4\n5\n6\n7\nGPUCSV\n"
+        "0, GPU-ours, NVIDIA A100-SXM4-80GB, 574, 81920, 0, 0, 31, 58.00, 400.00, 8.0\n"
+        "GPUAPPS\nGPU-ours, 2839766, python, 574\n"
+        "GPUPROCS\n 2839766 go73kaf2 python -m splat_explorer.repair_lrz\n"
+    )
+    assert remapped["scope"] == "allocated"
+    assert remapped["gpus"][0]["index"] == 0
+    assert remapped["gpus"][0]["allocated"] is True
+    assert remapped["physical_gpus"] == [1]
+    assert physical_indices_for_wipe(remapped) == [1]
 
 
-def test_request_setup_requires_overwrite_when_alphafold_leftover(monkeypatch):
+def test_request_setup_auto_starts_when_alphafold_leftover(monkeypatch):
     from splat_explorer.repair_lrz import (
-        SetupNeedsOverwrite,
         _PROBE,
         _SETUP,
         parse_gpu_occupancy_text,
@@ -1428,8 +1463,6 @@ def test_request_setup_requires_overwrite_when_alphafold_leftover(monkeypatch):
             "gpu": occ,
         }
         _PROBE["inflight"] = False
-    with pytest.raises(SetupNeedsOverwrite, match="ge72fon2"):
-        request_lrz_setup()
     started = []
 
     class FakeThread:
@@ -1440,9 +1473,10 @@ def test_request_setup_requires_overwrite_when_alphafold_leftover(monkeypatch):
 
     monkeypatch.setattr("splat_explorer.repair_lrz.threading.Thread", FakeThread)
     try:
-        body = request_lrz_setup(overwrite=True)
+        body = request_lrz_setup()
         assert body["inflight"] is True
-        assert started and started[0][1] is True
+        assert started
+        assert "leftover" in (body.get("message") or "").lower() or "Uploading" in (body.get("message") or "")
     finally:
         with _SETUP["lock"]:
             _SETUP["inflight"] = False
@@ -1451,7 +1485,7 @@ def test_request_setup_requires_overwrite_when_alphafold_leftover(monkeypatch):
 
 def test_request_setup_probes_occupancy_when_cache_empty(monkeypatch):
     from splat_explorer.repair_lrz import (
-        SetupNeedsOverwrite,
+        _SETUP,
         parse_gpu_occupancy_text,
         request_lrz_setup,
         reset_gpu_probe_cache,
@@ -1474,8 +1508,23 @@ def test_request_setup_probes_occupancy_when_cache_empty(monkeypatch):
         "cpus": 4, "mem": "32G", "container_name": "splat-repair",
     })
     monkeypatch.setattr("splat_explorer.repair_lrz.probe_gpu_occupancy", lambda cfg=None: occ)
-    with pytest.raises(SetupNeedsOverwrite, match="busy VRAM|ge72fon2|GPU processes"):
-        request_lrz_setup()
+    started = []
+
+    class FakeThread:
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
+            started.append(True)
+        def start(self):
+            return None
+
+    monkeypatch.setattr("splat_explorer.repair_lrz.threading.Thread", FakeThread)
+    try:
+        body = request_lrz_setup()
+        assert body["inflight"] is True
+        assert started
+    finally:
+        with _SETUP["lock"]:
+            _SETUP["inflight"] = False
+        reset_setup_cache()
 
 
 def test_setup_continues_after_wipe_if_vram_still_busy(monkeypatch):
@@ -1537,6 +1586,69 @@ def test_probe_occupancy_does_not_bump_squeue_ttl(monkeypatch):
         assert _PROBE["at"] == 123.0
         assert _PROBE["body"]["occupancy_at"]
         assert _PROBE["body"]["gpu"]["gpus"][0]["index"] == 0
+
+
+def test_setup_reuses_our_worker_without_wipe(monkeypatch):
+    from splat_explorer.repair_lrz import parse_gpu_occupancy_text, setup_lrz_gpu
+
+    ours = parse_gpu_occupancy_text(
+        "GPUENV\nCUDA_VISIBLE_DEVICES=0\nSLURM_STEP_GPUS=1\nUSER=go73kaf2\n"
+        "GPUDEVS\n0\n1\n2\n3\n4\n5\n6\n7\nGPUCSV\n"
+        "0, GPU-ours, NVIDIA A100-SXM4-80GB, 574, 81920, 0, 0, 31, 58.00, 400.00, 8.0\n"
+        "GPUAPPS\nGPU-ours, 2839766, python, 574\n"
+        "GPUPROCS\n 2839766 go73kaf2 python -m splat_explorer.repair_lrz --job-dir /workspace/inputs/abc\n"
+    )
+    cfg = {
+        "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "5786047",
+        "workspace": "/dss/ws", "container": "/dss/ws/containers/pytorch.sqsh",
+        "cpus": 4, "mem": "64G", "container_name": "splat-repair",
+    }
+    wiped = []
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_session_alive", lambda cfg=None: True)
+    monkeypatch.setattr("splat_explorer.repair_lrz.probe_job", lambda cfg=None: "R")
+    monkeypatch.setattr("splat_explorer.repair_lrz.probe_gpu_occupancy", lambda cfg=None: ours)
+    monkeypatch.setattr("splat_explorer.repair_lrz.wipe_allocated_gpu", lambda *a, **k: wiped.append(True) or "WIPE")
+    monkeypatch.setattr("splat_explorer.repair_lrz.sync_code_to_dss", lambda cfg: None)
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz.read_remote_setup_marker",
+        lambda cfg=None: {"ok": True, "job_id": "5786047", "gpu": "NVIDIA A100-SXM4-80GB"},
+    )
+    monkeypatch.setattr("splat_explorer.repair_lrz._set_setup_message", lambda msg: None)
+    out = setup_lrz_gpu(cfg)
+    assert out["ok"] is True
+    assert out.get("reused") is True
+    assert wiped == []
+
+
+def test_ensure_lrz_gpu_ready_reuses_dss_marker(monkeypatch):
+    from splat_explorer.repair_lrz import ensure_lrz_gpu_ready, reset_setup_cache
+
+    reset_setup_cache()
+    started = []
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_session_alive", lambda cfg=None: True)
+    monkeypatch.setattr("splat_explorer.repair_lrz.probe_job", lambda cfg=None: "R")
+    monkeypatch.setattr("splat_explorer.repair_lrz.load_lrz_config", lambda: {
+        "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "5786047",
+        "workspace": "/dss/ws", "container": "/dss/ws/containers/pytorch.sqsh",
+        "cpus": 4, "mem": "64G", "container_name": "splat-repair",
+    })
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz.read_remote_setup_marker",
+        lambda cfg=None: {
+            "ok": True, "job_id": "5786047", "gpu": "NVIDIA A100-SXM4-80GB",
+            "torch": "2.5.1", "gsplat": "1.5.0",
+        },
+    )
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz.request_lrz_setup",
+        lambda **kwargs: started.append(kwargs) or {"inflight": True},
+    )
+    body = ensure_lrz_gpu_ready()
+    assert body["ok"] is True
+    assert started == []
+    assert "A100" in (body.get("message") or "")
+    reset_setup_cache()
+
 
 
 

@@ -141,9 +141,8 @@ def list_repair_backends() -> dict:
             )
         elif not setup.get("ok"):
             cuda_detail = (
-                f"LRZ job {lrz.get('job_id')} SSH is up, but the PyTorch container "
-                "is not loaded on this allocation. Click Load GPU setup on /repair "
-                "or /repair/gpu (once per job)."
+                f"LRZ job {lrz.get('job_id')} SSH is up. First CUDA repair loads "
+                "the PyTorch container on this allocation (or click Load GPU setup)."
             )
         else:
             cuda_detail = (

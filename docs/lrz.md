@@ -82,7 +82,7 @@ That submits (8h example):
 ```bash
 sbatch --job-name=gs-8h \
   --partition=lrz-hgx-a100-80x4,lrz-dgx-a100-80x8 \
-  --nodes=1 --ntasks=1 --gres=gpu:1 --cpus-per-task=4 --mem=32G \
+  --nodes=1 --ntasks=1 --gres=gpu:1 --cpus-per-task=4 --mem=64G \
   --time=08:00:00 --output=gs-8h-%j.log \
   --wrap='sleep 28800'
 ```
@@ -184,10 +184,16 @@ Driver on the A100 nodes has been CUDA 13.0; a CUDA 12.x image is fine.
 The squashfs lives on DSS and survives job changes. The **named Pyxis
 container** does not — a new `sbatch` (new node) needs one load.
 
-From the dashboard (preferred), after **Use** on the running job:
+From `/repair`, the first CUDA refine attaches automatically: it reuses the
+DSS setup marker if this job already loaded, otherwise it starts the
+container. Foreign leftovers on **this** reserved GPU are cleared; your
+own splat-explorer process is not killed.
+
+From the GPU dashboard, after **Use** on the running job:
 
 1. Keep eduVPN + `scripts/lrz/ssh-session.sh` (ControlMaster) up.
-2. Open <http://localhost:8090/repair/gpu> and click **Load GPU setup**.
+2. Open <http://localhost:8090/repair/gpu> and click **Load GPU setup**
+   if you want to prepare the card before the first `/repair` run.
 
 That rsyncs `src/` to DSS, starts `--container-name=splat-repair` from
 `containers/pytorch.sqsh`, and installs `gsplat` into
@@ -233,8 +239,9 @@ hold, run `ssh-session.sh` again if the mux drops.
    Initial window is the last 14 days through now; switch to a start date
    through now, or a custom start/end range. Same 10 min cadence as squeue —
    hidden tabs send nothing.
-3. Click **Use** on the running job, then **Load GPU setup** once
-   (named Pyxis container + gsplat on DSS). Same button on `/repair`.
+3. Click **Use** on the running job. **Load GPU setup** once if you want
+   the container ready before `/repair` (named Pyxis container + gsplat
+   on DSS). The first CUDA refine on `/repair` also loads setup if needed.
 4. Back on <http://localhost:8090/repair>, backend **gsplat CUDA (GSFix3D)**.
    Repairs rsync the packed view and `srun --overlap` on `job_id`.
 

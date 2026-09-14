@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Once per GPU allocation: check occupancy, start a job-scoped Pyxis
-# container from DSS pytorch.sqsh, rsync code, and install gsplat onto
-# YOUR shared drive (never a colleague's files). Refuses to run if a
-# process that is not yours is on the allocated GPU.
+# Once per GPU allocation: start a job-scoped Pyxis container from YOUR
+# DSS pytorch.sqsh, rsync code, and install gsplat onto YOUR shared drive.
+# Foreign leftovers on THIS reserved GPU are cleared automatically; your
+# own splat-explorer process is never killed.
 #
 #   scripts/lrz/load-setup.sh
 #
 # Requires eduVPN + ControlMaster (scripts/lrz/ssh-session.sh) and a
 # running job_id in configs/lrz.local.yaml (Use on /repair/gpu).
+# /repair also calls this path on the first CUDA refine if setup is missing.
 set -euo pipefail
 # shellcheck source=env.sh
 source "$(cd "$(dirname "$0")" && pwd)/env.sh"

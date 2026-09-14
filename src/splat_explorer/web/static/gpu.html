@@ -217,7 +217,7 @@
   <div class="row">
     <button id="btn-widen" class="ghost">Widen selected partitions</button>
     <button id="btn-review" class="ghost">Refresh availability</button>
-    <button id="btn-setup" title="Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh and install gsplat onto YOUR shared drive. If the GPU already has leftover processes, click twice to overwrite.">Load GPU setup</button>
+    <button id="btn-setup" title="Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh. Foreign leftovers on this reserved GPU are cleared automatically; your own repair process is not killed.">Load GPU setup</button>
     <span id="probe-meta" class="hint">At most one remote probe per 10 min while this tab is visible. Reloads reuse cache; availability is a separate one-shot sinfo after the probe finishes.</span>
   </div>
 </div>
@@ -303,8 +303,6 @@ let reviewedOnce = false;
 let autoMs = AUTO_MS;
 let cancelArmed = null;
 let cancelArmedTimer = null;
-let setupOverwriteArmed = false;
-let setupOverwriteTimer = null;
 let loadProbeTimer = null;
 let occupancyBusy = false;
 
@@ -524,24 +522,7 @@ function setupNeedsOverwrite() {
   if (occ.needs_overwrite) return occ.needs_overwrite;
   const foreign = occ.foreign_on_allocated || [];
   if (foreign.length) {
-    return "Allocated GPU has leftover processes that are not yours. Click again to reset THIS job's CUDA device.";
-  }
-  const mine = occupancyProcesses().filter(p => p.allocated_gpu);
-  if (mine.length) {
-    return "Allocated GPU still has compute processes. Click again to reset it and load a fresh setup.";
-  }
-  const allocated = occ.allocated || [];
-  for (const g of allocated) {
-    if (Number(g.memory_used_mib || 0) >= 256) {
-      return `Allocated GPU has ${Math.round(g.memory_used_mib)} MiB VRAM in use. Click again to reset this job's CUDA device.`;
-    }
-  }
-  const scoped = snap?.gpu_scope === "allocated" || occ.scope === "allocated";
-  if (!scoped) {
-    const busy = gpuRows().some(g => Number(g.memory_used_mib || 0) >= 1024);
-    if (busy || occupancyProcesses().length) {
-      return "This node still has busy GPU VRAM and nvidia-smi did not pin which card is yours. Click again to reset THIS job's CUDA device only.";
-    }
+    return "Allocated GPU has leftover processes that are not yours. Load GPU setup will clear THIS reserved card only.";
   }
   return "";
 }
@@ -639,7 +620,7 @@ function renderOccupancy() {
   const procs = occupancyProcesses();
   const banners = [];
   if (foreign.length) {
-    banners.push(`<div class="err-banner">${esc(occ.needs_overwrite || `Your reserved GPU still has ${foreign.length} leftover process(es) from another user (stale occupant).`)} Overwrite resets <b>only this reserved GPU</b>. Processes on other cards — even the same PID — are never signalled.</div>`);
+    banners.push(`<div class="err-banner">${esc(occ.needs_overwrite || `Your reserved GPU still has ${foreign.length} leftover process(es) from another user.`)} Load GPU setup clears <b>only this reserved GPU</b> and then starts splat-explorer. Your own repair process is never killed.</div>`);
   } else if (occ.needs_overwrite) {
     banners.push(`<div class="warn-banner">${esc(occ.needs_overwrite)}</div>`);
   } else if (warning) {
@@ -1050,26 +1031,20 @@ function renderChrome() {
   $("btn-review").disabled = setupBusy || probeBusy || !session;
   const canSetup = session && (snap?.slurm?.state === "R" || hasRunningJob());
   const needsOverwrite = Boolean(setupNeedsOverwrite());
-  const showOverwrite = needsOverwrite || setupOverwriteArmed;
-  const armed = Boolean(setupOverwriteArmed && !setupBusy);
   $("btn-setup").disabled = probeBusy || setupBusy || !canSetup;
-  $("btn-setup").classList.toggle("overwrite-confirm", Boolean(showOverwrite && !setupBusy));
+  $("btn-setup").classList.toggle("overwrite-confirm", Boolean(needsOverwrite && !setupBusy));
   if (snap?.setup?.inflight) {
     $("btn-setup").textContent = snap.setup.elapsed_s
       ? `Loading GPU setup… ${fmtElapsed(snap.setup.elapsed_s)}`
       : "Loading GPU setup…";
-  } else if (armed) {
-    $("btn-setup").textContent = "click again to overwrite";
   } else if (needsOverwrite) {
-    $("btn-setup").textContent = "overwrite prior setup?";
+    $("btn-setup").textContent = "Load GPU setup (clear leftover)";
   } else {
     $("btn-setup").textContent = snap?.setup?.ok ? "Reload GPU setup" : "Load GPU setup";
   }
-  $("btn-setup").title = showOverwrite
-    ? (armed
-      ? "Click again to reset ONLY this reserved GPU. Leftover processes on this card (including a previous occupant's) are cleared; other GPUs are never signalled."
-      : (setupNeedsOverwrite() || "GPU is occupied. Click twice to overwrite."))
-    : "Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh.";
+  $("btn-setup").title = needsOverwrite
+    ? (setupNeedsOverwrite() || "Clears leftover processes on THIS reserved GPU, then loads splat-explorer.")
+    : "Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh. /repair also does this on the first CUDA run.";
   $("btn-hist").disabled = probeBusy || setupBusy || !session;
   const canOcc = session && Boolean(snap?.connection?.job_id || snap?.slurm?.job_id);
   if ($("btn-occ-reload")) {
@@ -1189,19 +1164,6 @@ function startAuto() {
   }, autoMs);
 }
 
-function clearSetupOverwriteArmed() {
-  setupOverwriteArmed = false;
-  if (setupOverwriteTimer) { clearTimeout(setupOverwriteTimer); setupOverwriteTimer = null; }
-}
-function armSetupOverwrite() {
-  clearSetupOverwriteArmed();
-  setupOverwriteArmed = true;
-  setupOverwriteTimer = setTimeout(() => {
-    setupOverwriteArmed = false;
-    setupOverwriteTimer = null;
-    renderChrome();
-  }, 8000);
-}
 function armCancel(jobId) {
   clearCancelArmed();
   cancelArmed = jobId;
@@ -1268,31 +1230,15 @@ $("btn-refresh").onclick = async () => {
 
 $("btn-setup").onclick = async () => {
   const reason = setupNeedsOverwrite();
-  const needsOverwrite = Boolean(reason);
-  if (needsOverwrite && !setupOverwriteArmed) {
-    armSetupOverwrite();
-    setNote("warn", reason);
-    renderChrome();
-    return;
-  }
-  const sendOverwrite = Boolean(setupOverwriteArmed);
   $("btn-setup").disabled = true;
   try {
-    snap = await postJson("/api/repair/gpu/setup", { force: true, overwrite: sendOverwrite });
-    clearSetupOverwriteArmed();
-    setNote("info", snap.message || (sendOverwrite
-      ? "Resetting this job's CUDA device, then loading splat-explorer…"
+    snap = await postJson("/api/repair/gpu/setup", { force: true, overwrite: false });
+    setNote("info", snap.message || (reason
+      ? "Clearing leftover occupant on this reserved GPU, then loading splat-explorer…"
       : "Loading GPU setup on the current job…"));
     render();
     syncAutoInterval();
   } catch (err) {
-    if (err.payload?.needs_overwrite || /overwrite|occupied|leftover|another user|CUDA device/i.test(err.message || "")) {
-      armSetupOverwrite();
-      setNote("warn", err.message);
-      renderChrome();
-      return;
-    }
-    clearSetupOverwriteArmed();
     setNote("err", err.message);
     renderChrome();
   }
