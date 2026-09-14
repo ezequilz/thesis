@@ -32,6 +32,10 @@
            font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .45; cursor: default; }
   #btn-setup { background: var(--ok); color: #0b1220; }
+  #btn-setup.overwrite-confirm {
+    background: var(--err);
+    color: #1a0808;
+  }
   #btn-refresh {
     margin-left: auto;
     width: 32px; height: 32px; padding: 0;
@@ -203,7 +207,7 @@
   <div class="row">
     <button id="btn-widen" class="ghost">Widen selected partitions</button>
     <button id="btn-review" class="ghost">Refresh availability</button>
-    <button id="btn-setup" title="Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh and install gsplat onto YOUR shared drive. Refuses to run if a colleague's process is on the allocated GPU.">Load GPU setup</button>
+    <button id="btn-setup" title="Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh and install gsplat onto YOUR shared drive. If the GPU already has leftover processes, click twice to overwrite.">Load GPU setup</button>
     <span id="probe-meta" class="hint">At most one remote probe per 10 min while this tab is visible. Reloads reuse cache; availability is a separate one-shot sinfo after the probe finishes.</span>
   </div>
 </div>
@@ -286,6 +290,8 @@ let reviewedOnce = false;
 let autoMs = AUTO_MS;
 let cancelArmed = null;
 let cancelArmedTimer = null;
+let setupOverwriteArmed = false;
+let setupOverwriteTimer = null;
 let loadProbeTimer = null;
 
 function esc(s) {
@@ -593,11 +599,11 @@ function renderOccupancy() {
   const procs = occupancyProcesses();
   const banners = [];
   if (foreign.length) {
-    banners.push(`<div class="err-banner">Your allocated GPU has ${esc(foreign.length)} process(es) that are not yours. Load GPU setup is blocked so those jobs are not overwritten.</div>`);
+    banners.push(`<div class="err-banner">${esc(occ.needs_overwrite || `Your allocated GPU has ${foreign.length} leftover process(es) that are not yours.`)} Click Load GPU setup, then overwrite prior setup? to wipe them and load splat-explorer.</div>`);
+  } else if (occ.needs_overwrite) {
+    banners.push(`<div class="warn-banner">${esc(occ.needs_overwrite)}</div>`);
   } else if (warning) {
     banners.push(`<div class="warn-banner">${esc(warning)}</div>`);
-  } else if (occ.high_vram_no_apps) {
-    banners.push(`<div class="warn-banner">Allocated GPU has VRAM in use but nvidia-smi lists no compute processes. That is leftover driver context, not a live colleague job. Load GPU setup only starts your Pyxis container on this job's card and writes to your DSS workspace.</div>`);
   }
   const chart = rows.map(g => {
     const pct = Number(g.memory_pct || 0);
@@ -1002,14 +1008,26 @@ function renderChrome() {
   $("btn-widen").disabled = setupBusy || !session;
   $("btn-review").disabled = setupBusy || probeBusy || !session;
   const canSetup = session && snap?.slurm?.state === "R";
-  const foreign = (snap?.gpu_occupancy?.foreign_on_allocated || []).length;
-  $("btn-setup").disabled = probeBusy || setupBusy || !canSetup || foreign > 0;
-  $("btn-setup").textContent = snap?.setup?.inflight
-    ? (snap.setup.elapsed_s ? `Loading GPU setup… ${fmtElapsed(snap.setup.elapsed_s)}` : "Loading GPU setup…")
-    : (snap?.setup?.ok ? "Reload GPU setup" : "Load GPU setup");
-  $("btn-setup").title = foreign
-    ? "Blocked: a process that is not yours is on the allocated GPU."
-    : "Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh. Refuses to run if a colleague's process is on this GPU.";
+  const needsOverwrite = Boolean(snap?.gpu_occupancy?.needs_overwrite);
+  const armed = Boolean(setupOverwriteArmed && needsOverwrite && !setupBusy);
+  $("btn-setup").disabled = probeBusy || setupBusy || !canSetup;
+  $("btn-setup").classList.toggle("overwrite-confirm", Boolean(needsOverwrite && !setupBusy));
+  if (snap?.setup?.inflight) {
+    $("btn-setup").textContent = snap.setup.elapsed_s
+      ? `Loading GPU setup… ${fmtElapsed(snap.setup.elapsed_s)}`
+      : "Loading GPU setup…";
+  } else if (armed) {
+    $("btn-setup").textContent = "click again to overwrite";
+  } else if (needsOverwrite) {
+    $("btn-setup").textContent = "overwrite prior setup?";
+  } else {
+    $("btn-setup").textContent = snap?.setup?.ok ? "Reload GPU setup" : "Load GPU setup";
+  }
+  $("btn-setup").title = needsOverwrite
+    ? (armed
+      ? "Click again to stop leftover GPU processes and load splat-explorer on this allocation."
+      : (snap.gpu_occupancy.needs_overwrite || "GPU is occupied. Click twice to overwrite."))
+    : "Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh.";
   $("btn-hist").disabled = probeBusy || setupBusy || !session;
   syncAutoInterval();
 }
@@ -1124,9 +1142,18 @@ function startAuto() {
   }, autoMs);
 }
 
-function clearCancelArmed() {
-  cancelArmed = null;
-  if (cancelArmedTimer) { clearTimeout(cancelArmedTimer); cancelArmedTimer = null; }
+function clearSetupOverwriteArmed() {
+  setupOverwriteArmed = false;
+  if (setupOverwriteTimer) { clearTimeout(setupOverwriteTimer); setupOverwriteTimer = null; }
+}
+function armSetupOverwrite() {
+  clearSetupOverwriteArmed();
+  setupOverwriteArmed = true;
+  setupOverwriteTimer = setTimeout(() => {
+    setupOverwriteArmed = false;
+    setupOverwriteTimer = null;
+    renderChrome();
+  }, 8000);
 }
 function armCancel(jobId) {
   clearCancelArmed();
@@ -1193,13 +1220,31 @@ $("btn-refresh").onclick = async () => {
 };
 
 $("btn-setup").onclick = async () => {
+  const needsOverwrite = Boolean(snap?.gpu_occupancy?.needs_overwrite);
+  if (needsOverwrite && !setupOverwriteArmed) {
+    armSetupOverwrite();
+    setNote("warn", snap.gpu_occupancy.needs_overwrite);
+    renderChrome();
+    return;
+  }
+  const overwrite = needsOverwrite && setupOverwriteArmed;
   $("btn-setup").disabled = true;
   try {
-    snap = await postJson("/api/repair/gpu/setup", { force: true });
-    setNote("info", snap.message || "Loading GPU setup on the current job…");
+    snap = await postJson("/api/repair/gpu/setup", { force: true, overwrite });
+    clearSetupOverwriteArmed();
+    setNote("info", snap.message || (overwrite
+      ? "Wiping leftover GPU processes, then loading splat-explorer…"
+      : "Loading GPU setup on the current job…"));
     render();
     syncAutoInterval();
   } catch (err) {
+    if (/overwrite|occupied|leftover|another user/i.test(err.message || "")) {
+      armSetupOverwrite();
+      setNote("warn", err.message);
+      renderChrome();
+      return;
+    }
+    clearSetupOverwriteArmed();
     setNote("err", err.message);
     renderChrome();
   }

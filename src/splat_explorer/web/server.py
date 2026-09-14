@@ -969,7 +969,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         elif path == "/api/repair/gpu/setup":
             try:
-                snap = studio.gpu_load_setup(force=bool(body.get("force", True)))
+                snap = studio.gpu_load_setup(
+                    force=bool(body.get("force", True)),
+                    overwrite=bool(body.get("overwrite", False)),
+                )
             except (RuntimeError, ValueError) as exc:
                 self._send_json({"ok": False, "message": str(exc)}, 409)
                 return

@@ -303,10 +303,10 @@ class RepairStudio:
         snap["cancel"] = result
         return snap
 
-    def gpu_load_setup(self, *, force: bool = True) -> dict:
+    def gpu_load_setup(self, *, force: bool = True, overwrite: bool = False) -> dict:
         from ..repair_lrz import request_lrz_setup
 
-        result = request_lrz_setup(force=force)
+        result = request_lrz_setup(force=force, overwrite=overwrite)
         snap = self.gpu_snapshot()
         snap["ok"] = True
         snap["setup"] = result

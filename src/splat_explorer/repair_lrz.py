@@ -1376,7 +1376,7 @@ def gpu_occupancy_summary(gpu: dict | None) -> dict[str, Any]:
     foreign = [proc for proc in processes if proc.get("foreign") and proc.get("allocated_gpu")]
     allocated_procs = [proc for proc in processes if proc.get("allocated_gpu")]
     used = float((allocated[0].get("memory_used_mib") or 0) if allocated else 0)
-    return {
+    body = {
         "scope": (gpu or {}).get("scope") if isinstance(gpu, dict) else None,
         "scope_reason": (gpu or {}).get("scope_reason") if isinstance(gpu, dict) else None,
         "warning": (gpu or {}).get("warning") if isinstance(gpu, dict) else None,
@@ -1387,26 +1387,126 @@ def gpu_occupancy_summary(gpu: dict | None) -> dict[str, Any]:
         "processes": processes,
         "foreign_on_allocated": foreign,
         "high_vram_no_apps": bool(allocated and used >= 1024 and not allocated_procs),
+        "needs_overwrite": None,
     }
+    body["needs_overwrite"] = occupancy_needs_overwrite(body)
+    return body
+
+
+def occupancy_needs_overwrite(occupancy: dict | None) -> str | None:
+    """Why Load GPU setup needs a second-click overwrite, or None if the card is empty."""
+    foreign = list((occupancy or {}).get("foreign_on_allocated") or [])
+    procs = [
+        proc for proc in ((occupancy or {}).get("processes") or [])
+        if proc.get("allocated_gpu")
+    ]
+    allocated = list((occupancy or {}).get("allocated") or [])
+    if foreign:
+        bits = [_process_brief(proc) for proc in foreign[:4]]
+        return (
+            "Allocated GPU is occupied by another user: "
+            + "; ".join(bits)
+            + ". Click again to stop those processes and load splat-explorer."
+        )
+    if procs:
+        bits = [_process_brief(proc) for proc in procs[:4]]
+        return (
+            "Allocated GPU still has compute processes: "
+            + "; ".join(bits)
+            + ". Click again to stop them and load a fresh setup."
+        )
+    if occupancy and occupancy.get("high_vram_no_apps") and allocated:
+        used = int(allocated[0].get("memory_used_mib") or 0)
+        return (
+            f"Allocated GPU has {used} MiB VRAM in use with no listed process. "
+            "Click again to reset the card and load splat-explorer."
+        )
+    return None
 
 
 def occupancy_blocks_setup(occupancy: dict | None) -> str | None:
-    """Refuse Load GPU setup when a colleague's process is on OUR card."""
-    foreign = list((occupancy or {}).get("foreign_on_allocated") or [])
-    if not foreign:
-        return None
-    bits = []
-    for proc in foreign[:4]:
-        bits.append(
-            f"{proc.get('user') or '?'} pid {proc.get('pid')} "
-            f"{proc.get('name') or proc.get('args') or ''} "
-            f"({int(proc.get('memory_used_mib') or 0)} MiB)"
-        )
+    """Back-compat alias: occupied GPUs now need overwrite, they are not hard-blocked."""
+    return occupancy_needs_overwrite(occupancy)
+
+
+def _process_brief(proc: dict) -> str:
+    name = str(proc.get("args") or proc.get("name") or "").strip() or "process"
+    if len(name) > 80:
+        name = "…" + name[-79:]
+    mem = proc.get("memory_used_mib")
+    extra = f" ({int(mem)} MiB)" if isinstance(mem, (int, float)) else ""
+    return f"{proc.get('user') or '?'} pid {proc.get('pid')} {name}{extra}"
+
+
+def wipe_gpu_srun_command(cfg: dict, *, gpu_indices: list[int], pids: list[int]) -> str:
+    """srun --overlap: TERM/KILL leftover PIDs, then nvidia-smi --gpu-reset on OUR cards."""
+    job = shlex.quote(str(cfg["job_id"]))
+    pid_csv = ",".join(str(int(pid)) for pid in pids)
+    idx_csv = ",".join(str(int(idx)) for idx in gpu_indices)
+    inner = f"""
+set +e
+echo WIPE_START
+PIDS={shlex.quote(pid_csv)}
+IDX={shlex.quote(idx_csv)}
+IFS=,
+for pid in $PIDS; do
+  [ -z "$pid" ] && continue
+  echo TERM "$pid"
+  kill -TERM "$pid" 2>/dev/null || echo TERM_FAIL "$pid"
+done
+sleep 2
+for pid in $PIDS; do
+  [ -z "$pid" ] && continue
+  if kill -0 "$pid" 2>/dev/null; then
+    echo KILL "$pid"
+    kill -KILL "$pid" 2>/dev/null || echo KILL_FAIL "$pid"
+  else
+    echo GONE "$pid"
+  fi
+done
+if [ -n "$IDX" ]; then
+  echo RESET "$IDX"
+  nvidia-smi --gpu-reset -i "$IDX" || echo RESET_FAIL
+fi
+echo APPS
+nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits || true
+echo WIPE_DONE
+"""
     return (
-        "Allocated GPU has processes that are not yours: "
-        + "; ".join(bits)
-        + ". Refusing Load GPU setup so those jobs are not disturbed."
+        f"srun --jobid={job} --overlap --nodes=1 --ntasks=1 "
+        f"--cpus-per-task=1 --gres=gpu:1 --quiet "
+        f"bash -lc {shlex.quote(inner.strip())}"
     )
+
+
+def wipe_allocated_gpu(cfg: dict, occupancy: dict) -> str:
+    """Stop leftover compute apps on this job's GPU only. Never touches other cards."""
+    gpus = list(occupancy.get("gpus") or [])
+    allocated = [gpu for gpu in gpus if gpu.get("allocated")]
+    if not allocated:
+        raise RuntimeError(
+            "Cannot overwrite: nvidia-smi did not identify which GPU is yours. "
+            "Refusing to kill processes on other cards of this node."
+        )
+    pids: list[int] = []
+    for gpu in allocated:
+        for proc in gpu.get("processes") or []:
+            pid = proc.get("pid")
+            if isinstance(pid, int):
+                pids.append(pid)
+            elif str(pid).isdigit():
+                pids.append(int(pid))
+    indices = [int(gpu.get("index") or 0) for gpu in allocated]
+    _set_setup_message(
+        "Stopping leftover GPU processes "
+        + (", ".join(str(pid) for pid in pids) if pids else "(no PIDs; resetting VRAM)")
+        + f" on GPU {','.join(str(i) for i in indices)}…"
+    )
+    result = _ssh_run(cfg, wipe_gpu_srun_command(cfg, gpu_indices=indices, pids=pids), timeout=90)
+    out = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+    if result.returncode != 0 and "WIPE_DONE" not in out:
+        raise RuntimeError(out[-1800:] or "GPU wipe srun failed.")
+    return out
 
 
 def pick_connected_gpu(gpus: list[dict] | None) -> dict | None:
@@ -1701,9 +1801,18 @@ def build_connection_checks(
         detail = " · ".join(x for x in (label, connected.get("name"), mem, procs) if x)
         if foreign_n:
             checks.append({
-                "id": "gpu", "ok": False, "label": "GPU",
-                "detail": f"{detail} · {foreign_n} process(es) are not yours",
-                "action": occupancy_blocks_setup(occupancy),
+                "id": "gpu", "ok": None, "label": "GPU",
+                "detail": f"{detail} · {foreign_n} leftover process(es) are not yours",
+                "action": (
+                    occupancy.get("needs_overwrite")
+                    or "Click Load GPU setup, then overwrite prior setup? to wipe leftovers."
+                ),
+            })
+        elif occupancy.get("needs_overwrite"):
+            checks.append({
+                "id": "gpu", "ok": None, "label": "GPU",
+                "detail": detail,
+                "action": occupancy.get("needs_overwrite"),
             })
         else:
             checks.append({
@@ -2881,7 +2990,7 @@ def poll_detached_setup(cfg: dict, *, timeout: float = SETUP_TIMEOUT_S) -> dict[
     )
 
 
-def setup_lrz_gpu(cfg: dict | None = None) -> dict[str, Any]:
+def setup_lrz_gpu(cfg: dict | None = None, *, overwrite: bool = False) -> dict[str, Any]:
     """Rsync code, start named Pyxis container, verify torch/gsplat.
 
     The container srun is detached so the SSH mux stays free for occupancy
@@ -2908,23 +3017,36 @@ def setup_lrz_gpu(cfg: dict | None = None) -> dict[str, Any]:
         )
     if occ:
         summary = gpu_occupancy_summary(occ)
-        blocker = occupancy_blocks_setup(summary)
-        if blocker:
-            raise RuntimeError(blocker)
-        connected = pick_connected_gpu(occ.get("gpus"))
+        reason = occupancy_needs_overwrite(summary)
+        if reason and not overwrite:
+            raise RuntimeError(reason)
+        if reason and overwrite:
+            _set_setup_message(
+                "Overwrite confirmed — stopping leftover processes on this job's GPU…"
+            )
+            wipe_allocated_gpu(cfg, occ)
+            try:
+                occ = probe_gpu_occupancy(cfg)
+            except RuntimeError as exc:
+                logger.warning("occupancy probe after wipe failed: %s", exc)
+                occ = None
+            leftover = occupancy_needs_overwrite(gpu_occupancy_summary(occ) if occ else None)
+            if leftover:
+                raise RuntimeError(
+                    "Overwrite could not clear the GPU: " + leftover
+                    + " Another user's PID may ignore kill; ask LRZ or the process owner."
+                )
+        connected = pick_connected_gpu((occ or {}).get("gpus") if occ else None)
         bits = []
         if connected:
             bits.append(
                 f"Allocated GPU {connected.get('index')} "
                 f"{connected.get('name')} sm {connected.get('compute_cap') or '?'}"
             )
-            if summary.get("high_vram_no_apps"):
-                bits.append(
-                    f"VRAM is {int(connected.get('memory_used_mib') or 0)} MiB with no "
-                    "compute processes (leftover context, not a live colleague job)"
-                )
-        elif summary.get("warning"):
-            bits.append(str(summary["warning"]))
+            if overwrite:
+                bits.append("prior setup wiped")
+        elif occ and gpu_occupancy_summary(occ).get("warning"):
+            bits.append(str(gpu_occupancy_summary(occ)["warning"]))
         bits.append("Uploading splat-explorer code to DSS…")
         _set_setup_message(". ".join(bits))
     sync_code_to_dss(cfg)
@@ -2937,7 +3059,7 @@ def setup_lrz_gpu(cfg: dict | None = None) -> dict[str, Any]:
     return poll_detached_setup(cfg)
 
 
-def request_lrz_setup(*, force: bool = True) -> dict[str, Any]:
+def request_lrz_setup(*, force: bool = True, overwrite: bool = False) -> dict[str, Any]:
     """Start GPU setup in a background thread. Safe to click once per allocation."""
     cfg = load_lrz_config()
     if not lrz_session_alive(cfg):
@@ -2956,6 +3078,10 @@ def request_lrz_setup(*, force: bool = True) -> dict[str, Any]:
             f"Job {job} is {state}, not running. Load GPU setup after the allocation "
             "is ST=R (or click Use on a running row)."
         )
+    cached_gpu = (cached or {}).get("gpu") if cached else None
+    reason = occupancy_needs_overwrite(gpu_occupancy_summary(cached_gpu if isinstance(cached_gpu, dict) else None))
+    if reason and not overwrite:
+        raise RuntimeError(reason)
     with _SETUP["lock"]:
         if _SETUP["inflight"]:
             return lrz_setup_status(cfg)
@@ -2967,16 +3093,20 @@ def request_lrz_setup(*, force: bool = True) -> dict[str, Any]:
         _SETUP["detail"] = None
         _SETUP["job_id"] = job
         _SETUP["at"] = time.time()
-        _SETUP["message"] = "Uploading code to DSS, then starting the PyTorch container…"
+        _SETUP["message"] = (
+            "Overwrite confirmed — wiping leftover GPU processes…"
+            if overwrite and reason
+            else "Uploading code to DSS, then starting the PyTorch container…"
+        )
     threading.Thread(
-        target=_run_setup_thread, args=(cfg,), daemon=True, name="lrz-gpu-setup",
+        target=_run_setup_thread, args=(cfg, overwrite), daemon=True, name="lrz-gpu-setup",
     ).start()
     return lrz_setup_status(cfg)
 
 
-def _run_setup_thread(cfg: dict) -> None:
+def _run_setup_thread(cfg: dict, overwrite: bool = False) -> None:
     try:
-        detail = setup_lrz_gpu(cfg)
+        detail = setup_lrz_gpu(cfg, overwrite=overwrite)
         gpu = detail.get("gpu") or "CUDA"
         extra = " (installed gsplat onto DSS)" if detail.get("installed") else ""
         with _SETUP["lock"]:

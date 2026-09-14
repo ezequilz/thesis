@@ -1201,8 +1201,8 @@ def test_occupancy_warns_when_nvidia_smi_is_node_wide():
     assert "GPU 0" in (occ.get("warning") or "")
 
 
-def test_occupancy_blocks_foreign_process_on_allocated_gpu():
-    from splat_explorer.repair_lrz import gpu_occupancy_summary, occupancy_blocks_setup, parse_gpu_occupancy_text
+def test_occupancy_requires_overwrite_for_foreign_process():
+    from splat_explorer.repair_lrz import gpu_occupancy_summary, occupancy_needs_overwrite, parse_gpu_occupancy_text
 
     text = (
         "GPUENV\nCUDA_VISIBLE_DEVICES=0\nSLURM_JOB_GPUS=0\nUSER=go73kaf2\n"
@@ -1212,14 +1212,16 @@ def test_occupancy_blocks_foreign_process_on_allocated_gpu():
         "GPUAPPS\n"
         "GPU-aaa, 1111, python, 77000\n"
         "GPUPROCS\n"
-        " 1111 colleague /usr/bin/python train.py\n"
+        " 1111 ge72fon2 /alphafold3_venv/bin/python3\n"
     )
     occ = parse_gpu_occupancy_text(text)
     summary = gpu_occupancy_summary(occ)
     assert occ["gpus"][0]["allocated"] is True
-    assert summary["foreign_on_allocated"][0]["user"] == "colleague"
-    msg = occupancy_blocks_setup(summary)
-    assert msg and "colleague" in msg and "Refusing" in msg
+    assert summary["foreign_on_allocated"][0]["user"] == "ge72fon2"
+    msg = occupancy_needs_overwrite(summary)
+    assert msg and "ge72fon2" in msg and "alphafold3_venv" in msg
+    assert "Click again" in msg
+    assert summary["needs_overwrite"] == msg
 
 
 def test_setup_status_ignores_marker_while_inflight():
@@ -1326,5 +1328,74 @@ def test_dashboard_snapshot_uses_allocated_gpu_not_gpu0(monkeypatch, tmp_path):
     gpu_check = next(c for c in body["checks"] if c["id"] == "gpu")
     assert gpu_check["ok"] is True
     assert "GPU 3" in gpu_check["detail"]
+
+
+def test_wipe_gpu_command_targets_allocated_pids_only():
+    from splat_explorer.repair_lrz import wipe_gpu_srun_command
+
+    cmd = wipe_gpu_srun_command({"job_id": "5786047"}, gpu_indices=[3], pids=[1111, 2222])
+    assert "--overlap" in cmd
+    assert "--jobid=5786047" in cmd
+    assert "kill -TERM" in cmd
+    assert "kill -KILL" in cmd
+    assert "--gpu-reset -i" in cmd
+    assert "3" in cmd
+    assert "1111" in cmd
+    assert "2222" in cmd
+
+
+def test_request_setup_requires_overwrite_when_alphafold_leftover(monkeypatch):
+    from splat_explorer.repair_lrz import (
+        _PROBE,
+        _SETUP,
+        parse_gpu_occupancy_text,
+        request_lrz_setup,
+        reset_gpu_probe_cache,
+        reset_setup_cache,
+    )
+
+    reset_setup_cache()
+    reset_gpu_probe_cache()
+    occ = parse_gpu_occupancy_text(
+        "GPUENV\nCUDA_VISIBLE_DEVICES=0\nSLURM_JOB_GPUS=0\nUSER=go73kaf2\n"
+        "GPUDEVS\n0\nGPUCSV\n"
+        "0, GPU-aaa, NVIDIA A100-SXM4-80GB, 77773, 81920, 0, 0, 31, 60.00, 400.00, 8.0\n"
+        "GPUAPPS\nGPU-aaa, 1111, python, 77000\n"
+        "GPUPROCS\n 1111 ge72fon2 /alphafold3_venv/bin/python3\n"
+    )
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_session_alive", lambda cfg=None: True)
+    monkeypatch.setattr("splat_explorer.repair_lrz.load_lrz_config", lambda: {
+        "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "5786047",
+        "workspace": "/dss/ws", "container": "/dss/ws/containers/pytorch.sqsh",
+        "cpus": 4, "mem": "32G", "container_name": "splat-repair",
+    })
+    with _PROBE["lock"]:
+        _PROBE["body"] = {
+            "slurm": {"job_id": "5786047", "state": "R"},
+            "jobs": [{"job_id": "5786047", "state": "R"}],
+            "gpu": occ,
+        }
+        _PROBE["inflight"] = False
+    with pytest.raises(RuntimeError, match="ge72fon2"):
+        request_lrz_setup()
+    started = []
+
+    class FakeThread:
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
+            started.append(args)
+        def start(self):
+            return None
+
+    monkeypatch.setattr("splat_explorer.repair_lrz.threading.Thread", FakeThread)
+    try:
+        body = request_lrz_setup(overwrite=True)
+        assert body["inflight"] is True
+        assert started and started[0][1] is True
+    finally:
+        with _SETUP["lock"]:
+            _SETUP["inflight"] = False
+        reset_setup_cache()
+
+
 
 
