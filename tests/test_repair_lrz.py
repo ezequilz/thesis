@@ -1347,6 +1347,9 @@ def test_wipe_gpu_command_resets_this_jobs_cuda_device():
     assert "fuser -k" in cmd
     assert "cudaDeviceReset" in cmd
     assert "--gpu-reset -i" in cmd
+    assert "ALLOWED_IDX" in cmd
+    assert "Device Minor" in cmd
+    assert "NVIDIA_VISIBLE_DEVICES" in cmd
     assert "REJECT_HINT_GPU0" in cmd
     assert "SKIP_SHARED_PID" in cmd
     assert "kill -TERM" not in cmd
@@ -1354,6 +1357,9 @@ def test_wipe_gpu_command_resets_this_jobs_cuda_device():
     assert "HINT=3" in cmd or "HINT='3'" in cmd
     assert "1111" not in cmd
     assert "2222" not in cmd
+    empty = wipe_gpu_srun_command({"job_id": "5786047"}, gpu_indices=[], pids=[])
+    assert "ALLOWED_IDX" in empty
+    assert "SKIP_PHYSICAL" in empty
 
 
 def test_physical_wipe_indices_never_guess_gpu0_on_a_full_node():

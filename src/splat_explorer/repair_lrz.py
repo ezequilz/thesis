@@ -1520,6 +1520,113 @@ def physical_indices_for_wipe(occupancy: dict | None) -> list[int]:
     return out
 
 
+_WIPE_RESOLVE_PY = r"""
+import ctypes
+import glob
+import os
+import re
+import sys
+
+
+def nvidia_minors():
+    found = []
+    try:
+        names = os.listdir("/dev")
+    except OSError:
+        return found
+    for name in names:
+        match = re.fullmatch(r"nvidia(\d+)", name)
+        if match:
+            found.append(match.group(1))
+    return sorted(found, key=int)
+
+
+def uuid_to_minor():
+    mapping = {}
+    for path in glob.glob("/proc/driver/nvidia/gpus/*/information"):
+        try:
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        uuid_match = re.search(r"GPU UUID:\s*(\S+)", text, re.I)
+        minor_match = re.search(r"Device Minor:\s*(\d+)", text, re.I)
+        if uuid_match and minor_match:
+            mapping[uuid_match.group(1).lower()] = minor_match.group(1)
+    return mapping
+
+
+def cuda_uuid():
+    class Uuid(ctypes.Structure):
+        _fields_ = [("bytes", ctypes.c_byte * 16)]
+
+    for name in ("libcudart.so", "libcudart.so.12", "libcudart.so.11"):
+        try:
+            lib = ctypes.CDLL(name)
+        except OSError:
+            continue
+        fn = getattr(lib, "cudaDeviceGetUuid", None)
+        if fn is None:
+            continue
+        buf = Uuid()
+        fn.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        fn.restype = ctypes.c_int
+        if fn(ctypes.byref(buf), 0) != 0:
+            continue
+        hexes = "".join(f"{(b & 0xFF):02x}" for b in buf.bytes)
+        return "GPU-" + "-".join((hexes[0:8], hexes[8:12], hexes[12:16], hexes[16:20], hexes[20:32]))
+    return ""
+
+
+minors = nvidia_minors()
+print("NDEV", len(minors))
+print("DEVS", ",".join(minors))
+mapping = uuid_to_minor()
+allowed = []
+source = ""
+if len(minors) == 1:
+    allowed, source = minors, "cgroup"
+nv = os.environ.get("NVIDIA_VISIBLE_DEVICES") or ""
+print("NVIDIA_VISIBLE_DEVICES", nv)
+if not allowed and nv and nv.lower() not in ("void", "none", "all"):
+    found = []
+    for tok in nv.split(","):
+        tok = tok.strip()
+        if tok.lower().startswith("gpu-") and tok.lower() in mapping:
+            found.append(mapping[tok.lower()])
+            source = "nvidia_uuid"
+        elif tok.isdigit() and len(minors) == 1 and tok in minors:
+            found.append(tok)
+            source = "nvidia_index"
+    if found:
+        allowed = found
+if not allowed:
+    slurm = (os.environ.get("SLURM_JOB_GPUS") or os.environ.get("SLURM_STEP_GPUS") or "").replace(" ", "")
+    found = [p for p in slurm.split(",") if p.isdigit()]
+    if found:
+        allowed, source = found, "slurm"
+if not allowed:
+    uuid = cuda_uuid()
+    if uuid:
+        print("CUDA_UUID", uuid)
+        minor = mapping.get(uuid.lower(), "")
+        if minor:
+            allowed, source = [minor], "cuda_uuid"
+hint = os.environ.get("HINT") or ""
+if not allowed and hint:
+    parts = [p for p in hint.split(",") if p.isdigit()]
+    if parts == ["0"] and len(minors) != 1:
+        print("REJECT_HINT_GPU0")
+    elif parts:
+        allowed, source = parts, "hint"
+if allowed:
+    print("ALLOWED_FROM", source)
+    print("ALLOWED_IDX", ",".join(allowed))
+else:
+    print("SKIP_PHYSICAL")
+    sys.exit(0)
+"""
+
+
 _WIPE_SHARED_PID_PY = r"""
 import os
 import sys
@@ -1544,20 +1651,19 @@ for pid, gpus in pid_gpus.items():
     if gpus & allowed and gpus - allowed:
         print("SKIP_SHARED_PID", pid, "gpus", ",".join(str(g) for g in sorted(gpus)))
         shared = 1
-sys.exit(shared)
+sys.exit(0 if not shared else 2)
 """
 
 
 def wipe_gpu_srun_command(cfg: dict, *, gpu_indices: list[int], pids: list[int]) -> str:
     """Reset THIS job's reserved GPU from inside srun --gres=gpu:1.
 
-    Never kills by PID (PIDs are node-global and may also sit on other GPUs).
-    Never fuser/reset a device unless this step uniquely owns it: one cgroup
-    ``/dev/nvidia*`` node, or a physical ``SLURM_JOB_GPUS`` / occupancy hint
-    that is not remapped CUDA 0. A leftover on *our* card (even another user)
-    is cleared; the same PID on a colleague's card is left alone.
+    Pins the card via cgroup / NVIDIA UUID / SLURM_JOB_GPUS / CUDA device 0
+    UUID (not remapped CUDA_VISIBLE_DEVICES=0). Never kills by PID. nvidia-smi
+    failures must not skip the reset: leftover occupants on OUR card are
+    fuser'd and gpu-reset; other cards are not touched.
     """
-    del pids  # never SIGKILL by pid — it can share other GPUs on this node
+    del pids
     job = shlex.quote(str(cfg["job_id"]))
     hint = ",".join(str(int(idx)) for idx in gpu_indices)
     inner = f"""
@@ -1568,52 +1674,27 @@ ls -1 /dev/nvidia[0-9]* 2>/dev/null || true
 echo CUDA_VISIBLE_DEVICES="${{CUDA_VISIBLE_DEVICES-}}"
 echo SLURM_JOB_GPUS="${{SLURM_JOB_GPUS-}}"
 echo SLURM_STEP_GPUS="${{SLURM_STEP_GPUS-}}"
-HINT={shlex.quote(hint)}
-devs() {{ ls -1 /dev/nvidia[0-9]* 2>/dev/null | sed 's|.*/nvidia||' | grep -E '^[0-9]+$' | sort -n | uniq; }}
-NDEV=$(devs | wc -l | tr -d ' ')
-echo NDEV "$NDEV"
-ALLOWED=""
-if [ "$NDEV" = "1" ]; then
-  ALLOWED=$(devs)
-  echo ALLOWED_FROM=cgroup "$ALLOWED"
-fi
-SG=$(printf '%s' "${{SLURM_JOB_GPUS:-${{SLURM_STEP_GPUS:-}}}}" | tr -d ' ')
-if [ -z "$ALLOWED" ] && [ -n "$SG" ]; then
-  ALLOWED=$(printf '%s' "$SG" | tr ',' '\\n' | grep -E '^[0-9]+$' | sort -n | uniq | paste -sd, -)
-  echo ALLOWED_FROM=slurm "$ALLOWED"
-fi
-if [ -z "$ALLOWED" ] && [ -n "$HINT" ]; then
-  if [ "$HINT" = "0" ] && [ "$NDEV" != "1" ]; then
-    echo REJECT_HINT_GPU0
-  else
-    INTER=""
-    IFS=,
-    for i in $HINT; do
-      [ -e "/dev/nvidia$i" ] || continue
-      INTER="${{INTER:+$INTER,}}$i"
-    done
-    unset IFS
-    if [ -n "$INTER" ]; then
-      ALLOWED="$INTER"
-      echo ALLOWED_FROM=hint "$ALLOWED"
-    fi
-  fi
-fi
-if [ -z "$ALLOWED" ]; then
-  echo SKIP_PHYSICAL
-  echo "Cannot pin this job's GPU index; will not fuser or gpu-reset any nvidia-smi row (GPU 0 may be a colleague)."
-fi
+echo NVIDIA_VISIBLE_DEVICES="${{NVIDIA_VISIBLE_DEVICES-}}"
+export HINT={shlex.quote(hint)}
+RESOLVE=$(python3 - <<'PY'
+{_WIPE_RESOLVE_PY.strip()}
+PY
+)
+echo "$RESOLVE"
+ALLOWED=$(printf '%s\\n' "$RESOLVE" | awk '/^ALLOWED_IDX /{{print $2}}' | tail -n 1)
+echo ALLOWED "$ALLOWED"
 SHARED=0
 if [ -n "$ALLOWED" ]; then
-  APPS=$(nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader,nounits 2>/dev/null || true)
-  MAP=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits 2>/dev/null || true)
+  APPS=$(timeout 15 nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader,nounits 2>/dev/null || true)
+  MAP=$(timeout 15 nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits 2>/dev/null || true)
   export APPS MAP ALLOWED
   python3 - <<'PY'
 {_WIPE_SHARED_PID_PY.strip()}
 PY
   rc=$?
-  if [ "$rc" != "0" ]; then
+  if [ "$rc" = "2" ]; then
     SHARED=1
+    echo SKIP_FUSER_SHARED
   fi
 fi
 python3 -c 'import ctypes; ctypes.CDLL("libcudart.so").cudaDeviceReset()' 2>/dev/null && echo CUDA_RESET_OK || echo CUDA_RESET_SKIP
@@ -1622,19 +1703,21 @@ if [ -n "$ALLOWED" ] && [ "$SHARED" != "1" ]; then
   for i in $ALLOWED; do
     [ -e "/dev/nvidia$i" ] || continue
     echo FUSER "/dev/nvidia$i"
-    fuser -k "/dev/nvidia$i" 2>/dev/null || true
+    fuser -v "/dev/nvidia$i" 2>&1 || true
+    fuser -k "/dev/nvidia$i" 2>&1 || echo FUSER_EPERM "$i"
   done
   unset IFS
+fi
+if [ -n "$ALLOWED" ] && [ "$SHARED" != "1" ]; then
   echo RESET "$ALLOWED"
-  nvidia-smi --gpu-reset -i "$ALLOWED" || echo RESET_FAIL
-elif [ -n "$ALLOWED" ]; then
-  echo SKIP_FUSER_SHARED
-  echo "A process on this GPU also has another GPU open; not signalling it."
+  timeout 30 nvidia-smi --gpu-reset -i "$ALLOWED" && echo RESET_OK || echo RESET_FAIL
+elif [ -z "$ALLOWED" ]; then
+  echo SKIP_PHYSICAL
 fi
 echo APPS
-nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits || true
+timeout 15 nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits || true
 echo MEM
-nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits || true
+timeout 15 nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits || true
 echo WIPE_DONE
 """
     return (
@@ -1644,16 +1727,33 @@ echo WIPE_DONE
     )
 
 
+def _wipe_summary(out: str) -> str:
+    keys = (
+        "ALLOWED_FROM", "ALLOWED_IDX", "ALLOWED ", "CUDA_UUID", "FUSER",
+        "FUSER_EPERM", "RESET ", "RESET_OK", "RESET_FAIL", "SKIP_PHYSICAL",
+        "SKIP_FUSER_SHARED", "SKIP_SHARED_PID", "REJECT_HINT_GPU0", "WIPE_DONE",
+    )
+    hits = []
+    for line in (out or "").splitlines():
+        raw = line.strip()
+        if any(raw.startswith(k.strip()) or raw.startswith(k) for k in keys):
+            hits.append(raw[:160])
+    return "; ".join(hits[-10:]) if hits else (out or "no wipe output")[-240:]
+
+
 def wipe_allocated_gpu(cfg: dict, occupancy: dict | None = None) -> str:
     """Reset this job's reserved GPU only. Never resets other cards on the node."""
     indices = physical_indices_for_wipe(occupancy)
     _set_setup_message(
         "Resetting this job's reserved GPU"
-        + (f" (physical index {','.join(str(i) for i in indices)})" if indices else " (CUDA device 0 in this srun only)")
+        + (f" (hint index {','.join(str(i) for i in indices)})" if indices else " (resolving CUDA/Slurm UUID on the node)")
         + "; other GPUs on the node are not touched…"
     )
-    result = _ssh_run(cfg, wipe_gpu_srun_command(cfg, gpu_indices=indices, pids=[]), timeout=90)
+    result = _ssh_run(cfg, wipe_gpu_srun_command(cfg, gpu_indices=indices, pids=[]), timeout=120)
     out = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+    logger.info("GPU wipe srun rc=%s %s", result.returncode, out[-2000:])
+    summary = _wipe_summary(out)
+    _set_setup_message("GPU wipe: " + summary)
     if "WIPE_DONE" not in out and result.returncode != 0:
         logger.warning("GPU wipe srun returned %s: %s", result.returncode, out[-800:])
     return out
@@ -2086,11 +2186,11 @@ printf 'HOSTNAME=%s\\n' "$(hostname -s 2>/dev/null || hostname)"
 echo GPUDEVS
 ls -1 /dev/nvidia[0-9]* 2>/dev/null | sed 's|.*/nvidia||' || true
 echo GPUCSV
-nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.total,utilization.gpu,utilization.memory,temperature.gpu,power.draw,power.limit,compute_cap --format=csv,noheader,nounits
+timeout 20 nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.total,utilization.gpu,utilization.memory,temperature.gpu,power.draw,power.limit,compute_cap --format=csv,noheader,nounits
 echo GPUAPPS
-nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits || true
+timeout 15 nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits || true
 echo GPUPROCS
-pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | tr -d ' ' | grep -E '^[0-9]+$' | sort -u | paste -sd, -)
+pids=$(timeout 15 nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | tr -d ' ' | grep -E '^[0-9]+$' | sort -u | paste -sd, -)
 if [ -n "$pids" ]; then
   ps -ww -p "$pids" -o pid=,user=,args= 2>/dev/null || true
 fi
@@ -3211,19 +3311,21 @@ def setup_lrz_gpu(cfg: dict | None = None, *, overwrite: bool = False) -> dict[s
             "Overwrite confirmed — resetting this job's CUDA device "
             "(other cards on the node are left alone)…"
         )
-        wipe_allocated_gpu(cfg, occ)
+        wipe_out = wipe_allocated_gpu(cfg, occ)
         try:
             occ = probe_gpu_occupancy(cfg)
             leftover = occupancy_needs_overwrite(gpu_occupancy_summary(occ))
             if leftover:
                 leftover_note = (
-                    " Leftover VRAM may remain until Pyxis binds this reserved GPU; "
-                    "processes on other cards were not signalled."
+                    " After wipe: " + leftover
+                    + " Processes on other cards were not signalled."
                 )
         except RuntimeError as exc:
             logger.warning("occupancy probe after wipe failed: %s", exc)
-            leftover_note = " Could not re-read occupancy after the CUDA reset."
+            leftover_note = " Could not re-read occupancy after wipe (" + str(exc)[:160] + ")."
             occ = None
+        if wipe_out:
+            leftover_note = (" Wipe: " + _wipe_summary(wipe_out) + ".") + leftover_note
     connected = pick_connected_gpu((occ or {}).get("gpus") if occ else None)
     bits = []
     if connected:
