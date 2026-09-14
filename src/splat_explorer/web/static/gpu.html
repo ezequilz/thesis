@@ -106,6 +106,16 @@
              letter-spacing: .04em; text-transform: uppercase; display: flex;
              align-items: center; justify-content: space-between; gap: 8px; }
   .card h2 .sub { font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--dim); font-size: 11px; }
+  #occ-card h2 { align-items: center; }
+  #btn-occ-reload {
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 600;
+    padding: 4px 9px;
+    font-size: 11px;
+    flex: none;
+  }
+  #btn-occ-reload.busy { opacity: .7; }
   .gpu-name { font-size: 20px; font-weight: 650; margin: 0 0 4px; }
   .gpu-sub { color: var(--dim); font-size: 12px; font-family: var(--mono); margin-bottom: 14px; }
   .meters { display: flex; flex-direction: column; gap: 12px; }
@@ -230,8 +240,11 @@
     </div>
   </div>
   <div class="card" style="margin-top:12px" id="occ-card">
-    <h2>GPU occupancy <span class="sub">every card nvidia-smi can see · yours vs other jobs</span></h2>
-    <div id="occupancy"><div class="empty">No occupancy probe yet. Open the SSH session, then refresh.</div></div>
+    <h2>
+      <span>GPU occupancy <span class="sub">nvidia-smi only · not the 10 min probe</span></span>
+      <button id="btn-occ-reload" class="ghost" type="button" title="Re-run nvidia-smi on this allocation without squeue">Reload occupancy</button>
+    </h2>
+    <div id="occupancy"><div class="empty">No occupancy probe yet. Open the SSH session, then refresh occupancy here.</div></div>
   </div>
   <div class="jobs-row">
     <div class="card">
@@ -293,6 +306,7 @@ let cancelArmedTimer = null;
 let setupOverwriteArmed = false;
 let setupOverwriteTimer = null;
 let loadProbeTimer = null;
+let occupancyBusy = false;
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -505,6 +519,32 @@ function occupancyProcesses() {
   }
   return out;
 }
+function setupNeedsOverwrite() {
+  const occ = snap?.gpu_occupancy || {};
+  if (occ.needs_overwrite) return occ.needs_overwrite;
+  const foreign = occ.foreign_on_allocated || [];
+  if (foreign.length) {
+    return "Allocated GPU has leftover processes that are not yours. Click again to reset THIS job's CUDA device.";
+  }
+  const mine = occupancyProcesses().filter(p => p.allocated_gpu);
+  if (mine.length) {
+    return "Allocated GPU still has compute processes. Click again to reset it and load a fresh setup.";
+  }
+  const allocated = occ.allocated || [];
+  for (const g of allocated) {
+    if (Number(g.memory_used_mib || 0) >= 256) {
+      return `Allocated GPU has ${Math.round(g.memory_used_mib)} MiB VRAM in use. Click again to reset this job's CUDA device.`;
+    }
+  }
+  const scoped = snap?.gpu_scope === "allocated" || occ.scope === "allocated";
+  if (!scoped) {
+    const busy = gpuRows().some(g => Number(g.memory_used_mib || 0) >= 1024);
+    if (busy || occupancyProcesses().length) {
+      return "This node still has busy GPU VRAM and nvidia-smi did not pin which card is yours. Click again to reset THIS job's CUDA device only.";
+    }
+  }
+  return "";
+}
 function fmtElapsed(s) {
   const n = Number(s);
   if (!Number.isFinite(n) || n < 0) return "";
@@ -638,6 +678,7 @@ function renderOccupancy() {
     env.CUDA_VISIBLE_DEVICES ? `CUDA_VISIBLE_DEVICES=${env.CUDA_VISIBLE_DEVICES}` : "",
     env.SLURM_JOB_GPUS ? `SLURM_JOB_GPUS=${env.SLURM_JOB_GPUS}` : "",
     env.USER ? `user ${env.USER}` : "",
+    snap?.occupancy_age_s != null ? `occupancy ${ageText(snap.occupancy_age_s)}` : "",
   ].filter(Boolean).join(" · ");
   box.innerHTML = `${banners.join("")}
     <div class="occ">${chart}</div>
@@ -1007,11 +1048,12 @@ function renderChrome() {
   $("btn-alloc").disabled = setupBusy || !session;
   $("btn-widen").disabled = setupBusy || !session;
   $("btn-review").disabled = setupBusy || probeBusy || !session;
-  const canSetup = session && snap?.slurm?.state === "R";
-  const needsOverwrite = Boolean(snap?.gpu_occupancy?.needs_overwrite);
-  const armed = Boolean(setupOverwriteArmed && needsOverwrite && !setupBusy);
+  const canSetup = session && (snap?.slurm?.state === "R" || hasRunningJob());
+  const needsOverwrite = Boolean(setupNeedsOverwrite());
+  const showOverwrite = needsOverwrite || setupOverwriteArmed;
+  const armed = Boolean(setupOverwriteArmed && !setupBusy);
   $("btn-setup").disabled = probeBusy || setupBusy || !canSetup;
-  $("btn-setup").classList.toggle("overwrite-confirm", Boolean(needsOverwrite && !setupBusy));
+  $("btn-setup").classList.toggle("overwrite-confirm", Boolean(showOverwrite && !setupBusy));
   if (snap?.setup?.inflight) {
     $("btn-setup").textContent = snap.setup.elapsed_s
       ? `Loading GPU setup… ${fmtElapsed(snap.setup.elapsed_s)}`
@@ -1023,12 +1065,17 @@ function renderChrome() {
   } else {
     $("btn-setup").textContent = snap?.setup?.ok ? "Reload GPU setup" : "Load GPU setup";
   }
-  $("btn-setup").title = needsOverwrite
+  $("btn-setup").title = showOverwrite
     ? (armed
-      ? "Click again to stop leftover GPU processes and load splat-explorer on this allocation."
-      : (snap.gpu_occupancy.needs_overwrite || "GPU is occupied. Click twice to overwrite."))
+      ? "Click again to reset THIS job's CUDA device and load splat-explorer. Other cards are left alone."
+      : (setupNeedsOverwrite() || "GPU is occupied. Click twice to overwrite."))
     : "Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh.";
   $("btn-hist").disabled = probeBusy || setupBusy || !session;
+  const canOcc = session && Boolean(snap?.connection?.job_id || snap?.slurm?.job_id);
+  if ($("btn-occ-reload")) {
+    $("btn-occ-reload").disabled = occupancyBusy || !canOcc;
+    $("btn-occ-reload").classList.toggle("busy", occupancyBusy);
+  }
   syncAutoInterval();
 }
 
@@ -1220,25 +1267,26 @@ $("btn-refresh").onclick = async () => {
 };
 
 $("btn-setup").onclick = async () => {
-  const needsOverwrite = Boolean(snap?.gpu_occupancy?.needs_overwrite);
+  const reason = setupNeedsOverwrite();
+  const needsOverwrite = Boolean(reason);
   if (needsOverwrite && !setupOverwriteArmed) {
     armSetupOverwrite();
-    setNote("warn", snap.gpu_occupancy.needs_overwrite);
+    setNote("warn", reason);
     renderChrome();
     return;
   }
-  const overwrite = needsOverwrite && setupOverwriteArmed;
+  const sendOverwrite = Boolean(setupOverwriteArmed);
   $("btn-setup").disabled = true;
   try {
-    snap = await postJson("/api/repair/gpu/setup", { force: true, overwrite });
+    snap = await postJson("/api/repair/gpu/setup", { force: true, overwrite: sendOverwrite });
     clearSetupOverwriteArmed();
-    setNote("info", snap.message || (overwrite
-      ? "Wiping leftover GPU processes, then loading splat-explorer…"
+    setNote("info", snap.message || (sendOverwrite
+      ? "Resetting this job's CUDA device, then loading splat-explorer…"
       : "Loading GPU setup on the current job…"));
     render();
     syncAutoInterval();
   } catch (err) {
-    if (/overwrite|occupied|leftover|another user/i.test(err.message || "")) {
+    if (err.payload?.needs_overwrite || /overwrite|occupied|leftover|another user|CUDA device/i.test(err.message || "")) {
       armSetupOverwrite();
       setNote("warn", err.message);
       renderChrome();
@@ -1246,6 +1294,25 @@ $("btn-setup").onclick = async () => {
     }
     clearSetupOverwriteArmed();
     setNote("err", err.message);
+    renderChrome();
+  }
+};
+
+$("btn-occ-reload").onclick = async () => {
+  const btn = $("btn-occ-reload");
+  occupancyBusy = true;
+  btn.disabled = true;
+  btn.classList.add("busy");
+  try {
+    snap = await postJson("/api/repair/gpu/occupancy", {});
+    setNote("info", snap.message || "GPU occupancy refreshed.");
+    render();
+  } catch (err) {
+    setNote("err", "Occupancy reload failed: " + err.message);
+    renderChrome();
+  } finally {
+    occupancyBusy = false;
+    btn.classList.remove("busy");
     renderChrome();
   }
 };

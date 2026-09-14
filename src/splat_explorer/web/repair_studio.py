@@ -313,6 +313,16 @@ class RepairStudio:
         snap["message"] = result.get("message") or "Loading GPU setup…"
         return snap
 
+    def gpu_occupancy(self) -> dict:
+        from ..repair_lrz import request_occupancy_probe
+
+        occupancy = request_occupancy_probe()
+        snap = self.gpu_snapshot()
+        snap["ok"] = True
+        snap["message"] = "GPU occupancy refreshed (nvidia-smi only)."
+        snap["occupancy"] = occupancy
+        return snap
+
     def gpu_widen(self, job_id: str | None = None, partition: str | None = None) -> dict:
         from ..repair_lrz import widen_lrz_job
 

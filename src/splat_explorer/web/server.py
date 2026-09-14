@@ -25,6 +25,7 @@ Endpoints:
   POST /api/repair/gpu/use      point configs/lrz.local.yaml at {job_id}
   POST /api/repair/gpu/cancel   scancel {job_id}; running ST=R requires {confirm: true}
   POST /api/repair/gpu/setup    load PyTorch/Pyxis container + gsplat onto the current job
+  POST /api/repair/gpu/occupancy  nvidia-smi occupancy only (not the 10 min squeue probe)
   POST /api/repair/gpu/widen    one scontrol to both A100 partitions
   POST /api/repair/gpu/review   one sinfo snapshot
   POST /api/repair/gpu/history  one sacct window {start, end}; also on the 10 min probe
@@ -973,6 +974,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     force=bool(body.get("force", True)),
                     overwrite=bool(body.get("overwrite", False)),
                 )
+            except Exception as exc:
+                from ..repair_lrz import SetupNeedsOverwrite
+                if isinstance(exc, SetupNeedsOverwrite):
+                    self._send_json({
+                        "ok": False,
+                        "message": str(exc),
+                        "needs_overwrite": True,
+                    }, 409)
+                    return
+                if isinstance(exc, (RuntimeError, ValueError)):
+                    self._send_json({"ok": False, "message": str(exc)}, 409)
+                    return
+                raise
+            self._send_json(snap)
+            return
+        elif path == "/api/repair/gpu/occupancy":
+            try:
+                snap = studio.gpu_occupancy()
             except (RuntimeError, ValueError) as exc:
                 self._send_json({"ok": False, "message": str(exc)}, 409)
                 return
