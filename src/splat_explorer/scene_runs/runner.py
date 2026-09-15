@@ -96,6 +96,35 @@ def _triggered(mode: str, action: Action) -> bool:
     return key == "every_artifact" or wants_regenerate(action.args)
 
 
+def _repair_trigger_state(
+    mode: str, action: Action, every_step_armed: bool,
+) -> tuple[bool, bool]:
+    """Return ``(trigger_now, armed_after_action)`` for a scene-run action."""
+    key = str(mode or "regenerate_yes").strip().lower().replace("-", "_")
+    if key != "every_step":
+        return _triggered(key, action), every_step_armed
+    armed = every_step_armed or action.name == "report_artifact"
+    return armed, armed
+
+
+def _require_vlm_response(policy: Any) -> None:
+    """Fail a run when CliRelay never produced a response for this decision."""
+    debug = getattr(policy, "last_debug", None)
+    if not isinstance(debug, dict):
+        return
+    if debug.get("backend") != "cli_relay" or not debug.get("fallback"):
+        return
+    attempts = debug.get("attempts")
+    if not isinstance(attempts, list) or not attempts:
+        return
+    errors = [attempt.get("error") for attempt in attempts if isinstance(attempt, dict)]
+    if len(errors) == len(attempts) and all(errors):
+        raise RuntimeError(
+            "CliRelay did not return a VLM decision; refusing scripted rotation "
+            f"fallback: {errors[-1]}"
+        )
+
+
 class SceneRunExecutor:
     """Execute one run created by ``SceneRunStore``."""
 
@@ -242,6 +271,29 @@ class SceneRunExecutor:
             send_depth_once = False
             send_coverage_once = False
 
+            if spawn is not None and spawn.points:
+                self._status(
+                    phase="choose_start",
+                    message="Asking VLM to choose a starting position",
+                )
+                Image.fromarray(spawn.image).save(self._run_dir / "birdseye.png")
+                choice = int(getattr(policy, "choose_start")(spawn.image, spawn))
+                _require_vlm_response(policy)
+                choice = int(np.clip(choice, 0, len(spawn.points) - 1))
+                rig.position = np.asarray(spawn.points[choice].position).copy()
+                start_record = {
+                    "step": -1,
+                    "pose": rig.state_description(),
+                    "position": rig.position.tolist(),
+                    "yaw_deg": rig.yaw_deg,
+                    "pitch_deg": rig.pitch_deg,
+                    "action": {"name": "choose_start", "args": {"point": choice}},
+                    "frame": "birdseye.png",
+                    "vlm": getattr(policy, "last_debug", None),
+                }
+                _append_jsonl(self._run_dir / "actions.jsonl", start_record)
+                self._event("start_selected", point=choice, frame="birdseye.png")
+
             gpu = self._new_gpu(progress)
             gpu_info = gpu.start(
                 source_ply=repaired_ply,
@@ -262,24 +314,8 @@ class SceneRunExecutor:
                 artifacts=0,
             )
 
-            if spawn is not None and spawn.points:
-                choice = int(getattr(policy, "choose_start")(spawn.image, spawn))
-                choice = int(np.clip(choice, 0, len(spawn.points) - 1))
-                rig.position = np.asarray(spawn.points[choice].position).copy()
-                Image.fromarray(spawn.image).save(self._run_dir / "birdseye.png")
-                start_record = {
-                    "step": -1,
-                    "pose": rig.state_description(),
-                    "position": rig.position.tolist(),
-                    "yaw_deg": rig.yaw_deg,
-                    "pitch_deg": rig.pitch_deg,
-                    "action": {"name": "choose_start", "args": {"point": choice}},
-                    "frame": "birdseye.png",
-                    "vlm": getattr(policy, "last_debug", None),
-                }
-                _append_jsonl(self._run_dir / "actions.jsonl", start_record)
-
             step = 0
+            every_step_armed = False
             while self.clock() < effective_deadline and not self._stop_requested():
                 camera = rig.camera(
                     int(params.get("width") or 960),
@@ -317,6 +353,12 @@ class SceneRunExecutor:
                         Image.fromarray(coverage_image).save(
                             self._run_dir / coverage_name,
                         )
+                self._event(
+                    "observation_rendered",
+                    step=step,
+                    frame=frame_path.name,
+                    map_frame=map_name,
+                )
 
                 pose = rig.state_description()
                 if coverage is not None:
@@ -332,6 +374,7 @@ class SceneRunExecutor:
                     map_image=map_image,  # fixed on for scene-runs
                     coverage_image=coverage_image if send_coverage_once else None,
                 )
+                _require_vlm_response(policy)
                 action = action.clamped(
                     float(run_cfg.agent.max_move_distance),
                     float(run_cfg.agent.max_rotate_degrees),
@@ -339,9 +382,10 @@ class SceneRunExecutor:
                 is_artifact = action.name == "report_artifact"
                 if is_artifact:
                     artifacts += 1
-                trigger = _triggered(
+                trigger, every_step_armed = _repair_trigger_state(
                     str(params.get("repair_trigger") or "regenerate_yes"),
                     action,
+                    every_step_armed,
                 )
                 record: dict[str, Any] = {
                     "step": step,
@@ -355,8 +399,16 @@ class SceneRunExecutor:
                     "map_sent": map_image is not None,
                     "coverage_frame": coverage_name,
                     "repair_triggered": trigger,
+                    "every_step_armed": every_step_armed,
                     "vlm": getattr(policy, "last_debug", None),
                 }
+                self._event(
+                    "vlm_action",
+                    step=step,
+                    action={"name": action.name, "args": action.args},
+                    repair_triggered=trigger,
+                    every_step_armed=every_step_armed,
+                )
 
                 if trigger:
                     if self.clock() >= effective_deadline or self._stop_requested():
@@ -524,9 +576,16 @@ class SceneRunExecutor:
         apply_spec(run_cfg, spec)
         run_cfg["renderer"]["width"] = int(params.get("width") or 960)
         run_cfg["renderer"]["height"] = int(params.get("height") or 720)
-        run_cfg["agent"]["vlm_backend"] = str(params.get("backend") or "cli_relay")
-        if params.get("model"):
-            run_cfg["agent"]["model"] = str(params["model"])
+        backend = str(params.get("backend") or "cli_relay")
+        if backend != "cli_relay":
+            raise ValueError(
+                "Automated scene-runs require the cli_relay VLM backend; "
+                "scripted policies are only available in the episode debugger."
+            )
+        run_cfg["agent"]["vlm_backend"] = backend
+        run_cfg["agent"]["model"] = str(
+            params.get("model") or run_cfg["agent"].get("model") or "gpt-5.6-luna"
+        )
         run_cfg["agent"]["send_map"] = True
         run_cfg["agent"]["send_depth"] = False
         run_cfg["agent"]["send_coverage"] = False

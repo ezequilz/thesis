@@ -29,7 +29,7 @@ checkpoint used by both the GPU worker and the local viser/VLM harness.
 1. Render RGB and the bird's-eye path map at the current camera.
 2. Ask the configured CliRelay VLM for one action.
 3. Depending on `repair_trigger`, synchronously run image edit and GSFix3D:
-   - `every_step`: every observation
+   - `every_step`: the first `report_artifact`, then every observation
    - `every_artifact`: every `report_artifact`
    - `regenerate_yes`: only `report_artifact(..., regenerate="yes")`
 4. Download the repaired PLY, hot-reload viser, and continue with the same VLM

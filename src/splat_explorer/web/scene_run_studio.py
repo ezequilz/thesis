@@ -20,7 +20,7 @@ from urllib.parse import quote
 SCENE_RUN_DEFAULTS = {
     "scene_id": "venetian-balcony",
     "backend": "cli_relay",
-    "model": "",
+    "model": "gpt-5.6-luna",
     "width": 960,
     "height": 720,
     "duration_seconds": 3600,
@@ -117,7 +117,9 @@ class SceneRunStudio:
 
     def defaults(self) -> dict:
         defaults = dict(SCENE_RUN_DEFAULTS)
-        defaults["model"] = str(_cfg_get(self.cfg, "agent.model", "") or "")
+        defaults["model"] = str(
+            _cfg_get(self.cfg, "agent.model", "") or defaults["model"]
+        )
         return defaults
 
     def validate_config(self, body: Mapping[str, Any] | None) -> dict:
@@ -143,6 +145,13 @@ class SceneRunStudio:
         for key in ("scene_id", "backend", "image_edit_backend", "repair_backend"):
             if not clean[key]:
                 raise SceneRunValidationError(f"{key} is required.")
+        if clean["backend"] != "cli_relay":
+            raise SceneRunValidationError(
+                "Automated scene-runs require cli_relay so every action comes "
+                "from the configured VLM."
+            )
+        if not clean["model"]:
+            raise SceneRunValidationError("model is required for CliRelay.")
         if clean["image_edit_backend"] != "qwen-image-edit":
             raise SceneRunValidationError(
                 "The first automated scene-run release supports qwen-image-edit; "

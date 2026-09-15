@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..config import Config
+from ..config import Config, load_dotenv
 from .runner import SceneRunExecutor
 
 logger = logging.getLogger(__name__)
@@ -319,6 +319,9 @@ class SceneRunManager:
 
 
 def run_manager(cfg: Config, *, once: bool = False) -> int:
+    loaded = load_dotenv()
+    if loaded:
+        logger.info("Loaded scene-run credentials from .env: %s", ", ".join(loaded))
     manager = SceneRunManager(cfg)
     if once:
         return 0 if manager.run_once() else 1

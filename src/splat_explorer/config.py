@@ -7,6 +7,7 @@ since the project is in the scaffolding stage and sections will evolve.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,23 @@ def _find_default_config() -> Path:
     raise FileNotFoundError(
         "configs/default.yaml not found. Run from the repo root or mount ./configs."
     )
+
+
+def load_dotenv(path: Path = Path(".env")) -> list[str]:
+    """Load simple ``KEY=VALUE`` entries without overriding the process env."""
+    loaded: list[str] = []
+    if not path.is_file():
+        return loaded
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip("'\"")
+        if key and key not in os.environ:
+            os.environ[key] = value
+            loaded.append(key)
+    return loaded
 
 
 def load_config(path: str | Path | None = None) -> Config:

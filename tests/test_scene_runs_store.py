@@ -30,7 +30,7 @@ def test_config_defaults_and_validation():
     assert config.to_dict() == {
         "scene_id": "venetian-balcony",
         "backend": "cli_relay",
-        "model": "",
+            "model": "gpt-5.6-luna",
         "width": 960,
         "height": 720,
         "duration_seconds": 3600,

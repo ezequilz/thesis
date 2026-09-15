@@ -96,6 +96,7 @@ def test_defaults_and_start_validation_are_isolated(tmp_path: Path):
         ("duration_seconds", 0),
         ("repair_seconds", 50000),
         ("repair_trigger", "sometimes"),
+        ("backend", "scripted"),
     ],
 )
 def test_invalid_start_form_is_rejected(tmp_path: Path, field: str, value):

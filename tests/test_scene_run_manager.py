@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-from splat_explorer.config import Config
+from splat_explorer.config import Config, load_dotenv
 from splat_explorer.scene_runs.manager import SceneRunManager
-from splat_explorer.scene_runs.runner import _triggered
+from splat_explorer.scene_runs.runner import _repair_trigger_state, _triggered
 from splat_explorer.agent.actions import Action
 
 
@@ -49,6 +50,14 @@ def _cfg(tmp_path: Path) -> Config:
     return Config({"output": {"dir": str(tmp_path)}})
 
 
+def test_shared_dotenv_loader_supplies_manager_credentials(tmp_path, monkeypatch):
+    env_path = tmp_path / ".env"
+    env_path.write_text("CLIRELAY_API_KEY=test-key\n")
+    monkeypatch.delenv("CLIRELAY_API_KEY", raising=False)
+    assert load_dotenv(env_path) == ["CLIRELAY_API_KEY"]
+    assert os.environ["CLIRELAY_API_KEY"] == "test-key"
+
+
 def test_trigger_modes():
     move = Action("move", {"direction": "forward", "distance": 1})
     artifact_no = Action("report_artifact", {"regenerate": "no"})
@@ -58,6 +67,21 @@ def test_trigger_modes():
     assert _triggered("every_artifact", artifact_no)
     assert not _triggered("regenerate_yes", artifact_no)
     assert _triggered("regenerate_yes", artifact_yes)
+
+
+def test_every_step_repairs_arm_on_first_artifact():
+    move = Action("move", {"direction": "forward", "distance": 1})
+    rotate = Action("rotate", {"yaw_degrees": 45})
+    artifact = Action("report_artifact", {"regenerate": "no"})
+
+    trigger, armed = _repair_trigger_state("every_step", move, False)
+    assert (trigger, armed) == (False, False)
+    trigger, armed = _repair_trigger_state("every_step", rotate, armed)
+    assert (trigger, armed) == (False, False)
+    trigger, armed = _repair_trigger_state("every_step", artifact, armed)
+    assert (trigger, armed) == (True, True)
+    trigger, armed = _repair_trigger_state("every_step", move, armed)
+    assert (trigger, armed) == (True, True)
 
 
 def test_manager_runs_one_ready_item(tmp_path, monkeypatch):

@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from splat_explorer.agent.actions import Action
 from splat_explorer.config import Config
 from splat_explorer.scene.catalog import SceneSpec
-from splat_explorer.scene_runs.runner import SceneRunExecutor
+from splat_explorer.scene_runs.runner import SceneRunExecutor, _require_vlm_response
 from splat_explorer.scene_runs.store import SceneRunStore
 
 
@@ -23,6 +25,29 @@ class _Renderer:
 
     def render_depth(self, camera):
         return np.ones((camera.height, camera.width), dtype=np.float32)
+
+
+def test_scene_run_rejects_clirelay_transport_fallback():
+    policy = SimpleNamespace(last_debug={
+        "backend": "cli_relay",
+        "fallback": True,
+        "attempts": [
+            {"error": "AuthenticationError: 401"},
+            {"error": "AuthenticationError: 401"},
+            {"error": "AuthenticationError: 401"},
+        ],
+    })
+    with pytest.raises(RuntimeError, match="refusing scripted rotation fallback"):
+        _require_vlm_response(policy)
+
+
+def test_scene_run_allows_fallback_after_real_unparseable_replies():
+    policy = SimpleNamespace(last_debug={
+        "backend": "cli_relay",
+        "fallback": True,
+        "attempts": [{"error": None, "reply": "not JSON"}],
+    })
+    _require_vlm_response(policy)
 
 
 def _run_cfg(tmp_path: Path) -> Config:

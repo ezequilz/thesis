@@ -114,10 +114,10 @@
       <form id="run-form">
         <label class="wide">Scene<select id="scene" name="scene_id"></select></label>
         <label>Duration (hours)<input id="duration" type="number" min="0.01" max="168" step="0.25" value="1"></label>
-        <label>VLM backend<input id="backend" name="backend" value="cli_relay"></label>
+        <label>VLM backend<input id="backend" name="backend" value="cli_relay" readonly></label>
         <label>Width<input id="width" name="width" type="number" min="64" max="3840" value="960"></label>
         <label>Height<input id="height" name="height" type="number" min="64" max="2160" value="720"></label>
-        <label class="wide">VLM model<input id="model" name="model" placeholder="configured default"></label>
+        <label class="wide">VLM model<input id="model" name="model" value="gpt-5.6-luna"></label>
         <label>Image edit<select id="image-edit" name="image_edit_backend">
           <option value="qwen-image-edit">qwen-image-edit</option>
           <option value="gpt-image-2" disabled>gpt-image-2 (debug dashboard only for now)</option>
@@ -126,7 +126,7 @@
         <label>Repair trigger<select id="repair-trigger" name="repair_trigger">
           <option value="regenerate_yes">regenerate=yes</option>
           <option value="every_artifact">every artifact</option>
-          <option value="every_step">every step</option>
+          <option value="every_step">every step after first artifact</option>
         </select></label>
         <label>Repair budget (seconds)<input id="repair-seconds" name="repair_seconds" type="number" min="1" max="43200" value="180"></label>
         <label class="wide locked" title="Scene runs always render and send the exploration map.">

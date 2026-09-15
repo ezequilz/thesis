@@ -38,7 +38,7 @@ class SceneRunConfig:
 
     scene_id: str = "venetian-balcony"
     backend: str = "cli_relay"
-    model: str = ""
+    model: str = "gpt-5.6-luna"
     width: int = 960
     height: int = 720
     duration_seconds: int = 3600

@@ -65,7 +65,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import numpy as np
 
-from ..config import Config
+from ..config import Config, load_dotenv
 from ..rendering.base import rotation_to_wxyz
 
 logger = logging.getLogger(__name__)
@@ -152,27 +152,6 @@ def _attach_regen_files(
             if rec.get("repair_ply"):
                 art["repair_ply"] = rec["repair_ply"]
 
-
-
-def load_dotenv(path: Path = Path(".env")) -> list[str]:
-    """Load KEY=VALUE lines from .env into the environment (no overrides).
-
-    Lets browser-started cli_relay runs find CLIRELAY_API_KEY without the
-    user exporting it in the shell that launched the dashboard.
-    """
-    loaded = []
-    if not path.is_file():
-        return loaded
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip().strip("'\"")
-        if key and key not in os.environ:
-            os.environ[key] = value
-            loaded.append(key)
-    return loaded
 
 
 class DashboardApp:
