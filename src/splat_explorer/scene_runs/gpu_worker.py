@@ -12,6 +12,8 @@ import gc
 import json
 import logging
 import signal
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import fields
@@ -29,6 +31,7 @@ RENDERED_NAME = "rendered.png"
 DEPTH_NAME = "depth.npy"
 REGENERATED_NAME = "regenerated.png"
 METRICS_NAME = "metrics.json"
+IMAGE_EDIT_RESULT_NAME = "image_edit.json"
 RESPONSE_NAME = "response.json"
 STOP_NAME = "STOP"
 HEARTBEAT_NAME = "heartbeat.json"
@@ -143,6 +146,32 @@ def _default_repair_factory(params: dict[str, Any]):
     kwargs = {key: value for key, value in params.items() if key in allowed}
     kwargs["max_chunks"] = 0
     return GsplatGsfix3dRepair(**kwargs)
+
+
+def run_image_edit_once(request_dir: Path, config_path: Path) -> dict[str, Any]:
+    """Run Qwen once in a disposable process and persist its result."""
+    request_dir = Path(request_dir)
+    config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    request = json.loads((request_dir / REQUEST_NAME).read_text(encoding="utf-8"))
+    prompt = str(
+        request.get("prompt")
+        or config.get("image_edit_prompt")
+        or DEFAULT_PROMPT
+    )
+    edit = _default_image_edit_factory(config).edit(
+        request_dir / RENDERED_NAME, prompt,
+    )
+    images = list(getattr(edit, "images", None) or [])
+    error = getattr(edit, "error", None)
+    result = {
+        "status": "error" if error or not images else "ok",
+        "error": error or (None if images else "Qwen image edit returned no PNG"),
+        "payload": _jsonable(getattr(edit, "payload", {}) or {}),
+    }
+    if images:
+        atomic_write_bytes(request_dir / REGENERATED_NAME, images[0])
+    atomic_write_json(request_dir / IMAGE_EDIT_RESULT_NAME, result)
+    return result
 
 
 class SceneRunGpuWorker:
@@ -297,14 +326,45 @@ class SceneRunGpuWorker:
                 or self.config.get("image_edit_prompt")
                 or DEFAULT_PROMPT
             )
-            edit = self._editor().edit(rendered_path, prompt)
-            images = list(getattr(edit, "images", None) or [])
-            edit_error = getattr(edit, "error", None)
-            if edit_error or not images:
-                raise RuntimeError(edit_error or "Qwen image edit returned no PNG")
-            atomic_write_bytes(request_dir / REGENERATED_NAME, images[0])
-            edit_payload = _jsonable(getattr(edit, "payload", {}) or {})
-            if self.config.get("release_image_editor_before_repair", True):
+            if self.config.get("image_edit_subprocess", False):
+                config_path = self.run_dir / "worker_config.json"
+                timeout = None
+                if self.overall_deadline is not None:
+                    timeout = max(1.0, self.overall_deadline - self.clock())
+                completed = subprocess.run(
+                    [
+                        sys.executable, "-m",
+                        "splat_explorer.scene_runs.gpu_worker",
+                        "--image-edit-request", str(request_dir),
+                        "--image-edit-config", str(config_path),
+                    ],
+                    check=False,
+                    timeout=timeout,
+                )
+                result_path = request_dir / IMAGE_EDIT_RESULT_NAME
+                edit_result = (
+                    json.loads(result_path.read_text(encoding="utf-8"))
+                    if result_path.is_file()
+                    else {}
+                )
+                if completed.returncode != 0 or edit_result.get("status") != "ok":
+                    raise RuntimeError(
+                        edit_result.get("error")
+                        or f"Qwen image-edit subprocess exited {completed.returncode}"
+                    )
+                edit_payload = _jsonable(edit_result.get("payload") or {})
+            else:
+                edit = self._editor().edit(rendered_path, prompt)
+                images = list(getattr(edit, "images", None) or [])
+                edit_error = getattr(edit, "error", None)
+                if edit_error or not images:
+                    raise RuntimeError(edit_error or "Qwen image edit returned no PNG")
+                atomic_write_bytes(request_dir / REGENERATED_NAME, images[0])
+                edit_payload = _jsonable(getattr(edit, "payload", {}) or {})
+            if (
+                not self.config.get("image_edit_subprocess", False)
+                and self.config.get("release_image_editor_before_repair", False)
+            ):
                 # The common 64 GiB LRZ step cannot retain Qwen's host-side
                 # buffers while GSFix allocates optimizer state. Weights remain
                 # cached on DSS and reload for the next image-edit request.
@@ -456,12 +516,23 @@ class SceneRunGpuWorker:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="splat_explorer.scene_runs.gpu_worker")
-    parser.add_argument("--run-dir", required=True)
+    parser.add_argument("--run-dir")
+    parser.add_argument("--image-edit-request")
+    parser.add_argument("--image-edit-config")
     parser.add_argument("--overall-deadline", type=float, default=0.0)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--heartbeat-seconds", type=float, default=10.0)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
+    if args.image_edit_request:
+        if not args.image_edit_config:
+            parser.error("--image-edit-config is required with --image-edit-request")
+        result = run_image_edit_once(
+            Path(args.image_edit_request), Path(args.image_edit_config),
+        )
+        raise SystemExit(0 if result.get("status") == "ok" else 1)
+    if not args.run_dir:
+        parser.error("--run-dir is required")
     worker = SceneRunGpuWorker(
         Path(args.run_dir),
         overall_deadline=args.overall_deadline or None,

@@ -247,6 +247,9 @@ class LrzSceneRunTransport:
             "scene_run": dict(config),
             "image_edit": image_edit,
             "image_edit_prompt": config.get("image_edit_prompt"),
+            # LRZ steps commonly have 62 GiB host memory. Process exit is the
+            # only reliable way to reclaim Qwen loading buffers before GSFix.
+            "image_edit_subprocess": True,
             "repair": repair,
         }
 

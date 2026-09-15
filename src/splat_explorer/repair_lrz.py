@@ -3618,6 +3618,9 @@ def _remote_pythonpath_exports(cfg: dict | None = None) -> str:
     return (
         f"export PYTHONPATH={REMOTE_PYTHONPATH}${{PYTHONPATH:+:$PYTHONPATH}}; "
         "export PATH=/workspace/python/bin:$PATH; "
+        # NGC's /usr/local/bin/ninja is a Python wrapper that can recursively
+        # invoke itself under our target-site PYTHONPATH. Prefer the real ELF.
+        "export PATH=/usr/bin:$PATH; "
         "if [ -z \"${LRZ_CUDA_ARCH:-}\" ] && [ -f /workspace/python/.cuda-arch ]; then "
         "LRZ_CUDA_ARCH=$(cat /workspace/python/.cuda-arch); fi; "
         "export TORCH_CUDA_ARCH_LIST=\"${LRZ_CUDA_ARCH:-8.0}\"; "
@@ -4109,6 +4112,7 @@ def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
     # weights remain an explicit, separately cached download.
     image_edit_requirements = {
         "numpy": "numpy==1.26.4",
+        "ninja": "ninja>=1.11",
         "diffusers": "diffusers>=0.36.0,<0.37",
         "transformers": "transformers>=4.51.3,<5",
         "torchvision": "torchvision==0.29.0",
