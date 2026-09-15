@@ -12,12 +12,19 @@ from splat_explorer.scene_runs.gpu_worker import (
     RESPONSE_NAME,
     SCENE_NAME,
     SceneRunGpuWorker,
+    _default_repair_factory,
     pending_request_dirs,
 )
 
 
 class _Scene:
     pass
+
+
+def test_scene_run_repair_factory_forces_densification_off():
+    backend = _default_repair_factory({"densify": True, "max_chunks": 3})
+    assert backend.densify is False
+    assert backend.max_chunks == 0
 
 
 def test_worker_can_render_without_qwen_or_browser(tmp_path: Path, monkeypatch):

@@ -144,6 +144,8 @@ def _default_repair_factory(params: dict[str, Any]):
 
     allowed = {field.name for field in fields(GsplatGsfix3dRepair)}
     kwargs = {key: value for key, value in params.items() if key in allowed}
+    # GSFix3D §3.3 enables the original 3DGS adaptive density control.
+    kwargs["densify"] = True
     kwargs["max_chunks"] = 0
     return GsplatGsfix3dRepair(**kwargs)
 
@@ -384,6 +386,7 @@ class SceneRunGpuWorker:
             )
             repair_params = dict(self.config.get("repair") or {})
             repair_params.update(dict(request.get("repair") or {}))
+            repair_params["densify"] = True
             repair_params["max_chunks"] = 0
             backend = self.repair_factory(repair_params)
             deadline = bounded_repair_deadline(

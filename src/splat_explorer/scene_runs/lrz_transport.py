@@ -240,6 +240,7 @@ class LrzSceneRunTransport:
         # fetch. Subsequent runs reuse the DSS-backed Hugging Face cache.
         image_edit["download"] = True
         repair = dict(config.get("repair") or {})
+        repair["densify"] = True
         repair.setdefault("max_chunks", 0)
         return {
             "protocol": 1,

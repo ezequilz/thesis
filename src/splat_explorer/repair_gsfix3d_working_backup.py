@@ -88,6 +88,11 @@ def _quat_to_rotmat(quats, torch):
     return rot
 
 
+def _repeat_gaussians(tensor, count: int):
+    """Repeat dimension 0 while preserving all remaining tensor ranks."""
+    return tensor.repeat(*((int(count),) + (1,) * (tensor.ndim - 1)))
+
+
 def densify_clone_split(
     torch,
     means,
@@ -151,17 +156,29 @@ def densify_clone_split(
         n_spawned += n_clone
 
     if n_split:
-        stds = scales[split_sel].repeat(_SPLIT_N, 1)
+        stds = _repeat_gaussians(scales[split_sel], _SPLIT_N)
         samples = torch.normal(mean=torch.zeros_like(stds), std=stds)
         rots = _quat_to_rotmat(torch.nn.functional.normalize(quats[split_sel], dim=-1), torch)
-        rots = rots.repeat(_SPLIT_N, 1, 1)
-        new_means = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + means[split_sel].repeat(_SPLIT_N, 1)
-        new_scales = scales[split_sel].repeat(_SPLIT_N, 1) / _SPLIT_SCALE_DIV
+        rots = _repeat_gaussians(rots, _SPLIT_N)
+        new_means = (
+            torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1)
+            + _repeat_gaussians(means[split_sel], _SPLIT_N)
+        )
+        new_scales = (
+            _repeat_gaussians(scales[split_sel], _SPLIT_N)
+            / _SPLIT_SCALE_DIV
+        )
         parts_means.append(new_means.detach())
-        parts_quats.append(quats[split_sel].detach().repeat(_SPLIT_N, 1))
-        parts_dc.append(f_dc[split_sel].detach().repeat(_SPLIT_N, 1))
+        parts_quats.append(
+            _repeat_gaussians(quats[split_sel].detach(), _SPLIT_N)
+        )
+        parts_dc.append(
+            _repeat_gaussians(f_dc[split_sel].detach(), _SPLIT_N)
+        )
         parts_log.append(torch.log(torch.clamp(new_scales, min=1e-8)).detach())
-        parts_op.append(logit_opacities[split_sel].detach().repeat(_SPLIT_N, 1))
+        parts_op.append(
+            _repeat_gaussians(logit_opacities[split_sel].detach(), _SPLIT_N)
+        )
         n_spawned += n_split * _SPLIT_N - n_split  # net: each split becomes 2
 
     def _cat(chunks):
@@ -177,7 +194,9 @@ def densify_clone_split(
     )
 
 
-def _viewspace_grad_norm(means2d, n_gaussians, torch):
+def _viewspace_grad_norm(
+    means2d, n_gaussians, torch, *, info=None, width=None, height=None,
+):
     if means2d is None:
         return None
     grad = getattr(means2d, "absgrad", None)
@@ -186,11 +205,29 @@ def _viewspace_grad_norm(means2d, n_gaussians, torch):
     if grad is None:
         return None
     g = grad.detach()
+    info = info if isinstance(info, dict) else {}
+    gaussian_ids = info.get("gaussian_ids")
     if g.ndim == 3:
-        g = g[0]
-    if g.shape[0] != n_gaussians:
+        g = g.reshape(-1, g.shape[-1])
+    if width and height and g.shape[-1] >= 2:
+        g = g.clone()
+        g[..., 0] *= float(width) / 2.0
+        g[..., 1] *= float(height) / 2.0
+    magnitude = g[..., :2].norm(dim=-1)
+    if magnitude.shape[0] == n_gaussians:
+        return magnitude
+    if (
+        gaussian_ids is None
+        or magnitude.shape[0] != int(gaussian_ids.reshape(-1).shape[0])
+    ):
         return None
-    return g[..., :2].norm(dim=-1)
+    result = torch.zeros(
+        n_gaussians, device=magnitude.device, dtype=magnitude.dtype,
+    )
+    result.index_add_(
+        0, gaussian_ids.reshape(-1).long(), magnitude.reshape(-1),
+    )
+    return result
 
 
 @dataclass
@@ -273,7 +310,13 @@ class GsplatGsfix3dRepair:
                 break
             if limit > 0 and chunk >= limit:
                 break
-            last = self.apply(scene, camera, rendered_rgb, repaired_rgb)
+            # GSFix3D applies ADC during its 20 iterations for a repaired
+            # image. Extra time-budget chunks continue photometric fitting
+            # without repeatedly multiplying the topology for the same view.
+            chunk_backend = self if chunk == 0 else replace(self, densify=False)
+            last = chunk_backend.apply(
+                scene, camera, rendered_rgb, repaired_rgb,
+            )
             if l1_before is None:
                 l1_before = last.get("l1_before")
             total_iters += int(last.get("n_iters") or 0)
@@ -428,7 +471,14 @@ class GsplatGsfix3dRepair:
             last_l1 = float(l1.item())
             loss.backward()
 
-            vis_norm = _viewspace_grad_norm(means2d, means.shape[0], torch)
+            vis_norm = _viewspace_grad_norm(
+                means2d,
+                means.shape[0],
+                torch,
+                info=info,
+                width=w,
+                height=h,
+            )
             if vis_norm is not None:
                 radii = info.get("radii") if isinstance(info, dict) else None
                 vis = vis_norm > 0

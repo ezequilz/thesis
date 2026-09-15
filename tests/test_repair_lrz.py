@@ -2274,6 +2274,7 @@ def test_scene_gpu_worker_keeps_scene_and_qwen_backend_resident(tmp_path):
 
     def make_repair(params):
         assert params["max_chunks"] == 0
+        assert params["densify"] is False
         return Repair()
 
     worker = SceneRunGpuWorker(
