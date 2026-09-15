@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>splat-explorer · scene runs</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg:#101318; --panel:#171c24; --panel2:#1e2530; --border:#2a3342;
+    --text:#dce3ee; --dim:#8b97a8; --accent:#5aa2ff; --ok:#45c98b;
+    --warn:#e6b450; --err:#ef6a6a; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  header { position:sticky; top:0; z-index:10; display:flex; align-items:center; gap:14px;
+    padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--border);
+    flex-wrap:wrap; }
+  h1 { margin:0; font-size:15px; font-weight:650; }
+  h1 span { color:var(--dim); font-weight:400; }
+  a { color:var(--accent); text-decoration:none; }
+  .spacer { flex:1; }
+  .pill { padding:2px 10px; border:1px solid var(--border); border-radius:20px;
+    color:var(--dim); font-size:12px; }
+  .pill.ok { color:var(--ok); border-color:var(--ok); }
+  .pill.busy { color:var(--warn); border-color:var(--warn); }
+  .pill.err { color:var(--err); border-color:var(--err); }
+  main { max-width:1500px; margin:auto; padding:16px; display:grid;
+    grid-template-columns:minmax(300px,390px) minmax(0,1fr); gap:14px; }
+  .column { display:flex; flex-direction:column; gap:14px; min-width:0; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:14px 16px; min-width:0; }
+  .card h2 { margin:0 0 12px; color:var(--dim); font-size:12px;
+    text-transform:uppercase; letter-spacing:.06em; }
+  form { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  label { display:flex; flex-direction:column; gap:3px; color:var(--dim); font-size:11px; }
+  label.wide, .actions { grid-column:1/-1; }
+  input, select { width:100%; padding:7px 8px; border:1px solid var(--border);
+    border-radius:6px; background:var(--panel2); color:var(--text); font:13px inherit; }
+  input:focus, select:focus { outline:1px solid var(--accent); }
+  .locked { flex-direction:row; align-items:center; font-size:12px; }
+  .locked input { width:auto; accent-color:var(--accent); }
+  button { border:0; border-radius:6px; padding:8px 15px; cursor:pointer;
+    background:var(--accent); color:#091525; font-weight:650; }
+  button.stop { background:var(--err); color:#fff; }
+  button:disabled { opacity:.45; cursor:default; }
+  .actions { display:flex; align-items:center; gap:10px; margin-top:2px; }
+  #message { color:var(--warn); font-size:12px; min-height:18px; }
+  .summary { display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:8px; }
+  .metric { padding:10px 12px; background:var(--panel2); border-radius:7px; min-width:0; }
+  .metric .key { color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.05em; }
+  .metric .value { margin-top:3px; font:600 13px var(--mono); overflow-wrap:anywhere; }
+  .run-list { display:flex; flex-direction:column; gap:6px; max-height:390px; overflow:auto; }
+  .run-row { display:grid; grid-template-columns:1fr auto; gap:3px 10px; padding:9px 10px;
+    border:1px solid var(--border); border-radius:7px; cursor:pointer; }
+  .run-row:hover, .run-row.selected { background:var(--panel2); }
+  .run-row.selected { border-color:var(--accent); }
+  .run-id { font:12px var(--mono); overflow:hidden; text-overflow:ellipsis; }
+  .status { font-size:11px; font-weight:700; color:var(--dim); }
+  .status.running,.status.completed { color:var(--ok); }
+  .status.queued,.status.waiting_gpu,.status.starting,.status.stopping { color:var(--warn); }
+  .status.error,.status.gpu_expired { color:var(--err); }
+  .sub { grid-column:1/-1; color:var(--dim); font-size:11px; }
+  .empty { color:var(--dim); text-align:center; padding:24px 8px; }
+  .detail-head { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .detail-head h2 { margin:0; }
+  .detail-head .stop { margin-left:auto; }
+  .kv { display:grid; grid-template-columns:150px minmax(0,1fr); gap:5px 12px;
+    margin-top:13px; font-size:12.5px; }
+  .kv .k { color:var(--dim); }
+  .kv .v { font-family:var(--mono); overflow-wrap:anywhere; }
+  .error { margin-top:12px; padding:10px; border-left:3px solid var(--err);
+    background:rgba(239,106,106,.08); color:#ffb3b3; white-space:pre-wrap; }
+  .artifacts { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr));
+    gap:9px; margin-top:12px; }
+  .artifact { min-width:0; padding:8px; border:1px solid var(--border);
+    border-radius:7px; background:var(--panel2); overflow:hidden; }
+  .artifact img { display:block; width:100%; aspect-ratio:4/3; object-fit:contain;
+    background:#080a0d; border-radius:4px; margin-bottom:6px; }
+  .artifact a { display:block; font:11px var(--mono); overflow-wrap:anywhere; }
+  details { margin-top:13px; border:1px solid var(--border); border-radius:7px; }
+  summary { padding:8px 10px; color:var(--dim); cursor:pointer; font-size:12px; }
+  pre { margin:0; padding:10px; border-top:1px solid var(--border); overflow:auto;
+    max-height:420px; color:var(--text); font:11.5px/1.5 var(--mono); }
+  #capture-pip { position:fixed; right:14px; bottom:14px; z-index:20;
+    width:260px; background:var(--panel); border:1px solid var(--border);
+    border-radius:8px; overflow:hidden; box-shadow:0 8px 30px #0008; }
+  #capture-pip .bar { padding:5px 8px; color:var(--dim); font-size:10px;
+    border-bottom:1px solid var(--border); }
+  #capture-window { width:260px; height:195px; overflow:hidden; background:#000; }
+  #capture-stage { transform-origin:top left; }
+  #capture-frame { display:block; border:0; }
+  @media (max-width:900px) {
+    main { grid-template-columns:1fr; }
+    .summary { grid-template-columns:1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>splat-explorer <span>· scene runs</span></h1>
+  <span id="manager-pill" class="pill">manager: …</span>
+  <span id="run-pill" class="pill">no active run</span>
+  <span class="spacer"></span>
+  <a href="/">episode dashboard</a>
+  <a href="/repair">repair review</a>
+  <a href="/repair/gpu">GPU / LRZ</a>
+  <a href="/spectator" target="_blank">spectator (HD) ↗</a>
+</header>
+<main>
+  <section class="column">
+    <div class="card">
+      <h2>Create isolated run</h2>
+      <form id="run-form">
+        <label class="wide">Scene<select id="scene" name="scene_id"></select></label>
+        <label>Duration (hours)<input id="duration" type="number" min="0.01" max="168" step="0.25" value="1"></label>
+        <label>VLM backend<input id="backend" name="backend" value="cli_relay"></label>
+        <label>Width<input id="width" name="width" type="number" min="64" max="3840" value="960"></label>
+        <label>Height<input id="height" name="height" type="number" min="64" max="2160" value="720"></label>
+        <label class="wide">VLM model<input id="model" name="model" placeholder="configured default"></label>
+        <label>Image edit<select id="image-edit" name="image_edit_backend">
+          <option value="qwen-image-edit">qwen-image-edit</option>
+          <option value="gpt-image-2" disabled>gpt-image-2 (debug dashboard only for now)</option>
+        </select></label>
+        <label>3D repair<input id="repair-backend" name="repair_backend" value="gsfix-gsplat" readonly></label>
+        <label>Repair trigger<select id="repair-trigger" name="repair_trigger">
+          <option value="regenerate_yes">regenerate=yes</option>
+          <option value="every_artifact">every artifact</option>
+          <option value="every_step">every step</option>
+        </select></label>
+        <label>Repair budget (seconds)<input id="repair-seconds" name="repair_seconds" type="number" min="1" max="43200" value="180"></label>
+        <label class="wide locked" title="Scene runs always render and send the exploration map.">
+          <input id="send-map" type="checkbox" checked disabled> Send exploration map (locked)
+        </label>
+        <div class="actions">
+          <button id="start" type="submit">Queue scene run</button>
+          <span id="message"></span>
+        </div>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Current and queued</h2>
+      <div id="active-list" class="run-list"><div class="empty">No queued runs.</div></div>
+    </div>
+    <div class="card">
+      <h2>History</h2>
+      <div id="history" class="run-list"><div class="empty">No runs yet.</div></div>
+    </div>
+  </section>
+  <section class="column">
+    <div class="summary">
+      <div class="metric"><div class="key">status</div><div id="m-status" class="value">–</div></div>
+      <div class="metric"><div class="key">step / phase</div><div id="m-step" class="value">–</div></div>
+      <div class="metric"><div class="key">repairs</div><div id="m-repairs" class="value">–</div></div>
+      <div class="metric"><div class="key">L1 before → after</div><div id="m-l1" class="value">–</div></div>
+    </div>
+    <div id="detail" class="card"><div class="empty">Select a run to inspect it.</div></div>
+  </section>
+</main>
+<aside id="capture-pip" title="This live WebGL client answers scene-run render requests while the page is open.">
+  <div class="bar">VLM capture visor · <span id="capture-size">960×720</span></div>
+  <div id="capture-window"><div id="capture-stage">
+    <iframe id="capture-frame" title="Scene-run capture visor" src="http://localhost:8080" allow="autoplay"></iframe>
+  </div></div>
+</aside>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const ACTIVE = new Set(["queued","waiting_gpu","starting","running","stopping"]);
+let state = null, detail = null, selectedId = null, timer = null, first = true;
+
+const esc = value => String(value ?? "").replace(/[&<>"']/g, c => (
+  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]
+));
+function runId(run) { return run?.id || run?.run_id || run?.run?.id || ""; }
+function statusOf(run) {
+  const stateValue = run?.state;
+  return String(
+    run?.status || (typeof stateValue === "object" ? stateValue?.status : stateValue)
+    || run?.run?.status || "unknown"
+  ).toLowerCase();
+}
+function bag(run) {
+  const stateValue = typeof run?.state === "object" ? run.state : {};
+  return {...run, ...(run?.status && typeof run.status === "object" ? run.status : {}),
+    ...stateValue, ...(stateValue?.details || {}), ...(run?.progress || {})};
+}
+function firstValue(obj, keys) {
+  for (const key of keys) if (obj?.[key] !== undefined && obj?.[key] !== null && obj[key] !== "") return obj[key];
+  return null;
+}
+function fmtTime(value) {
+  if (value == null || value === "") return "–";
+  const date = new Date(typeof value === "number" && value < 1e12 ? value * 1000 : value);
+  return Number.isNaN(date.valueOf()) ? String(value) : date.toLocaleString();
+}
+function fmtDuration(seconds) {
+  const n = Number(seconds);
+  if (!Number.isFinite(n)) return "–";
+  if (n >= 3600) return `${(n / 3600).toFixed(n % 3600 ? 1 : 0)}h`;
+  if (n >= 60) return `${Math.round(n / 60)}m`;
+  return `${Math.round(n)}s`;
+}
+function runRow(run) {
+  const id = runId(run), status = statusOf(run), b = bag(run);
+  const scene = run?.config?.scene_id || b.scene_id || "";
+  const when = firstValue(b, ["updated_at","created_at","started_at"]);
+  return `<div class="run-row ${id === selectedId ? "selected" : ""}" data-id="${esc(id)}">
+    <span class="run-id">${esc(id || "(unknown id)")}</span><span class="status ${esc(status)}">${esc(status)}</span>
+    <span class="sub">${esc(scene)}${when ? ` · ${esc(fmtTime(when))}` : ""}</span></div>`;
+}
+function wireRows() {
+  document.querySelectorAll(".run-row").forEach(row => row.onclick = () => {
+    selectedId = row.dataset.id; detail = null; refreshDetail().then(render);
+  });
+}
+function setDefaults(defaults, scenes) {
+  if (!first) return;
+  first = false;
+  $("scene").innerHTML = (scenes || []).map(s =>
+    `<option value="${esc(s.id)}">${esc(s.label || s.id)}</option>`).join("");
+  if (!scenes?.length) $("scene").innerHTML = `<option value="${esc(defaults.scene_id)}">${esc(defaults.scene_id)}</option>`;
+  $("scene").value = defaults.scene_id;
+  $("duration").value = Number(defaults.duration_seconds || 3600) / 3600;
+  for (const [id,key] of [["backend","backend"],["model","model"],["width","width"],["height","height"],
+    ["image-edit","image_edit_backend"],["repair-backend","repair_backend"],
+    ["repair-trigger","repair_trigger"],["repair-seconds","repair_seconds"]]) {
+    if (defaults[key] !== undefined) $(id).value = defaults[key];
+  }
+  layoutCapture();
+}
+function layoutCapture() {
+  const active = (state?.runs || []).find(run => ["starting","running","stopping"].includes(statusOf(run)));
+  const w = Number(active?.config?.width || $("width").value || 960);
+  const h = Number(active?.config?.height || $("height").value || 720);
+  const visualW = 260, scale = visualW / Math.max(1, w);
+  $("capture-frame").style.width = `${w}px`;
+  $("capture-frame").style.height = `${h}px`;
+  $("capture-stage").style.width = `${w}px`;
+  $("capture-stage").style.height = `${h}px`;
+  $("capture-stage").style.transform = `scale(${scale})`;
+  $("capture-window").style.height = `${Math.round(h * scale)}px`;
+  $("capture-size").textContent = `${w}×${h}`;
+}
+function renderState() {
+  const runs = state?.runs || [];
+  const active = runs.filter(run => ACTIVE.has(statusOf(run)));
+  const history = runs.filter(run => !ACTIVE.has(statusOf(run)));
+  $("active-list").innerHTML = active.length ? active.map(runRow).join("") : `<div class="empty">No queued runs.</div>`;
+  $("history").innerHTML = history.length ? history.map(runRow).join("") : `<div class="empty">No completed runs.</div>`;
+  wireRows();
+  const manager = state?.manager || {};
+  const managerStatus = String(manager.status || (manager.active ? "busy" : "idle"));
+  $("manager-pill").textContent = `manager: ${managerStatus}`;
+  $("manager-pill").className = `pill ${
+    manager.active ? "ok" : managerStatus === "stale" || managerStatus === "not_detected" ? "err" : ""
+  }`;
+  $("run-pill").textContent = active.length ? `${active.length} active / queued` : "no active run";
+  $("run-pill").className = `pill ${active.length ? "busy" : "ok"}`;
+  if (!selectedId && runs.length) selectedId = runId(state.active_run) || runId(runs[0]);
+  setDefaults(state?.defaults || {}, state?.scenes || []);
+  layoutCapture();
+}
+function deadlineRows(b) {
+  const user = firstValue(b, ["requested_deadline","user_deadline","user_end","deadline"]);
+  const gpu = firstValue(b, ["gpu_expected_end","gpu_deadline","slurm_end","gpu_end"])
+    ?? firstValue(b.gpu || {}, ["expected_end","deadline","end"]);
+  const effective = firstValue(b, ["effective_deadline","effective_end"]);
+  let remaining = null;
+  if (effective != null) {
+    const ms = new Date(typeof effective === "number" && effective < 1e12 ? effective * 1000 : effective).valueOf();
+    if (Number.isFinite(ms)) remaining = Math.max(0, (ms - Date.now()) / 1000);
+  }
+  return [
+    ["user deadline", fmtTime(user)], ["GPU deadline", fmtTime(gpu)],
+    ["effective deadline", `${fmtTime(effective)}${remaining == null ? "" : ` · ${fmtDuration(remaining)} left`}`],
+  ];
+}
+function artifactEntries(value, id, key = "", seen = new Set()) {
+  const entries = [];
+  if (!value || typeof value !== "object" || seen.has(value)) return entries;
+  seen.add(value);
+  for (const [name,item] of Object.entries(value)) {
+    const nextKey = `${key}.${name}`.toLowerCase();
+    if ((name === "name" || name === "relative") && value.url) continue;
+    if (typeof item === "string" && /\.(png|jpe?g|webp|gif|ply|log|txt|jsonl)$/i.test(item)) {
+      if (nextKey.endsWith(".path") && !/(image|frame|artifact|ply|log)/.test(nextKey)) continue;
+      let url = item.startsWith("/scene-run-files/") || item.startsWith("/frames/") ? item : "";
+      if (!url) {
+        if (item.startsWith("/") || /^[A-Za-z]:[\\/]/.test(item)) continue;
+        const rel = item.replace(/^\.?\//,"");
+        if (!rel.includes("..") && !rel.includes("://")) url = `/scene-run-files/${encodeURIComponent(id)}/${rel.split("/").map(encodeURIComponent).join("/")}`;
+      }
+      if (url) entries.push({name, path:item, url, image:/\.(png|jpe?g|webp|gif)$/i.test(item)});
+    } else if (item && typeof item === "object") {
+      entries.push(...artifactEntries(item, id, nextKey, seen));
+    }
+  }
+  return entries.filter((entry,index,all) => all.findIndex(other => other.url === entry.url) === index);
+}
+function renderDetail() {
+  if (!selectedId) {
+    $("detail").innerHTML = `<div class="empty">Select a run to inspect it.</div>`;
+    return;
+  }
+  if (!detail) {
+    $("detail").innerHTML = `<div class="empty">Loading ${esc(selectedId)}…</div>`;
+    return;
+  }
+  const b = bag(detail), status = statusOf(detail), cfg = detail.config || detail.params || {};
+  const step = firstValue(b, ["step","current_step","steps","steps_completed"]);
+  const phase = firstValue(b, ["phase","current_phase"]);
+  const repairs = firstValue(b, ["repair_count","repairs","repairs_completed"]);
+  const repairTime = firstValue(b, ["repair_elapsed_seconds","repair_seconds_total","last_repair_seconds"]);
+  const l1Before = firstValue(b, ["l1_before","repair_l1_before"]);
+  const l1After = firstValue(b, ["l1_after","repair_l1_after"]);
+  $("m-status").textContent = status;
+  $("m-step").textContent = [step == null ? null : `#${step}`, phase].filter(Boolean).join(" · ") || "–";
+  $("m-repairs").textContent = `${repairs ?? 0}${repairTime == null ? "" : ` · ${fmtDuration(repairTime)}`}`;
+  $("m-l1").textContent = l1Before == null && l1After == null ? "–" : `${l1Before ?? "–"} → ${l1After ?? "–"}`;
+  const rows = [
+    ["scene", cfg.scene_id || firstValue(b, ["scene_id","scene"]) || "–"],
+    ["VLM", [cfg.backend,cfg.model].filter(Boolean).join(" · ") || "–"],
+    ["resolution", cfg.width && cfg.height ? `${cfg.width}×${cfg.height}` : "–"],
+    ["image / repair", [cfg.image_edit_backend,cfg.repair_backend].filter(Boolean).join(" → ") || "–"],
+    ["repair trigger", cfg.repair_trigger || "–"],
+    ["created", fmtTime(firstValue(b, ["created_at"]))],
+    ["started", fmtTime(firstValue(b, ["started_at"]))],
+    ["updated", fmtTime(firstValue(b, ["updated_at"]))],
+    ...deadlineRows(b),
+  ];
+  const artifacts = artifactEntries(detail, selectedId);
+  const error = firstValue(b, ["error","last_error","message"]);
+  $("detail").innerHTML = `<div class="detail-head">
+    <h2>${esc(selectedId)}</h2><span class="status ${esc(status)}">${esc(status)}</span>
+    <button id="stop" class="stop" ${ACTIVE.has(status) ? "" : "disabled"}>Request stop</button>
+  </div>
+  <div class="kv">${rows.map(([k,v]) => `<span class="k">${esc(k)}</span><span class="v">${esc(v)}</span>`).join("")}</div>
+  ${error && (status === "error" || b.error || b.last_error) ? `<div class="error">${esc(error)}</div>` : ""}
+  <div class="artifacts">${artifacts.map(a => `<div class="artifact">
+    ${a.image ? `<a href="${esc(a.url)}" target="_blank"><img src="${esc(a.url)}" loading="lazy" alt="${esc(a.name)}"></a>` : ""}
+    <a href="${esc(a.url)}" target="_blank">${esc(a.path)} ↗</a></div>`).join("")}</div>
+  ${artifacts.length ? "" : `<div class="empty">No images, logs, or PLY artifacts yet.</div>`}
+  <details><summary>Raw run detail</summary><pre>${esc(JSON.stringify(detail,null,2))}</pre></details>`;
+  $("stop").onclick = stopRun;
+}
+function render() { renderState(); renderDetail(); }
+async function fetchJson(url, options) {
+  const response = await fetch(url, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.message || body.error || `HTTP ${response.status}`);
+  return body;
+}
+async function refreshDetail() {
+  if (!selectedId) return;
+  try { detail = await fetchJson(`/api/scene-runs/${encodeURIComponent(selectedId)}`); }
+  catch (error) { detail = {id:selectedId,status:"error",error:error.message}; }
+}
+async function tick() {
+  clearTimeout(timer);
+  try {
+    state = await fetchJson("/api/scene-runs/state");
+    renderState();
+    await refreshDetail();
+    render();
+  } catch (error) {
+    $("message").textContent = error.message;
+  }
+  timer = setTimeout(tick, state?.active ? 1000 : 5000);
+}
+$("run-form").onsubmit = async event => {
+  event.preventDefault();
+  $("start").disabled = true; $("message").textContent = "Writing queued run…";
+  const body = {
+    scene_id:$("scene").value, duration_seconds:Math.round(Number($("duration").value) * 3600),
+    backend:$("backend").value, model:$("model").value, width:Number($("width").value),
+    height:Number($("height").value), send_map:true, image_edit_backend:$("image-edit").value,
+    repair_backend:$("repair-backend").value, repair_trigger:$("repair-trigger").value,
+    repair_seconds:Number($("repair-seconds").value),
+  };
+  try {
+    const result = await fetchJson("/api/scene-runs/start", {
+      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
+    });
+    selectedId = runId(result.run); detail = result.run;
+    $("message").textContent = `Queued ${selectedId}. The separate manager will start it.`;
+    await tick();
+  } catch (error) { $("message").textContent = error.message; }
+  finally { $("start").disabled = false; }
+};
+async function stopRun() {
+  if (!selectedId) return;
+  $("stop").disabled = true; $("message").textContent = `Requesting stop for ${selectedId}…`;
+  try {
+    const result = await fetchJson("/api/scene-runs/stop", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({id:selectedId}),
+    });
+    detail = result.run; $("message").textContent = "Stop requested.";
+    await tick();
+  } catch (error) { $("message").textContent = error.message; $("stop").disabled = false; }
+}
+tick();
+</script>
+</body>
+</html>

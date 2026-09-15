@@ -18,7 +18,10 @@ WORKDIR /app
 # torch must match the CUDA version of the base image.
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124
 RUN pip install --no-cache-dir \
-    "numpy>=1.26" "pillow>=10.0" "pyyaml>=6.0" "scipy>=1.11" "openai>=1.40" "gsplat>=1.4"
+    "numpy>=1.26" "pillow>=10.0" "pyyaml>=6.0" "scipy>=1.11" \
+    "openai>=1.40" "gsplat>=1.4" \
+    "diffusers>=0.36.0" "transformers>=4.51.3" "accelerate>=1.2.0" \
+    "safetensors>=0.4.5"
 
 COPY pyproject.toml README.md ./
 COPY src ./src
@@ -29,5 +32,7 @@ RUN pip install --no-cache-dir --no-deps .
 #   splat-explorer --config configs/gpu.yaml render-test   (renderer.backend: gsplat)
 # Packed LRZ / CUDA refine jobs:
 #   python -m splat_explorer.repair_lrz --job-dir /workspace/inputs/<id>
+# Persistent automated scene-runs additionally keep Qwen-Image-Edit-2511
+# resident beside the GSFix3D worker; weights are mounted/cached at runtime.
 ENTRYPOINT ["splat-explorer"]
 CMD ["render-test"]

@@ -34,7 +34,9 @@ class GsplatRenderer:
         self.quats = torch.from_numpy(scene.quats).to(device)      # (w, x, y, z)
         self.scales = torch.from_numpy(scene.scales).to(device)
         self.opacities = torch.from_numpy(scene.opacities).to(device)
-        self.colors = torch.from_numpy(scene.colors).to(device)
+        # SOG/PLY loaders may retain an RGBA color column while opacity is
+        # already passed separately. gsplat expects RGB here.
+        self.colors = torch.from_numpy(scene.colors[..., :3]).to(device)
         self.background = torch.tensor(background, device=device)
 
     def render(self, camera: Camera) -> np.ndarray:
@@ -63,6 +65,7 @@ class GsplatRenderer:
                 height=camera.height,
                 backgrounds=self.background.unsqueeze(0),
                 render_mode="RGB+ED",
+                packed=False,
             )
         img = renders[0, :, :, :3].clamp(0, 1).mul(255).byte().cpu().numpy()
         depth = renders[0, :, :, 3].cpu().numpy().astype(np.float32)

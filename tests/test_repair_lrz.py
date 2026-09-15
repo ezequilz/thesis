@@ -2148,6 +2148,171 @@ def test_ensure_lrz_gpu_ready_reloads_on_family_mismatch(monkeypatch):
     reset_setup_cache()
 
 
+def test_squeue_parser_includes_expected_end_and_time_left():
+    from splat_explorer.repair_lrz import SQUEUE_FORMAT, parse_squeue_line
+
+    assert SQUEUE_FORMAT.endswith("|%e|%L")
+    row = parse_squeue_line(
+        "5786047|R|lrz-dgx-a100-80x8|lrz-dgx-a100-002|1:02|"
+        "08:00:00|None|gs-8h|2026-09-15T18:00:00|64G|"
+        "2026-09-16T02:00:00|07:58:58"
+    )
+    assert row["expected_end"] == "2026-09-16T02:00:00"
+    assert row["time_left"] == "07:58:58"
+    assert row["sched_nodes"] is None
+    legacy = parse_squeue_line(
+        "5786047|PD|p||0:00|08:00:00|Priority|gs-8h|"
+        "2026-09-15T18:00:00|64G|node[01-02]"
+    )
+    assert legacy["expected_end"] is None
+    assert legacy["time_left"] is None
+    assert legacy["sched_nodes"] == "node[01-02]"
+
+
+def test_scene_run_protocol_and_srun_commands():
+    from splat_explorer.scene_runs.lrz_transport import (
+        active_job_squeue_command,
+        request_protocol_body,
+        scene_worker_launch_command,
+        scene_worker_srun_command,
+    )
+
+    cfg = {
+        "job_id": "5786047",
+        "user": "go73kaf2",
+        "host": "login.ai.lrz.de",
+        "workspace": "/dss/ws",
+        "container": "/dss/ws/containers/pytorch.sqsh",
+        "container_name": "splat-repair",
+        "cpus": 4,
+        "mem": "64G",
+    }
+    camera = CameraRig(
+        np.array([0.0, 0.0, -1.0]), up_axis="+y",
+    ).camera(32, 24, 75.0)
+    body = request_protocol_body(
+        request_id="step-00003",
+        step=3,
+        camera=camera,
+        repair_seconds=180,
+        deadline=2_000_000_000,
+    )
+    assert body["camera"]["width"] == 32
+    assert body["repair_seconds"] == 180.0
+    assert body["deadline_unix"] == 2_000_000_000.0
+    queue = active_job_squeue_command("5786047")
+    assert "--job=5786047" in queue
+    assert "%e|%L" in queue
+    srun = scene_worker_srun_command(
+        cfg, "run-abc", overall_deadline=2_000_000_000,
+    )
+    assert "--jobid=5786047" in srun
+    assert "--overlap" in srun
+    assert "--container-name=splat-repair-5786047" in srun
+    assert "splat_explorer.scene_runs.gpu_worker" in srun
+    assert "/workspace/scene-runs/run-abc" in srun
+    launch = scene_worker_launch_command(
+        cfg, "run-abc", overall_deadline=2_000_000_000,
+    )
+    assert "nohup" in launch
+    assert "worker.log" in launch
+    assert "launcher.pid" in launch
+
+
+def test_scene_gpu_worker_keeps_scene_and_qwen_backend_resident(tmp_path):
+    import io
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from splat_explorer.scene_runs.gpu_worker import (
+        CHECKPOINT_NAME,
+        METRICS_NAME,
+        REGENERATED_NAME,
+        REQUEST_NAME,
+        RESPONSE_NAME,
+        SceneRunGpuWorker,
+        atomic_write_json,
+    )
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "scene.ply").write_bytes(b"ply")
+    calls = {"load": 0, "editor": 0, "edit": 0, "repair": 0}
+    scene = SimpleNamespace(value=0)
+
+    def load_scene(_path):
+        calls["load"] += 1
+        return scene
+
+    def save_scene(value, path):
+        Path(path).write_bytes(f"scene-{value.value}".encode())
+
+    image = Image.new("RGB", (8, 6), (20, 30, 40))
+    png = io.BytesIO()
+    image.save(png, format="PNG")
+    png_bytes = png.getvalue()
+
+    class Editor:
+        def edit(self, _path, _prompt):
+            calls["edit"] += 1
+            return SimpleNamespace(
+                images=[png_bytes], payload={"backend": "qwen"}, error=None,
+            )
+
+    def make_editor(_config):
+        calls["editor"] += 1
+        return Editor()
+
+    class Repair:
+        def apply_until(self, value, _camera, _rendered, _repaired, **kwargs):
+            calls["repair"] += 1
+            value.value += 1
+            stats = {"backend": "gsfix-gsplat", "n_iters": 20}
+            kwargs["on_checkpoint"](stats)
+            return stats
+
+    def make_repair(params):
+        assert params["max_chunks"] == 0
+        return Repair()
+
+    worker = SceneRunGpuWorker(
+        run_dir,
+        scene_loader=load_scene,
+        scene_saver=save_scene,
+        image_edit_factory=make_editor,
+        repair_factory=make_repair,
+    )
+    worker._load_scene_once()
+    camera = CameraRig(
+        np.array([0.0, 0.0, -1.0]), up_axis="+y",
+    ).camera(8, 6, 75.0)
+    from splat_explorer.repair_lrz import camera_to_dict
+
+    for index in range(2):
+        request_dir = run_dir / "requests" / f"step-{index:05d}"
+        request_dir.mkdir(parents=True)
+        (request_dir / "rendered.png").write_bytes(png_bytes)
+        atomic_write_json(
+            request_dir / REQUEST_NAME,
+            {
+                "request_id": request_dir.name,
+                "step": index,
+                "camera": camera_to_dict(camera),
+                "repair_seconds": 180,
+            },
+        )
+        response = worker.process_request(request_dir)
+        assert response["status"] == "ok"
+        assert (request_dir / REGENERATED_NAME).is_file()
+        assert (request_dir / METRICS_NAME).is_file()
+        assert (request_dir / RESPONSE_NAME).is_file()
+
+    assert calls == {"load": 1, "editor": 1, "edit": 2, "repair": 2}
+    assert scene.value == 2
+    assert (run_dir / CHECKPOINT_NAME).read_bytes() == b"scene-2"
+
+
 
 
 

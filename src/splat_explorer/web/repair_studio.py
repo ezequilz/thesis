@@ -167,6 +167,25 @@ class RepairStudio:
         self._regen_key = None
         self._regenerator_lock = threading.Lock()
 
+    def _scene_run_gpu_owner(self) -> dict | None:
+        """Cross-process scene-run lease, if the production pipeline owns LRZ."""
+        try:
+            from ..scene_runs.store import SceneRunStore
+
+            root = Path(self.app.cfg.output.dir) / "scene-runs"
+            return SceneRunStore(root).gpu_lease_owner()
+        except Exception:
+            logger.exception("Could not inspect scene-run GPU lease")
+            return None
+
+    def _require_gpu_available(self, operation: str) -> None:
+        owner = self._scene_run_gpu_owner()
+        if owner:
+            run_id = owner.get("run_id") or "an active scene-run"
+            raise RuntimeError(
+                f"GPU is reserved by {run_id}; stop that scene-run before {operation}."
+            )
+
     @staticmethod
     def _idle_job(episode: str | None = None) -> dict:
         return {
@@ -305,6 +324,7 @@ class RepairStudio:
     def gpu_use_job(self, job_id: str) -> dict:
         from ..repair_lrz import use_lrz_job
 
+        self._require_gpu_available("switching LRZ jobs")
         result = use_lrz_job(job_id)
         snap = self.gpu_snapshot(probe=True, force=True)
         snap["ok"] = True
@@ -314,6 +334,7 @@ class RepairStudio:
     def gpu_cancel_job(self, job_id: str, *, confirm: bool = False) -> dict:
         from ..repair_lrz import cancel_lrz_job
 
+        self._require_gpu_available("cancelling the LRZ allocation")
         result = cancel_lrz_job(job_id, confirm=confirm)
         snap = self.gpu_snapshot(probe=True, force=True)
         snap["ok"] = True
@@ -324,6 +345,7 @@ class RepairStudio:
     def gpu_load_setup(self, *, force: bool = True, overwrite: bool = False) -> dict:
         from ..repair_lrz import request_lrz_setup
 
+        self._require_gpu_available("reloading GPU setup")
         result = request_lrz_setup(force=force, overwrite=overwrite)
         snap = self.gpu_snapshot()
         snap["ok"] = True
@@ -344,6 +366,7 @@ class RepairStudio:
     def gpu_widen(self, job_id: str | None = None, partition: str | None = None) -> dict:
         from ..repair_lrz import widen_lrz_job
 
+        self._require_gpu_available("changing the active GPU reservation")
         result = widen_lrz_job(job_id, partition=partition)
         snap = self.gpu_snapshot(probe=True, force=True)
         snap["ok"] = True
@@ -474,6 +497,16 @@ class RepairStudio:
         resume: bool = True,
         ssh_password: str | None = None,
     ) -> tuple[bool, str]:
+        if str(backend or "").lower() in (
+            "auto", "gsfix-gsplat", "gsfix-gsplat-baseline",
+            "gsfix-gsplat-visprune", "cuda", "gsplat", "gsfix", "visprune",
+        ):
+            owner = self._scene_run_gpu_owner()
+            if owner:
+                return False, (
+                    f"GPU is reserved by {owner.get('run_id') or 'an active scene-run'}. "
+                    "Stop it before starting a repair replay."
+                )
         d = self.app.episode_path(episode_id)
         if d is None:
             return False, f"Episode {episode_id} not found."

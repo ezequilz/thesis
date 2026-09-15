@@ -49,6 +49,18 @@ stop_host_dashboard() {
   done
 }
 
+stop_scene_run_manager() {
+  if [ -f outputs/scene-run-manager.pid ]; then
+    local pid
+    pid=$(cat outputs/scene-run-manager.pid 2>/dev/null || true)
+    if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
+      echo "    Stopping scene-run manager (pid $pid)"
+      kill "$pid" || true
+    fi
+    rm -f outputs/scene-run-manager.pid
+  fi
+}
+
 RENDER_TEST=0 EPISODE=0
 for arg in "$@"; do
   case "$arg" in
@@ -56,6 +68,7 @@ for arg in "$@"; do
     --episode)     EPISODE=1 ;;
     --stop)
       echo "==> Stopping splat-explorer stack"
+      stop_scene_run_manager
       stop_host_dashboard
       docker compose down --remove-orphans
       if [ -d "$CLIRELAY_DIR" ]; then
@@ -121,14 +134,17 @@ echo "==> [2/4] Building splat-explorer image + host extras"
 docker compose build
 
 HOST_DASHBOARD=0
+HOST_EXTRAS="viewer,vlm"
 if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
   HOST_DASHBOARD=1
-  echo "    Apple Silicon: installing [apple] extra (gsplat-mlx / MLX) into .venv"
-  if [ ! -x .venv/bin/python ]; then
-    python3 -m venv .venv
-  fi
-  .venv/bin/pip install -e ".[viewer,vlm,apple]"
+  HOST_EXTRAS="viewer,vlm,apple"
+  echo "    Apple Silicon: host tools include [apple] (gsplat-mlx / MLX)"
 fi
+if [ ! -x .venv/bin/python ]; then
+  python3 -m venv .venv
+fi
+echo "    Installing host scene-run manager extras [$HOST_EXTRAS] into .venv"
+.venv/bin/pip install -e ".[$HOST_EXTRAS]"
 
 echo "==> [3/4] (Re)starting viser viewer (:8080) + episode dashboard (:8090)"
 stop_host_dashboard
@@ -212,6 +228,22 @@ elif [ "$HOST_DASHBOARD" != 1 ] && [ "$DASH_FREE" = 1 ]; then
   docker compose up -d dashboard
 fi
 
+if [ -f outputs/scene-run-manager.pid ] \
+  && kill -0 "$(cat outputs/scene-run-manager.pid 2>/dev/null || true)" 2>/dev/null; then
+  echo "    Scene-run manager already running (pid $(cat outputs/scene-run-manager.pid))"
+else
+  rm -f outputs/scene-run-manager.pid
+  mkdir -p outputs/scene-runs
+  echo "    Starting persistent scene-run manager"
+  export CLIRELAY_BASE_URL="${CLIRELAY_BASE_URL:-http://localhost:8317/v1}"
+  export VISER_RENDER_URL="${VISER_RENDER_URL:-http://localhost:8081}"
+  export VISER_VIEWER_URL="${VISER_VIEWER_URL:-http://localhost:8080}"
+  nohup .venv/bin/splat-explorer scene-run-manager >> outputs/scene-run-manager.log 2>&1 </dev/null &
+  echo $! > outputs/scene-run-manager.pid
+  disown $! 2>/dev/null || true
+  echo "    Scene-run manager pid $(cat outputs/scene-run-manager.pid)  (logs: outputs/scene-run-manager.log)"
+fi
+
 echo "==> [4/4] Optional one-off jobs"
 if [ "$RENDER_TEST" = 1 ]; then
   echo "    Rendering test views -> outputs/test_views/"
@@ -234,6 +266,7 @@ else
 fi
 echo "  Repair review  : http://localhost:8090/repair"
 echo "  GPU / LRZ      : http://localhost:8090/repair/gpu  (reserve 8h/24h, probe, jobs)"
+echo "  Scene runs     : http://localhost:8090/scene-runs  (automated VLM → Qwen → GSFix3D)"
 echo "  Spectator (HD) : http://localhost:8090/spectator  (viewing only)"
 echo "  CLI episode    : export CLIRELAY_API_KEY=sk-... && \\"
 echo "                   splat-explorer --config configs/cli_relay.yaml explore"

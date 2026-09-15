@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -83,7 +84,7 @@ PARTITION_CATALOG = (
     {"id": "lrz-v100x2", "label": "V100 ×2", "family": "V100", "default": False},
 )
 FAMILY_CUDA_ARCH = {"A100": "8.0", "H100": "9.0", "V100": "7.0"}
-SQUEUE_FORMAT = "%i|%t|%P|%N|%M|%l|%r|%j|%S|%m"
+SQUEUE_FORMAT = "%i|%t|%P|%N|%M|%l|%r|%j|%S|%m|%e|%L"
 
 
 def catalog_entry_for_partition(partition: str | None) -> dict[str, Any] | None:
@@ -1327,7 +1328,7 @@ def gpu_attach_error_is_stale(message: str | None) -> bool:
 
 
 def parse_squeue_line(line: str) -> dict | None:
-    """Parse `squeue --me -o SQUEUE_FORMAT` (name/start/mem optional)."""
+    """Parse ``squeue --me -o SQUEUE_FORMAT`` with legacy rows accepted."""
     text = (line or "").strip()
     if not text:
         return None
@@ -1338,6 +1339,9 @@ def parse_squeue_line(line: str) -> dict | None:
     while len(parts) < 7:
         parts.append("")
     reason = _squeue_blank(parts[6])
+    # Before expected-end/time-left were added, an optional 11th field was
+    # interpreted as sched_nodes. Keep that legacy shape unambiguous.
+    has_deadline_fields = len(parts) >= 12
     body = {
         "job_id": parts[0],
         "state": parts[1],
@@ -1349,7 +1353,13 @@ def parse_squeue_line(line: str) -> dict | None:
         "name": _squeue_blank(parts[7]) if len(parts) > 7 else None,
         "start_time": _squeue_blank(parts[8]) if len(parts) > 8 else None,
         "mem": _squeue_blank(parts[9]) if len(parts) > 9 else None,
-        "sched_nodes": _squeue_blank(parts[10]) if len(parts) > 10 else None,
+        "expected_end": _squeue_blank(parts[10]) if has_deadline_fields else None,
+        "time_left": _squeue_blank(parts[11]) if has_deadline_fields else None,
+        "sched_nodes": (
+            _squeue_blank(parts[12]) if len(parts) > 12
+            else _squeue_blank(parts[10]) if len(parts) == 11
+            else None
+        ),
         "current": False,
     }
     if not body["job_id"] or not body["job_id"].isdigit():
@@ -4094,6 +4104,68 @@ def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
     gsplat_ver = _gsplat_version_from_site(python_dir)
     arch_file.write_text(arch + "\n")
 
+    # The persistent scene-run worker performs self-hosted image edit in the
+    # same Pyxis allocation. Install code dependencies onto DSS once; model
+    # weights remain an explicit, separately cached download.
+    image_edit_requirements = {
+        "numpy": "numpy==1.26.4",
+        "diffusers": "diffusers>=0.36.0,<0.37",
+        "transformers": "transformers>=4.51.3,<5",
+        "torchvision": "torchvision==0.29.0",
+        "accelerate": "accelerate>=1.2.0",
+        "safetensors": "safetensors>=0.4.5",
+        "huggingface_hub": "huggingface-hub==0.36.0",
+        "tokenizers": "tokenizers==0.22.2",
+        "regex": "regex>=2024.11.6",
+    }
+    for metadata_dir in python_dir.glob("tokenizers-*.dist-info"):
+        if metadata_dir.name != "tokenizers-0.22.2.dist-info":
+            shutil.rmtree(metadata_dir, ignore_errors=True)
+    for metadata_dir in python_dir.glob("huggingface_hub-*.dist-info"):
+        if metadata_dir.name != "huggingface_hub-0.36.0.dist-info":
+            shutil.rmtree(metadata_dir, ignore_errors=True)
+    for metadata_dir in python_dir.glob("numpy-*.dist-info"):
+        if metadata_dir.name != "numpy-1.26.4.dist-info":
+            shutil.rmtree(metadata_dir, ignore_errors=True)
+    for metadata_dir in python_dir.glob("torchvision-*.dist-info"):
+        if metadata_dir.name != "torchvision-0.29.0.dist-info":
+            shutil.rmtree(metadata_dir, ignore_errors=True)
+    missing_image_edit = [
+        requirement
+        for package, requirement in image_edit_requirements.items()
+        if not (python_dir / package).is_dir()
+        or (
+            package == "tokenizers"
+            and not any(python_dir.glob("tokenizers-0.22.2.dist-info"))
+        )
+        or (
+            package == "huggingface_hub"
+            and not any(python_dir.glob("huggingface_hub-0.36.0.dist-info"))
+        )
+        or (
+            package == "numpy"
+            and not any(python_dir.glob("numpy-1.26.4.dist-info"))
+        )
+        or (
+            package == "torchvision"
+            and not any(python_dir.glob("torchvision-0.29.0.dist-info"))
+        )
+    ]
+    image_edit_installed = False
+    if missing_image_edit:
+        image_edit_installed = True
+        logger.info(
+            "Installing scene-run Qwen dependencies onto DSS: %s",
+            ", ".join(missing_image_edit),
+        )
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", "--upgrade", "--no-deps",
+            "--target", site,
+            *missing_image_edit,
+        ])
+        import importlib
+        importlib.invalidate_caches()
+
     ext_dir = python_dir / "torch_extensions"
     tmp_dir = root / "tmp"
     ext_dir.mkdir(parents=True, exist_ok=True)
@@ -4115,6 +4187,10 @@ def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
         "cuda": cuda_ver,
         "gsplat": str(gsplat_ver or "?"),
         "installed": installed,
+        "image_edit_ready": all(
+            (python_dir / package).is_dir() for package in image_edit_requirements
+        ),
+        "image_edit_installed": image_edit_installed,
         "python": site,
         "cuda_arch": arch,
         "compute_cap": f"{int(cap[0])}.{int(cap[1])}",
@@ -4186,7 +4262,7 @@ def launch_detached_setup(cfg: dict) -> str:
     inner = f"{srun} >{shlex.quote(log)} 2>&1; echo SETUP_EXIT:$? >>{shlex.quote(log)}"
     remote = (
         f"mkdir -p {shlex.quote(str(Path(log).parent))} && "
-        f"rm -f {shlex.quote(marker)} && "
+        f"rm -f {shlex.quote(marker)}; "
         f"nohup sh -c {shlex.quote(inner)} </dev/null >/dev/null 2>&1 & "
         "echo SETUP_PID $!"
     )

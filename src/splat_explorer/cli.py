@@ -4,6 +4,7 @@
   splat-explorer explore       run an agent episode (scripted policy by default)
   splat-explorer viewer        serve the interactive viser debug viewer
   splat-explorer dashboard     serve the episode control/debug dashboard
+  splat-explorer scene-run-manager  execute queued automated scene-runs
 """
 
 from __future__ import annotations
@@ -305,6 +306,13 @@ def cmd_lrz_sync(cfg, args) -> None:
     sync_code_and_job(job_dir)
 
 
+def cmd_scene_run_manager(cfg, args) -> None:
+    """Run the disk-backed automated scene-run queue manager."""
+    from .scene_runs.manager import run_manager
+
+    raise SystemExit(run_manager(cfg, once=bool(args.once)))
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -350,6 +358,17 @@ def main() -> None:
     p_lrz.add_argument("job_id", nargs="?", default="", help="outputs/lrz-jobs/<id>")
     p_lrz.add_argument("--job-dir", default="", help="Override path to the packed job directory")
     p_lrz.set_defaults(func=cmd_lrz_sync)
+
+    p_scene_runs = sub.add_parser(
+        "scene-run-manager",
+        help="Run queued deadline-limited scene refinements in the background",
+    )
+    p_scene_runs.add_argument(
+        "--once",
+        action="store_true",
+        help="Execute one ready queued run, then exit (integration tests/manual recovery)",
+    )
+    p_scene_runs.set_defaults(func=cmd_scene_run_manager)
 
     args = parser.parse_args()
     cfg = load_config(args.config)

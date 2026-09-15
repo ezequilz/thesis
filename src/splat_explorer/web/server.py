@@ -54,13 +54,14 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import os
 import shutil
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import numpy as np
 
@@ -197,8 +198,10 @@ class DashboardApp:
         self._video_locks: dict[str, threading.Lock] = {}
         self._video_locks_guard = threading.Lock()
         from .repair_studio import RepairStudio
+        from .scene_run_studio import SceneRunStudio
 
         self.repair = RepairStudio(self)
+        self.scene_runs = SceneRunStudio(self)
         threading.Thread(target=self._load_scene, daemon=True).start()
 
     # --- scene ----------------------------------------------------------------
@@ -366,6 +369,19 @@ class DashboardApp:
 
     # --- run control ------------------------------------------------------------
     def start_run(self, params: dict) -> tuple[bool, str]:
+        try:
+            from ..scene_runs.store import SceneRunStore
+
+            owner = SceneRunStore(
+                Path(self.cfg.output.dir) / "scene-runs",
+            ).gpu_lease_owner()
+        except Exception:
+            owner = None
+        if owner:
+            return False, (
+                f"Automated scene-run {owner.get('run_id') or ''} owns the visor/GPU. "
+                "Stop it before starting a debug episode."
+            )
         clean = dict(RUN_DEFAULTS)
         for key in clean:
             if key in params and params[key] not in ("", None):
@@ -764,6 +780,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(200, (STATIC_DIR / "repair.html").read_bytes(), "text/html; charset=utf-8")
         elif path in ("/repair/gpu", "/gpu", "/gpu.html"):
             self._send(200, (STATIC_DIR / "gpu.html").read_bytes(), "text/html; charset=utf-8")
+        elif path in ("/scene-runs", "/scene-runs.html"):
+            self._send(200, (STATIC_DIR / "scene_runs.html").read_bytes(), "text/html; charset=utf-8")
         elif path.startswith("/video/"):
             ep = path[len("/video/"):]
             if not ep or "/" in ep:
@@ -774,6 +792,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(self.app.snapshot())
         elif path == "/api/episodes":
             self._send_json({"episodes": self.app.list_episodes()})
+        elif path.startswith("/api/scene-runs"):
+            self._serve_scene_runs_get(path)
+        elif path.startswith("/scene-run-files/"):
+            self._serve_scene_run_file(path)
         elif path.startswith("/api/repair"):
             self._serve_repair_get(path)
         elif path.startswith("/api/episodes/"):
@@ -782,6 +804,51 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._serve_frame(path)
         else:
             self._send_json({"error": "not found"}, 404)
+
+    def _serve_scene_runs_get(self, path: str) -> None:
+        studio = self.app.scene_runs
+        try:
+            if path == "/api/scene-runs/state":
+                self._send_json(studio.state())
+                return
+            if path == "/api/scene-runs":
+                self._send_json({"runs": studio.list_runs()})
+                return
+            prefix = "/api/scene-runs/"
+            if path.startswith(prefix):
+                run_id = path[len(prefix):]
+                if run_id and "/" not in run_id:
+                    detail = studio.detail(run_id)
+                    if detail is not None:
+                        self._send_json(detail)
+                        return
+            self._send_json({"error": "not found"}, 404)
+        except (ImportError, ModuleNotFoundError) as exc:
+            logger.warning("Scene-run store unavailable: %s", exc)
+            self._send_json({"error": "scene-run store unavailable"}, 503)
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.exception("Scene-run API failed")
+            self._send_json({"error": str(exc) or type(exc).__name__}, 409)
+
+    def _serve_scene_run_file(self, path: str) -> None:
+        rest = path[len("/scene-run-files/"):]
+        run_id, separator, relative = rest.partition("/")
+        if not separator or not run_id or not relative:
+            self._send_json({"error": "not found"}, 404)
+            return
+        run_id, relative = unquote(run_id), unquote(relative)
+        try:
+            target = self.app.scene_runs.artifact_path(run_id, relative)
+        except (ImportError, ModuleNotFoundError, OSError, RuntimeError, ValueError):
+            target = None
+        if target is None:
+            self._send_json({"error": "not found"}, 404)
+            return
+        content_type = mimetypes.guess_type(target.name)[0]
+        if content_type is None and target.suffix.lower() in {".log", ".txt", ".jsonl"}:
+            content_type = "text/plain; charset=utf-8"
+        content_type = content_type or "application/octet-stream"
+        self._send(200, target.read_bytes(), content_type)
 
     def _serve_episode(self, rest: str) -> None:
         if rest.endswith("/log"):
@@ -1088,6 +1155,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ok, message = self.app.select_scene(str(scene_id))
         elif path == "/api/select":
             ok, message = self.app.select_step(body.get("step"))
+        elif path.startswith("/api/scene-runs"):
+            self._serve_scene_runs_post(path, body)
+            return
         elif path.startswith("/api/repair"):
             self._serve_repair_post(path, body)
             return
@@ -1095,6 +1165,46 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "not found"}, 404)
             return
         self._send_json({"ok": ok, "message": message}, 200 if ok else 409)
+
+    def _serve_scene_runs_post(self, path: str, body: dict) -> None:
+        from .scene_run_studio import SceneRunValidationError
+
+        if not isinstance(body, dict):
+            self._send_json(
+                {"ok": False, "message": "Request body must be a JSON object."}, 400,
+            )
+            return
+        studio = self.app.scene_runs
+        try:
+            if path == "/api/scene-runs/start":
+                run = studio.create(body)
+                self._send_json({"ok": True, "run": run})
+                return
+            if path == "/api/scene-runs/stop":
+                run_id = body.get("id") or body.get("run_id")
+                if not run_id:
+                    self._send_json(
+                        {"ok": False, "message": "Missing scene-run id."}, 400,
+                    )
+                    return
+                run = studio.request_stop(str(run_id))
+                self._send_json({"ok": True, "run": run})
+                return
+            self._send_json({"error": "not found"}, 404)
+        except SceneRunValidationError as exc:
+            self._send_json({"ok": False, "message": str(exc)}, 400)
+        except (FileNotFoundError, KeyError) as exc:
+            self._send_json({"ok": False, "message": str(exc) or "not found"}, 404)
+        except (ImportError, ModuleNotFoundError) as exc:
+            logger.warning("Scene-run store unavailable: %s", exc)
+            self._send_json(
+                {"ok": False, "message": "Scene-run store unavailable."}, 503,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.exception("Scene-run request failed")
+            self._send_json(
+                {"ok": False, "message": str(exc) or type(exc).__name__}, 409,
+            )
 
     def _serve_episode_video(self, ep_id: str) -> None:
         result, error = self.app.episode_video(ep_id)

@@ -1,0 +1,56 @@
+# Automated scene-runs
+
+Scene-runs are the production, deadline-controlled counterpart to debugging
+episodes. The original episode dashboard (`/`) and repair studio (`/repair`)
+remain available for isolated testing.
+
+## Start
+
+```bash
+./scripts/start.sh
+```
+
+Open `http://127.0.0.1:8090/scene-runs`. Before a queued run can start,
+`/repair/gpu` must show a selected LRZ allocation in `ST=R` with its setup
+loaded. The local scene-run manager is independent of the browser and writes
+its log to `outputs/scene-run-manager.log`.
+
+Each run starts from the selected catalog scene and writes only below:
+
+```text
+outputs/scene-runs/run_YYYYMMDD_HHMMSS/
+```
+
+`scene_original.ply` is immutable. `scene_repaired.ply` is the cumulative
+checkpoint used by both the GPU worker and the local viser/VLM harness.
+
+## Loop
+
+1. Render RGB and the bird's-eye path map at the current camera.
+2. Ask the configured CliRelay VLM for one action.
+3. Depending on `repair_trigger`, synchronously run image edit and GSFix3D:
+   - `every_step`: every observation
+   - `every_artifact`: every `report_artifact`
+   - `regenerate_yes`: only `report_artifact(..., regenerate="yes")`
+4. Download the repaired PLY, hot-reload viser, and continue with the same VLM
+   history, camera pose, path, and coverage state.
+5. Stop at the earlier of the user deadline and LRZ reservation deadline.
+
+The default path is Venetian Balcony, 960×720, RGB plus bird's-eye map,
+one hour, Qwen-Image-Edit-2511, `regenerate_yes`, and the original working
+GSFix3D CUDA implementation with a three-minute refine cap per triggered view.
+
+## GPU ownership and recovery
+
+One scene-run owns the selected allocation for its duration. Mutating repair
+operations are blocked while that lease is active. Closing the browser does
+not stop a run; use the dashboard Stop action or:
+
+```bash
+touch outputs/scene-runs/<run-id>/STOP
+```
+
+All phases and failures are persisted in `status.json` and `events.jsonl`.
+If the GPU allocation expires, the latest complete PLY remains reviewable.
+Model weights are never downloaded implicitly; preload Qwen into the remote
+Hugging Face cache or explicitly enable the one-time download in configuration.
