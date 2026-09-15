@@ -51,6 +51,7 @@ class SceneRunGpu(Protocol):
         repair_seconds: float,
         deadline: float,
         should_stop: Callable[[], bool],
+        prompt: str | None = None,
     ) -> dict[str, Any]: ...
 
     def render(
@@ -94,6 +95,32 @@ def _triggered(mode: str, action: Action) -> bool:
     if action.name != "report_artifact":
         return False
     return key == "every_artifact" or wants_regenerate(action.args)
+
+
+def _image_edit_prompt(action: Action, params: dict[str, Any] | None = None) -> str:
+    """Build the Qwen instruction from the run default plus any artifact report."""
+    from .gpu_worker import DEFAULT_PROMPT
+
+    configured = ""
+    if params:
+        configured = str(params.get("image_edit_prompt") or "").strip()
+    prompt = configured or DEFAULT_PROMPT
+    if action.name != "report_artifact":
+        return prompt
+    args = dict(action.args or {})
+    details = []
+    description = str(args.get("description") or "").strip()
+    region = str(args.get("image_region") or "").strip()
+    severity = str(args.get("severity") or "").strip()
+    if description:
+        details.append(description)
+    if region:
+        details.append(f"Focus on: {region}.")
+    if severity:
+        details.append(f"Severity: {severity}.")
+    if not details:
+        return prompt
+    return f"{prompt} Specific artifact to repair: {' '.join(details)}"
 
 
 def _repair_trigger_state(
@@ -418,6 +445,8 @@ class SceneRunExecutor:
                         message=f"Repairing step {step}",
                         step=step,
                     )
+                    prompt = _image_edit_prompt(action, params)
+                    record["image_edit_prompt"] = prompt
                     result = gpu.repair(
                         step=step,
                         camera=camera,
@@ -425,6 +454,7 @@ class SceneRunExecutor:
                         repair_seconds=float(params.get("repair_seconds") or 180),
                         deadline=effective_deadline,
                         should_stop=self._stop_requested,
+                        prompt=prompt,
                     )
                     record["repair"] = _jsonable(result)
                     if str(result.get("status") or "") != "ok":

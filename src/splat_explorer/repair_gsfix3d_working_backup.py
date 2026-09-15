@@ -1,32 +1,42 @@
 """src/splat_explorer/repair_gsfix3d_working_backup.py
-GSFix3D §3.3 photometric lift (CUDA / gsplat) — our research default.
-This is the last fully working backup copy of the original GSFix3D implementation from the paper. 
-Loading of Scenes to the GPU required changes that overcomplicated the system. 
-The scene-run system should reuse this logic of the working backup, since scene loading is handled before each run.
+GSFix3D §3.3 photometric lift (CUDA / gsplat) — scene-run default.
 
-Ports ``scripts/gsfix3d/refine_gs.py`` onto ``GaussianScene``. No color
-stamp. Subclass this (or add a sibling backend id) to try a new idea;
-leave ``repair_gsfix.GsplatPhotometricRepair`` frozen as the A/B baseline.
+This is the paper ADC path used by scene-runs. Scene loading stays
+outside this module. Later research in ``repair_gsfix3d.py`` showed the
+neon artifacts come from two mistakes relative to INRIA / GSFix3D:
+
+1. Optimizing raw RGB, then hard-clipping to ``[0, 1]`` every chunk.
+   Saturated channels get zero gradient through the clip, Adam keeps
+   pushing, and the next reload starts at the clip wall — posterized
+   magenta / cyan / yellow.
+2. Reloading those clipped RGB values from the CPU scene between
+   20-iter chunks. Scene-runs set ``max_chunks=0`` for a time budget,
+   so that cycle ran for minutes on one Qwen view.
+
+This copy therefore keeps the working-backup ADC loop, but uses the
+later GPU-resident SH DC tensors: RGB2SH once, Adam on ``f_dc``,
+SH2RGB only for rasterization. Checkpoints still write clipped RGB
+for the PLY / spectator; the optimizer state is not reset by that clip.
 
 Per repaired view (``iters=20``, paper default)::
 
-    I_gs = rasterize(gaussians, camera)
-    L = 0.8 ||I_fixed - I_gs||_1 + 0.2 (1 - SSIM)
+    I_gs = rasterize(gaussians, camera)          # unclamped training RGB
+    L = 0.8 ||W ⊙ (I_fixed - I_gs)||_1
+        + 0.2 (1 - SSIM)
+        + ||(1-W) ⊙ (I_orig - I_gs)||_1
+        + λ_bound · overshoot(SH2RGB(f_dc))
     backward
     accumulate view-space positional gradients
     every 5 steps: clone small + split large Gaussians (Kerbl ADC)
-    last iter: prune opacity < 0.005
+    last iter of the first chunk: prune opacity < 0.005
     Adam step  (never skipped on densify steps)
 
-Colors are optimized as SH DC coefficients (RGB2SH / SH2RGB), matching
-the INRIA ``GaussianModel``, not as raw RGB. That is what stopped the
-neon posterization: unconstrained RGB Adam + a final clip.
-
-``apply_until`` repeats paper 20-iter chunks so the Stop button still
-works for research. Each chunk is the paper inner loop. ``Replay all
-views`` then runs ``kf_iters=50`` shuffled passes over the repaired
-images (our stand-in for the paper's augmented captured dataset — we
-do not have the original RGB-D capture).
+``W`` is the Qwen residual, so artifact pixels follow the repaired
+image and unchanged pixels stay anchored to the original render.
+``apply_until`` repeats paper 20-iter chunks with Gaussians remaining
+on the GPU. ``Replay all views`` then runs ``kf_iters=50`` shuffled
+passes over the repaired images (our stand-in for the paper's
+augmented captured dataset — we do not have the original RGB-D capture).
 """
 
 from __future__ import annotations
@@ -47,7 +57,9 @@ from .repair_gsfix import (
     _rasterize,
     _require_torch,
     _to_uint8,
-    photometric_loss,
+    camera_for_train,
+    ssim,
+    upsample_uint8,
 )
 from .scene import GaussianScene
 from .scene.ply_loader import SH_C0
@@ -70,6 +82,51 @@ def rgb_to_sh(rgb):
 def sh_to_rgb(sh):
     """INRIA SH2RGB DC term."""
     return 0.5 + sh * SH_C0
+
+
+def repaired_view_loss(
+    pred,
+    target,
+    rendered,
+    torch,
+    *,
+    lambda_dssim: float = _LAMBDA_DSSIM,
+    lambda_preserve: float = 1.0,
+    lambda_color_bound: float = 0.05,
+    colors_rgb=None,
+    min_fix_weight: float = 0.05,
+):
+    """Photometric lift of a Qwen view without neon-saturating unchanged pixels.
+
+    ``pred`` is the current differentiable render and must not be
+    display-clamped: once a channel exceeds 1, ``clamp`` has zero
+    gradient and Adam drives SH DC to the clip wall. ``target`` is the
+    repaired image; ``rendered`` is the original 3DGS view. Residual
+    weights ``W`` send artifact pixels toward Qwen and keep the rest
+    anchored. ``colors_rgb`` (SH2RGB of ``f_dc``) gets a quadratic
+    overshoot penalty so per-Gaussian colors cannot run to ±inf.
+    """
+    change = (target - rendered).abs().mean(dim=-1, keepdim=True)
+    scale = change.mean().clamp(min=1e-4)
+    w_fix = (change / (change + scale)).clamp(min=float(min_fix_weight), max=1.0)
+    l1_fix = (w_fix * (pred - target).abs()).mean()
+    l1_keep = ((1.0 - w_fix) * (pred - rendered).abs()).mean()
+    pred_disp = pred.clamp(0.0, 1.0)
+    ssim_val = ssim(pred_disp.permute(2, 0, 1), target.permute(2, 0, 1), torch)
+    loss = (
+        (1.0 - float(lambda_dssim)) * l1_fix
+        + float(lambda_dssim) * (1.0 - ssim_val)
+        + float(lambda_preserve) * l1_keep
+    )
+    if colors_rgb is not None and float(lambda_color_bound) > 0:
+        over = torch.relu(colors_rgb - 1.0).square().mean()
+        under = torch.relu(-colors_rgb).square().mean()
+        loss = loss + float(lambda_color_bound) * (over + under)
+    return loss, (pred_disp - target).abs().mean()
+
+
+def _as_leaf(tensor):
+    return tensor.detach().clone().requires_grad_(True)
 
 
 def _quat_to_rotmat(quats, torch):
@@ -257,8 +314,14 @@ class GsplatGsfix3dRepair:
     lr_quats: float = 0.001
     near: float = 0.05
     packed: bool = False
+    train_max_edge: int = 0
+    sparse_grad: bool = False
     white_background: bool = False
     max_chunks: int = 1
+    lambda_preserve: float = 1.0
+    lambda_color_bound: float = 0.05
+    min_fix_weight: float = 0.05
+    sh_clip: float = 2.3
     on_progress: Callable[[dict], None] | None = None
 
     def apply(
@@ -271,15 +334,27 @@ class GsplatGsfix3dRepair:
         try:
             return self._apply(scene, camera, rendered_rgb, repaired_rgb)
         except RuntimeError as exc:
-            if self.packed or "out of memory" not in str(exc).lower():
+            if "out of memory" not in str(exc).lower():
                 raise
-            logger.warning("CUDA OOM during GSFix3D refine; retrying with packed=True")
             try:
                 import torch
                 torch.cuda.empty_cache()
             except Exception:
                 pass
-            return replace(self, packed=True)._apply(scene, camera, rendered_rgb, repaired_rgb)
+            edge = int(self.train_max_edge or 0)
+            if not self.packed:
+                logger.warning("CUDA OOM during GSFix3D refine; retrying packed @ %spx", edge or 512)
+                return replace(
+                    self, packed=True, sparse_grad=True,
+                    train_max_edge=edge or 512,
+                )._apply(scene, camera, rendered_rgb, repaired_rgb)
+            nxt = 384 if edge <= 0 or edge > 384 else (320 if edge > 320 else 0)
+            if nxt:
+                logger.warning("CUDA OOM during packed GSFix3D refine; retrying @ %spx", nxt)
+                return replace(
+                    self, packed=True, sparse_grad=True, train_max_edge=nxt,
+                )._apply(scene, camera, rendered_rgb, repaired_rgb)
+            raise
 
     def apply_until(
         self,
@@ -294,7 +369,9 @@ class GsplatGsfix3dRepair:
     ) -> dict[str, Any]:
         """Run ``max_chunks`` paper 20-iter passes (default 1 = paper §3.3).
 
-        Set ``max_chunks=0`` to keep going until Stop / deadline (research).
+        Gaussians stay on the GPU across chunks so SH DC is not clipped
+        back to RGB between passes. Set ``max_chunks=0`` to keep going
+        until Stop / deadline (scene-runs). ADC runs only on chunk 0.
         """
         import time
 
@@ -303,32 +380,45 @@ class GsplatGsfix3dRepair:
         l1_before = None
         chunk = 0
         limit = int(self.max_chunks)
-        while True:
-            if should_stop is not None and should_stop():
-                break
-            if deadline is not None and time.time() >= deadline:
-                break
-            if limit > 0 and chunk >= limit:
-                break
-            # GSFix3D applies ADC during its 20 iterations for a repaired
-            # image. Extra time-budget chunks continue photometric fitting
-            # without repeatedly multiplying the topology for the same view.
-            chunk_backend = self if chunk == 0 else replace(self, densify=False)
-            last = chunk_backend.apply(
-                scene, camera, rendered_rgb, repaired_rgb,
-            )
-            if l1_before is None:
-                l1_before = last.get("l1_before")
-            total_iters += int(last.get("n_iters") or 0)
-            chunk += 1
-            last = dict(last)
-            last["n_iters"] = total_iters
-            last["n_chunks"] = chunk
-            last["n_stamped"] = 0
-            last["l1_before"] = l1_before
-            last["phase"] = "refine"
-            if on_checkpoint is not None:
-                on_checkpoint(last)
+        state: dict[str, Any] = {
+            "should_stop": should_stop,
+            "deadline": deadline,
+        }
+        saved_densify = self.densify
+        try:
+            while True:
+                if should_stop is not None and should_stop():
+                    break
+                if deadline is not None and time.time() >= deadline:
+                    break
+                if limit > 0 and chunk >= limit:
+                    break
+                # GSFix3D applies ADC during its 20 iterations for a repaired
+                # image. Extra time-budget chunks continue photometric fitting
+                # without repeatedly multiplying the topology for the same view.
+                if chunk > 0:
+                    self.densify = False
+                last = self._step_chunk(
+                    scene, camera, rendered_rgb, repaired_rgb, state,
+                )
+                if l1_before is None:
+                    l1_before = last.get("l1_before")
+                total_iters += int(last.get("n_iters") or 0)
+                chunk += 1
+                last = dict(last)
+                last["n_iters"] = total_iters
+                last["n_chunks"] = chunk
+                last["n_stamped"] = 0
+                last["l1_before"] = l1_before
+                last["phase"] = "refine"
+                last["checkpoint_iters"] = total_iters
+                if on_checkpoint is not None:
+                    on_checkpoint(last)
+        finally:
+            self.densify = saved_densify
+            ctx = state.get("ctx")
+            if isinstance(ctx, dict):
+                ctx.pop("opt", None)
         if last is None:
             return {
                 "backend": BACKEND_ID,
@@ -390,7 +480,39 @@ class GsplatGsfix3dRepair:
         )
         return last
 
-    def _apply(
+    def _step_chunk(
+        self,
+        scene: GaussianScene,
+        camera: Camera,
+        rendered_rgb: np.ndarray,
+        repaired_rgb: np.ndarray,
+        state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """One paper 20-iter pass. Reuses ``state['ctx']`` so SH DC stays on GPU."""
+        state = state if state is not None else {}
+        if "ctx" not in state:
+            state["ctx"] = self._gpu_bind(scene, camera, rendered_rgb, repaired_rgb)
+        ctx = state["ctx"]
+        if "should_stop" in state:
+            ctx["should_stop"] = state.get("should_stop")
+        if "deadline" in state:
+            ctx["deadline"] = state.get("deadline")
+        return self._gpu_advance(ctx, scene)
+
+    def _make_opt(self, torch, means, quats, f_dc, log_scales, logit_opacities):
+        return torch.optim.Adam(
+            [
+                {"params": [means], "lr": self.lr_means},
+                {"params": [f_dc], "lr": self.lr_colors},
+                {"params": [logit_opacities], "lr": self.lr_opacities},
+                {"params": [log_scales], "lr": self.lr_scales},
+                {"params": [quats], "lr": self.lr_quats},
+            ],
+            lr=0.0,
+            eps=1e-15,
+        )
+
+    def _gpu_bind(
         self,
         scene: GaussianScene,
         camera: Camera,
@@ -401,7 +523,11 @@ class GsplatGsfix3dRepair:
         import gsplat
 
         device = torch.device("cuda")
+        orig_w, orig_h = int(camera.width), int(camera.height)
+        camera = camera_for_train(camera, int(self.train_max_edge or 0))
         h, w = int(camera.height), int(camera.width)
+        use_packed = bool(self.packed)
+        use_sparse = bool(self.sparse_grad)
         if self.on_progress is not None:
             props = torch.cuda.get_device_properties(0)
             self.on_progress({
@@ -411,6 +537,9 @@ class GsplatGsfix3dRepair:
                 "n_gaussians": int(scene.num_gaussians),
                 "n_iters": 0,
                 "n_stamped": 0,
+                "packed": use_packed,
+                "train_width": w,
+                "train_height": h,
             })
         target = _image_to_tensor(repaired_rgb, w, h, torch, device)
         rendered = _image_to_tensor(rendered_rgb, w, h, torch, device)
@@ -433,42 +562,143 @@ class GsplatGsfix3dRepair:
         K = torch.from_numpy(np.asarray(camera.intrinsics, dtype=np.float32)).to(device).unsqueeze(0)
         bg = _BACKGROUND_WHITE if self.white_background else _BACKGROUND_BLACK
         background = torch.tensor(bg, device=device)
-        n_spawned = 0
-        xyz_grad_accum = torch.zeros(means.shape[0], device=device)
-        xyz_grad_denom = torch.zeros(means.shape[0], device=device)
+        opt = self._make_opt(torch, means, quats, f_dc, log_scales, logit_opacities)
+        return {
+            "torch": torch,
+            "gsplat": gsplat,
+            "means": means,
+            "quats": quats,
+            "f_dc": f_dc,
+            "log_scales": log_scales,
+            "logit_opacities": logit_opacities,
+            "opt": opt,
+            "viewmat": viewmat,
+            "K": K,
+            "background": background,
+            "target": target,
+            "rendered": rendered,
+            "l1_before": l1_before,
+            "n0": n0,
+            "w": w,
+            "h": h,
+            "orig_w": orig_w,
+            "orig_h": orig_h,
+            "use_packed": use_packed,
+            "use_sparse": use_sparse,
+            "n_visible": int(means.shape[0]),
+            "n_spawned": 0,
+            "total_iters": 0,
+            "last_l1": l1_before,
+            "xyz_grad_accum": torch.zeros(means.shape[0], device=device),
+            "xyz_grad_denom": torch.zeros(means.shape[0], device=device),
+        }
 
-        def make_opt():
-            return torch.optim.Adam(
-                [
-                    {"params": [means], "lr": self.lr_means},
-                    {"params": [f_dc], "lr": self.lr_colors},
-                    {"params": [logit_opacities], "lr": self.lr_opacities},
-                    {"params": [log_scales], "lr": self.lr_scales},
-                    {"params": [quats], "lr": self.lr_quats},
-                ],
-                lr=0.0,
-                eps=1e-15,
+    def _commit_scene(self, ctx: dict[str, Any], scene: GaussianScene) -> tuple[np.ndarray, float]:
+        """CPU snapshot for PLY / dashboard. Does not clip the GPU SH DC."""
+        torch = ctx["torch"]
+        gsplat = ctx["gsplat"]
+        means = ctx["means"]
+        quats = ctx["quats"]
+        f_dc = ctx["f_dc"]
+        log_scales = ctx["log_scales"]
+        logit_opacities = ctx["logit_opacities"]
+        with torch.no_grad():
+            scales = torch.exp(log_scales)
+            opacities = torch.sigmoid(logit_opacities)
+            quats_n = torch.nn.functional.normalize(quats, dim=-1)
+            colors = sh_to_rgb(f_dc)
+            rgb, _ = _rasterize(
+                gsplat, means, quats_n, scales, opacities, colors,
+                ctx["viewmat"], ctx["K"], ctx["w"], ctx["h"], ctx["background"],
+                packed=ctx["use_packed"], sparse_grad=ctx["use_sparse"],
+                absgrad=False, clamp_rgb=True,
             )
+            l1_after = float(torch.abs(rgb - ctx["target"]).mean().item())
+            render_rgb = upsample_uint8(_to_uint8(rgb), ctx["orig_w"], ctx["orig_h"])
+        scene.means = means.detach().float().cpu().numpy().astype(np.float32)
+        scene.quats = quats_n.detach().float().cpu().numpy().astype(np.float32)
+        scene.scales = scales.detach().float().cpu().numpy().astype(np.float32)
+        scene.opacities = opacities.detach().float().cpu().numpy().astype(np.float32)
+        scene.colors = torch.clamp(colors, 0.0, 1.0).detach().float().cpu().numpy().astype(np.float32)
+        return render_rgb, l1_after
 
-        opt = make_opt()
-        last_l1 = l1_before
-        rgb = None
-        n_visible = int(means.shape[0])
+    def _gpu_advance(self, ctx: dict[str, Any], scene: GaussianScene) -> dict[str, Any]:
+        import time
+
+        torch = ctx["torch"]
+        gsplat = ctx["gsplat"]
+        means = ctx["means"]
+        quats = ctx["quats"]
+        f_dc = ctx["f_dc"]
+        log_scales = ctx["log_scales"]
+        logit_opacities = ctx["logit_opacities"]
+        opt = ctx["opt"]
+        viewmat = ctx["viewmat"]
+        K = ctx["K"]
+        background = ctx["background"]
+        target = ctx["target"]
+        rendered = ctx["rendered"]
+        l1_before = ctx["l1_before"]
+        n0 = ctx["n0"]
+        w, h = ctx["w"], ctx["h"]
+        use_packed = ctx["use_packed"]
+        use_sparse = ctx["use_sparse"]
+        n_visible = int(ctx["n_visible"])
+        n_spawned = int(ctx["n_spawned"])
+        last_l1 = ctx["last_l1"]
+        xyz_grad_accum = ctx["xyz_grad_accum"]
+        xyz_grad_denom = ctx["xyz_grad_denom"]
+        should_stop = ctx.get("should_stop")
+        deadline = ctx.get("deadline")
+        sh_clip = float(self.sh_clip)
+        ran = 0
 
         for it in range(int(self.iters)):
+            if should_stop is not None and should_stop():
+                break
+            if deadline is not None and time.time() >= deadline:
+                break
             scales = torch.exp(log_scales)
             opacities = torch.sigmoid(logit_opacities)
             quats_n = torch.nn.functional.normalize(quats, dim=-1)
             colors = sh_to_rgb(f_dc)
             rgb, info = _rasterize(
                 gsplat, means, quats_n, scales, opacities, colors,
-                viewmat, K, w, h, background, packed=self.packed,
+                viewmat, K, w, h, background, packed=use_packed,
+                sparse_grad=use_sparse, absgrad=not use_packed,
+                clamp_rgb=False,
             )
             means2d = info.get("means2d") if isinstance(info, dict) else None
             if means2d is not None and means2d.requires_grad:
                 means2d.retain_grad()
-            loss, l1 = photometric_loss(rgb, target, torch, self.lambda_dssim)
+            loss, l1 = repaired_view_loss(
+                rgb, target, rendered, torch,
+                lambda_dssim=self.lambda_dssim,
+                lambda_preserve=self.lambda_preserve,
+                lambda_color_bound=self.lambda_color_bound,
+                colors_rgb=colors,
+                min_fix_weight=self.min_fix_weight,
+            )
             last_l1 = float(l1.item())
+            if ctx["total_iters"] == 0 and it == 0 and self.on_progress is not None:
+                self.on_progress({
+                    "phase": "refine",
+                    "iter": 0,
+                    "n_iters": 0,
+                    "n_updated": 0,
+                    "n_gaussians": int(means.shape[0]),
+                    "n_spawned": int(n_spawned),
+                    "n_stamped": 0,
+                    "n_visible": int(n_visible),
+                    "l1_before": round(l1_before, 6),
+                    "l1": round(last_l1, 6),
+                    "train_width": w,
+                    "train_height": h,
+                    "message": (
+                        f"First rasterize L1 {last_l1:.4f} @ {w}x{h}"
+                        + (" · packed" if use_packed else "")
+                    ),
+                })
             loss.backward()
 
             vis_norm = _viewspace_grad_norm(
@@ -498,6 +728,8 @@ class GsplatGsfix3dRepair:
             opt.zero_grad(set_to_none=True)
             with torch.no_grad():
                 quats.copy_(torch.nn.functional.normalize(quats, dim=-1))
+                if sh_clip > 0:
+                    f_dc.clamp_(-sh_clip, sh_clip)
 
             last_iter = it == int(self.iters) - 1
             if (
@@ -517,24 +749,33 @@ class GsplatGsfix3dRepair:
                 if packed is not None:
                     means, quats, f_dc, log_scales, logit_opacities, n_new = packed
                     n_spawned += n_new
-                    xyz_grad_accum = torch.zeros(means.shape[0], device=device)
-                    xyz_grad_denom = torch.zeros(means.shape[0], device=device)
-                    opt = make_opt()
+                    xyz_grad_accum = torch.zeros(means.shape[0], device=means.device)
+                    xyz_grad_denom = torch.zeros(means.shape[0], device=means.device)
+                    opt = self._make_opt(
+                        torch, means, quats, f_dc, log_scales, logit_opacities,
+                    )
 
             if last_iter and self.densify and means.shape[0] > 32:
-                with torch.no_grad():
-                    keep = torch.sigmoid(logit_opacities) > float(self.prune_opacity)
-                    if int(keep.sum()) >= 32 and int((~keep).sum()) > 0:
-                        means, quats, f_dc, log_scales, logit_opacities = (
-                            means[keep], quats[keep], f_dc[keep],
-                            log_scales[keep], logit_opacities[keep],
-                        )
+                keep = torch.sigmoid(logit_opacities).reshape(-1) > float(self.prune_opacity)
+                if int(keep.sum()) >= 32 and int((~keep).sum()) > 0:
+                    means, quats, f_dc, log_scales, logit_opacities = (
+                        _as_leaf(means[keep]), _as_leaf(quats[keep]),
+                        _as_leaf(f_dc[keep]), _as_leaf(log_scales[keep]),
+                        _as_leaf(logit_opacities[keep]),
+                    )
+                    xyz_grad_accum = torch.zeros(means.shape[0], device=means.device)
+                    xyz_grad_denom = torch.zeros(means.shape[0], device=means.device)
+                    opt = self._make_opt(
+                        torch, means, quats, f_dc, log_scales, logit_opacities,
+                    )
 
+            ran += 1
+            done = ctx["total_iters"] + ran
             if self.on_progress is not None:
                 self.on_progress({
                     "phase": "refine",
-                    "iter": it + 1,
-                    "n_iters": it + 1,
+                    "iter": done,
+                    "n_iters": done,
                     "n_updated": int(means.shape[0]),
                     "n_gaussians": int(means.shape[0]),
                     "n_spawned": int(n_spawned),
@@ -542,30 +783,28 @@ class GsplatGsfix3dRepair:
                     "n_visible": int(n_visible),
                     "l1_before": round(l1_before, 6),
                     "l1": round(last_l1, 6),
+                    "train_width": w,
+                    "train_height": h,
                 })
 
-        with torch.no_grad():
-            scales = torch.exp(log_scales)
-            opacities = torch.sigmoid(logit_opacities)
-            quats_n = torch.nn.functional.normalize(quats, dim=-1)
-            colors = sh_to_rgb(f_dc)
-            rgb, _ = _rasterize(
-                gsplat, means, quats_n, scales, opacities, colors,
-                viewmat, K, w, h, background, packed=self.packed,
-            )
-            l1_after = float(torch.abs(rgb - target).mean().item())
-            render_rgb = _to_uint8(rgb)
+        ctx["means"] = means
+        ctx["quats"] = quats
+        ctx["f_dc"] = f_dc
+        ctx["log_scales"] = log_scales
+        ctx["logit_opacities"] = logit_opacities
+        ctx["opt"] = opt
+        ctx["xyz_grad_accum"] = xyz_grad_accum
+        ctx["xyz_grad_denom"] = xyz_grad_denom
+        ctx["n_visible"] = n_visible
+        ctx["n_spawned"] = n_spawned
+        ctx["last_l1"] = last_l1
+        ctx["total_iters"] += ran
 
-        scene.means = means.detach().float().cpu().numpy().astype(np.float32)
-        scene.quats = quats_n.detach().float().cpu().numpy().astype(np.float32)
-        scene.scales = scales.detach().float().cpu().numpy().astype(np.float32)
-        scene.opacities = opacities.detach().float().cpu().numpy().astype(np.float32)
-        scene.colors = torch.clamp(colors, 0.0, 1.0).detach().float().cpu().numpy().astype(np.float32)
-
+        render_rgb, l1_after = self._commit_scene(ctx, scene)
         n1 = scene.num_gaussians
         logger.info(
             "GSFix3D refine: %d iters, L1 %.4f -> %.4f, %d -> %d gaussians (+%d)",
-            self.iters, l1_before, l1_after, n0, n1, n_spawned,
+            ran, l1_before, l1_after, n0, n1, n_spawned,
         )
         return {
             "backend": BACKEND_ID,
@@ -574,11 +813,22 @@ class GsplatGsfix3dRepair:
             "n_stamped": 0,
             "n_spawned": int(max(0, n1 - n0) if n_spawned == 0 else n_spawned),
             "n_gaussians": n1,
-            "n_iters": int(self.iters),
+            "n_iters": int(ran),
             "l1_before": round(l1_before, 6),
             "l1_after": round(l1_after, 6),
+            "train_width": w,
+            "train_height": h,
             "render_rgb": render_rgb,
         }
+
+    def _apply(
+        self,
+        scene: GaussianScene,
+        camera: Camera,
+        rendered_rgb: np.ndarray,
+        repaired_rgb: np.ndarray,
+    ) -> dict[str, Any]:
+        return self._step_chunk(scene, camera, rendered_rgb, repaired_rgb, {})
 
 
 def instantiate_cuda_repair(params: dict | None = None, **overrides):

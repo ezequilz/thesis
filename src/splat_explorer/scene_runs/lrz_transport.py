@@ -111,6 +111,7 @@ def request_protocol_body(
 ) -> dict[str, Any]:
     """Build the JSON request consumed by :mod:`gpu_worker`."""
     from ..repair_lrz import camera_to_dict
+    from .gpu_worker import DEFAULT_PROMPT
 
     camera_body = camera_to_dict(camera) if not isinstance(camera, dict) else dict(camera)
     body: dict[str, Any] = {
@@ -123,8 +124,8 @@ def request_protocol_body(
         "deadline_unix": float(deadline),
         "created_at": time.time(),
     }
-    if prompt:
-        body["prompt"] = str(prompt)
+    if str(operation) == "repair":
+        body["prompt"] = str(prompt or DEFAULT_PROMPT)
     if repair:
         body["repair"] = dict(repair)
     return body
@@ -494,6 +495,7 @@ class LrzSceneRunTransport:
         repair_seconds: float,
         deadline: float,
         should_stop: Callable[[], bool],
+        prompt: str | None = None,
     ) -> dict[str, Any]:
         if not self._started:
             raise RuntimeError("LRZ scene-run worker has not been started")
@@ -517,7 +519,10 @@ class LrzSceneRunTransport:
             camera=camera,
             repair_seconds=repair_seconds,
             deadline=request_deadline,
-            prompt=self._run_config.get("image_edit_prompt"),
+            prompt=(
+                prompt
+                or self._run_config.get("image_edit_prompt")
+            ),
             repair=repair_cfg,
             operation="repair",
         )

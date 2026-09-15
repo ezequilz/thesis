@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>splat-explorer · scene-run visor</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #101318; --panel: #171c24; --border: #2a3342;
+    --text: #dce3ee; --dim: #8b97a8; --accent: #5aa2ff;
+    --ok: #45c98b; --warn: #e6b450; --err: #ef6a6a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #000; color: var(--text);
+               font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+               display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+           background: var(--panel); border-bottom: 1px solid var(--border);
+           flex-shrink: 0; }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  header h1 span { color: var(--dim); font-weight: 400; }
+  .hint { color: var(--dim); font-size: 12px; }
+  .hint.err { color: var(--err); }
+  a { color: var(--accent); text-decoration: none; }
+  .spacer { flex: 1; }
+  header button {
+    border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+    background: var(--accent); color: #091525; font-weight: 650;
+  }
+  header button:disabled { opacity: .45; cursor: default; }
+  #stage { flex: 1; min-height: 0; width: 100%; background: #000; position: relative; }
+  #stage iframe { width: 100%; height: 100%; border: 0; display: block; }
+  #overlay {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: #000c; color: var(--dim); font-size: 14px; text-align: center; padding: 24px;
+  }
+  #overlay.hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>splat-explorer <span id="title">· visor</span></h1>
+  <span id="hint" class="hint">Loading repaired splat…</span>
+  <span class="spacer"></span>
+  <a href="/scene-runs">scene runs</a>
+  <button id="flip" type="button" disabled>Show original</button>
+</header>
+<div id="stage">
+  <iframe id="frame" title="Scene-run visor" allow="autoplay"></iframe>
+  <div id="overlay">Loading repaired splat…</div>
+</div>
+<script>
+"use strict";
+const runId = decodeURIComponent(location.pathname.replace(/^\/+|\/viser\/?$/g, ""));
+const client = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now());
+const $ = id => document.getElementById(id);
+const title = $("title"), hint = $("hint"), flip = $("flip");
+const frame = $("frame"), overlay = $("overlay");
+const api = `/api/scene-runs/${encodeURIComponent(runId)}/viser`;
+let state = null, pending = false, timer = null, started = false;
+
+function plyLabel(which) {
+  return which === "original" ? "scene_original.ply" : "scene_repaired.ply";
+}
+function setOverlay(text, isError) {
+  overlay.textContent = text || "";
+  overlay.classList.toggle("hidden", !text);
+  hint.classList.toggle("err", Boolean(isError));
+  hint.textContent = text || "";
+}
+function render() {
+  const which = state?.which || "repaired";
+  const status = state?.status || "idle";
+  const showing = status === "ready" ? which : (state?.which || "repaired");
+  document.title = `splat-explorer · ${runId} visor`;
+  title.textContent = `· ${runId}`;
+  flip.textContent = showing === "original" ? "Show repaired" : "Show original";
+  const other = showing === "original" ? "repaired" : "original";
+  const otherReady = Boolean(state?.[other]);
+  flip.disabled = pending || status === "loading" || !otherReady;
+  flip.title = otherReady
+    ? `Swap the full-screen splat to ${plyLabel(other)}`
+    : `No ${plyLabel(other)} on disk yet`;
+  if (state?.viewer_url && !String(frame.src).startsWith(state.viewer_url)) {
+    frame.src = state.viewer_url;
+  }
+  if (!state?.ok && state?.message) {
+    setOverlay(state.message, true);
+    return;
+  }
+  if (status === "error") {
+    setOverlay(state.error || state.message || "Visor failed to load.", true);
+    return;
+  }
+  if (status === "ready" && state.viewer_url) {
+    setOverlay("");
+    hint.classList.remove("err");
+    hint.textContent = showing === "original" ? "original splat" : "repaired splat";
+    return;
+  }
+  const loadingWhich = state?.which || "repaired";
+  setOverlay(`Loading ${plyLabel(loadingWhich)}…`);
+  hint.textContent = `Loading ${plyLabel(loadingWhich)}…`;
+}
+async function fetchJson(url, options) {
+  const response = await fetch(url, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok && body.ok !== false) {
+    throw new Error(body.message || body.error || `HTTP ${response.status}`);
+  }
+  return body;
+}
+async function post(body) {
+  return fetchJson(api, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({client, ...body}),
+  });
+}
+async function refresh(start) {
+  if (start) {
+    pending = true;
+    state = await post({});
+    started = Boolean(state?.viewer_url) || state?.status === "loading" || state?.status === "ready";
+    pending = false;
+  } else if (started) {
+    state = await post({heartbeat: true});
+  } else {
+    state = await fetchJson(api);
+  }
+  render();
+}
+async function tick() {
+  clearTimeout(timer);
+  try {
+    await refresh(!started);
+  } catch (error) {
+    state = {ok: false, message: error.message, status: "error"};
+    render();
+  }
+  const wait = !started || state?.status === "loading" ? 1000 : 8000;
+  timer = setTimeout(tick, wait);
+}
+function stopVisor() {
+  const body = JSON.stringify({stop: true, client});
+  try {
+    navigator.sendBeacon(api, new Blob([body], {type: "application/json"}));
+  } catch (_err) {
+    fetch(api, {method: "POST", headers: {"Content-Type": "application/json"},
+      body, keepalive: true}).catch(() => {});
+  }
+}
+flip.onclick = async () => {
+  if (flip.disabled) return;
+  pending = true;
+  flip.disabled = true;
+  try { state = await post({toggle: true}); }
+  catch (error) { state = {...(state || {}), ok: false, message: error.message, status: "error"}; }
+  pending = false;
+  render();
+};
+window.addEventListener("pagehide", stopVisor);
+tick();
+</script>
+</body>
+</html>

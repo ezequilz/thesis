@@ -2200,6 +2200,7 @@ def test_scene_run_protocol_and_srun_commands():
     assert body["camera"]["width"] == 32
     assert body["repair_seconds"] == 180.0
     assert body["deadline_unix"] == 2_000_000_000.0
+    assert "Repair visible 3D Gaussian rendering artifacts" in body["prompt"]
     queue = active_job_squeue_command("5786047")
     assert "--job=5786047" in queue
     assert "%e|%L" in queue
@@ -2274,7 +2275,7 @@ def test_scene_gpu_worker_keeps_scene_and_qwen_backend_resident(tmp_path):
 
     def make_repair(params):
         assert params["max_chunks"] == 0
-        assert params["densify"] is False
+        assert params["densify"] is True
         return Repair()
 
     worker = SceneRunGpuWorker(

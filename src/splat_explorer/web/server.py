@@ -15,6 +15,10 @@ starting a new episode from the browser costs nothing but the rendering.
 Endpoints:
   GET  /                  dashboard page
   GET  /spectator         HD visor for looking around (not used for VLM captures)
+  GET  /scene-runs        isolated deadline-driven scene-run queue and history
+  GET  /<run_id>/viser    full-screen original/repaired visor for one scene-run
+  GET  /api/scene-runs/<id>/viser  visor snapshot {which, viewer_url, original, repaired}
+  POST /api/scene-runs/<id>/viser  start or flip that visor {which?, toggle?}
   GET  /video/<id>        player tab: loading, then the stitched episode video
   GET  /repair            3D repair review: original vs repaired splat, replay past runs
   GET  /repair/gpu        LRZ SSH + GPU connection dashboard
@@ -761,6 +765,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(200, (STATIC_DIR / "gpu.html").read_bytes(), "text/html; charset=utf-8")
         elif path in ("/scene-runs", "/scene-runs.html"):
             self._send(200, (STATIC_DIR / "scene_runs.html").read_bytes(), "text/html; charset=utf-8")
+        elif self._serve_scene_run_viser_page(path):
+            return
         elif path.startswith("/video/"):
             ep = path[len("/video/"):]
             if not ep or "/" in ep:
@@ -784,6 +790,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
         else:
             self._send_json({"error": "not found"}, 404)
 
+    def _serve_scene_run_viser_page(self, path: str) -> bool:
+        from .scene_run_viser import parse_run_viser_page
+
+        run_id = parse_run_viser_page(path)
+        if run_id is None:
+            return False
+        try:
+            detail = self.app.scene_runs.detail(run_id)
+        except (ImportError, ModuleNotFoundError):
+            self._send_json({"error": "scene-run store unavailable"}, 503)
+            return True
+        except (OSError, RuntimeError, ValueError):
+            self._send_json({"error": "not found"}, 404)
+            return True
+        if detail is None:
+            self._send_json({"error": "not found"}, 404)
+            return True
+        self._send(
+            200,
+            (STATIC_DIR / "scene_run_viser.html").read_bytes(),
+            "text/html; charset=utf-8",
+        )
+        return True
+
     def _serve_scene_runs_get(self, path: str) -> None:
         studio = self.app.scene_runs
         try:
@@ -792,6 +822,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/scene-runs":
                 self._send_json({"runs": studio.list_runs()})
+                return
+            from .scene_run_viser import parse_run_viser_api
+
+            visor_id = parse_run_viser_api(path)
+            if visor_id:
+                if studio.detail(visor_id) is None:
+                    self._send_json({"error": "not found"}, 404)
+                    return
+                self._send_json(studio.visor.snapshot(visor_id))
                 return
             prefix = "/api/scene-runs/"
             if path.startswith(prefix):
@@ -1168,6 +1207,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
                 run = studio.request_stop(str(run_id))
                 self._send_json({"ok": True, "run": run})
+                return
+            from .scene_run_viser import parse_run_viser_api
+
+            visor_id = parse_run_viser_api(path)
+            if visor_id:
+                if studio.detail(visor_id) is None:
+                    self._send_json(
+                        {"ok": False, "message": f"Scene-run {visor_id} not found."},
+                        404,
+                    )
+                    return
+                if body.get("stop"):
+                    result = studio.visor.release(
+                        visor_id, client=body.get("client"),
+                    )
+                    self._send_json(result)
+                    return
+                if body.get("heartbeat"):
+                    result = studio.visor.heartbeat(
+                        visor_id, client=body.get("client"),
+                    )
+                    self._send_json(result)
+                    return
+                result = studio.visor.show(
+                    visor_id,
+                    which=body.get("which"),
+                    toggle=bool(body.get("toggle")),
+                    client=body.get("client"),
+                )
+                code = 200 if result.get("ok") else (
+                    404 if result.get("error") == "not found" else 409
+                )
+                self._send_json(result, code)
                 return
             self._send_json({"error": "not found"}, 404)
         except SceneRunValidationError as exc:

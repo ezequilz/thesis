@@ -169,6 +169,7 @@ def run_image_edit_once(request_dir: Path, config_path: Path) -> dict[str, Any]:
         "status": "error" if error or not images else "ok",
         "error": error or (None if images else "Qwen image edit returned no PNG"),
         "payload": _jsonable(getattr(edit, "payload", {}) or {}),
+        "prompt": prompt,
     }
     if images:
         atomic_write_bytes(request_dir / REGENERATED_NAME, images[0])
@@ -355,6 +356,7 @@ class SceneRunGpuWorker:
                         or f"Qwen image-edit subprocess exited {completed.returncode}"
                     )
                 edit_payload = _jsonable(edit_result.get("payload") or {})
+                edit_payload["prompt"] = prompt
             else:
                 edit = self._editor().edit(rendered_path, prompt)
                 images = list(getattr(edit, "images", None) or [])
@@ -363,6 +365,7 @@ class SceneRunGpuWorker:
                     raise RuntimeError(edit_error or "Qwen image edit returned no PNG")
                 atomic_write_bytes(request_dir / REGENERATED_NAME, images[0])
                 edit_payload = _jsonable(getattr(edit, "payload", {}) or {})
+                edit_payload["prompt"] = prompt
             if (
                 not self.config.get("image_edit_subprocess", False)
                 and self.config.get("release_image_editor_before_repair", False)

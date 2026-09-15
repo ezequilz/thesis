@@ -401,7 +401,7 @@ def _gsplat_backgrounds(background, packed: bool):
 
 def _rasterize(
     gsplat, means, quats, scales, opacities, colors, viewmat, K, width, height,
-    background, packed=False, sparse_grad=None, absgrad=None,
+    background, packed=False, sparse_grad=None, absgrad=None, clamp_rgb=True,
 ):
     packed = bool(packed)
     kwargs = dict(
@@ -446,7 +446,9 @@ def _rasterize(
                 means2d.retain_grad()
             except Exception:
                 pass
-    return rgb.clamp(0.0, 1.0), info if isinstance(info, dict) else {}
+    if clamp_rgb:
+        rgb = rgb.clamp(0.0, 1.0)
+    return rgb, info if isinstance(info, dict) else {}
 
 
 def _maybe_densify(

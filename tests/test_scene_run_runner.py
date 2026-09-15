@@ -27,7 +27,23 @@ class _Renderer:
         return np.ones((camera.height, camera.width), dtype=np.float32)
 
 
-def test_scene_run_rejects_clirelay_transport_fallback():
+def test_image_edit_prompt_includes_artifact_report():
+    from splat_explorer.agent.actions import Action
+    from splat_explorer.scene_runs.runner import _image_edit_prompt
+
+    generic = _image_edit_prompt(Action("rotate", {"yaw_degrees": 15}), {})
+    assert "Repair visible 3D Gaussian rendering artifacts" in generic
+    prompt = _image_edit_prompt(
+        Action("report_artifact", {
+            "description": "stretched smears on the right windows",
+            "image_region": "right third",
+            "severity": "high",
+        }),
+        {},
+    )
+    assert "stretched smears on the right windows" in prompt
+    assert "Focus on: right third." in prompt
+    assert "Severity: high." in prompt
     policy = SimpleNamespace(last_debug={
         "backend": "cli_relay",
         "fallback": True,

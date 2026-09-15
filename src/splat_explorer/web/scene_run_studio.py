@@ -94,6 +94,7 @@ class SceneRunStudio:
         self.cfg = app.cfg
         self.root = Path(_cfg_get(self.cfg, "output.dir", "outputs")) / "scene-runs"
         self._store = store
+        self._visor = None
 
     @property
     def store(self):
@@ -104,6 +105,23 @@ class SceneRunStudio:
 
             self._store = SceneRunStore(root=self.root)
         return self._store
+
+    @property
+    def visor(self):
+        if self._visor is None:
+            from .scene_run_viser import SceneRunViser
+
+            self._visor = SceneRunViser(self)
+        return self._visor
+
+    def ply_status(self, run_id: str) -> dict:
+        """Whether this run has original/repaired PLYs, plus the visor URL."""
+        visor_path = f"/{run_id}/viser"
+        return {
+            "original": self.artifact_path(str(run_id), "scene_original.ply") is not None,
+            "repaired": self.artifact_path(str(run_id), "scene_repaired.ply") is not None,
+            "viser_path": visor_path,
+        }
 
     def scenes(self) -> list[dict]:
         from ..scene.catalog import list_scenes
@@ -194,8 +212,12 @@ class SceneRunStudio:
         if detail is None:
             return None
         result = _jsonable(detail)
-        if isinstance(result, dict) and "files" not in result:
-            result["files"] = self._artifact_listing(str(run_id))
+        if isinstance(result, dict):
+            if "files" not in result:
+                result["files"] = self._artifact_listing(str(run_id))
+            ply = self.ply_status(str(run_id))
+            result["viser_path"] = ply["viser_path"]
+            result["ply"] = {"original": ply["original"], "repaired": ply["repaired"]}
         return result
 
     def create(self, body: Mapping[str, Any] | None) -> dict:

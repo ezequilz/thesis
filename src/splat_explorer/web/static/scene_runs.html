@@ -64,7 +64,10 @@
   .empty { color:var(--dim); text-align:center; padding:24px 8px; }
   .detail-head { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   .detail-head h2 { margin:0; }
-  .detail-head .stop { margin-left:auto; }
+  .detail-head .right { margin-left:auto; display:flex; align-items:center; gap:8px; }
+  a.btn { display:inline-block; border:1px solid var(--border); border-radius:6px;
+    padding:8px 15px; background:var(--panel2); color:var(--text); font-weight:650; }
+  a.btn:hover { border-color:var(--accent); }
   .kv { display:grid; grid-template-columns:150px minmax(0,1fr); gap:5px 12px;
     margin-top:13px; font-size:12.5px; }
   .kv .k { color:var(--dim); }
@@ -333,7 +336,11 @@ function renderDetail() {
   const error = firstValue(b, ["error","last_error","message"]);
   $("detail").innerHTML = `<div class="detail-head">
     <h2>${esc(selectedId)}</h2><span class="status ${esc(status)}">${esc(status)}</span>
-    <button id="stop" class="stop" ${ACTIVE.has(status) ? "" : "disabled"}>Request stop</button>
+    <div class="right">
+      <a class="btn" id="open-viser" href="/${encodeURIComponent(selectedId)}/viser" target="_blank" rel="noopener"
+         title="Starts one dedicated review visor for this run (not the live capture visor).">Open visor ↗</a>
+      <button id="stop" class="stop" ${ACTIVE.has(status) ? "" : "disabled"}>Request stop</button>
+    </div>
   </div>
   <div class="kv">${rows.map(([k,v]) => `<span class="k">${esc(k)}</span><span class="v">${esc(v)}</span>`).join("")}</div>
   ${error && (status === "error" || b.error || b.last_error) ? `<div class="error">${esc(error)}</div>` : ""}

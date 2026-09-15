@@ -21,9 +21,9 @@ class _Scene:
     pass
 
 
-def test_scene_run_repair_factory_forces_densification_off():
-    backend = _default_repair_factory({"densify": True, "max_chunks": 3})
-    assert backend.densify is False
+def test_scene_run_repair_factory_enables_adaptive_density_control():
+    backend = _default_repair_factory({"densify": False, "max_chunks": 3})
+    assert backend.densify is True
     assert backend.max_chunks == 0
 
 

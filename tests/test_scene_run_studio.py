@@ -129,6 +129,8 @@ def test_detail_lists_artifacts_and_resolver_blocks_escape(tmp_path: Path):
 
     detail = studio.detail("run_20260915_200000")
     assert {item["kind"] for item in detail["files"]} == {"image", "ply", "log"}
+    assert detail["viser_path"] == "/run_20260915_200000/viser"
+    assert detail["ply"] == {"original": False, "repaired": True}
     assert studio.artifact_path(
         "run_20260915_200000", "images/step_001.png",
     ) == run_dir / "images" / "step_001.png"
@@ -200,6 +202,123 @@ def test_scene_run_routes_and_safe_files(tmp_path: Path):
         )
         assert code == 404
         assert payload["error"] == "not found"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
+class _FakeVisor:
+    def __init__(self):
+        self.which = None
+        self.shown = []
+        self.heartbeats = []
+        self.released = []
+
+    def snapshot(self, run_id):
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "which": self.which,
+            "status": "ready" if self.which else "idle",
+            "viewer_url": "http://localhost:8082" if self.which else None,
+            "original": True,
+            "repaired": True,
+            "viser_path": f"/{run_id}/viser",
+            "message": "",
+            "error": None,
+        }
+
+    def show(self, run_id, which=None, toggle=False, client=None):
+        requested = str(which or "").strip().lower() or None
+        if toggle:
+            requested = "original" if self.which == "repaired" else "repaired"
+        self.which = requested or "repaired"
+        self.shown.append((run_id, self.which, toggle, client))
+        snap = self.snapshot(run_id)
+        snap["ok"] = True
+        snap["message"] = f"Showing {self.which}."
+        return snap
+
+    def heartbeat(self, run_id, client=None):
+        self.heartbeats.append((run_id, client))
+        return self.snapshot(run_id)
+
+    def release(self, run_id, client=None):
+        self.released.append((run_id, client))
+        self.which = None
+        snap = self.snapshot(run_id)
+        snap["ok"] = True
+        return snap
+
+
+def test_scene_run_visor_page_defaults_to_repaired_and_toggles(tmp_path: Path):
+    app, studio, store = _app(tmp_path)
+    run_dir = store.run_path("run_20260915_200000")
+    run_dir.mkdir(parents=True)
+    (run_dir / "scene_original.ply").write_bytes(b"ply")
+    (run_dir / "scene_repaired.ply").write_bytes(b"ply")
+    visor = _FakeVisor()
+    studio._visor = visor
+    DashboardHandler.app = app
+    server = ThreadingHTTPServer(("127.0.0.1", 0), DashboardHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        code, page = _request(base, "/scene-runs")
+        assert code == 200
+        assert b"Open visor" in page
+        assert b"/${encodeURIComponent(selectedId)}/viser" in page
+
+        code, page = _request(base, "/run_20260915_200000/viser")
+        assert code == 200
+        assert b"Show original" in page
+        assert b"id=\"flip\"" in page
+
+        code, payload = _request(base, "/not-a-run/viser")
+        assert code == 404
+
+        code, payload = _request(base, "/run_19990101_000000/viser")
+        assert code == 404
+
+        code, payload = _request(base, "/api/scene-runs/run_20260915_200000/viser")
+        assert code == 200
+        assert payload["status"] == "idle"
+        assert payload["viser_path"] == "/run_20260915_200000/viser"
+
+        code, payload = _request(base, "/api/scene-runs/run_20260915_200000/viser", {})
+        assert code == 200
+        assert payload["which"] == "repaired"
+        assert payload["viewer_url"] == "http://localhost:8082"
+        assert visor.shown == [("run_20260915_200000", "repaired", False, None)]
+
+        code, payload = _request(base, "/api/scene-runs/run_20260915_200000/viser")
+        assert visor.shown == [("run_20260915_200000", "repaired", False, None)]
+
+        code, payload = _request(
+            base, "/api/scene-runs/run_20260915_200000/viser", {"heartbeat": True, "client": "tab-a"},
+        )
+        assert code == 200
+        assert visor.heartbeats == [("run_20260915_200000", "tab-a")]
+        assert visor.shown == [("run_20260915_200000", "repaired", False, None)]
+
+        code, payload = _request(
+            base, "/api/scene-runs/run_20260915_200000/viser", {"toggle": True},
+        )
+        assert code == 200
+        assert payload["which"] == "original"
+        code, payload = _request(
+            base, "/api/scene-runs/run_20260915_200000/viser", {"toggle": True},
+        )
+        assert payload["which"] == "repaired"
+
+        code, payload = _request(
+            base, "/api/scene-runs/run_20260915_200000/viser", {"stop": True, "client": "tab-a"},
+        )
+        assert code == 200
+        assert visor.released == [("run_20260915_200000", "tab-a")]
+        assert payload["status"] == "idle"
     finally:
         server.shutdown()
         server.server_close()
