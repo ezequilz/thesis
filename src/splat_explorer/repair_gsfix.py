@@ -387,6 +387,18 @@ def _image_to_tensor(image: np.ndarray, width: int, height: int, torch, device):
     return torch.from_numpy(arr.astype(np.float32) / 255.0).to(device)
 
 
+def _gsplat_backgrounds(background, packed: bool):
+    """gsplat 1.5 packed kernels want ``[channels]``; unpacked wants ``[C, channels]``."""
+    packed = bool(packed)
+    channels = int(background.shape[-1]) if getattr(background, "ndim", 0) else 3
+    if packed:
+        flat = background.reshape(-1)
+        return flat[-channels:] if flat.numel() >= channels else flat
+    if getattr(background, "ndim", 0) == 1:
+        return background.unsqueeze(0)
+    return background
+
+
 def _rasterize(
     gsplat, means, quats, scales, opacities, colors, viewmat, K, width, height,
     background, packed=False, sparse_grad=None, absgrad=None,
@@ -404,13 +416,11 @@ def _rasterize(
         height=int(height),
         packed=packed,
     )
-    extra = dict(backgrounds=background.unsqueeze(0), render_mode="RGB")
+    extra = dict(backgrounds=_gsplat_backgrounds(background, packed), render_mode="RGB")
     if absgrad is None:
         absgrad = not packed
     if absgrad:
         extra["absgrad"] = True
-    if sparse_grad is None:
-        sparse_grad = packed
     if sparse_grad:
         extra["sparse_grad"] = True
     try:

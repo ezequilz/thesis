@@ -288,23 +288,25 @@ def should_persist_repair_checkpoint(stats: dict | None, *, last_iters: int = 0)
 
     Status polls during CUDA srun (``cuda_ready`` / ``srun``) must not dump
     an unchanged 20MB ply every 2s — that reloads the visor with no L1.
+    Persist only when a GPU (or CPU) snapshot of the scene is actually new.
     """
     stats = stats or {}
     phase = str(stats.get("phase") or "")
     if phase in (
         "packed", "rsync_up", "srun", "rsync_down", "gpu_ready",
-        "cuda_import", "cuda_ready", "awaiting_ssh",
+        "cuda_import", "cuda_ready", "rasterize", "awaiting_ssh",
     ):
         return False
-    if stats.get("render_rgb") is not None or stats.get("l1_after") is not None:
+    if stats.get("render_rgb") is not None:
         return True
-    iters = int(stats.get("n_iters") or 0)
-    if phase in ("refine", "done", "keyframes") and iters > int(last_iters):
-        return True
+    if stats.get("l1_after") is not None:
+        iters = int(stats.get("checkpoint_iters") or stats.get("n_iters") or 0)
+        if iters > int(last_iters):
+            return True
     if not phase and (
         stats.get("backend")
         or int(stats.get("n_updated") or 0)
-        or iters
+        or int(stats.get("n_iters") or 0)
     ):
         return True
     return False
@@ -1067,7 +1069,8 @@ class SceneRepairer:
                 )
                 if persist:
                     last_saved_iters = max(
-                        last_saved_iters, int(stats.get("n_iters") or 0),
+                        last_saved_iters,
+                        int(stats.get("checkpoint_iters") or stats.get("n_iters") or 0),
                     )
                     with self._lock:
                         save_ply(working, repaired_path_out)

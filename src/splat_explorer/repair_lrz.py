@@ -55,6 +55,8 @@ METRICS_JSON = "metrics.json"
 OUT_PLY = "scene_repaired.ply"
 OUT_RENDER = "repaired_render.png"
 RUN_TXT = "RUN.txt"
+STOP_NAME = "STOP"
+STOP_GRACE_S = 120.0
 
 _DEFAULTS = {
     "user": "go73kaf2",
@@ -630,7 +632,10 @@ def hold_mem_mb(cfg: dict | None = None) -> int:
 # Requesting hold-1G (31G of a 32G allocation) lets unpacked gsplat rasterize
 # of ~400k Gaussians cgroup-OOM after cuda_ready, with no L1 / metrics updates.
 SRUN_HEADROOM_MB = 8 * 1024
+SRUN_WIDE_HEADROOM_MB = 2 * 1024
 SRUN_MIN_WORKER_MB = 8 * 1024
+# 32G holds pack @ 512px. 64G holds run unpacked native GSFix3D once gsplat
+# CUDA is prebuilt in GPU setup (nvcc JIT during repair was the 56G OOM).
 TIGHT_HOST_RAM_MB = 40 * 1024
 TIGHT_TRAIN_MAX_EDGE = 512
 TIGHT_TRAIN_RETRY_EDGES = (512, 384, 320)
@@ -687,7 +692,8 @@ def srun_mem_flag(
     if probe:
         return "--mem=1G"
     mb = mem_to_mb(mem) if mem else hold_mem_mb(cfg)
-    worker = max(SRUN_MIN_WORKER_MB, mb - SRUN_HEADROOM_MB)
+    headroom = SRUN_WIDE_HEADROOM_MB if mb >= 48 * 1024 else SRUN_HEADROOM_MB
+    worker = max(SRUN_MIN_WORKER_MB, mb - headroom)
     if worker % 1024 == 0:
         return f"--mem={worker // 1024}G"
     return f"--mem={worker}M"
@@ -714,8 +720,9 @@ def progress_from_status(body: dict[str, Any] | None) -> dict[str, Any]:
         "message": body.get("message"),
     }
     for key in (
-        "iter", "l1", "l1_before", "gpu_name", "n_visible", "n_stamped",
-        "packed", "train_width", "train_height",
+        "iter", "l1", "l1_before", "l1_after", "gpu_name", "n_visible", "n_stamped",
+        "packed", "train_width", "train_height", "checkpoint_iters", "has_ply",
+        "n_chunks",
     ):
         if key in body:
             payload[key] = body[key]
@@ -803,6 +810,31 @@ def _write_json(path: Path, body: dict) -> None:
     tmp.replace(path)
 
 
+def job_stop_requested(job_dir: Path) -> bool:
+    return (Path(job_dir) / STOP_NAME).is_file()
+
+
+def write_job_checkpoint(job_dir: Path, scene: GaussianScene, stats: dict[str, Any]) -> None:
+    """Atomic ply/render/metrics so the dashboard can download without a re-upload."""
+    job_dir = Path(job_dir)
+    save_ply(scene, job_dir / OUT_PLY)
+    render_rgb = stats.get("render_rgb")
+    if render_rgb is not None:
+        Image.fromarray(np.asarray(render_rgb, dtype=np.uint8)).save(job_dir / OUT_RENDER)
+    metrics = {k: _jsonable(v) for k, v in stats.items() if k != "render_rgb" and v is not None}
+    metrics["job_id"] = job_dir.name
+    _write_json(job_dir / METRICS_JSON, metrics)
+    iters = int(stats.get("n_iters") or stats.get("checkpoint_iters") or 0)
+    extra = {k: v for k, v in metrics.items() if k not in ("job_id", "phase")}
+    write_status(
+        job_dir,
+        phase=str(stats.get("phase") or "refine"),
+        has_ply=True,
+        checkpoint_iters=iters,
+        **extra,
+    )
+
+
 def enable_packed_job_params(job_dir: Path) -> bool:
     """Flip params.json to packed gsplat. False if already packed or missing."""
     path = Path(job_dir) / PARAMS_JSON
@@ -833,9 +865,6 @@ def enable_tighter_job_params(job_dir: Path) -> bool:
     changed = False
     if not params.get("packed"):
         params["packed"] = True
-        changed = True
-    if not params.get("sparse_grad"):
-        params["sparse_grad"] = True
         changed = True
     edge = int(params.get("train_max_edge") or 0)
     next_edge = edge
@@ -986,6 +1015,13 @@ def apply_packed_job(job_dir: Path, backend=None) -> dict[str, Any]:
     job_dir = Path(job_dir)
     camera = camera_from_dict(json.loads((job_dir / CAMERA_JSON).read_text()))
     params = dict(json.loads((job_dir / PARAMS_JSON).read_text()))
+    if backend is None:
+        write_status(
+            job_dir,
+            phase="cuda_import",
+            message="Loading torch/gsplat (reusing prebuilt CUDA kernels when present)…",
+            packed=bool(params.get("packed")),
+        )
     scene = load_ply(job_dir / SCENE_PLY)
     rendered = np.asarray(Image.open(job_dir / RENDERED_PNG).convert("RGB"), dtype=np.uint8)
     repaired = np.asarray(Image.open(job_dir / REPAIRED_PNG).convert("RGB"), dtype=np.uint8)
@@ -994,9 +1030,6 @@ def apply_packed_job(job_dir: Path, backend=None) -> dict[str, Any]:
     if tight:
         if not params.get("packed"):
             params["packed"] = True
-            changed = True
-        if not params.get("sparse_grad"):
-            params["sparse_grad"] = True
             changed = True
         if int(params.get("train_max_edge") or 0) <= 0:
             params["train_max_edge"] = TIGHT_TRAIN_MAX_EDGE
@@ -1019,7 +1052,7 @@ def apply_packed_job(job_dir: Path, backend=None) -> dict[str, Any]:
         write_status(
             job_dir,
             phase="cuda_import",
-            message="Loading torch/gsplat (first run on this node compiles CUDA kernels)…",
+            message="Loading torch/gsplat (reusing /workspace/python/torch_extensions if built)…",
             n_gaussians=int(scene.num_gaussians),
             packed=bool(params.get("packed")),
         )
@@ -1057,16 +1090,35 @@ def apply_packed_job(job_dir: Path, backend=None) -> dict[str, Any]:
         backend.on_progress = on_progress
     except Exception:
         pass
-    stats = backend.apply(scene, camera, rendered, repaired)
-    save_ply(scene, job_dir / OUT_PLY)
-    render_rgb = stats.get("render_rgb")
-    if render_rgb is not None:
-        Image.fromarray(np.asarray(render_rgb, dtype=np.uint8)).save(job_dir / OUT_RENDER)
-    metrics = {k: v for k, v in stats.items() if k != "render_rgb"}
-    metrics["job_id"] = job_dir.name
-    _write_json(job_dir / METRICS_JSON, metrics)
-    write_status(job_dir, phase="done", message="CUDA refine finished.", **{
-        k: _jsonable(v) for k, v in metrics.items() if k not in ("job_id",)
+
+    def should_stop() -> bool:
+        return job_stop_requested(job_dir)
+
+    deadline = params.get("deadline_unix")
+    try:
+        deadline_f = float(deadline) if deadline not in (None, "") else None
+    except (TypeError, ValueError):
+        deadline_f = None
+    use_until = int(params.get("max_chunks", 1) or 0) != 1 and hasattr(backend, "apply_until")
+
+    def on_checkpoint(stats: dict) -> None:
+        write_job_checkpoint(job_dir, scene, stats)
+        if callable(existing):
+            existing(stats)
+
+    if use_until:
+        stats = backend.apply_until(
+            scene, camera, rendered, repaired,
+            should_stop=should_stop,
+            deadline=deadline_f,
+            on_checkpoint=on_checkpoint,
+        )
+    else:
+        stats = backend.apply(scene, camera, rendered, repaired)
+    write_job_checkpoint(job_dir, scene, stats)
+    metrics = {k: _jsonable(v) for k, v in stats.items() if k != "render_rgb" and v is not None}
+    write_status(job_dir, phase="done", message="CUDA refine finished.", has_ply=True, **{
+        k: v for k, v in metrics.items() if k not in ("job_id", "phase", "message", "has_ply")
     })
     return stats
 
@@ -1106,7 +1158,7 @@ SESSION_DOWN_TTL_S = 4.0
 SSH_STAGGER_S = 0.4
 SSH_CONNECT_TIMEOUT_S = 8
 SINFO_TTL_S = 600.0  # Same as probe. Reloads must not re-run sinfo.
-SETUP_TIMEOUT_S = 1800.0  # First gsplat compile on a node can take 10–20 min.
+SETUP_TIMEOUT_S = 3600.0  # Sequential nvcc of gsplat CUDA can take 20–40 min.
 SETUP_POLL_S = 8.0
 HISTORY_DEFAULT_DAYS = 14
 SACCT_FORMAT = (
@@ -3521,6 +3573,28 @@ def push_job_params(cfg: dict, job_id: str, job_dir: Path) -> None:
     ])
 
 
+def request_remote_stop(cfg: dict, job_id: str) -> None:
+    """Create STOP on DSS so the GPU loop checkpoints instead of dying mid-iter."""
+    path = f"{remote_job_dir(cfg, job_id)}/{STOP_NAME}"
+    _ssh_run(cfg, f"touch {shlex.quote(path)}", timeout=15)
+
+
+def pull_remote_job_artifacts(cfg: dict, job_id: str, job_dir: Path) -> None:
+    """Download repaired ply/render/metrics only — never re-upload the scene."""
+    job_dir = Path(job_dir)
+    remote = f"{cfg['user']}@{cfg['host']}:{remote_job_dir(cfg, job_id)}/"
+    argv = [
+        "rsync", "-az", "-e", rsync_ssh_cmd(cfg),
+        "--include", OUT_PLY,
+        "--include", OUT_RENDER,
+        "--include", METRICS_JSON,
+        "--exclude", "*",
+        remote,
+        f"{job_dir}/",
+    ]
+    _mux_run(argv)
+
+
 def _code_src() -> Path:
     code_src = Path(__file__).resolve().parents[2] / "src"
     if not code_src.is_dir():
@@ -3529,15 +3603,23 @@ def _code_src() -> Path:
 
 
 def _remote_pythonpath_exports(cfg: dict | None = None) -> str:
-    jobs = 1 if hold_mem_mb(cfg) <= TIGHT_HOST_RAM_MB else 4
+    # Parallel nvcc of gsplat kernels OOMs a 56G step cgroup. One job also
+    # reuses TORCH_EXTENSIONS_DIR on DSS so later srun steps skip compile.
     return (
         f"export PYTHONPATH={REMOTE_PYTHONPATH}${{PYTHONPATH:+:$PYTHONPATH}}; "
+        "export PATH=/workspace/python/bin:$PATH; "
         "if [ -z \"${LRZ_CUDA_ARCH:-}\" ] && [ -f /workspace/python/.cuda-arch ]; then "
         "LRZ_CUDA_ARCH=$(cat /workspace/python/.cuda-arch); fi; "
         "export TORCH_CUDA_ARCH_LIST=\"${LRZ_CUDA_ARCH:-8.0}\"; "
         "export OMP_NUM_THREADS=1; export TORCH_NUM_THREADS=1; "
         "export MALLOC_ARENA_MAX=1; export PYTHONMALLOC=malloc; "
-        f"export MAX_JOBS={jobs}; "
+        "export MAX_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=1 NINJAFLAGS=-j1 MAKEFLAGS=-j1; "
+        "export FAST_COMPILE=1 VERBOSE=1; "
+        "export NVCC_APPEND_FLAGS='--threads=1'; "
+        "export TORCH_EXTENSIONS_DIR=/workspace/python/torch_extensions; "
+        "export TMPDIR=/workspace/tmp TMP=/workspace/tmp TEMP=/workspace/tmp; "
+        "export HOME=/workspace/python/home XDG_CACHE_HOME=/workspace/python/cache; "
+        "mkdir -p /workspace/python/torch_extensions /workspace/tmp /workspace/python/home /workspace/python/cache /workspace/python/bin; "
     )
 
 
@@ -3565,14 +3647,16 @@ def container_srun_prefix(cfg: dict, *, mem_flag: str | None = None) -> str:
 def srun_worker_command(cfg: dict, job_id: str, *, mem_flag: str | None = None) -> str:
     inner = (
         _remote_pythonpath_exports(cfg)
-        + f"python -m splat_explorer.repair_lrz --job-dir /workspace/inputs/{job_id}"
+        + f"python -u -m splat_explorer.repair_lrz --job-dir /workspace/inputs/{job_id}"
     )
     return container_srun_prefix(cfg, mem_flag=mem_flag) + f"bash -lc {shlex.quote(inner)}"
 
 
 def srun_setup_command(cfg: dict) -> str:
     inner = _remote_pythonpath_exports(cfg) + "python -m splat_explorer.repair_lrz --setup"
-    return container_srun_prefix(cfg) + f"bash -lc {shlex.quote(inner)}"
+    setup_cfg = dict(cfg)
+    setup_cfg["cpus"] = 1  # nvcc thread pool tracks CPU count; 1 keeps host RAM down
+    return container_srun_prefix(setup_cfg) + f"bash -lc {shlex.quote(inner)}"
 
 
 def sync_code_to_dss(cfg: dict | None = None) -> None:
@@ -3719,6 +3803,243 @@ def detect_cuda_arch_list(*, device: int = 0) -> str:
     return "8.0"
 
 
+def _find_gsplat_cuda_so() -> Path | None:
+    root = Path(os.environ.get("TORCH_EXTENSIONS_DIR") or "")
+    if root.is_dir():
+        hits = sorted(root.rglob("gsplat*.so"))
+        if hits:
+            return hits[0]
+    return None
+
+
+def _patch_gsplat_nvcc_single_thread(site: Path) -> None:
+    """Ask nvcc for one thread so CUDA 13 JIT fits a 64G Slurm cgroup."""
+    path = Path(site) / "gsplat" / "cuda" / "_backend.py"
+    if not path.is_file():
+        return
+    text = path.read_text()
+    if '"--threads"' in text or "'--threads'" in text:
+        return
+    old = '            extra_cuda_cflags += ["-use_fast_math"]\n'
+    new = old + '        extra_cuda_cflags += ["--threads", "1"]\n'
+    if old not in text:
+        return
+    path.write_text(text.replace(old, new, 1))
+
+
+def _prepare_gsplat_compile_env(*, site: str | None = None) -> None:
+    os.environ["MAX_JOBS"] = "1"
+    os.environ["CMAKE_BUILD_PARALLEL_LEVEL"] = "1"
+    os.environ["NINJAFLAGS"] = "-j1"
+    os.environ["MAKEFLAGS"] = "-j1"
+    os.environ["FAST_COMPILE"] = "1"
+    os.environ["VERBOSE"] = "1"
+    os.environ["NVCC_APPEND_FLAGS"] = "--threads=1"
+    if site:
+        site_path = Path(site)
+        _patch_gsplat_nvcc_single_thread(site_path)
+        bin_dir = site_path / "bin"
+        if bin_dir.is_dir():
+            os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+
+
+def _gsplat_cuda_dir(site: str | None = None) -> Path:
+    """Locate gsplat/cuda without importing gsplat (import JIT-compiles)."""
+    import importlib.util
+    import sys
+
+    if site and site not in sys.path:
+        sys.path.insert(0, site)
+    spec = importlib.util.find_spec("gsplat")
+    if spec is None or not spec.origin:
+        raise RuntimeError("gsplat is not installed (needed to compile gsplat_cuda.so).")
+    return Path(spec.origin).resolve().parent / "cuda"
+
+
+def _gsplat_cuda_sources(site: str | None = None) -> tuple[list[str], list[str]]:
+    cuda_dir = _gsplat_cuda_dir(site)
+    sources = (
+        sorted(str(p) for p in cuda_dir.glob("csrc/*.cu"))
+        + sorted(str(p) for p in cuda_dir.glob("csrc/*.cpp"))
+        + [str(cuda_dir / "ext.cpp")]
+    )
+    includes = [
+        str(cuda_dir / "include"),
+        str(cuda_dir / "csrc" / "third_party" / "glm"),
+    ]
+    missing = [p for p in sources if not Path(p).is_file()]
+    if missing or not any(p.endswith(".cu") for p in sources):
+        raise RuntimeError(f"gsplat CUDA sources missing under {cuda_dir}: {missing[:8]}")
+    return sources, includes
+
+
+def gsplat_ninja_build_dir() -> Path:
+    root = Path(os.environ.get("TORCH_EXTENSIONS_DIR") or "")
+    if not str(root):
+        raise RuntimeError("TORCH_EXTENSIONS_DIR is not set.")
+    return root / "gsplat_cuda"
+
+
+def gsplat_ninja_command(build_dir: Path | None = None) -> list[str]:
+    return ["ninja", "-j1", "-v", "-C", str(build_dir or gsplat_ninja_build_dir())]
+
+
+def _gsplat_version_from_site(site: Path) -> str | None:
+    for meta in sorted(site.glob("gsplat-*.dist-info/METADATA")):
+        for line in meta.read_text().splitlines():
+            if line.startswith("Version:"):
+                return line.split(":", 1)[1].strip()
+    return None
+
+
+def _probe_torch_cuda_subprocess() -> dict[str, Any]:
+    """Short-lived CUDA probe so the setup process never keeps a torch RSS."""
+    import sys
+
+    script = (
+        "import json, torch\n"
+        "ok = bool(torch.cuda.is_available())\n"
+        "cap = list(torch.cuda.get_device_capability(0)) if ok else [0, 0]\n"
+        "name = torch.cuda.get_device_name(0) if ok else ''\n"
+        "print(json.dumps({"
+        "'available': ok, 'gpu': name, 'cap': cap, "
+        "'torch': torch.__version__, 'cuda': torch.version.cuda"
+        "}))\n"
+    )
+    out = subprocess.check_output([sys.executable, "-c", script], text=True, timeout=120)
+    lines = [ln for ln in out.splitlines() if ln.strip().startswith("{")]
+    if not lines:
+        raise RuntimeError("torch CUDA probe produced no JSON.")
+    return json.loads(lines[-1])
+
+
+def write_gsplat_ninja_build(*, site: str | None = None) -> Path:
+    """Import torch only long enough to emit build.ninja — do not run nvcc here."""
+    import inspect
+    import sys
+
+    _prepare_gsplat_compile_env(site=site)
+    if site and site not in sys.path:
+        sys.path.insert(0, site)
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    import torch.utils.cpp_extension as cpp
+
+    cpp._run_ninja_build = lambda *a, **k: None
+    if hasattr(cpp, "_run_ninja"):
+        cpp._run_ninja = lambda *a, **k: None
+    writer = getattr(cpp, "_write_ninja_file_and_build_library", None)
+    if writer is None:
+        raise RuntimeError("this torch build cannot emit a ninja file for gsplat CUDA")
+    name = "gsplat_cuda"
+    get_build = getattr(cpp, "_get_build_directory")
+    build_dir = Path(get_build(name, verbose=True))
+    build_dir.mkdir(parents=True, exist_ok=True)
+    lock = build_dir / "lock"
+    try:
+        lock.unlink()
+    except FileNotFoundError:
+        pass
+    sources, includes = _gsplat_cuda_sources(site)
+    extra_cflags = ["-O0", "-Wno-attributes"]
+    extra_cuda_cflags = ["-O0", "-use_fast_math", "--threads", "1"]
+    sig = inspect.signature(writer)
+    kwargs = {
+        "name": name,
+        "sources": sources,
+        "extra_cflags": extra_cflags,
+        "extra_cuda_cflags": extra_cuda_cflags,
+        "extra_sycl_cflags": None,
+        "extra_ldflags": [],
+        "extra_include_paths": includes,
+        "build_directory": str(build_dir),
+        "verbose": True,
+        "with_cuda": True,
+        "with_sycl": False,
+        "is_standalone": False,
+    }
+    kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    logger.info("Writing gsplat CUDA ninja for %d sources → %s", len(sources), build_dir)
+    writer(**kwargs)
+    ninja = build_dir / "build.ninja"
+    if not ninja.is_file():
+        raise RuntimeError(f"gsplat ninja was not written to {ninja}")
+    logger.info("Wrote %s", ninja)
+    return build_dir
+
+
+def run_gsplat_ninja_build(build_dir: Path | None = None) -> Path:
+    """Run ninja -j1 in this process. Caller must not have imported torch."""
+    import shutil
+    import sys
+
+    if "torch" in sys.modules:
+        raise RuntimeError(
+            "nvcc must not share RSS with a loaded torch; run ninja in a fresh process."
+        )
+    build_dir = Path(build_dir or gsplat_ninja_build_dir())
+    ninja_file = build_dir / "build.ninja"
+    if not ninja_file.is_file():
+        raise RuntimeError(f"missing {ninja_file}")
+    ninja_bin = shutil.which("ninja")
+    if not ninja_bin:
+        raise RuntimeError("ninja is not on PATH (pip install ninja into /workspace/python).")
+    argv = gsplat_ninja_command(build_dir)
+    argv[0] = ninja_bin
+    env = os.environ.copy()
+    env["MAX_JOBS"] = "1"
+    env["NINJAFLAGS"] = "-j1"
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    logger.info("Compiling gsplat CUDA with %s (torch not loaded)", " ".join(argv))
+    subprocess.check_call(argv, env=env)
+    so = _find_gsplat_cuda_so()
+    if so is None:
+        cand = build_dir / "gsplat_cuda.so"
+        if cand.is_file():
+            return cand
+        raise RuntimeError(
+            "gsplat CUDA ninja finished but gsplat_cuda.so was not found under "
+            f"TORCH_EXTENSIONS_DIR={os.environ.get('TORCH_EXTENSIONS_DIR')!r}."
+        )
+    return so
+
+
+def compile_gsplat_cuda_extension(*, site: str | None = None) -> dict[str, Any]:
+    """Build fused gsplat CUDA into TORCH_EXTENSIONS_DIR without a torch splat stand-in.
+
+    In-process JIT keeps a 10–20G torch RSS while nvcc runs, which OOMs a 62G
+    Slurm step. Emit ninja in a short torch process, then nvcc with torch gone.
+    """
+    import sys
+
+    _prepare_gsplat_compile_env(site=site)
+    so = _find_gsplat_cuda_so()
+    if so is not None:
+        logger.info("Reusing prebuilt gsplat CUDA extension %s", so)
+        return {"ok": True, "so": str(so), "reused": True}
+    if "torch" in sys.modules:
+        argv = [sys.executable, "-m", "splat_explorer.repair_lrz", "--compile-gsplat-cuda"]
+        if site:
+            argv += ["--site", site]
+        logger.info("Spawning torch-free gsplat CUDA compile: %s", " ".join(argv))
+        subprocess.check_call(argv)
+        so = _find_gsplat_cuda_so()
+        if so is None:
+            raise RuntimeError(
+                "out-of-process gsplat CUDA compile finished without gsplat_cuda.so under "
+                f"TORCH_EXTENSIONS_DIR={os.environ.get('TORCH_EXTENSIONS_DIR')!r}."
+            )
+        return {"ok": True, "so": str(so), "reused": False, "out_of_process": True}
+    argv = [sys.executable, "-m", "splat_explorer.repair_lrz", "--write-gsplat-ninja"]
+    if site:
+        argv += ["--site", site]
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    logger.info("Emitting gsplat CUDA ninja (short torch process)…")
+    subprocess.check_call(argv, env=env)
+    so = run_gsplat_ninja_build()
+    return {"ok": True, "so": str(so), "reused": False, "out_of_process": True}
+
+
 def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
     """Inside the Pyxis container: verify torch/CUDA and install gsplat onto DSS."""
     import sys
@@ -3733,28 +4054,23 @@ def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
         sys.path.insert(0, site)
     existing = os.environ.get("PYTHONPATH") or ""
     os.environ["PYTHONPATH"] = site + (os.pathsep + existing if existing else "")
+    os.environ["PATH"] = str(python_dir / "bin") + os.pathsep + os.environ.get("PATH", "")
 
-    import torch
-
-    if not torch.cuda.is_available():
+    probe = _probe_torch_cuda_subprocess()
+    if not probe.get("available"):
         raise RuntimeError("torch.cuda is not available in this container.")
-    arch = detect_cuda_arch_list()
+    cap = probe.get("cap") or [8, 0]
+    arch = f"{int(cap[0])}.{int(cap[1])}"
     os.environ["TORCH_CUDA_ARCH_LIST"] = arch
-    gpu = torch.cuda.get_device_name(0)
-    cap = torch.cuda.get_device_capability(0)
-    torch_ver = torch.__version__
-    cuda_ver = torch.version.cuda
+    gpu = str(probe.get("gpu") or "")
+    torch_ver = str(probe.get("torch") or "")
+    cuda_ver = str(probe.get("cuda") or "")
     logger.info("torch %s cuda %s gpu %s arch %s", torch_ver, cuda_ver, gpu, arch)
 
     arch_file = root / _CUDA_ARCH_MARKER
     prev_arch = arch_file.read_text().strip() if arch_file.is_file() else ""
-    gsplat_ver = None
-    try:
-        import gsplat  # noqa: F401
-        gsplat_ver = getattr(gsplat, "__version__", "?")
-        need_gsplat = prev_arch != arch
-    except ImportError:
-        need_gsplat = True
+    gsplat_pkg = python_dir / "gsplat"
+    need_gsplat = (not gsplat_pkg.is_dir()) or (bool(prev_arch) and prev_arch != arch)
 
     installed = False
     if need_gsplat:
@@ -3762,7 +4078,7 @@ def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
         cmd = [sys.executable, "-m", "pip", "install", "--target", site]
         if prev_arch and prev_arch != arch:
             logger.info("gsplat was built for sm_%s, rebuilding for sm_%s", prev_arch, arch)
-            cmd += ["--upgrade", "--force-reinstall", "gsplat>=1.4"]
+            cmd += ["--upgrade", "--force-reinstall", "gsplat>=1.4", "ninja"]
         else:
             cmd += [
                 "ninja",
@@ -3775,9 +4091,17 @@ def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
         importlib.invalidate_caches()
         if site not in sys.path:
             sys.path.insert(0, site)
-        import gsplat  # noqa: F401
-        gsplat_ver = getattr(gsplat, "__version__", "?")
+    gsplat_ver = _gsplat_version_from_site(python_dir)
     arch_file.write_text(arch + "\n")
+
+    ext_dir = python_dir / "torch_extensions"
+    tmp_dir = root / "tmp"
+    ext_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["TORCH_EXTENSIONS_DIR"] = str(ext_dir)
+    os.environ.setdefault("TMPDIR", str(tmp_dir))
+    os.environ["TORCH_CUDA_ARCH_LIST"] = arch
+    cuda_ext = compile_gsplat_cuda_extension(site=site)
 
     job_id = os.environ.get("SLURM_JOB_ID") or os.environ.get("LRZ_JOB_ID") or "unknown"
     family = gpu_family_from_name(gpu)
@@ -3789,11 +4113,12 @@ def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
         "partition": os.environ.get("SLURM_JOB_PARTITION") or "",
         "torch": torch_ver,
         "cuda": cuda_ver,
-        "gsplat": str(gsplat_ver),
+        "gsplat": str(gsplat_ver or "?"),
         "installed": installed,
         "python": site,
         "cuda_arch": arch,
-        "compute_cap": f"{cap[0]}.{cap[1]}",
+        "compute_cap": f"{int(cap[0])}.{int(cap[1])}",
+        "gsplat_cuda": cuda_ext,
     }
     (logs / f"setup-{job_id}.json").write_text(json.dumps(body, indent=2) + "\n")
     print("SETUP_OK " + json.dumps(body), flush=True)
@@ -4310,23 +4635,40 @@ def run_srun_worker(
             argv, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
         )
         try:
+            last_ckpt = -1
+            stop_at: float | None = None
             while True:
                 if should_stop is not None and should_stop():
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                    try:
-                        cancel_overlapping_repair_steps(cfg)
-                    except Exception as exc:
-                        logger.warning("could not cancel leftover CUDA steps: %s", exc)
-                    raise RepairStopped("Stopped during CUDA srun.")
+                    if stop_at is None:
+                        try:
+                            request_remote_stop(cfg, job_id)
+                        except Exception as exc:
+                            logger.warning("could not write remote STOP: %s", exc)
+                        stop_at = time.time()
+                    if time.time() - stop_at >= STOP_GRACE_S:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        try:
+                            cancel_overlapping_repair_steps(cfg)
+                        except Exception as exc:
+                            logger.warning("could not cancel leftover CUDA steps: %s", exc)
+                        raise RepairStopped("Stopped during CUDA srun.")
                 rc = proc.poll()
                 try:
                     pull_remote_job_status(cfg, job_id, job_dir)
                 except RuntimeError as exc:
                     logger.warning("remote status poll failed: %s", exc)
+                body = read_status_file(job_dir)
+                ckpt = int(body.get("checkpoint_iters") or 0)
+                if ckpt > last_ckpt:
+                    try:
+                        pull_remote_job_artifacts(cfg, job_id, job_dir)
+                        last_ckpt = ckpt
+                    except Exception as exc:
+                        logger.warning("artifact download failed: %s", exc)
                 if on_progress is not None:
                     on_progress(progress_from_status(read_status_file(job_dir)))
                 if rc is not None:
@@ -4431,7 +4773,7 @@ def sync_code_and_job(
     job_id = job_dir.name
     remote = f"{cfg['user']}@{cfg['host']}"
     ssh_e = rsync_ssh_cmd(cfg)
-    note("rsync_up", "Uploading scene + code to DSS…")
+    note("rsync_up", "Uploading scene + code to DSS (once for this repair)…")
     with _gpu_exclusive("repair", timeout=SETUP_TIMEOUT_S):
         sync_code_to_dss(cfg)
         _mux_run(ssh_argv(cfg, multiplex=True) + [
@@ -4607,10 +4949,13 @@ class LrzRemoteRepair:
             "train_max_edge": int(
                 self.train_max_edge or (TIGHT_TRAIN_MAX_EDGE if tight else 0)
             ),
-            "sparse_grad": bool(self.sparse_grad) or tight,
+            "sparse_grad": bool(self.sparse_grad),
             "white_background": bool(self.white_background),
             "max_chunks": int(self.max_chunks),
         }
+        deadline = getattr(self, "_deadline", None)
+        if deadline:
+            params["deadline_unix"] = float(deadline)
         if str(self.method) in ("gsfix-gsplat-visprune", "visprune"):
             params.update(
                 freeze_occluded=False,
@@ -4652,10 +4997,40 @@ class LrzRemoteRepair:
             scene, camera, rendered_rgb, repaired_rgb, params=self._params(cfg),
         )
         password = get_ssh_password() or os.environ.get("LRZ_SSH_PASSWORD")
-        if self.on_progress is not None:
-            self.on_progress({"phase": "rsync_up", "n_iters": 0, "n_updated": 0})
+        last_ply_mtime = 0.0
+        user_progress = self.on_progress
+
+        def wrapped_progress(stats: dict | None) -> None:
+            nonlocal last_ply_mtime
+            merged = dict(stats or {})
+            ply = job_dir / OUT_PLY
+            try:
+                mtime = ply.stat().st_mtime if ply.is_file() else 0.0
+            except OSError:
+                mtime = 0.0
+            if mtime > last_ply_mtime:
+                last_ply_mtime = mtime
+                try:
+                    ingested = ingest_job_results(scene, job_dir)
+                    merged = {**ingested, **merged}
+                    if ingested.get("render_rgb") is not None:
+                        merged["render_rgb"] = ingested["render_rgb"]
+                    if ingested.get("l1_after") is not None:
+                        merged["l1_after"] = ingested["l1_after"]
+                    merged.setdefault("phase", "refine")
+                    merged.setdefault(
+                        "checkpoint_iters",
+                        int(merged.get("n_iters") or ingested.get("n_iters") or 0),
+                    )
+                except FileNotFoundError:
+                    pass
+            if user_progress is not None:
+                user_progress(merged)
+
+        if user_progress is not None:
+            user_progress({"phase": "rsync_up", "n_iters": 0, "n_updated": 0})
         kwargs = {
-            "on_progress": self.on_progress,
+            "on_progress": wrapped_progress,
             "should_stop": getattr(self, "should_stop", None),
         }
         try:
@@ -4689,58 +5064,36 @@ class LrzRemoteRepair:
         deadline: float | None = None,
         on_checkpoint=None,
     ) -> dict[str, Any]:
-        last: dict[str, Any] | None = None
-        total_iters = 0
-        l1_before = None
-        chunk = 0
+        """One remote job: upload the scene once, GPU loops, dashboard only downloads."""
+        empty = {
+            "backend": str(self.method),
+            "n_visible": scene.num_gaussians,
+            "n_updated": 0,
+            "n_stamped": 0,
+            "n_spawned": 0,
+            "n_gaussians": scene.num_gaussians,
+            "n_iters": 0,
+            "l1_before": 0.0,
+            "l1_after": None,
+        }
+        if should_stop is not None and should_stop():
+            return empty
+        if deadline is not None and time.time() >= deadline:
+            return empty
         self.should_stop = should_stop
         self.on_progress = on_checkpoint
-        password = get_ssh_password() or os.environ.get("LRZ_SSH_PASSWORD")
-        once = not lrz_session_alive() and not bool(password)
-        limit = int(self.max_chunks)
-        saved_densify = self.densify
-        visprune = str(self.method) in ("gsfix-gsplat-visprune", "visprune")
+        self._deadline = deadline
         try:
-            while True:
-                if should_stop is not None and should_stop():
-                    break
-                if deadline is not None and time.time() >= deadline:
-                    break
-                if limit > 0 and chunk >= limit:
-                    break
-                try:
-                    last = self.apply(scene, camera, rendered_rgb, repaired_rgb)
-                except RepairStopped:
-                    break
-                chunk += 1
-                if visprune:
-                    self.densify = False
-                if l1_before is None:
-                    l1_before = last.get("l1_before")
-                total_iters += int(last.get("n_iters") or 0)
-                last = dict(last)
-                last["n_iters"] = total_iters
-                last["n_chunks"] = chunk
-                last["n_stamped"] = int(last.get("n_stamped") or 0)
-                last["l1_before"] = l1_before
-                if on_checkpoint is not None:
-                    on_checkpoint(last)
-                if once:
-                    break
+            last = self.apply(scene, camera, rendered_rgb, repaired_rgb)
+        except RepairStopped:
+            return empty
         finally:
-            self.densify = saved_densify
-        if last is None:
-            return {
-                "backend": str(self.method),
-                "n_visible": scene.num_gaussians,
-                "n_updated": 0,
-                "n_stamped": 0,
-                "n_spawned": 0,
-                "n_gaussians": scene.num_gaussians,
-                "n_iters": 0,
-                "l1_before": 0.0,
-                "l1_after": None,
-            }
+            self._deadline = None
+        last = dict(last)
+        last["n_stamped"] = int(last.get("n_stamped") or 0)
+        last["phase"] = last.get("phase") or "refine"
+        if on_checkpoint is not None:
+            on_checkpoint(last)
         return last
 
 
@@ -4753,8 +5106,25 @@ def main(argv: list[str] | None = None) -> None:
         "--setup", action="store_true",
         help="Inside the Pyxis container: verify torch/CUDA and install gsplat onto DSS",
     )
+    parser.add_argument(
+        "--write-gsplat-ninja", action="store_true",
+        help="Emit gsplat CUDA build.ninja then exit (no nvcc; used by --setup)",
+    )
+    parser.add_argument(
+        "--compile-gsplat-cuda", action="store_true",
+        help="Build gsplat_cuda.so with nvcc in a torch-free process",
+    )
+    parser.add_argument("--site", help="pip --target dir that contains gsplat (e.g. /workspace/python)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if args.write_gsplat_ninja:
+        path = write_gsplat_ninja_build(site=args.site)
+        print("NINJA_OK " + str(path), flush=True)
+        return
+    if args.compile_gsplat_cuda:
+        stats = compile_gsplat_cuda_extension(site=args.site)
+        print("COMPILE_OK " + json.dumps(stats), flush=True)
+        return
     if args.setup:
         stats = apply_gpu_setup()
         logger.info("gpu setup done: %s", stats)

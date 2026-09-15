@@ -36,10 +36,14 @@ def test_should_persist_repair_checkpoint():
     from splat_explorer.repair import should_persist_repair_checkpoint
 
     assert should_persist_repair_checkpoint({"phase": "cuda_ready", "n_iters": 0}) is False
+    assert should_persist_repair_checkpoint({"phase": "rasterize", "n_iters": 0}) is False
     assert should_persist_repair_checkpoint({"phase": "srun", "n_iters": 0}) is False
-    assert should_persist_repair_checkpoint({"phase": "refine", "n_iters": 1}) is True
+    assert should_persist_repair_checkpoint({"phase": "refine", "n_iters": 1}) is False
     assert should_persist_repair_checkpoint(
-        {"phase": "refine", "n_iters": 1}, last_iters=1,
+        {"phase": "refine", "n_iters": 1, "l1_after": 0.04},
+    ) is True
+    assert should_persist_repair_checkpoint(
+        {"phase": "refine", "n_iters": 1, "l1_after": 0.04}, last_iters=1,
     ) is False
     assert should_persist_repair_checkpoint({"backend": "cpu-photometric", "n_updated": 4}) is True
     assert should_persist_repair_checkpoint({"render_rgb": np.zeros((2, 2, 3), np.uint8)}) is True
@@ -167,8 +171,21 @@ def test_repair_progress_suffix_does_not_call_updates_stamped():
     assert "99" not in stamped
 
 
-def test_ssim_and_l1_on_cpu():
+def test_rasterize_is_fused_gsplat_cuda():
+    import inspect
+
+    from splat_explorer import repair_gsfix
+
+    src = inspect.getsource(repair_gsfix)
+    assert "_rasterize_torch_fallback" not in src
+    assert "_torch_impl" not in src
+    assert "gsplat.rasterization" in inspect.getsource(repair_gsfix._rasterize)
     torch = pytest.importorskip("torch")
+    bg = torch.zeros(3)
+    packed_bg = repair_gsfix._gsplat_backgrounds(bg, True)
+    assert tuple(packed_bg.shape) == (3,)
+    assert tuple(repair_gsfix._gsplat_backgrounds(bg.unsqueeze(0), True).shape) == (3,)
+    assert tuple(repair_gsfix._gsplat_backgrounds(bg, False).shape) == (1, 3)
     a = torch.zeros(32, 32, 3)
     b = torch.ones(32, 32, 3)
     loss, l1 = photometric_loss(a, a, torch)

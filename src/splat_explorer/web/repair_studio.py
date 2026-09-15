@@ -1048,7 +1048,7 @@ class RepairStudio:
                         )
                     elif str(phase) in (
                         "rsync_up", "srun", "rsync_down",
-                        "gpu_ready", "cuda_import", "cuda_ready",
+                        "gpu_ready", "cuda_import", "cuda_ready", "rasterize",
                     ):
                         msg = stats.get("message") or (
                             f"Step {views[0].get('step')} {phase} via LRZ ControlMaster"

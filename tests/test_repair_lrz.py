@@ -84,6 +84,121 @@ def test_pack_and_fake_worker(tmp_path, monkeypatch):
     assert ingested["render_rgb"].shape == (12, 16, 3)
 
 
+def test_packed_job_runs_apply_until_when_max_chunks_zero(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    scene = _scene()
+    camera = CameraRig(np.array([0.0, 1.0, 0.0]), up_axis="+y").camera(16, 12, 75.0)
+    rendered = np.full((12, 16, 3), 40, np.uint8)
+    repaired = np.full((12, 16, 3), 200, np.uint8)
+    job_dir = pack_refine_job(
+        scene, camera, rendered, repaired,
+        params={"iters": 20, "max_chunks": 0},
+    )
+    calls = {"apply": 0, "until": 0, "ckpt": 0}
+
+    class Fake:
+        def apply(self, *_a, **_k):
+            calls["apply"] += 1
+            raise AssertionError("focused repairs must not re-run apply() per chunk")
+
+        def apply_until(self, scene, camera, rendered_rgb, repaired_rgb, **kwargs):
+            calls["until"] += 1
+            assert kwargs.get("should_stop") is not None
+            scene.colors[:] = 0.9
+            stats = {
+                "backend": "gsfix-gsplat",
+                "n_visible": scene.num_gaussians,
+                "n_updated": scene.num_gaussians,
+                "n_spawned": 0,
+                "n_gaussians": scene.num_gaussians,
+                "n_iters": 40,
+                "n_chunks": 2,
+                "l1_before": 0.5,
+                "l1_after": 0.2,
+                "render_rgb": repaired_rgb,
+                "phase": "refine",
+            }
+            kwargs["on_checkpoint"](stats)
+            calls["ckpt"] += 1
+            return stats
+
+    stats = apply_packed_job(job_dir, backend=Fake())
+    assert calls == {"apply": 0, "until": 1, "ckpt": 1}
+    assert stats["n_iters"] == 40
+    assert (job_dir / "scene_repaired.ply").is_file()
+    status = json.loads((job_dir / "status.json").read_text())
+    assert status["has_ply"] is True
+    assert status["checkpoint_iters"] == 40
+
+
+def test_packed_job_stop_file_is_visible_to_gpu_loop(tmp_path, monkeypatch):
+    from splat_explorer.repair_lrz import STOP_NAME, job_stop_requested
+
+    monkeypatch.chdir(tmp_path)
+    scene = _scene()
+    camera = CameraRig(np.array([0.0, 1.0, 0.0]), up_axis="+y").camera(16, 12, 75.0)
+    job_dir = pack_refine_job(
+        scene, camera,
+        np.full((12, 16, 3), 40, np.uint8),
+        np.full((12, 16, 3), 200, np.uint8),
+        params={"max_chunks": 0},
+    )
+    seen = {"stop": None}
+
+    class Fake:
+        def apply_until(self, scene, camera, rendered_rgb, repaired_rgb, **kwargs):
+            should_stop = kwargs["should_stop"]
+            assert should_stop() is False
+            (job_dir / STOP_NAME).write_text("")
+            seen["stop"] = should_stop()
+            scene.colors[:] = 0.7
+            stats = {
+                "backend": "gsfix-gsplat",
+                "n_iters": 20,
+                "l1_before": 0.4,
+                "l1_after": 0.3,
+                "render_rgb": repaired_rgb,
+                "n_gaussians": scene.num_gaussians,
+                "n_updated": scene.num_gaussians,
+                "n_visible": scene.num_gaussians,
+                "n_spawned": 0,
+            }
+            kwargs["on_checkpoint"](stats)
+            return stats
+
+    apply_packed_job(job_dir, backend=Fake())
+    assert seen["stop"] is True
+    assert job_stop_requested(job_dir) is True
+
+
+def test_lrz_apply_until_is_a_single_remote_job(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_apply(self, scene, camera, rendered_rgb, repaired_rgb):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise AssertionError("LRZ apply_until re-uploaded the scene")
+        return {
+            "n_iters": 60,
+            "n_chunks": 3,
+            "l1_before": 0.4,
+            "l1_after": 0.2,
+            "backend": "gsfix-gsplat",
+        }
+
+    monkeypatch.setattr(LrzRemoteRepair, "apply", fake_apply)
+    camera = CameraRig(np.array([0.0, 0.0, -1.0]), up_axis="+y").camera(8, 8, 75.0)
+    out = LrzRemoteRepair(max_chunks=0).apply_until(
+        _scene(), camera,
+        np.zeros((8, 8, 3), np.uint8),
+        np.ones((8, 8, 3), np.uint8) * 200,
+        should_stop=lambda: False,
+    )
+    assert calls["n"] == 1
+    assert out["n_iters"] == 60
+    assert out["l1_after"] == 0.2
+
+
 def test_session_missing_errors(monkeypatch, tmp_path):
     monkeypatch.setenv("LRZ_SSH_CONTROL_PATH", str(tmp_path / "missing-cm"))
     monkeypatch.setattr("splat_explorer.repair_lrz.lrz_configured", lambda: True)
@@ -180,7 +295,7 @@ def test_srun_worker_overlaps_sleep_hold():
     assert "--overlap" in cmd
     assert "--jobid=5777469" in cmd
     assert "--gres=gpu:1" in cmd
-    assert "--mem=56G" in cmd
+    assert "--mem=62G" in cmd
     assert "/workspace/python" in cmd
     assert "--container-name=splat-repair-5777469" in cmd
 
@@ -203,6 +318,99 @@ def test_srun_setup_starts_named_container():
     assert "--container-name=splat-repair-5777731" in cmd
     assert "repair_lrz --setup" in cmd
     assert "/workspace/python" in cmd
+    assert "--cpus-per-task=1" in cmd
+
+
+def test_patch_gsplat_nvcc_single_thread(tmp_path):
+    from splat_explorer.repair_lrz import _patch_gsplat_nvcc_single_thread
+
+    backend = tmp_path / "gsplat" / "cuda" / "_backend.py"
+    backend.parent.mkdir(parents=True)
+    backend.write_text(
+        '        extra_cuda_cflags = [opt_level]\n'
+        '        if not NO_FAST_MATH:\n'
+        '            extra_cuda_cflags += ["-use_fast_math"]\n'
+        '        sources = ()\n'
+    )
+    _patch_gsplat_nvcc_single_thread(tmp_path)
+    text = backend.read_text()
+    assert '        extra_cuda_cflags += ["--threads", "1"]' in text
+    _patch_gsplat_nvcc_single_thread(tmp_path)
+    assert backend.read_text().count("--threads") == 1
+
+
+def test_gsplat_ninja_is_single_job():
+    from splat_explorer.repair_lrz import gsplat_ninja_command
+
+    cmd = gsplat_ninja_command(Path("/workspace/python/torch_extensions/gsplat_cuda"))
+    assert cmd[0] == "ninja"
+    assert "-j1" in cmd
+    assert "-C" in cmd
+
+
+def test_compile_gsplat_reuses_existing_so(tmp_path, monkeypatch):
+    from splat_explorer.repair_lrz import compile_gsplat_cuda_extension
+
+    so = tmp_path / "gsplat_cuda" / "gsplat_cuda.so"
+    so.parent.mkdir()
+    so.write_bytes(b"elf")
+    monkeypatch.setenv("TORCH_EXTENSIONS_DIR", str(tmp_path))
+    out = compile_gsplat_cuda_extension()
+    assert out["ok"] is True
+    assert out["reused"] is True
+    assert out["so"] == str(so)
+
+
+def test_compile_gsplat_spawns_child_when_torch_imported(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from splat_explorer import repair_lrz as m
+
+    monkeypatch.setenv("TORCH_EXTENSIONS_DIR", str(tmp_path))
+    hits: list[Path | None] = [None]
+    monkeypatch.setattr(m, "_find_gsplat_cuda_so", lambda: hits[0])
+    added = "torch" not in sys.modules
+    if added:
+        sys.modules["torch"] = types.ModuleType("torch")
+    calls: list[list[str]] = []
+
+    def fake_call(argv, **kwargs):
+        calls.append([str(x) for x in argv])
+        so = tmp_path / "gsplat_cuda.so"
+        so.write_bytes(b"elf")
+        hits[0] = so
+        return 0
+
+    monkeypatch.setattr(m.subprocess, "check_call", fake_call)
+    try:
+        out = m.compile_gsplat_cuda_extension(site=str(tmp_path))
+    finally:
+        if added:
+            sys.modules.pop("torch", None)
+    assert out["ok"] is True
+    assert out["reused"] is False
+    assert any("--compile-gsplat-cuda" in c for c in calls)
+    assert any("--site" in c for c in calls)
+
+
+def test_run_gsplat_ninja_refuses_loaded_torch(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    from splat_explorer import repair_lrz as m
+
+    ninja = tmp_path / "build.ninja"
+    ninja.write_text("rule dummy\n")
+    added = "torch" not in sys.modules
+    if added:
+        sys.modules["torch"] = types.ModuleType("torch")
+    try:
+        with pytest.raises(RuntimeError, match="torch"):
+            m.run_gsplat_ninja_build(tmp_path)
+    finally:
+        if added:
+            sys.modules.pop("torch", None)
 
 
 def test_example_yaml_alone_is_not_configured(monkeypatch):
@@ -1661,7 +1869,7 @@ def test_srun_mem_flag_leaves_headroom_on_32g_hold():
     from splat_explorer.repair_lrz import srun_mem_flag
 
     assert srun_mem_flag({"mem": "32G"}) == "--mem=24G"
-    assert srun_mem_flag({"mem": "64G"}) == "--mem=56G"
+    assert srun_mem_flag({"mem": "64G"}) == "--mem=62G"
     assert srun_mem_flag({"mem": "32G"}, probe=True) == "--mem=1G"
 
 
@@ -1687,10 +1895,10 @@ def test_lrz_params_enable_packed_on_32g_hold():
         params = LrzRemoteRepair()._params()
         assert params["packed"] is True
         assert params["train_max_edge"] == 512
-        assert params["sparse_grad"] is True
+        assert params["sparse_grad"] is False
     finally:
         reset_live_allocation()
-    wide = LrzRemoteRepair()._params()
+    wide = LrzRemoteRepair()._params({"mem": "64G"})
     assert wide["packed"] is False
     assert wide["train_max_edge"] == 0
     assert wide["sparse_grad"] is False
@@ -1714,7 +1922,7 @@ def test_enable_tighter_job_params_packs_and_shrinks(tmp_path):
     assert enable_tighter_job_params(tmp_path) is True
     body = json.loads(path.read_text())
     assert body["packed"] is True
-    assert body["sparse_grad"] is True
+    assert body.get("sparse_grad") is not True
     assert body["train_max_edge"] == 512
     assert enable_tighter_job_params(tmp_path) is True
     assert json.loads(path.read_text())["train_max_edge"] == 384
@@ -1739,8 +1947,14 @@ def test_pythonpath_exports_single_compile_job_on_32g_hold():
     tight = _remote_pythonpath_exports({"mem": "64G", "job_mem": "32G"})
     assert "MAX_JOBS=1" in tight
     assert "TORCH_NUM_THREADS=1" in tight
-    wide = _remote_pythonpath_exports({"mem": "64G"})
-    assert "MAX_JOBS=4" in wide
+    assert "TORCH_EXTENSIONS_DIR=/workspace/python/torch_extensions" in tight
+    wide = _remote_pythonpath_exports({"mem": "96G"})
+    assert "MAX_JOBS=1" in wide
+    assert "CMAKE_BUILD_PARALLEL_LEVEL=1" in wide
+    assert "FAST_COMPILE=1" in wide
+    assert "TMPDIR=/workspace/tmp" in wide
+    assert "NVCC_APPEND_FLAGS='--threads=1'" in wide
+    assert "PATH=/workspace/python/bin:$PATH" in wide
 
 
 def test_oom_error_does_not_dump_ply_loader_logs():
@@ -1845,8 +2059,8 @@ def test_srun_mem_flag_uses_live_hold_not_yaml_64g():
     )
     try:
         assert srun_mem_flag({"mem": "64G", "job_id": "5786047"}) == "--mem=24G"
-        assert srun_mem_flag({"mem": "64G", "job_id": "999"}) == "--mem=56G"
-        assert "--mem=56G" in (
+        assert srun_mem_flag({"mem": "64G", "job_id": "999"}) == "--mem=62G"
+        assert "--mem=62G" in (
             __import__("splat_explorer.repair_lrz", fromlist=["srun_worker_command"])
             .srun_worker_command(
                 {
