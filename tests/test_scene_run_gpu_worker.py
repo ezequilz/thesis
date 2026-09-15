@@ -25,6 +25,7 @@ def test_scene_run_repair_factory_enables_adaptive_density_control():
     backend = _default_repair_factory({"densify": False, "max_chunks": 3})
     assert backend.densify is True
     assert backend.max_chunks == 0
+    assert backend.freeze_geometry_after_first_chunk is True
 
 
 def test_worker_can_render_without_qwen_or_browser(tmp_path: Path, monkeypatch):

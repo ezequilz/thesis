@@ -18,6 +18,15 @@ later GPU-resident SH DC tensors: RGB2SH once, Adam on ``f_dc``,
 SH2RGB only for rasterization. Checkpoints still write clipped RGB
 for the PLY / spectator; the optimizer state is not reset by that clip.
 
+A remaining single-view failure mode is **scale needles**, not RGB clip:
+``max_chunks=0`` runs thousands of Adam steps on one Qwen view, stretches
+Gaussians along the camera ray, and viser's WebGL path packs covariance
+as float16. ``scale^2 > 65504`` becomes Inf and reads as rainbow neon
+even when the Qwen image and the CUDA training-view L1 look fine.
+Extra time-budget chunks therefore freeze means / scales / quats after
+the paper's first 20-iter ADC pass, and every step clamps scale and
+anisotropy to the bound scene's envelope.
+
 Per repaired view (``iters=20``, paper default)::
 
     I_gs = rasterize(gaussians, camera)          # unclamped training RGB
@@ -72,6 +81,10 @@ _SPLIT_N = 2
 _SPLIT_SCALE_DIV = 0.8 * _SPLIT_N  # Kerbl / GSFix3D densify_and_split
 _BACKGROUND_BLACK = (0.0, 0.0, 0.0)
 _BACKGROUND_WHITE = (1.0, 1.0, 1.0)
+# |f_dc| at RGB 0 and 1. Looser clips allow per-channel overshoot that
+# the PLY commit then independently saturates into primaries.
+_SH_CLIP_UNIT_RGB = float(0.5 / SH_C0)
+_DEFAULT_MAX_ANISO = 32.0
 
 
 def rgb_to_sh(rgb):
@@ -127,6 +140,23 @@ def repaired_view_loss(
 
 def _as_leaf(tensor):
     return tensor.detach().clone().requires_grad_(True)
+
+
+def clamp_log_scales(log_scales, *, min_scale: float, max_scale: float, max_aniso: float):
+    """Keep Gaussian axes in ``[min_scale, max_scale]`` and cap anisotropy.
+
+    Long single-view Adam otherwise produces ray-aligned needles whose
+    ``scale^2`` overflows viser's float16 covariance and shows as neon.
+    """
+    min_scale = max(float(min_scale), 1e-8)
+    max_scale = max(float(max_scale), min_scale)
+    max_aniso = max(float(max_aniso), 1.0)
+    scales = log_scales.exp().clamp(min=min_scale, max=max_scale)
+    s_min = scales.min(dim=-1, keepdim=True).values.clamp(min=min_scale)
+    scales = scales.minimum(s_min * max_aniso)
+    scales = scales.clamp(min=min_scale, max=max_scale)
+    log_scales.copy_(scales.log())
+    return log_scales
 
 
 def _quat_to_rotmat(quats, torch):
@@ -320,8 +350,13 @@ class GsplatGsfix3dRepair:
     max_chunks: int = 1
     lambda_preserve: float = 1.0
     lambda_color_bound: float = 0.05
+    lambda_color_reg: float = 0.02
     min_fix_weight: float = 0.05
-    sh_clip: float = 2.3
+    sh_clip: float = _SH_CLIP_UNIT_RGB
+    min_scale: float = 1e-6
+    max_scale: float = 0.0
+    max_aniso: float = _DEFAULT_MAX_ANISO
+    freeze_geometry_after_first_chunk: bool = True
     on_progress: Callable[[dict], None] | None = None
 
     def apply(
@@ -371,7 +406,9 @@ class GsplatGsfix3dRepair:
 
         Gaussians stay on the GPU across chunks so SH DC is not clipped
         back to RGB between passes. Set ``max_chunks=0`` to keep going
-        until Stop / deadline (scene-runs). ADC runs only on chunk 0.
+        until Stop / deadline (scene-runs). ADC runs only on chunk 0;
+        later chunks freeze means / scales / quats so the extra minutes
+        cannot stretch the same view into visor-breaking needles.
         """
         import time
 
@@ -401,6 +438,10 @@ class GsplatGsfix3dRepair:
                 last = self._step_chunk(
                     scene, camera, rendered_rgb, repaired_rgb, state,
                 )
+                if chunk == 0 and self.freeze_geometry_after_first_chunk:
+                    ctx = state.get("ctx")
+                    if isinstance(ctx, dict):
+                        self._freeze_geometry(ctx)
                 if l1_before is None:
                     l1_before = last.get("l1_before")
                 total_iters += int(last.get("n_iters") or 0)
@@ -499,18 +540,44 @@ class GsplatGsfix3dRepair:
             ctx["deadline"] = state.get("deadline")
         return self._gpu_advance(ctx, scene)
 
-    def _make_opt(self, torch, means, quats, f_dc, log_scales, logit_opacities):
-        return torch.optim.Adam(
-            [
-                {"params": [means], "lr": self.lr_means},
-                {"params": [f_dc], "lr": self.lr_colors},
-                {"params": [logit_opacities], "lr": self.lr_opacities},
-                {"params": [log_scales], "lr": self.lr_scales},
-                {"params": [quats], "lr": self.lr_quats},
-            ],
-            lr=0.0,
-            eps=1e-15,
+    def _make_opt(
+        self, torch, means, quats, f_dc, log_scales, logit_opacities,
+        *, geometry: bool = True,
+    ):
+        groups = [
+            {"params": [f_dc], "lr": self.lr_colors},
+            {"params": [logit_opacities], "lr": self.lr_opacities},
+        ]
+        if geometry:
+            groups.extend(
+                [
+                    {"params": [means], "lr": self.lr_means},
+                    {"params": [log_scales], "lr": self.lr_scales},
+                    {"params": [quats], "lr": self.lr_quats},
+                ]
+            )
+        return torch.optim.Adam(groups, lr=0.0, eps=1e-15)
+
+    def _freeze_geometry(self, ctx: dict[str, Any]) -> None:
+        """Keep extra time-budget chunks from stretching Gaussians into needles."""
+        if ctx.get("geometry_frozen"):
+            return
+        torch = ctx.get("torch")
+        means = ctx.get("means")
+        f_dc = ctx.get("f_dc")
+        if torch is None or means is None or f_dc is None:
+            ctx["geometry_frozen"] = True
+            return
+        for key in ("means", "quats", "log_scales"):
+            tensor = ctx.get(key)
+            if tensor is not None:
+                tensor.requires_grad_(False)
+        ctx["opt"] = self._make_opt(
+            torch, ctx["means"], ctx["quats"], ctx["f_dc"],
+            ctx["log_scales"], ctx["logit_opacities"],
+            geometry=False,
         )
+        ctx["geometry_frozen"] = True
 
     def _gpu_bind(
         self,
@@ -563,12 +630,20 @@ class GsplatGsfix3dRepair:
         bg = _BACKGROUND_WHITE if self.white_background else _BACKGROUND_BLACK
         background = torch.tensor(bg, device=device)
         opt = self._make_opt(torch, means, quats, f_dc, log_scales, logit_opacities)
+        scales0 = torch.exp(log_scales.detach())
+        max_scale = float(self.max_scale) if float(self.max_scale) > 0 else float(scales0.max().clamp(min=1e-4).item())
+        aniso0 = scales0.max(dim=-1).values / scales0.min(dim=-1).values.clamp(min=1e-8)
+        max_aniso = max(
+            float(self.max_aniso),
+            float(aniso0.max().item()) if int(aniso0.numel()) else float(self.max_aniso),
+        )
         return {
             "torch": torch,
             "gsplat": gsplat,
             "means": means,
             "quats": quats,
             "f_dc": f_dc,
+            "f_dc_orig": f_dc.detach().clone(),
             "log_scales": log_scales,
             "logit_opacities": logit_opacities,
             "opt": opt,
@@ -591,6 +666,10 @@ class GsplatGsfix3dRepair:
             "last_l1": l1_before,
             "xyz_grad_accum": torch.zeros(means.shape[0], device=device),
             "xyz_grad_denom": torch.zeros(means.shape[0], device=device),
+            "min_scale": float(self.min_scale),
+            "max_scale": max_scale,
+            "max_aniso": max_aniso,
+            "geometry_frozen": False,
         }
 
     def _commit_scene(self, ctx: dict[str, Any], scene: GaussianScene) -> tuple[np.ndarray, float]:
@@ -603,6 +682,12 @@ class GsplatGsfix3dRepair:
         log_scales = ctx["log_scales"]
         logit_opacities = ctx["logit_opacities"]
         with torch.no_grad():
+            clamp_log_scales(
+                log_scales,
+                min_scale=float(ctx.get("min_scale") or self.min_scale),
+                max_scale=float(ctx.get("max_scale") or self.max_scale or 1.0),
+                max_aniso=float(ctx.get("max_aniso") or self.max_aniso),
+            )
             scales = torch.exp(log_scales)
             opacities = torch.sigmoid(logit_opacities)
             quats_n = torch.nn.functional.normalize(quats, dim=-1)
@@ -648,9 +733,14 @@ class GsplatGsfix3dRepair:
         last_l1 = ctx["last_l1"]
         xyz_grad_accum = ctx["xyz_grad_accum"]
         xyz_grad_denom = ctx["xyz_grad_denom"]
+        f_dc_orig = ctx.get("f_dc_orig")
         should_stop = ctx.get("should_stop")
         deadline = ctx.get("deadline")
-        sh_clip = float(self.sh_clip)
+        sh_clip = float(self.sh_clip) if float(self.sh_clip) > 0 else _SH_CLIP_UNIT_RGB
+        min_scale = float(ctx.get("min_scale") or self.min_scale)
+        max_scale = float(ctx.get("max_scale") or self.max_scale or 1.0)
+        max_aniso = float(ctx.get("max_aniso") or self.max_aniso)
+        geometry_frozen = bool(ctx.get("geometry_frozen"))
         ran = 0
 
         for it in range(int(self.iters)):
@@ -679,6 +769,12 @@ class GsplatGsfix3dRepair:
                 colors_rgb=colors,
                 min_fix_weight=self.min_fix_weight,
             )
+            if (
+                f_dc_orig is not None
+                and float(self.lambda_color_reg) > 0
+                and f_dc_orig.shape == f_dc.shape
+            ):
+                loss = loss + float(self.lambda_color_reg) * (f_dc - f_dc_orig).square().mean()
             last_l1 = float(l1.item())
             if ctx["total_iters"] == 0 and it == 0 and self.on_progress is not None:
                 self.on_progress({
@@ -730,10 +826,18 @@ class GsplatGsfix3dRepair:
                 quats.copy_(torch.nn.functional.normalize(quats, dim=-1))
                 if sh_clip > 0:
                     f_dc.clamp_(-sh_clip, sh_clip)
+                if not geometry_frozen:
+                    clamp_log_scales(
+                        log_scales,
+                        min_scale=min_scale,
+                        max_scale=max_scale,
+                        max_aniso=max_aniso,
+                    )
 
             last_iter = it == int(self.iters) - 1
             if (
                 self.densify
+                and not geometry_frozen
                 and (it + 1) % int(self.densify_every) == 0
                 and not last_iter
                 and means.shape[0] < int(self.max_gaussians)
@@ -749,13 +853,14 @@ class GsplatGsfix3dRepair:
                 if packed is not None:
                     means, quats, f_dc, log_scales, logit_opacities, n_new = packed
                     n_spawned += n_new
+                    f_dc_orig = f_dc.detach().clone()
                     xyz_grad_accum = torch.zeros(means.shape[0], device=means.device)
                     xyz_grad_denom = torch.zeros(means.shape[0], device=means.device)
                     opt = self._make_opt(
                         torch, means, quats, f_dc, log_scales, logit_opacities,
                     )
 
-            if last_iter and self.densify and means.shape[0] > 32:
+            if last_iter and self.densify and not geometry_frozen and means.shape[0] > 32:
                 keep = torch.sigmoid(logit_opacities).reshape(-1) > float(self.prune_opacity)
                 if int(keep.sum()) >= 32 and int((~keep).sum()) > 0:
                     means, quats, f_dc, log_scales, logit_opacities = (
@@ -763,6 +868,7 @@ class GsplatGsfix3dRepair:
                         _as_leaf(f_dc[keep]), _as_leaf(log_scales[keep]),
                         _as_leaf(logit_opacities[keep]),
                     )
+                    f_dc_orig = f_dc.detach().clone()
                     xyz_grad_accum = torch.zeros(means.shape[0], device=means.device)
                     xyz_grad_denom = torch.zeros(means.shape[0], device=means.device)
                     opt = self._make_opt(
@@ -790,6 +896,7 @@ class GsplatGsfix3dRepair:
         ctx["means"] = means
         ctx["quats"] = quats
         ctx["f_dc"] = f_dc
+        ctx["f_dc_orig"] = f_dc_orig
         ctx["log_scales"] = log_scales
         ctx["logit_opacities"] = logit_opacities
         ctx["opt"] = opt

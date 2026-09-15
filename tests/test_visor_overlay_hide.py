@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from splat_explorer.rendering.viser_viewer import (
     overlay_node_names,
     queue_client_overlay_visibility,
+    visor_safe_scales,
 )
 
 
@@ -56,3 +57,15 @@ def test_queue_client_overlay_visibility_uses_the_client_socket():
 
 def test_queue_client_overlay_visibility_skips_clients_without_a_socket():
     assert queue_client_overlay_visibility(SimpleNamespace(), ("/agent",), True) is False
+
+
+def test_visor_safe_scales_prevents_float16_covariance_overflow():
+    import numpy as np
+
+    scales = np.array([[1e-6, 1e-6, 3267.0], [0.02, 0.03, 0.04]], dtype=np.float32)
+    out = visor_safe_scales(scales)
+    assert float(out.max()) <= 128.0
+    assert float(out[0].max() / max(float(out[0].min()), 1e-8)) <= 128.0 + 1e-4
+    np.testing.assert_allclose(out[1], scales[1], atol=1e-6)
+    # viser's pack uses float16 covariance = R diag(s^2) R^T
+    assert float((out ** 2).max()) < 65504.0

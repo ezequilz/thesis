@@ -36,6 +36,13 @@ logger = logging.getLogger(__name__)
 
 LIVE_STATE_PATH = Path("outputs/live/agent_state.json")
 
+# Viser packs covariance as float16. Needle Gaussians from a long single-view
+# photometric lift overflow that (scale^2 > 65504) and the WebGL shader
+# reads Inf as rainbow neon. Display-only clamp; the CUDA scene is unchanged.
+_VISER_MAX_SCALE = 128.0
+_VISER_MAX_ANISO = 128.0
+_VISER_MIN_SCALE = 1e-6
+
 # Viser's splat shader applies last frame's projection. The dashboard visor
 # iframe is therefore sized to the VLM's 4:3 so get_render(W,H) matches the
 # live canvas and we never read back a larger buffer.
@@ -183,6 +190,23 @@ def _view_pose(scene: GaussianScene, up_axis: str, fov_deg: float) -> dict:
     return _view_from_center(scene.robust_centroid(), up_axis, fov_deg)
 
 
+def visor_safe_scales(
+    scales: np.ndarray,
+    *,
+    min_scale: float = _VISER_MIN_SCALE,
+    max_scale: float = _VISER_MAX_SCALE,
+    max_aniso: float = _VISER_MAX_ANISO,
+) -> np.ndarray:
+    """Clamp scales so viser's float16 covariance packing stays finite."""
+    min_scale = max(float(min_scale), 1e-8)
+    max_scale = max(float(max_scale), min_scale)
+    max_aniso = max(float(max_aniso), 1.0)
+    s = np.clip(np.asarray(scales, dtype=np.float32), min_scale, max_scale)
+    s_min = np.clip(s.min(axis=-1, keepdims=True), min_scale, None)
+    s = np.minimum(s, s_min * max_aniso)
+    return np.clip(s, min_scale, max_scale)
+
+
 def _splat_index(scene: GaussianScene, max_splats: int) -> np.ndarray:
     n = scene.num_gaussians
     if max_splats and n > max_splats:
@@ -203,7 +227,7 @@ def _install_splats(server, scene: GaussianScene, max_splats: int) -> None:
         centers=scene.means[idx],
         rgbs=scene.colors[idx],
         opacities=scene.opacities[idx, None],
-        covariances=quats_to_covariances(scene.quats[idx], scene.scales[idx]),
+        covariances=quats_to_covariances(scene.quats[idx], visor_safe_scales(scene.scales[idx])),
     )
 
 

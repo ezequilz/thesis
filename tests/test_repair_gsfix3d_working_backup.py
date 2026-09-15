@@ -7,11 +7,14 @@ import pytest
 
 from splat_explorer.repair_gsfix3d_working_backup import (
     GsplatGsfix3dRepair,
+    _SH_CLIP_UNIT_RGB,
+    clamp_log_scales,
     densify_clone_split,
     repaired_view_loss,
     rgb_to_sh,
     sh_to_rgb,
 )
+from splat_explorer.scene.ply_loader import SH_C0
 
 
 def test_working_backup_clone_split_keeps_1d_and_column_opacities():
@@ -149,6 +152,46 @@ def test_color_bound_pulls_exploded_sh_rgb_back():
 def test_working_backup_keeps_sh_clip_and_preserve_defaults():
     backend = GsplatGsfix3dRepair()
     assert backend.lambda_preserve == 1.0
-    assert backend.sh_clip == 2.3
+    assert backend.sh_clip == pytest.approx(_SH_CLIP_UNIT_RGB)
     assert backend.lambda_color_bound == 0.05
-    assert (0.5 + backend.sh_clip * 0.28209479177387814) > 1.0
+    assert backend.lambda_color_reg == 0.02
+    assert backend.freeze_geometry_after_first_chunk is True
+    rgb_hi = 0.5 + backend.sh_clip * SH_C0
+    rgb_lo = 0.5 - backend.sh_clip * SH_C0
+    assert rgb_hi == pytest.approx(1.0)
+    assert rgb_lo == pytest.approx(0.0)
+
+
+def test_working_backup_apply_until_freezes_geometry_after_first_chunk():
+    backend = GsplatGsfix3dRepair(max_chunks=0)
+    seen: list[bool] = []
+    frozen_calls: list[int] = []
+
+    def fake_chunk(scene, camera, rendered_rgb, repaired_rgb, state):
+        state["ctx"] = state.get("ctx") or {"geometry_frozen": False}
+        seen.append(bool(state["ctx"].get("geometry_frozen")))
+        return {"n_iters": 20, "l1_before": 0.5, "l1_after": 0.4}
+
+    def fake_freeze(ctx):
+        ctx["geometry_frozen"] = True
+        frozen_calls.append(1)
+
+    backend._step_chunk = fake_chunk
+    backend._freeze_geometry = fake_freeze
+    backend.apply_until(
+        object(), object(), object(), object(),
+        should_stop=lambda: len(seen) >= 3,
+    )
+    assert seen == [False, True, True]
+    assert frozen_calls == [1]
+
+
+def test_clamp_log_scales_caps_needles():
+    torch = pytest.importorskip("torch")
+    log_scales = torch.log(torch.tensor([[1e-6, 1e-6, 80.0], [0.02, 0.02, 0.02]]))
+    clamp_log_scales(log_scales, min_scale=1e-6, max_scale=1.0, max_aniso=32.0)
+    scales = log_scales.exp()
+    assert float(scales[0].max()) <= 32.0 * 1e-6 + 1e-9
+    assert float(scales[0].max() / scales[0].min()) <= 32.0 + 1e-5
+    assert float(scales.max()) <= 1.0 + 1e-6
+    np.testing.assert_allclose(scales[1].detach().cpu().numpy(), [0.02, 0.02, 0.02], atol=1e-6)
