@@ -139,15 +139,26 @@ def list_repair_backends() -> dict:
             cuda_detail = setup.get("message") or (
                 f"Loading GPU setup on LRZ job {lrz.get('job_id')}…"
             )
-        elif not setup.get("ok"):
+        elif not setup.get("ok") or (lrz.get("gpu_target") or {}).get("needs_reload"):
+            target = lrz.get("gpu_target") or {}
             cuda_detail = (
-                f"LRZ job {lrz.get('job_id')} SSH is up. First CUDA repair loads "
-                "the PyTorch container on this allocation (or click Load GPU setup)."
+                target.get("reload_reason")
+                or (
+                    f"LRZ job {lrz.get('job_id')} SSH is up. First CUDA repair loads "
+                    "the PyTorch container on this allocation (or click Load GPU setup)."
+                )
             )
         else:
+            target = lrz.get("gpu_target") or {}
+            label = target.get("label") or target.get("family") or "GPU"
+            gpu_name = target.get("gpu_name") or ""
+            arch = target.get("cuda_arch") or ""
+            extra = f" — {gpu_name}" if gpu_name else ""
+            if arch:
+                extra += f" sm {arch}"
             cuda_detail = (
-                f"LRZ A100 via ControlMaster — job {lrz.get('job_id')} @ {lrz.get('host')}. "
-                "Socket ~/.ssh/cm-lrz (scripts/lrz/ssh-session.sh)."
+                f"LRZ {label} via ControlMaster — job {lrz.get('job_id')} @ {lrz.get('host')}"
+                f"{extra}. Socket ~/.ssh/cm-lrz (scripts/lrz/ssh-session.sh)."
             )
     else:
         cuda_detail = (
@@ -177,7 +188,7 @@ def list_repair_backends() -> dict:
                 "label": "gsplat CUDA (GSFix3D)",
                 "available": bool(cuda or lrz_ok),
                 "detail": (
-                    f"{cuda_detail}. Paper §3.3 photometric lift: 20 iters, "
+                    f"{cuda_detail.rstrip('. ')}. Paper §3.3 photometric lift: 20 iters, "
                     "L1+SSIM, SH DC colors. No clone/split densify "
                     "(that is vis-prune only). No color stamp."
                 ),
@@ -266,7 +277,37 @@ def repair_progress_suffix(stats: dict) -> str:
         parts.append(f"{n_gaussians} gaussians")
     if stats.get("n_iters"):
         parts.append(f"{stats['n_iters']} iters")
+    l1 = stats.get("l1")
+    if isinstance(l1, (int, float)):
+        parts.append(f"L1 {l1:.4f}")
     return "".join(f" · {p}" for p in parts)
+
+
+def should_persist_repair_checkpoint(stats: dict | None, *, last_iters: int = 0) -> bool:
+    """True when the working ply should be rewritten.
+
+    Status polls during CUDA srun (``cuda_ready`` / ``srun``) must not dump
+    an unchanged 20MB ply every 2s — that reloads the visor with no L1.
+    """
+    stats = stats or {}
+    phase = str(stats.get("phase") or "")
+    if phase in (
+        "packed", "rsync_up", "srun", "rsync_down", "gpu_ready",
+        "cuda_import", "cuda_ready", "awaiting_ssh",
+    ):
+        return False
+    if stats.get("render_rgb") is not None or stats.get("l1_after") is not None:
+        return True
+    iters = int(stats.get("n_iters") or 0)
+    if phase in ("refine", "done", "keyframes") and iters > int(last_iters):
+        return True
+    if not phase and (
+        stats.get("backend")
+        or int(stats.get("n_updated") or 0)
+        or iters
+    ):
+        return True
+    return False
 
 
 def make_repair_backend(
@@ -1017,18 +1058,26 @@ class SceneRepairer:
                 backend = self.backend or PhotometricViewRepair()
             repaired_path_out = Path(episode_dir) / REPAIRED_PLY
             render_name = None
+            last_saved_iters = 0
 
             def checkpoint(stats: dict) -> None:
-                nonlocal render_name
-                with self._lock:
-                    save_ply(working, repaired_path_out)
-                    self.repaired_ply = repaired_path_out
-                    render_rgb = stats.get("render_rgb")
-                    if render_rgb is not None:
-                        render_name = repaired_render_name(step)
-                        Image.fromarray(np.asarray(render_rgb, dtype=np.uint8)).save(
-                            Path(episode_dir) / render_name,
-                        )
+                nonlocal render_name, last_saved_iters
+                persist = should_persist_repair_checkpoint(
+                    stats, last_iters=last_saved_iters,
+                )
+                if persist:
+                    last_saved_iters = max(
+                        last_saved_iters, int(stats.get("n_iters") or 0),
+                    )
+                    with self._lock:
+                        save_ply(working, repaired_path_out)
+                        self.repaired_ply = repaired_path_out
+                        render_rgb = stats.get("render_rgb")
+                        if render_rgb is not None:
+                            render_name = repaired_render_name(step)
+                            Image.fromarray(np.asarray(render_rgb, dtype=np.uint8)).save(
+                                Path(episode_dir) / render_name,
+                            )
                 if on_progress is not None:
                     on_progress(stats)
 

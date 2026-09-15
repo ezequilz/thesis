@@ -33,7 +33,9 @@ from .repair_gsfix import (
     _rasterize,
     _require_torch,
     _to_uint8,
+    camera_for_train,
     photometric_loss,
+    upsample_uint8,
 )
 from .repair_gsfix3d import (
     _BACKGROUND_BLACK,
@@ -684,6 +686,8 @@ class GsplatGsfix3dVisPruneRepair(GsplatGsfix3dRepair):
         import gsplat
 
         device = torch.device("cuda")
+        orig_w, orig_h = int(camera.width), int(camera.height)
+        camera = camera_for_train(camera, int(getattr(self, "train_max_edge", 0) or 0))
         h, w = int(camera.height), int(camera.width)
         if self.on_progress is not None:
             props = torch.cuda.get_device_properties(0)
@@ -694,6 +698,7 @@ class GsplatGsfix3dVisPruneRepair(GsplatGsfix3dRepair):
                 "n_gaussians": int(scene.num_gaussians),
                 "n_iters": 0,
                 "n_stamped": 0,
+                "packed": bool(self.packed),
             })
         target = _image_to_tensor(repaired_rgb, w, h, torch, device)
         rendered = _image_to_tensor(rendered_rgb, w, h, torch, device)
@@ -876,7 +881,7 @@ class GsplatGsfix3dVisPruneRepair(GsplatGsfix3dRepair):
                 viewmat, K, w, h, background, packed=self.packed,
             )
             l1_after = float(torch.abs(rgb - target).mean().item())
-            render_rgb = _to_uint8(rgb)
+            render_rgb = upsample_uint8(_to_uint8(rgb), orig_w, orig_h)
 
         scene.means = means.detach().float().cpu().numpy().astype(np.float32)
         scene.quats = quats_n.detach().float().cpu().numpy().astype(np.float32)

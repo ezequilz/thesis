@@ -176,11 +176,37 @@ agent:
   send_coverage: false
   # Paid gpt-image-2 repair (~4¢/call) when the inspector sets regenerate=yes.
   # Off (default): the model can still request it; the decision is logged and
-  # the pipeline stops before the CliRelay image prompt.
+  # the pipeline stops before the CliRelay / local Qwen image prompt.
   image_regeneration: false
   # Hard limits the harness enforces on tool call parameters.
   max_move_distance: 2.0
   max_rotate_degrees: 90.0
+
+# RGB image-edit for regenerate=yes views (not the VLM, not photometric 3DGS).
+# Swap with --image-edit-backend / SPLAT_IMAGE_EDIT_BACKEND / IMAGE_EDIT_BACKEND.
+# gpt-image-2: CliRelay /v1/images/edits (default).
+# qwen-image-edit: Qwen-Image-Edit-2511 on the connected CUDA GPU.
+image_edit:
+  backend: gpt-image-2
+  # CUDA index after CUDA_VISIBLE_DEVICES remap. 0 = same GPU as photometric
+  # GSFix3D (`torch.device("cuda")` / cuda:0). LRZ srun --gres=gpu:1 already
+  # pins one card on lrz-hgx-a100-80x4, lrz-dgx-a100-80x8, or lrz-hgx-h100-94x4.
+  # Dedicated GPU: set 1 (or SPLAT_IMAGE_EDIT_DEVICE) without occupying all 4/8.
+  device: 0
+  dtype: bfloat16
+  # none = keep ~40GB bf16 weights resident (preferred for one-by-one repairs).
+  # sequential / model = CPU offload if the 80GB card OOMs next to photometric.
+  offload: none
+  vae_tiling: true
+  attention_slicing: false
+  # First-time Hugging Face fetch is ~20GB. Off so CI/laptops never pull it.
+  # On the GPU node: true once, or SPLAT_IMAGE_EDIT_DOWNLOAD=1.
+  download: false
+  num_inference_steps: 40
+  true_cfg_scale: 4.0
+  negative_prompt: " "
+  guidance_scale: 1.0
+  seed: 0
 
 viewer:
   host: 0.0.0.0

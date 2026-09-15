@@ -39,6 +39,10 @@ from .scene import GaussianScene, load_ply, save_ply
 
 logger = logging.getLogger(__name__)
 
+
+class RepairStopped(RuntimeError):
+    """Cooperative Stop during an LRZ CUDA srun — not a failed refine."""
+
 _PASSWORD = threading.local()
 
 SCENE_PLY = "scene.ply"
@@ -76,6 +80,179 @@ PARTITION_CATALOG = (
     {"id": "lrz-hgx-h100-94x4", "label": "HGX H100 94GB ×4", "family": "H100", "default": False},
     {"id": "lrz-v100x2", "label": "V100 ×2", "family": "V100", "default": False},
 )
+FAMILY_CUDA_ARCH = {"A100": "8.0", "H100": "9.0", "V100": "7.0"}
+SQUEUE_FORMAT = "%i|%t|%P|%N|%M|%l|%r|%j|%S|%m"
+
+
+def catalog_entry_for_partition(partition: str | None) -> dict[str, Any] | None:
+    """Match a Slurm partition string, including truncated squeue names."""
+    text = str(partition or "").strip()
+    if not text:
+        return None
+    first = text.split(",")[0].strip()
+    for spec in PARTITION_CATALOG:
+        if first == spec["id"]:
+            return dict(spec)
+    hits = [
+        spec for spec in PARTITION_CATALOG
+        if spec["id"].startswith(first) or first.startswith(spec["id"])
+    ]
+    if len(hits) == 1:
+        return dict(hits[0])
+    return dict(hits[0]) if hits else None
+
+
+def gpu_family_from_name(name: str | None) -> str | None:
+    text = str(name or "").upper()
+    for family in ("H100", "A100", "V100"):
+        if family in text:
+            return family
+    return None
+
+
+def expected_cuda_arch(family: str | None) -> str:
+    return FAMILY_CUDA_ARCH.get(str(family or ""), "")
+
+
+def _arch_major(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text.split(".", 1)[0]
+
+
+def remember_live_allocation(
+    *,
+    job_id: str = "",
+    state: str = "",
+    mem: str = "",
+    partition: str = "",
+    node: str = "",
+) -> None:
+    with _LIVE_ALLOC["lock"]:
+        _LIVE_ALLOC["job_id"] = str(job_id or "")
+        _LIVE_ALLOC["state"] = str(state or "")
+        _LIVE_ALLOC["mem"] = str(mem or "")
+        _LIVE_ALLOC["partition"] = str(partition or "")
+        _LIVE_ALLOC["node"] = str(node or "")
+        _LIVE_ALLOC["at"] = time.time()
+
+
+def live_allocation(job_id: str | None = None) -> dict[str, str]:
+    with _LIVE_ALLOC["lock"]:
+        body = {
+            "job_id": str(_LIVE_ALLOC.get("job_id") or ""),
+            "state": str(_LIVE_ALLOC.get("state") or ""),
+            "mem": str(_LIVE_ALLOC.get("mem") or ""),
+            "partition": str(_LIVE_ALLOC.get("partition") or ""),
+            "node": str(_LIVE_ALLOC.get("node") or ""),
+        }
+    wanted = str(job_id or "").strip()
+    if wanted and body["job_id"] and body["job_id"] != wanted:
+        return {"job_id": wanted, "state": "", "mem": "", "partition": "", "node": ""}
+    return body
+
+
+def reset_live_allocation() -> None:
+    remember_live_allocation()
+
+
+def setup_matches_allocation(
+    marker: dict | None,
+    *,
+    job_id: str = "",
+    slurm: dict | None = None,
+    connected: dict | None = None,
+) -> tuple[bool, str]:
+    """True when the DSS setup marker belongs to this job and GPU family."""
+    marker = marker if isinstance(marker, dict) else {}
+    if not marker.get("ok"):
+        return False, "GPU setup has not been loaded on this allocation."
+    marker_job = str(marker.get("job_id") or "").strip()
+    job = str(job_id or (slurm or {}).get("job_id") or "").strip()
+    if job and marker_job and marker_job != job:
+        return False, (
+            f"DSS setup marker is for job {marker_job}, not the connected job {job}. "
+            "Load GPU setup on /repair/gpu for this allocation."
+        )
+    if job and not marker_job:
+        return False, (
+            "GPU setup marker is missing a job id. Reload setup so this allocation "
+            "gets a job-scoped Pyxis container."
+        )
+    marker_family = gpu_family_from_name(marker.get("gpu") or marker.get("family"))
+    live_family = gpu_family_from_name((connected or {}).get("name"))
+    if not live_family:
+        spec = catalog_entry_for_partition((slurm or {}).get("partition"))
+        live_family = (spec or {}).get("family")
+    if marker_family and live_family and marker_family != live_family:
+        return False, (
+            f"Setup was built for {marker_family} ({marker.get('gpu') or 'CUDA'}), "
+            f"but this allocation is {live_family}. Reload GPU setup so gsplat "
+            "matches the connected card."
+        )
+    marker_arch = str(marker.get("cuda_arch") or marker.get("compute_cap") or "").strip()
+    live_arch = str((connected or {}).get("compute_cap") or "").strip()
+    if not live_arch:
+        live_arch = expected_cuda_arch(live_family)
+    if (
+        marker_arch and live_arch
+        and _arch_major(marker_arch) != _arch_major(live_arch)
+    ):
+        return False, (
+            f"gsplat was compiled for sm {marker_arch}, this GPU is sm {live_arch}. "
+            "Reload GPU setup on /repair/gpu."
+        )
+    return True, ""
+
+
+def gpu_target_snapshot(
+    cfg: dict | None = None,
+    *,
+    slurm: dict | None = None,
+    gpu: dict | None = None,
+    setup: dict | None = None,
+) -> dict[str, Any]:
+    """Shared /repair ↔ /gpu identity of the connected LRZ allocation."""
+    cfg = cfg or {}
+    job = str((slurm or {}).get("job_id") or cfg.get("job_id") or "").strip()
+    live = live_allocation(job)
+    slurm = dict(slurm or {})
+    if not slurm.get("mem"):
+        slurm["mem"] = live.get("mem") or ""
+    if not slurm.get("partition"):
+        slurm["partition"] = live.get("partition") or ""
+    if not slurm.get("node"):
+        slurm["node"] = live.get("node") or ""
+    rows = (gpu or {}).get("gpus") if isinstance(gpu, dict) else gpu
+    connected = pick_connected_gpu(rows if isinstance(rows, list) else None)
+    spec = catalog_entry_for_partition(slurm.get("partition"))
+    family = gpu_family_from_name((connected or {}).get("name")) or (spec or {}).get("family")
+    marker = None
+    if isinstance(setup, dict):
+        marker = setup.get("detail") if isinstance(setup.get("detail"), dict) else setup
+    matches, reason = setup_matches_allocation(
+        marker, job_id=job, slurm=slurm, connected=connected,
+    )
+    gpu_name = (connected or {}).get("name") or (marker or {}).get("gpu")
+    arch = (
+        (connected or {}).get("compute_cap")
+        or (marker or {}).get("cuda_arch")
+        or expected_cuda_arch(family)
+    )
+    return {
+        "job_id": job,
+        "partition": slurm.get("partition") or (spec or {}).get("id"),
+        "family": family,
+        "label": (spec or {}).get("label") or family,
+        "node": slurm.get("node") or ((gpu or {}).get("node") if isinstance(gpu, dict) else None),
+        "gpu_name": gpu_name,
+        "cuda_arch": arch,
+        "compute_cap": (connected or {}).get("compute_cap"),
+        "job_mem": slurm.get("mem") or cfg.get("job_mem") or cfg.get("mem"),
+        "needs_reload": not matches,
+        "reload_reason": reason if not matches else "",
+    }
 
 
 def set_ssh_password(password: str | None) -> None:
@@ -223,6 +400,7 @@ def lrz_status() -> dict[str, Any]:
     can_ssh = bool(cfg["user"] and cfg["host"])
     alive = lrz_session_alive(cfg) if can_ssh else False
     sock = control_path()
+    setup = lrz_setup_status(cfg)
     return {
         "configured": configured,
         "session": alive,
@@ -243,7 +421,8 @@ def lrz_status() -> dict[str, Any]:
         "setup_script": "scripts/lrz/load-setup.sh",
         "status_script": "scripts/lrz/status.sh",
         "gpu_url": "/repair/gpu",
-        "setup": lrz_setup_status(cfg),
+        "setup": setup,
+        "gpu_target": gpu_target_snapshot(cfg, setup=setup),
         "partition": os.environ.get("LRZ_PARTITION") or DEFAULT_PARTITION,
         "hold_hours": list(HOLD_HOURS),
         "max_hold_hours": MAX_HOLD_HOURS,
@@ -409,10 +588,306 @@ def jobs_root() -> Path:
     return root
 
 
+def mem_to_mb(mem: str | None) -> int:
+    """Parse Slurm ``--mem`` values like ``32G`` / ``64000M`` into MiB."""
+    text = str(mem or _DEFAULTS["mem"]).strip().upper().replace(" ", "")
+    if not text:
+        text = str(_DEFAULTS["mem"])
+    try:
+        if text.endswith("G"):
+            return int(float(text[:-1]) * 1024)
+        if text.endswith("M"):
+            return int(float(text[:-1]))
+        if text.endswith("K"):
+            return max(1, int(float(text[:-1]) / 1024))
+        return int(float(text))
+    except ValueError:
+        return 64 * 1024
+
+
+def hold_mem_mb(cfg: dict | None = None) -> int:
+    """Host RAM of the connected sleep-hold, never larger than the live squeue value.
+
+    configs/lrz.local.yaml may say 64G while an older 48h job was submitted with
+    32G. Overlapping srun must fit the *actual* allocation or Slurm rejects the
+    CUDA step with "Memory required by task is not available".
+    """
+    cfg = cfg or {}
+    yaml_mb = mem_to_mb(cfg.get("mem"))
+    known: list[int] = []
+    job_mem = str(cfg.get("job_mem") or "").strip()
+    if job_mem:
+        known.append(mem_to_mb(job_mem))
+    live = live_allocation(str(cfg.get("job_id") or ""))
+    if live.get("mem"):
+        known.append(mem_to_mb(live["mem"]))
+    if known:
+        return min(min(known), yaml_mb)
+    return yaml_mb
+
+
+# Pyxis + the sleep-hold + a 1G occupancy probe share the job cgroup.
+# Requesting hold-1G (31G of a 32G allocation) lets unpacked gsplat rasterize
+# of ~400k Gaussians cgroup-OOM after cuda_ready, with no L1 / metrics updates.
+SRUN_HEADROOM_MB = 8 * 1024
+SRUN_MIN_WORKER_MB = 8 * 1024
+TIGHT_HOST_RAM_MB = 40 * 1024
+TIGHT_TRAIN_MAX_EDGE = 512
+TIGHT_TRAIN_RETRY_EDGES = (512, 384, 320)
+
+
+def host_cgroup_mem_mb() -> int | None:
+    """Slurm step cgroup limit in MiB, or None if unbounded / unreadable."""
+    for path in (
+        Path("/sys/fs/cgroup/memory.max"),
+        Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    ):
+        try:
+            raw = path.read_text().strip()
+        except OSError:
+            continue
+        if not raw or raw.lower() == "max":
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        if value <= 0 or value >= 1 << 60:
+            continue
+        return max(1, value // (1024 * 1024))
+    return None
+
+
+def tight_host_ram(
+    cfg: dict | None = None,
+    *,
+    cgroup_mb: int | None = None,
+    use_cgroup: bool = False,
+) -> bool:
+    """True on the current 32G DGX A100 hold (H100 64G holds stay False).
+
+    Local dashboard code uses the live Slurm hold. The CUDA worker passes
+    ``use_cgroup=True`` so a 32G step cgroup is detected even without squeue.
+    """
+    mb = cgroup_mb
+    if mb is None and use_cgroup:
+        mb = host_cgroup_mem_mb()
+    if mb is not None and 0 < mb <= TIGHT_HOST_RAM_MB:
+        return True
+    return hold_mem_mb(cfg) <= TIGHT_HOST_RAM_MB
+
+
+def srun_mem_flag(
+    cfg: dict | None = None,
+    *,
+    probe: bool = False,
+    mem: str | None = None,
+) -> str:
+    """Probes stay at 1G so they cannot cgroup-OOM a 32G hold running repair."""
+    if probe:
+        return "--mem=1G"
+    mb = mem_to_mb(mem) if mem else hold_mem_mb(cfg)
+    worker = max(SRUN_MIN_WORKER_MB, mb - SRUN_HEADROOM_MB)
+    if worker % 1024 == 0:
+        return f"--mem={worker // 1024}G"
+    return f"--mem={worker}M"
+
+
+def read_status_file(job_dir: Path) -> dict[str, Any]:
+    path = Path(job_dir) / STATUS_JSON
+    if not path.is_file():
+        return {}
+    try:
+        body = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def progress_from_status(body: dict[str, Any] | None) -> dict[str, Any]:
+    body = body or {}
+    payload = {
+        "phase": body.get("phase") or "srun",
+        "n_iters": int(body.get("n_iters") or body.get("iter") or 0),
+        "n_updated": int(body.get("n_updated") or 0),
+        "n_gaussians": body.get("n_gaussians"),
+        "message": body.get("message"),
+    }
+    for key in (
+        "iter", "l1", "l1_before", "gpu_name", "n_visible", "n_stamped",
+        "packed", "train_width", "train_height",
+    ):
+        if key in body:
+            payload[key] = body[key]
+    return payload
+
+
+def overlay_running_job_message(job: dict[str, Any], packed: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep the /repair ticker moving while rsync/srun block the worker thread."""
+    if job.get("status") not in ("running", "stopping"):
+        return job
+    job = dict(job)
+    started = float(job.get("started_at") or 0) or time.time()
+    elapsed = max(0.0, time.time() - started)
+    if packed and (packed.get("message") or packed.get("phase")):
+        job["packed"] = packed
+        msg = packed.get("message") or packed.get("phase")
+        job["message"] = f"{msg} · {elapsed:.0f}s"
+    elif job.get("message"):
+        job["message"] = re.sub(r" · \d+s$", "", str(job["message"])) + f" · {elapsed:.0f}s"
+    return job
+
+
+def format_remote_command_error(
+    argv: list[str],
+    result: subprocess.CompletedProcess,
+    *,
+    log_tail: str = "",
+) -> str:
+    """User-facing SSH/srun failure. Do not dump Python INFO next to Slurm OOM."""
+    err = (result.stderr or "").strip()
+    out = (result.stdout or "").strip()
+    blob = f"{err}\n{out}\n{log_tail}".lower()
+    lines = [
+        ln.strip() for ln in f"{err}\n{out}\n{log_tail}".splitlines()
+        if ln.strip() and (
+            "slurmstepd" in ln.lower()
+            or ln.lower().startswith("srun:")
+            or "oom" in ln.lower()
+            or "out of memory" in ln.lower()
+        )
+    ]
+    hint = "; ".join(lines[-4:]) if lines else (err or out or log_tail)[-500:]
+    if "memory required by task is not available" in blob:
+        live = live_allocation()
+        job_mem = live.get("mem") or "the live hold"
+        return (
+            "Slurm refused the CUDA srun: this allocation does not have enough "
+            f"free host RAM (hold is {job_mem}). Overlapping steps share one "
+            "cgroup — leftover Load GPU setup or occupancy probes can consume it. "
+            "Repair this view now sizes --mem from the live squeue hold, not the "
+            "64G yaml default. Retry after setup is idle, or Reload GPU setup on "
+            "/repair/gpu if a prior occupant was wiped. "
+            + hint
+        )
+    if "oom_kill" in blob or "out of memory" in blob:
+        live = live_allocation()
+        job_mem = live.get("mem") or "the live hold"
+        return (
+            "LRZ CUDA step ran out of host RAM (Slurm cgroup OOM) during the first "
+            "gsplat rasterize — that is why L1 / metrics.json never moved past "
+            "cuda_ready. This sleep-hold shares one host-RAM cgroup across every "
+            f"overlapping srun (repair, Load GPU setup, occupancy nvidia-smi). "
+            f"This allocation is {job_mem}; unpacked rasterize of a large splat "
+            "does not fit. Repair this view now retries packed gsplat automatically. "
+            "Do not click Reload GPU setup during a refine. "
+            + hint
+        )
+    if (
+        result.returncode in (137, 143)
+        or "force terminated" in blob
+        or "killed" in blob
+    ):
+        return (
+            "GPU step was killed. Load GPU setup must not run while a repair is on "
+            "the card; retry after setup is idle. "
+            + hint
+        )
+    cmd = " ".join(str(p) for p in argv[:8])
+    return f"command failed ({result.returncode}): {cmd}… {hint}"
+
+
 def _write_json(path: Path, body: dict) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(body, indent=2))
     tmp.replace(path)
+
+
+def enable_packed_job_params(job_dir: Path) -> bool:
+    """Flip params.json to packed gsplat. False if already packed or missing."""
+    path = Path(job_dir) / PARAMS_JSON
+    if not path.is_file():
+        return False
+    try:
+        params = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(params, dict) or params.get("packed"):
+        return False
+    params["packed"] = True
+    _write_json(path, params)
+    return True
+
+
+def enable_tighter_job_params(job_dir: Path) -> bool:
+    """Pack gsplat and shrink the train image so a 32G cgroup can finish an iter."""
+    path = Path(job_dir) / PARAMS_JSON
+    if not path.is_file():
+        return False
+    try:
+        params = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(params, dict):
+        return False
+    changed = False
+    if not params.get("packed"):
+        params["packed"] = True
+        changed = True
+    if not params.get("sparse_grad"):
+        params["sparse_grad"] = True
+        changed = True
+    edge = int(params.get("train_max_edge") or 0)
+    next_edge = edge
+    for candidate in TIGHT_TRAIN_RETRY_EDGES:
+        if edge <= 0 or edge > candidate:
+            next_edge = candidate
+            break
+    if next_edge and next_edge != edge:
+        params["train_max_edge"] = int(next_edge)
+        changed = True
+    if changed:
+        _write_json(path, params)
+    return changed
+
+
+def overlapping_step_ids(text: str, job_id: str) -> list[str]:
+    """Parse ``squeue -s`` rows into cancellable job.step ids (not the sleep hold)."""
+    job = str(job_id or "").strip()
+    found: list[str] = []
+    seen: set[str] = set()
+    for line in (text or "").splitlines():
+        token = line.strip().split()[0] if line.strip() else ""
+        if "." not in token:
+            continue
+        base, _, step = token.partition(".")
+        if base != job:
+            continue
+        if step.lower() in ("batch", "extern", "interactive"):
+            continue
+        if token not in seen:
+            seen.add(token)
+            found.append(token)
+    return found
+
+
+def cancel_overlapping_repair_steps(cfg: dict) -> list[str]:
+    """SIGTERM leftover CUDA srun steps so they do not sit on the hold cgroup."""
+    job = str((cfg or {}).get("job_id") or "").strip()
+    if not job.isdigit():
+        return []
+    listed = _ssh_run(
+        cfg, f"squeue -s --job={shlex.quote(job)} -h -o '%i %t' || true", timeout=20,
+    )
+    steps = overlapping_step_ids(
+        (listed.stdout or "") + "\n" + (listed.stderr or ""), job,
+    )
+    if not steps:
+        return []
+    ids = " ".join(shlex.quote(s) for s in steps)
+    _ssh_run(cfg, f"scancel --signal=TERM {ids} || true", timeout=20)
+    logger.info("Cancelled leftover CUDA steps on job %s: %s", job, steps)
+    return steps
 
 
 def write_status(job_dir: Path, **fields) -> None:
@@ -510,16 +985,44 @@ def apply_packed_job(job_dir: Path, backend=None) -> dict[str, Any]:
     """CUDA (or injected) refine inside a packed job directory. Mutates scene on disk."""
     job_dir = Path(job_dir)
     camera = camera_from_dict(json.loads((job_dir / CAMERA_JSON).read_text()))
-    params = json.loads((job_dir / PARAMS_JSON).read_text())
+    params = dict(json.loads((job_dir / PARAMS_JSON).read_text()))
     scene = load_ply(job_dir / SCENE_PLY)
     rendered = np.asarray(Image.open(job_dir / RENDERED_PNG).convert("RGB"), dtype=np.uint8)
     repaired = np.asarray(Image.open(job_dir / REPAIRED_PNG).convert("RGB"), dtype=np.uint8)
-    write_status(
-        job_dir,
-        phase="cuda_import",
-        message="Loading torch/gsplat (first run on this node compiles CUDA kernels)…",
-        n_gaussians=int(scene.num_gaussians),
-    )
+    tight = tight_host_ram(use_cgroup=True)
+    changed = False
+    if tight:
+        if not params.get("packed"):
+            params["packed"] = True
+            changed = True
+        if not params.get("sparse_grad"):
+            params["sparse_grad"] = True
+            changed = True
+        if int(params.get("train_max_edge") or 0) <= 0:
+            params["train_max_edge"] = TIGHT_TRAIN_MAX_EDGE
+            changed = True
+    if changed:
+        _write_json(job_dir / PARAMS_JSON, params)
+        edge = int(params.get("train_max_edge") or TIGHT_TRAIN_MAX_EDGE)
+        write_status(
+            job_dir,
+            phase="cuda_import",
+            message=(
+                "Host RAM cgroup is tight (32G-class hold). "
+                f"Packed gsplat @ {edge}px so photometric refine can start…"
+            ),
+            n_gaussians=int(scene.num_gaussians),
+            packed=True,
+            train_max_edge=edge,
+        )
+    else:
+        write_status(
+            job_dir,
+            phase="cuda_import",
+            message="Loading torch/gsplat (first run on this node compiles CUDA kernels)…",
+            n_gaussians=int(scene.num_gaussians),
+            packed=bool(params.get("packed")),
+        )
     if backend is None:
         from .repair_gsfix3d import instantiate_cuda_repair
 
@@ -533,9 +1036,11 @@ def apply_packed_job(job_dir: Path, backend=None) -> dict[str, Any]:
         }
         phase = str(fields.get("phase") or "refine")
         if phase == "cuda_ready":
+            packed = bool(fields.get("packed"))
             fields["message"] = (
-                f"GPU ready: {fields.get('gpu_name') or 'CUDA'}. "
-                "Starting photometric refine…"
+                f"GPU ready: {fields.get('gpu_name') or 'CUDA'}"
+                + (" · packed rasterize" if packed else "")
+                + ". Starting photometric refine…"
             )
         elif phase == "refine":
             it = fields.get("iter") or fields.get("n_iters") or 0
@@ -691,6 +1196,15 @@ _GPU_WORK = {
     "lock": threading.Lock(),
     "owner": "",
 }
+_LIVE_ALLOC = {
+    "lock": threading.Lock(),
+    "job_id": "",
+    "state": "",
+    "mem": "",
+    "partition": "",
+    "node": "",
+    "at": 0.0,
+}
 _OURS_PROCESS_HINTS = ("splat_explorer", "splat-explorer", "repair_lrz", "gsplat")
 
 
@@ -761,7 +1275,7 @@ def gpu_attach_error_is_stale(message: str | None) -> bool:
 
 
 def parse_squeue_line(line: str) -> dict | None:
-    """Parse `squeue --me -o '%i|%t|%P|%N|%M|%l|%r|%j|%S'` (name/start optional)."""
+    """Parse `squeue --me -o SQUEUE_FORMAT` (name/start/mem optional)."""
     text = (line or "").strip()
     if not text:
         return None
@@ -782,7 +1296,8 @@ def parse_squeue_line(line: str) -> dict | None:
         "reason": reason,
         "name": _squeue_blank(parts[7]) if len(parts) > 7 else None,
         "start_time": _squeue_blank(parts[8]) if len(parts) > 8 else None,
-        "sched_nodes": _squeue_blank(parts[9]) if len(parts) > 9 else None,
+        "mem": _squeue_blank(parts[9]) if len(parts) > 9 else None,
+        "sched_nodes": _squeue_blank(parts[10]) if len(parts) > 10 else None,
         "current": False,
     }
     if not body["job_id"] or not body["job_id"].isdigit():
@@ -1764,7 +2279,7 @@ echo WIPE_DONE
 """
     return (
         f"srun --jobid={job} --overlap --nodes=1 --ntasks=1 "
-        f"--cpus-per-task=1 --gres=gpu:1 --quiet "
+        f"--cpus-per-task=1 --gres=gpu:1 --mem=1G --quiet "
         f"bash -lc {shlex.quote(inner.strip())}"
     )
 
@@ -2190,7 +2705,7 @@ def _login_probe_script(
         status_block = "echo NONE"
     return (
         "echo SQUEUE\n"
-        "squeue --me -h -o '%i|%t|%P|%N|%M|%l|%r|%j|%S' || true\n"
+        f"squeue --me -h -o '{SQUEUE_FORMAT}' || true\n"
         "echo CONTAINER\n"
         f"if [ -f {container} ]; then echo OK $(stat -c%s {container}); else echo MISSING; fi\n"
         "echo NGC\n"
@@ -2240,7 +2755,7 @@ fi
 """
     return (
         f"srun --jobid={job} --overlap --nodes=1 --ntasks=1 "
-        f"--cpus-per-task=1 --gres=gpu:1 --quiet "
+        f"--cpus-per-task=1 --gres=gpu:1 --mem=1G --quiet "
         f"bash -lc {shlex.quote(inner.strip())}"
     )
 
@@ -2270,6 +2785,14 @@ def _login_probe_body(cfg: dict, parsed: dict[str, str]) -> dict[str, Any]:
         except json.JSONDecodeError:
             remote_status = {"raw": status_raw[:500]}
     uid_raw = (parsed.get("uid") or "").strip()
+    if slurm:
+        remember_live_allocation(
+            job_id=str(slurm.get("job_id") or ""),
+            state=str(slurm.get("state") or ""),
+            mem=str(slurm.get("mem") or ""),
+            partition=str(slurm.get("partition") or ""),
+            node=str(slurm.get("node") or ""),
+        )
     return {
         "slurm": slurm,
         "jobs": jobs,
@@ -2325,6 +2848,10 @@ def probe_lrz_gpu(
     slurm = body.get("slurm")
     smi_job = slurm.get("job_id") if slurm_job_is_running(slurm) else None
     if not smi_job:
+        return body
+    if gpu_work_owner() == "repair":
+        # A second srun --gres=gpu:1 shares the hold job's host-RAM cgroup.
+        body["gpu_error"] = None
         return body
     smi_cfg = dict(cfg)
     smi_cfg["job_id"] = smi_job
@@ -2449,6 +2976,7 @@ def reset_gpu_probe_cache() -> None:
         _SESSION["alive"] = False
         _SESSION["checked"] = False
     _MUX["last_at"] = 0.0
+    reset_live_allocation()
     reset_setup_cache()
 
 
@@ -2868,6 +3396,16 @@ def lrz_dashboard_snapshot(
         nodes = []
         summary = []
         default_free = None
+    gpu_target = gpu_target_snapshot(
+        {"job_id": status.get("job_id"), "mem": status.get("mem")},
+        slurm=slurm,
+        gpu=gpu if show_gpu else None,
+        setup=setup,
+    )
+    status = dict(status)
+    status["gpu_target"] = gpu_target
+    if gpu_target.get("needs_reload") and not (setup or {}).get("inflight"):
+        ready = False
     return {
         "connection": status,
         "checks": checks,
@@ -2886,6 +3424,7 @@ def lrz_dashboard_snapshot(
         "ngc": (cached or {}).get("ngc"),
         "workspace_ok": (cached or {}).get("workspace_ok"),
         "setup": setup,
+        "gpu_target": gpu_target,
         "gpu": gpus if show_gpu else None,
         "gpu_node": (
             (gpu or {}).get("node") if isinstance(gpu, dict) and show_gpu
@@ -2972,6 +3511,16 @@ def remote_job_dir(cfg: dict, job_id: str) -> str:
     return f"{cfg['workspace']}/inputs/{job_id}"
 
 
+def push_job_params(cfg: dict, job_id: str, job_dir: Path) -> None:
+    """Overwrite remote params.json after a packed-rasterize retry."""
+    remote = f"{cfg['user']}@{cfg['host']}"
+    _mux_run([
+        "rsync", "-az", "-e", rsync_ssh_cmd(cfg),
+        str(Path(job_dir) / PARAMS_JSON),
+        f"{remote}:{remote_job_dir(cfg, job_id)}/{PARAMS_JSON}",
+    ])
+
+
 def _code_src() -> Path:
     code_src = Path(__file__).resolve().parents[2] / "src"
     if not code_src.is_dir():
@@ -2979,13 +3528,16 @@ def _code_src() -> Path:
     return code_src
 
 
-def _remote_pythonpath_exports() -> str:
+def _remote_pythonpath_exports(cfg: dict | None = None) -> str:
+    jobs = 1 if hold_mem_mb(cfg) <= TIGHT_HOST_RAM_MB else 4
     return (
         f"export PYTHONPATH={REMOTE_PYTHONPATH}${{PYTHONPATH:+:$PYTHONPATH}}; "
         "if [ -z \"${LRZ_CUDA_ARCH:-}\" ] && [ -f /workspace/python/.cuda-arch ]; then "
         "LRZ_CUDA_ARCH=$(cat /workspace/python/.cuda-arch); fi; "
         "export TORCH_CUDA_ARCH_LIST=\"${LRZ_CUDA_ARCH:-8.0}\"; "
-        "export MAX_JOBS=4; "
+        "export OMP_NUM_THREADS=1; export TORCH_NUM_THREADS=1; "
+        "export MALLOC_ARENA_MAX=1; export PYTHONMALLOC=malloc; "
+        f"export MAX_JOBS={jobs}; "
     )
 
 
@@ -2996,28 +3548,30 @@ def container_name_for_job(cfg: dict) -> str:
     return f"{base}-{job}" if job.isdigit() else base
 
 
-def container_srun_prefix(cfg: dict) -> str:
+def container_srun_prefix(cfg: dict, *, mem_flag: str | None = None) -> str:
     image = cfg.get("container") or f"{cfg['workspace']}/containers/pytorch.sqsh"
     name = container_name_for_job(cfg)
+    mem = mem_flag or srun_mem_flag(cfg)
     return (
         f"srun --jobid={shlex.quote(str(cfg['job_id']))} --overlap "
         f"--nodes=1 --ntasks=1 --cpus-per-task={int(cfg['cpus'])} --gres=gpu:1 "
+        f"{mem} "
         f"--container-image={shlex.quote(str(image))} "
         f"--container-name={shlex.quote(str(name))} "
         f"--container-mounts={shlex.quote(cfg['workspace'] + ':/workspace')} "
     )
 
 
-def srun_worker_command(cfg: dict, job_id: str) -> str:
+def srun_worker_command(cfg: dict, job_id: str, *, mem_flag: str | None = None) -> str:
     inner = (
-        _remote_pythonpath_exports()
+        _remote_pythonpath_exports(cfg)
         + f"python -m splat_explorer.repair_lrz --job-dir /workspace/inputs/{job_id}"
     )
-    return container_srun_prefix(cfg) + f"bash -lc {shlex.quote(inner)}"
+    return container_srun_prefix(cfg, mem_flag=mem_flag) + f"bash -lc {shlex.quote(inner)}"
 
 
 def srun_setup_command(cfg: dict) -> str:
-    inner = _remote_pythonpath_exports() + "python -m splat_explorer.repair_lrz --setup"
+    inner = _remote_pythonpath_exports(cfg) + "python -m splat_explorer.repair_lrz --setup"
     return container_srun_prefix(cfg) + f"bash -lc {shlex.quote(inner)}"
 
 
@@ -3073,34 +3627,57 @@ def lrz_setup_status(cfg: dict | None = None, *, probe_setup: dict | None = None
     if body["inflight"] and started:
         body["elapsed_s"] = round(time.time() - started, 1)
     marker = probe_setup if isinstance(probe_setup, dict) else None
-    marker_ok = bool(marker and marker.get("ok"))
-    marker_job = str((marker or {}).get("job_id") or job)
-    if (
-        marker_ok
-        and not body["inflight"]
-        and (not job or marker_job == job or not marker.get("job_id"))
-    ):
-        body["ok"] = True
-        body["detail"] = marker
-        if not body["message"]:
-            gpu_name = marker.get("gpu") or "CUDA"
-            body["message"] = (
-                f"Pyxis container ready: {gpu_name} "
-                f"(torch {marker.get('torch') or '?'}, gsplat {marker.get('gsplat') or '?'}"
-                f"{', sm ' + str(marker.get('cuda_arch')) if marker.get('cuda_arch') else ''})"
-            )
-        with _SETUP["lock"]:
-            if not _SETUP["inflight"]:
-                _SETUP["ok"] = True
-                _SETUP["job_id"] = job or marker_job
-                _SETUP["detail"] = marker
-                if not _SETUP.get("message"):
-                    _SETUP["message"] = body["message"]
-                _SETUP["error"] = None
-    if not body["ok"] and not body["inflight"]:
-        gpu, _at = _cached_occupancy_raw()
+    gpu, _at = _cached_occupancy_raw()
+    connected = pick_connected_gpu(
+        list((gpu or {}).get("gpus") or []) if isinstance(gpu, dict) else None
+    )
+    slurm = live_allocation(job)
+    if slurm.get("job_id") != job:
+        slurm = {"job_id": job, "partition": slurm.get("partition"), "mem": slurm.get("mem"), "node": slurm.get("node")}
+    matches = False
+    reason = ""
+    if marker and marker.get("ok") and not body["inflight"]:
+        matches, reason = setup_matches_allocation(
+            marker, job_id=job, slurm=slurm, connected=connected,
+        )
+        if matches:
+            body["ok"] = True
+            body["detail"] = marker
+            if not body["message"]:
+                gpu_name = marker.get("gpu") or "CUDA"
+                body["message"] = (
+                    f"Pyxis container ready: {gpu_name} "
+                    f"(torch {marker.get('torch') or '?'}, gsplat {marker.get('gsplat') or '?'}"
+                    f"{', sm ' + str(marker.get('cuda_arch')) if marker.get('cuda_arch') else ''})"
+                )
+            with _SETUP["lock"]:
+                if not _SETUP["inflight"]:
+                    _SETUP["ok"] = True
+                    _SETUP["job_id"] = job or str(marker.get("job_id") or "")
+                    _SETUP["detail"] = marker
+                    if not _SETUP.get("message"):
+                        _SETUP["message"] = body["message"]
+                    _SETUP["error"] = None
+        else:
+            body["ok"] = False
+            body["needs_reload"] = True
+            if reason and not body["inflight"]:
+                body["message"] = reason
+    if body.get("ok") and not body["inflight"] and body.get("detail"):
+        still_ok, reason = setup_matches_allocation(
+            body.get("detail"), job_id=job, slurm=slurm, connected=connected,
+        )
+        if not still_ok:
+            body["ok"] = False
+            body["needs_reload"] = True
+            body["message"] = reason
+            with _SETUP["lock"]:
+                if not _SETUP["inflight"]:
+                    _SETUP["ok"] = False
+    if not body["ok"] and not body["inflight"] and not body.get("needs_reload"):
         summary = gpu_occupancy_summary(gpu if isinstance(gpu, dict) else None)
-        if summary.get("ours_on_allocated"):
+        ours = list(summary.get("ours_on_allocated") or [])
+        if ours and matches:
             body["ok"] = True
             if not body["message"]:
                 gpu_name = ""
@@ -3203,10 +3780,13 @@ def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
     arch_file.write_text(arch + "\n")
 
     job_id = os.environ.get("SLURM_JOB_ID") or os.environ.get("LRZ_JOB_ID") or "unknown"
+    family = gpu_family_from_name(gpu)
     body = {
         "ok": True,
         "job_id": str(job_id),
         "gpu": gpu,
+        "family": family,
+        "partition": os.environ.get("SLURM_JOB_PARTITION") or "",
         "torch": torch_ver,
         "cuda": cuda_ver,
         "gsplat": str(gsplat_ver),
@@ -3223,6 +3803,21 @@ def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
 def probe_gpu_occupancy(cfg: dict | None = None) -> dict[str, Any]:
     """nvidia-smi occupancy only — does not re-run squeue."""
     cfg = cfg or load_lrz_config()
+    if gpu_work_owner() == "repair":
+        gpu, _at = _cached_occupancy_raw()
+        if isinstance(gpu, dict) and gpu.get("gpus"):
+            skipped = dict(gpu)
+            skipped["deferred"] = True
+            skipped["warning"] = (
+                "Occupancy probe skipped while a CUDA repair is using the GPU "
+                "(a second srun would share the hold job's host-RAM cgroup)."
+            )
+            return skipped
+        raise RuntimeError(
+            "Occupancy probe skipped: a CUDA repair is using this GPU. "
+            "A second nvidia-smi srun would share the hold job's host RAM "
+            "and can OOM a 32G allocation."
+        )
     smi = _ssh_run(cfg, nvidia_smi_command(cfg), timeout=SMI_TIMEOUT_S)
     if smi.returncode != 0:
         err = (smi.stderr or smi.stdout or "nvidia-smi occupancy probe failed").strip()[:400]
@@ -3383,10 +3978,10 @@ def remember_setup_ok(cfg: dict, detail: dict[str, Any], message: str) -> dict[s
 
 
 def ensure_lrz_gpu_ready(cfg: dict | None = None) -> dict[str, Any]:
-    """Bind this allocation for CUDA repair: reuse marker / our process, else load setup.
+    """Bind this allocation for CUDA repair: reuse marker if GPU family matches.
 
-    Called from the /repair pipeline so a dashboard restart or a new GPU job
-    does not require a second-click overwrite before the first refine.
+    Called from the /repair pipeline so a dashboard restart or a new A100/H100
+    job does not require a second-click overwrite before the first refine.
     """
     cfg = cfg or load_lrz_config()
     if not lrz_session_alive(cfg):
@@ -3396,19 +3991,32 @@ def ensure_lrz_gpu_ready(cfg: dict | None = None) -> dict[str, Any]:
     if status.get("inflight"):
         _set_setup_message("Waiting for GPU setup to finish before starting the repair…")
         return wait_for_lrz_setup(cfg)
-    if status.get("ok"):
-        return status
+    slurm = live_allocation(str(cfg.get("job_id") or ""))
+    gpu, _at = _cached_occupancy_raw()
+    connected = pick_connected_gpu(
+        list((gpu or {}).get("gpus") or []) if isinstance(gpu, dict) else None
+    )
     try:
         marker = read_remote_setup_marker(cfg)
     except RuntimeError as exc:
         logger.warning("setup marker read failed: %s", exc)
+        marker = status.get("detail") if status.get("ok") else {"ok": False}
+    if not isinstance(marker, dict):
         marker = {"ok": False}
-    if marker.get("ok"):
-        gpu_name = marker.get("gpu") or "CUDA"
+    matches, reason = setup_matches_allocation(
+        marker, job_id=str(cfg.get("job_id") or ""), slurm=slurm, connected=connected,
+    )
+    if matches:
+        gpu_name = marker.get("gpu") or (connected or {}).get("name") or "CUDA"
+        family = gpu_family_from_name(gpu_name) or ""
+        extra = f" ({family})" if family else ""
         return remember_setup_ok(
             cfg, marker,
-            f"Reusing GPU setup on {gpu_name} (DSS marker for job {cfg.get('job_id')}).",
+            f"Reusing GPU setup on {gpu_name}{extra} "
+            f"(DSS marker for job {cfg.get('job_id')}).",
         )
+    if reason:
+        _set_setup_message(reason + " Loading GPU setup…")
     request_lrz_setup(force=True, overwrite=False)
     return wait_for_lrz_setup(cfg)
 
@@ -3610,7 +4218,9 @@ def probe_job(cfg: dict | None = None, *, password: str | None = None) -> str:
     mux = lrz_session_alive(cfg)
     if not mux and not password:
         raise RuntimeError(session_required_message())
-    argv = ssh_argv(cfg, multiplex=mux) + [f"squeue --me --job={cfg['job_id']} -h -o %t"]
+    argv = ssh_argv(cfg, multiplex=mux) + [
+        f"squeue --me --job={cfg['job_id']} -h -o '%t|%m|%P|%N'"
+    ]
     env = os.environ.copy()
     helper = None
     if password and not mux:
@@ -3631,13 +4241,22 @@ def probe_job(cfg: dict | None = None, *, password: str | None = None) -> str:
             except OSError:
                 pass
             env.pop("LRZ_SSH_PASSWORD", None)
-    state = (result.stdout or "").strip().split()[0] if result.stdout else ""
+    line = (result.stdout or "").strip().splitlines()[0] if result.stdout else ""
+    parts = [p.strip() for p in line.split("|")] if line else []
+    state = parts[0] if parts else ""
     if result.returncode != 0 or not state:
         err = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(
             f"Could not query Slurm job {cfg['job_id']}: {err or 'empty squeue'}. "
             "Is eduVPN up? Is the allocation still running?"
         )
+    remember_live_allocation(
+        job_id=str(cfg["job_id"]),
+        state=state,
+        mem=parts[1] if len(parts) > 1 else "",
+        partition=parts[2] if len(parts) > 2 else "",
+        node=parts[3] if len(parts) > 3 else "",
+    )
     if state != "R":
         raise RuntimeError(
             f"LRZ job {cfg['job_id']} is {state}, not running. "
@@ -3649,27 +4268,140 @@ def probe_job(cfg: dict | None = None, *, password: str | None = None) -> str:
 def _mux_run(argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
     result = subprocess.run(argv, check=False, capture_output=True, text=True)
     if check and result.returncode != 0:
-        err = (result.stderr or result.stdout or "").strip()
-        extra = ""
-        blob = err.lower()
-        if (
-            result.returncode in (137, 143)
-            or "killed" in blob
-            or "force terminated" in blob
-        ):
-            extra = (
-                " GPU step was killed. Load GPU setup must not run while a repair "
-                "is on the card; retry the repair after setup is idle. "
-                "If this repeats, the hold job may be out of host RAM "
-                "(new allocations use 64G)."
-            )
-        raise RuntimeError(
-            f"command failed ({result.returncode}): {' '.join(argv[:8])}… {err}{extra}"
-        )
+        raise RuntimeError(format_remote_command_error(argv, result))
     return result
 
 
-def sync_code_and_job(job_dir: Path, *, password: str | None = None) -> None:
+def pull_remote_job_status(cfg: dict, job_id: str, job_dir: Path) -> dict[str, Any] | None:
+    """Login-node `cat` of DSS status.json — never a second GPU srun."""
+    path = f"{remote_job_dir(cfg, job_id)}/{STATUS_JSON}"
+    result = _ssh_run(cfg, f"cat {shlex.quote(path)}", timeout=12)
+    if result.returncode != 0:
+        return None
+    try:
+        body = json.loads(result.stdout or "")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(body, dict) or not body:
+        return None
+    write_status(job_dir, **{k: v for k, v in body.items() if k != "updated_at"})
+    return body
+
+
+def run_srun_worker(
+    cfg: dict,
+    job_id: str,
+    job_dir: Path,
+    *,
+    on_progress: Callable[[dict], None] | None = None,
+    should_stop=None,
+    mem_flag: str | None = None,
+    attempt: int = 0,
+) -> None:
+    """Stream CUDA srun logs and poll DSS status.json while the GPU step runs."""
+    flag = mem_flag or srun_mem_flag(cfg)
+    argv = ssh_argv(cfg, multiplex=True) + [
+        srun_worker_command(cfg, job_id, mem_flag=flag)
+    ]
+    log_path = Path(job_dir) / "srun.log"
+    rc: int | None = None
+    with log_path.open("ab") as log:
+        proc = subprocess.Popen(
+            argv, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        )
+        try:
+            while True:
+                if should_stop is not None and should_stop():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    try:
+                        cancel_overlapping_repair_steps(cfg)
+                    except Exception as exc:
+                        logger.warning("could not cancel leftover CUDA steps: %s", exc)
+                    raise RepairStopped("Stopped during CUDA srun.")
+                rc = proc.poll()
+                try:
+                    pull_remote_job_status(cfg, job_id, job_dir)
+                except RuntimeError as exc:
+                    logger.warning("remote status poll failed: %s", exc)
+                if on_progress is not None:
+                    on_progress(progress_from_status(read_status_file(job_dir)))
+                if rc is not None:
+                    break
+                time.sleep(2.0)
+        except Exception:
+            if proc.poll() is None:
+                proc.terminate()
+            raise
+    if rc:
+        tail = ""
+        try:
+            tail = log_path.read_text(errors="replace")[-2500:]
+        except OSError:
+            pass
+        failed = subprocess.CompletedProcess(argv, rc, stdout=tail, stderr=tail)
+        error = format_remote_command_error(argv, failed, log_tail=tail)
+        blob = error.lower()
+        refused = "memory required by task is not available" in blob
+        oom = "oom_kill" in blob or "out of memory" in blob
+        if attempt < 2 and refused and flag != "--mem=16G":
+            logger.warning("CUDA srun refused at %s; retrying with --mem=16G", flag)
+            msg = f"Hold RAM too small for {flag}; retrying CUDA srun at 16G…"
+            write_status(job_dir, phase="srun", message=msg)
+            if on_progress is not None:
+                on_progress({"phase": "srun", "message": msg})
+            run_srun_worker(
+                cfg, job_id, job_dir,
+                on_progress=on_progress, should_stop=should_stop,
+                mem_flag="--mem=16G", attempt=attempt + 1,
+            )
+            return
+        if attempt < 2 and oom:
+            tighter = enable_tighter_job_params(job_dir)
+            if tighter:
+                try:
+                    push_job_params(cfg, job_id, job_dir)
+                except Exception as exc:
+                    logger.warning("could not push packed params.json: %s", exc)
+            retry_flag = flag
+            logger.warning(
+                "CUDA srun OOM at %s tighter=%s; retrying %s",
+                flag, tighter, retry_flag,
+            )
+            params = {}
+            try:
+                params = json.loads((Path(job_dir) / PARAMS_JSON).read_text())
+            except (OSError, json.JSONDecodeError):
+                params = {}
+            edge = params.get("train_max_edge") or TIGHT_TRAIN_MAX_EDGE
+            msg = (
+                "CUDA step OOM-killed on the host cgroup after cuda_ready. "
+                f"Retrying packed gsplat at {edge}px / {retry_flag}…"
+            )
+            write_status(job_dir, phase="srun", message=msg, packed=True)
+            if on_progress is not None:
+                on_progress({"phase": "srun", "message": msg, "packed": True})
+            if tighter or attempt == 0:
+                run_srun_worker(
+                    cfg, job_id, job_dir,
+                    on_progress=on_progress, should_stop=should_stop,
+                    mem_flag=retry_flag, attempt=attempt + 1,
+                )
+                return
+        write_status(job_dir, phase="error", message=error[:400])
+        raise RuntimeError(error)
+
+
+def sync_code_and_job(
+    job_dir: Path,
+    *,
+    password: str | None = None,
+    on_progress: Callable[[dict], None] | None = None,
+    should_stop=None,
+) -> None:
     """rsync + srun + rsync over ControlMaster, or the interactive shell script."""
     if not lrz_configured():
         raise RuntimeError(
@@ -3684,12 +4416,22 @@ def sync_code_and_job(job_dir: Path, *, password: str | None = None) -> None:
         raise RuntimeError(session_required_message())
     cfg = load_lrz_config()
     probe_job(cfg)
-    write_status(job_dir, phase="gpu_ready", message="Connecting this repair to the reserved GPU…")
+    live = live_allocation(str(cfg.get("job_id") or ""))
+    if live.get("mem"):
+        cfg = dict(cfg)
+        cfg["job_mem"] = live["mem"]
+
+    def note(phase: str, message: str) -> None:
+        write_status(job_dir, phase=phase, message=message)
+        if on_progress is not None:
+            on_progress(progress_from_status(read_status_file(job_dir)))
+
+    note("gpu_ready", "Connecting this repair to the reserved GPU…")
     ensure_lrz_gpu_ready(cfg)
     job_id = job_dir.name
     remote = f"{cfg['user']}@{cfg['host']}"
     ssh_e = rsync_ssh_cmd(cfg)
-    write_status(job_dir, phase="rsync_up", message="Uploading scene + code to DSS…")
+    note("rsync_up", "Uploading scene + code to DSS…")
     with _gpu_exclusive("repair", timeout=SETUP_TIMEOUT_S):
         sync_code_to_dss(cfg)
         _mux_run(ssh_argv(cfg, multiplex=True) + [
@@ -3699,9 +4441,18 @@ def sync_code_and_job(job_dir: Path, *, password: str | None = None) -> None:
             "rsync", "-az", "-e", ssh_e, "--exclude", STATUS_JSON,
             f"{job_dir}/", f"{remote}:{remote_job_dir(cfg, job_id)}/",
         ])
-        write_status(job_dir, phase="srun", message="Running GSFix CUDA refine on the reserved GPU…")
-        _mux_run(ssh_argv(cfg, multiplex=True) + [srun_worker_command(cfg, job_id)])
-        write_status(job_dir, phase="rsync_down", message="Downloading repaired splat…")
+        note("srun", "Running GSFix CUDA refine on the reserved GPU…")
+        try:
+            cancelled = cancel_overlapping_repair_steps(cfg)
+        except Exception as exc:
+            logger.warning("could not cancel leftover CUDA steps: %s", exc)
+            cancelled = []
+        if cancelled:
+            time.sleep(3.0)
+        run_srun_worker(
+            cfg, job_id, job_dir, on_progress=on_progress, should_stop=should_stop,
+        )
+        note("rsync_down", "Downloading repaired splat…")
         _mux_run([
             "rsync", "-az", "-e", ssh_e,
             f"{remote}:{remote_job_dir(cfg, job_id)}/",
@@ -3825,12 +4576,15 @@ class LrzRemoteRepair:
     lr_quats: float = 0.001
     near: float = 0.05
     packed: bool = False
+    train_max_edge: int = 0
+    sparse_grad: bool = False
     white_background: bool = False
     max_chunks: int = 1
     on_progress: Callable[[dict], None] | None = None
     should_stop: Callable[[], bool] | None = None
 
-    def _params(self) -> dict:
+    def _params(self, cfg: dict | None = None) -> dict:
+        tight = tight_host_ram(cfg)
         params = {
             "method": str(self.method),
             "iters": int(self.iters),
@@ -3849,7 +4603,11 @@ class LrzRemoteRepair:
             "lr_scales": float(self.lr_scales),
             "lr_quats": float(self.lr_quats),
             "near": float(self.near),
-            "packed": bool(self.packed),
+            "packed": bool(self.packed) or tight,
+            "train_max_edge": int(
+                self.train_max_edge or (TIGHT_TRAIN_MAX_EDGE if tight else 0)
+            ),
+            "sparse_grad": bool(self.sparse_grad) or tight,
             "white_background": bool(self.white_background),
             "max_chunks": int(self.max_chunks),
         }
@@ -3880,18 +4638,41 @@ class LrzRemoteRepair:
                 "gsplat CUDA refine needs an NVIDIA GPU, or LRZ (configs/lrz.local.yaml "
                 "with a running sbatch job_id)."
             )
+        cfg = load_lrz_config()
+        if lrz_session_alive(cfg):
+            try:
+                probe_job(cfg)
+            except Exception as exc:
+                logger.warning("squeue before pack failed: %s", exc)
+            live = live_allocation(str(cfg.get("job_id") or ""))
+            if live.get("mem"):
+                cfg = dict(cfg)
+                cfg["job_mem"] = live["mem"]
         job_dir = pack_refine_job(
-            scene, camera, rendered_rgb, repaired_rgb, params=self._params(),
+            scene, camera, rendered_rgb, repaired_rgb, params=self._params(cfg),
         )
         password = get_ssh_password() or os.environ.get("LRZ_SSH_PASSWORD")
         if self.on_progress is not None:
             self.on_progress({"phase": "rsync_up", "n_iters": 0, "n_updated": 0})
-        if lrz_session_alive():
-            sync_code_and_job(job_dir)
-        elif password:
-            sync_code_and_job(job_dir, password=password)
-        else:
-            raise RuntimeError(session_required_message())
+        kwargs = {
+            "on_progress": self.on_progress,
+            "should_stop": getattr(self, "should_stop", None),
+        }
+        try:
+            if lrz_session_alive():
+                sync_code_and_job(job_dir, **kwargs)
+            elif password:
+                sync_code_and_job(job_dir, password=password, **kwargs)
+            else:
+                raise RuntimeError(session_required_message())
+        except RepairStopped:
+            if job_results_ready(job_dir):
+                stats = ingest_job_results(scene, job_dir)
+                stats["lrz_job_dir"] = str(job_dir)
+                stats["lrz_job_id"] = job_dir.name
+                stats["stopped"] = True
+                return stats
+            raise
         stats = ingest_job_results(scene, job_dir)
         stats["lrz_job_dir"] = str(job_dir)
         stats["lrz_job_id"] = job_dir.name
@@ -3927,7 +4708,10 @@ class LrzRemoteRepair:
                     break
                 if limit > 0 and chunk >= limit:
                     break
-                last = self.apply(scene, camera, rendered_rgb, repaired_rgb)
+                try:
+                    last = self.apply(scene, camera, rendered_rgb, repaired_rgb)
+                except RepairStopped:
+                    break
                 chunk += 1
                 if visprune:
                     self.densify = False

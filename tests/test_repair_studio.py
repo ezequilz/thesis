@@ -476,7 +476,7 @@ def test_add_view_is_dashboard_only_and_queues_image_repair(tmp_path: Path, monk
     studio._capture_view_rgb = lambda camera: np.full(
         (camera.height, camera.width, 3), 90, dtype=np.uint8,
     )
-    studio._ensure_regenerator = lambda: regen
+    studio._ensure_regenerator = lambda backend=None: regen
     ok, message, extra = studio.add_view(ep.name)
     assert ok, message
     assert extra["step"] == 5

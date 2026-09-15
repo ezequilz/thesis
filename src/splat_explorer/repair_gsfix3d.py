@@ -45,7 +45,9 @@ from .repair_gsfix import (
     _rasterize,
     _require_torch,
     _to_uint8,
+    camera_for_train,
     photometric_loss,
+    upsample_uint8,
 )
 from .scene import GaussianScene
 from .scene.ply_loader import SH_C0
@@ -131,6 +133,8 @@ class GsplatGsfix3dRepair:
     lr_quats: float = 0.001
     near: float = 0.05
     packed: bool = False
+    train_max_edge: int = 0
+    sparse_grad: bool = False
     white_background: bool = False
     max_chunks: int = 1
     on_progress: Callable[[dict], None] | None = None
@@ -145,15 +149,27 @@ class GsplatGsfix3dRepair:
         try:
             return self._apply(scene, camera, rendered_rgb, repaired_rgb)
         except RuntimeError as exc:
-            if self.packed or "out of memory" not in str(exc).lower():
+            if "out of memory" not in str(exc).lower():
                 raise
-            logger.warning("CUDA OOM during GSFix3D refine; retrying with packed=True")
             try:
                 import torch
                 torch.cuda.empty_cache()
             except Exception:
                 pass
-            return replace(self, packed=True)._apply(scene, camera, rendered_rgb, repaired_rgb)
+            edge = int(self.train_max_edge or 0)
+            if not self.packed:
+                logger.warning("CUDA OOM during GSFix3D refine; retrying packed @ %spx", edge or 512)
+                return replace(
+                    self, packed=True, sparse_grad=True,
+                    train_max_edge=edge or 512,
+                )._apply(scene, camera, rendered_rgb, repaired_rgb)
+            nxt = 384 if edge <= 0 or edge > 384 else (320 if edge > 320 else 0)
+            if nxt:
+                logger.warning("CUDA OOM during packed GSFix3D refine; retrying @ %spx", nxt)
+                return replace(
+                    self, packed=True, sparse_grad=True, train_max_edge=nxt,
+                )._apply(scene, camera, rendered_rgb, repaired_rgb)
+            raise
 
     def apply_until(
         self,
@@ -269,7 +285,11 @@ class GsplatGsfix3dRepair:
         import gsplat
 
         device = torch.device("cuda")
+        orig_w, orig_h = int(camera.width), int(camera.height)
+        camera = camera_for_train(camera, int(self.train_max_edge or 0))
         h, w = int(camera.height), int(camera.width)
+        use_packed = bool(self.packed)
+        use_sparse = bool(self.sparse_grad or use_packed)
         if self.on_progress is not None:
             props = torch.cuda.get_device_properties(0)
             self.on_progress({
@@ -279,6 +299,9 @@ class GsplatGsfix3dRepair:
                 "n_gaussians": int(scene.num_gaussians),
                 "n_iters": 0,
                 "n_stamped": 0,
+                "packed": use_packed,
+                "train_width": w,
+                "train_height": h,
             })
         target = _image_to_tensor(repaired_rgb, w, h, torch, device)
         rendered = _image_to_tensor(rendered_rgb, w, h, torch, device)
@@ -327,13 +350,33 @@ class GsplatGsfix3dRepair:
             colors = sh_to_rgb(f_dc)
             rgb, info = _rasterize(
                 gsplat, means, quats_n, scales, opacities, colors,
-                viewmat, K, w, h, background, packed=self.packed,
+                viewmat, K, w, h, background, packed=use_packed,
+                sparse_grad=use_sparse, absgrad=not use_packed,
             )
             means2d = info.get("means2d") if isinstance(info, dict) else None
             if means2d is not None and means2d.requires_grad:
                 means2d.retain_grad()
             loss, l1 = photometric_loss(rgb, target, torch, self.lambda_dssim)
             last_l1 = float(l1.item())
+            if it == 0 and self.on_progress is not None:
+                self.on_progress({
+                    "phase": "refine",
+                    "iter": 0,
+                    "n_iters": 0,
+                    "n_updated": 0,
+                    "n_gaussians": int(means.shape[0]),
+                    "n_spawned": 0,
+                    "n_stamped": 0,
+                    "n_visible": int(n_visible),
+                    "l1_before": round(l1_before, 6),
+                    "l1": round(last_l1, 6),
+                    "train_width": w,
+                    "train_height": h,
+                    "message": (
+                        f"First rasterize L1 {last_l1:.4f} @ {w}x{h}"
+                        + (" · packed" if use_packed else "")
+                    ),
+                })
             loss.backward()
 
             vis_norm = _viewspace_grad_norm(means2d, means.shape[0], torch)
@@ -365,6 +408,8 @@ class GsplatGsfix3dRepair:
                     "n_visible": int(n_visible),
                     "l1_before": round(l1_before, 6),
                     "l1": round(last_l1, 6),
+                    "train_width": w,
+                    "train_height": h,
                 })
 
         with torch.no_grad():
@@ -374,10 +419,11 @@ class GsplatGsfix3dRepair:
             colors = sh_to_rgb(f_dc)
             rgb, _ = _rasterize(
                 gsplat, means, quats_n, scales, opacities, colors,
-                viewmat, K, w, h, background, packed=self.packed,
+                viewmat, K, w, h, background, packed=use_packed,
+                sparse_grad=use_sparse, absgrad=False,
             )
             l1_after = float(torch.abs(rgb - target).mean().item())
-            render_rgb = _to_uint8(rgb)
+            render_rgb = upsample_uint8(_to_uint8(rgb), orig_w, orig_h)
 
         scene.means = means.detach().float().cpu().numpy().astype(np.float32)
         scene.quats = quats_n.detach().float().cpu().numpy().astype(np.float32)
@@ -400,6 +446,8 @@ class GsplatGsfix3dRepair:
             "n_iters": int(self.iters),
             "l1_before": round(l1_before, 6),
             "l1_after": round(l1_after, 6),
+            "train_width": w,
+            "train_height": h,
             "render_rgb": render_rgb,
         }
 

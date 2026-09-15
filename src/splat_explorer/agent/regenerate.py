@@ -2,8 +2,9 @@
 
 When the inspector sets regenerate=yes (or fix=1), the harness keeps
 exploring. If the dashboard/config tick `image_regeneration` is on, a
-worker thread sends the already-rendered RGB PNG to gpt-image-2 via
-CliRelay (`/v1/images/edits`):
+worker thread sends the already-rendered RGB PNG to the configured
+image-edit backend (gpt-image-2 via CliRelay `/v1/images/edits`, or
+self-hosted Qwen-Image-Edit-2511):
 
   "Please regenerate and fix this image. Repair artifacts and upscale to
    higher resolution."
@@ -200,21 +201,26 @@ def _message_text(payload: dict) -> str:
 
 
 def ask_regenerate(client, model: str, image_path: Path,
-                   timeout_s: float = REQUEST_TIMEOUT_S) -> tuple[dict, str | None]:
-    """Send the RGB frame + static repair prompt to gpt-image-2.
+                   timeout_s: float = REQUEST_TIMEOUT_S,
+                   prompt: str | None = None) -> tuple[dict, str | None]:
+    """Send the RGB frame + repair prompt to gpt-image-2.
 
     Same CliRelay call the episode loop uses for report_artifact regenerate=yes:
     `client.images.edit(model=gpt-image-2, image=<png>, prompt=...)`.
-    Returns (response dict, error).
+    Returns (response dict, error). Local Qwen inference does not use this;
+    it goes through ``image_edit.ImageEditBackend``.
     """
     edit = getattr(getattr(client, "images", None), "edit", None)
     if edit is None:
         return {}, "CliRelay client has no images.edit"
-    return _images_edit(edit, model, image_path, timeout_s)
+    return _images_edit(
+        edit, model, image_path, timeout_s, prompt=prompt or REGENERATE_PROMPT,
+    )
 
 
 def _images_edit(edit, model: str, image_path: Path,
-                 timeout_s: float) -> tuple[dict, str | None]:
+                 timeout_s: float,
+                 prompt: str = REGENERATE_PROMPT) -> tuple[dict, str | None]:
     attempts = (
         {"image": "file", "timeout": True},
         {"image": "file", "timeout": False},
@@ -228,7 +234,7 @@ def _images_edit(edit, model: str, image_path: Path,
                 kwargs: dict[str, Any] = {
                     "model": model,
                     "image": image,
-                    "prompt": REGENERATE_PROMPT,
+                    "prompt": prompt,
                 }
                 if spec["timeout"]:
                     kwargs["timeout"] = timeout_s
@@ -273,8 +279,16 @@ def record_disabled(episode_dir: Path, step: int,
     return result
 
 
-def regenerator_from_policy(policy) -> "Regenerator | None":
-    """Build a Regenerator from a live CliRelay client, always on gpt-image-2."""
+def regenerator_from_policy(policy, cfg=None) -> "Regenerator | None":
+    """Build a Regenerator for regenerate=yes views.
+
+    Qwen (env / config) does not need the VLM's CliRelay client. The gpt-image-2
+    path still uses that client. Does not change report_artifact itself.
+    """
+    from ..image_edit import is_qwen_backend, resolve_image_edit_backend
+
+    if is_qwen_backend(resolve_image_edit_backend(cfg=cfg)):
+        return regenerator_from_config(cfg)
     client = getattr(policy, "client", None)
     if client is None:
         return None
@@ -282,39 +296,31 @@ def regenerator_from_policy(policy) -> "Regenerator | None":
 
 
 def regenerator_from_config(cfg=None) -> "Regenerator":
-    """Studio/dashboard Regenerator: same CliRelay client as report_artifact.
+    """Studio/dashboard Regenerator for the configured RGB-edit backend.
 
     Independent of any running episode so /repair testing cannot touch the
-    harness thread pool. The OpenAI client is the same constructor the VLM
-    uses; Regenerator still pins the image request to gpt-image-2.
+    harness thread pool. ``image_edit.backend`` / ``SPLAT_IMAGE_EDIT_BACKEND``
+    selects gpt-image-2 (CliRelay) or Qwen-Image-Edit-2511 (local GPU).
     """
-    from .cli_relay import CliRelayPolicy
+    from ..image_edit import is_qwen_backend, make_image_edit_backend
 
-    agent = {}
-    if cfg is not None:
-        raw = getattr(cfg, "agent", None)
-        if raw is None and hasattr(cfg, "get"):
-            raw = cfg.get("agent")
-        if isinstance(raw, dict):
-            agent = raw
-        elif raw is not None:
-            agent = dict(raw)
-    policy = CliRelayPolicy(
-        model=IMAGE_MODEL,
-        base_url=str(agent.get("relay_base_url") or ""),
-        api_key=str(agent.get("relay_api_key") or ""),
+    editor = make_image_edit_backend(cfg=cfg)
+    workers = 1 if is_qwen_backend(editor.name) else MAX_WORKERS
+    client = getattr(editor, "client", None)
+    return Regenerator(
+        client=client, model=editor.name, editor=editor, max_workers=workers,
     )
-    return Regenerator(client=policy.client, model=IMAGE_MODEL)
 
 
 class Regenerator:
     """Runs repair requests on a small thread pool so the episode loop is not blocked."""
 
     def __init__(self, client, model: str, max_workers: int = MAX_WORKERS,
-                 timeout_s: float = REQUEST_TIMEOUT_S):
+                 timeout_s: float = REQUEST_TIMEOUT_S, editor=None):
         self.client = client
         self.model = model
         self.timeout_s = timeout_s
+        self.editor = editor
         self._pool = ThreadPoolExecutor(
             max_workers=max(1, max_workers), thread_name_prefix="regen",
         )
@@ -364,6 +370,17 @@ class Regenerator:
             self._pool.shutdown(wait=False, cancel_futures=True)
         return results
 
+    def _edit_image(self, image_path: Path) -> tuple[dict, str | None, list[bytes] | None]:
+        """RGB repair via the swap-in backend, or gpt-image-2 CliRelay."""
+        if self.editor is not None:
+            outcome = self.editor.edit(Path(image_path), REGENERATE_PROMPT)
+            payload = dict(outcome.payload or {})
+            return payload, outcome.error, list(outcome.images or [])
+        payload, error = ask_regenerate(
+            self.client, self.model, image_path, timeout_s=self.timeout_s,
+        )
+        return payload, error, None
+
     def _run(self, image_path: Path, episode_dir: Path, step: int,
              on_done: OnDone | None) -> RegenerateResult:
         t0 = time.perf_counter()
@@ -373,15 +390,14 @@ class Regenerator:
             if not image_path.is_file():
                 result.error = f"source image missing: {image_path}"
             else:
-                payload, error = ask_regenerate(
-                    self.client, self.model, image_path, timeout_s=self.timeout_s,
-                )
+                payload, error, images = self._edit_image(image_path)
                 result.seconds = time.perf_counter() - t0
                 if error:
                     result.error = error
                 else:
                     result.reply_text = _message_text(payload)
-                    images = extract_images(payload)
+                    if images is None:
+                        images = extract_images(payload)
                     result.n_images = len(images)
                     if images:
                         names = []

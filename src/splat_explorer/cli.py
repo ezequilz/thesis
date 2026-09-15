@@ -153,6 +153,7 @@ def cmd_explore(cfg, args) -> None:
         compute_depth=bool(cfg.agent.get("compute_depth", False)),
         compute_coverage=bool(cfg.agent.get("compute_coverage", False)),
         image_regeneration=bool(cfg.agent.get("image_regeneration", False)),
+        regenerator=_regenerator_if_enabled(cfg),
         run_meta={"params": {
             "backend": cfg.agent.vlm_backend,
             "model": cfg.agent.model,
@@ -165,10 +166,26 @@ def cmd_explore(cfg, args) -> None:
             "compute_depth": bool(cfg.agent.get("compute_depth", False)),
             "compute_coverage": bool(cfg.agent.get("compute_coverage", False)),
             "image_regeneration": bool(cfg.agent.get("image_regeneration", False)),
+            "image_edit_backend": _image_edit_backend_name(cfg),
             "prompt": cfg.agent.get("prompt", ""),
             "collision": world.collision,
         }},
     )
+
+
+def _image_edit_backend_name(cfg) -> str:
+    from .image_edit import resolve_image_edit_backend
+
+    return resolve_image_edit_backend(cfg=cfg)
+
+
+def _regenerator_if_enabled(cfg):
+    if not bool(cfg.agent.get("image_regeneration", False)):
+        return None
+    from .agent.regenerate import regenerator_from_config
+
+    return regenerator_from_config(cfg)
+
 
 
 def _stop_stale_viewers() -> None:
@@ -293,6 +310,16 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(prog="splat-explorer")
     parser.add_argument("--config", default=None, help="YAML overriding configs/default.yaml")
+    parser.add_argument(
+        "--image-edit-backend",
+        default=None,
+        help="RGB repair: gpt-image-2 (CliRelay) or qwen-image-edit (local GPU)",
+    )
+    parser.add_argument(
+        "--image-edit-device",
+        default=None,
+        help="CUDA index for Qwen (default 0 = same GPU as photometric repair)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_test = sub.add_parser("render-test", help="Render test views from the scene center")
@@ -326,6 +353,13 @@ def main() -> None:
 
     args = parser.parse_args()
     cfg = load_config(args.config)
+    from .image_edit import apply_image_edit_overrides
+
+    apply_image_edit_overrides(
+        cfg,
+        backend=getattr(args, "image_edit_backend", None),
+        device=getattr(args, "image_edit_device", None),
+    )
     args.func(cfg, args)
 
 

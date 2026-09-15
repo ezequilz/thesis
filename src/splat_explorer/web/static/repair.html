@@ -266,6 +266,12 @@
       <option value="cpu-photometric">CPU photometric (no rasterizer)</option>
     </select>
   </label>
+  <label>RGB repair
+    <select id="in-image-edit" title="Backend for Add view / regenerate=yes RGB repair. gpt-image-2 uses CliRelay. Qwen-Image-Edit-2511 runs on the connected CUDA GPU (same card as photometric by default).">
+      <option value="gpt-image-2">gpt-image-2 (CliRelay)</option>
+      <option value="qwen-image-edit">Qwen-Image-Edit-2511 (GPU)</option>
+    </select>
+  </label>
   <label>saved repair
     <select id="in-save" title="View the working repaired ply, or a numbered snapshot from Save repair. Reset restores the working ply and leaves snapshots in this list.">
       <option value="current">Current repair</option>
@@ -297,6 +303,7 @@
   <span>repaired ply <b id="st-rep">–</b></span>
   <span>scene <b id="st-scene">–</b></span>
   <span>lift <b id="st-backend">–</b></span>
+  <span>RGB <b id="st-image-edit">–</b></span>
   <span id="st-l1">L1 <b>–</b></span>
   <span id="metrics-wrap" hidden>
     <button type="button" id="btn-metrics" title="View this repair's metrics.json">metrics.json</button>
@@ -510,6 +517,8 @@ function lrzPill() {
   const lrz = snapshot?.backends?.lrz;
   const cuda = (snapshot?.backends?.backends || []).find(b => b.id === "gsfix-gsplat");
   const setup = lrz?.setup || {};
+  const target = lrz?.gpu_target || {};
+  const family = target.label || target.family || "";
   const btn = $("btn-gpu-setup");
   if (!lrz) {
     el.textContent = "LRZ: …";
@@ -518,8 +527,9 @@ function lrzPill() {
     if (btn) btn.hidden = true;
     return;
   }
+  const needReload = Boolean(!setup.ok || target.needs_reload);
   if (btn) {
-    const need = Boolean(lrz.configured && lrz.session && !setup.ok);
+    const need = Boolean(lrz.configured && lrz.session && needReload);
     btn.hidden = !need && !setup.inflight;
     btn.disabled = Boolean(setup.inflight) || !lrz.session;
     btn.textContent = setup.inflight ? "Loading GPU setup…" : "Load GPU setup";
@@ -533,19 +543,26 @@ function lrzPill() {
     el.className = "pill err";
     el.title = cuda?.detail || "Run scripts/lrz/ssh-session.sh";
   } else if (setup.inflight) {
-    el.textContent = `LRZ: loading setup`;
+    el.textContent = family ? `LRZ: loading ${family}` : "LRZ: loading setup";
     el.className = "pill busy";
     el.title = setup.message || "Starting PyTorch container on the allocated GPU…";
-  } else if (!setup.ok) {
-    el.textContent = `LRZ: job ${lrz.job_id} · setup needed`;
+  } else if (needReload) {
+    el.textContent = family
+      ? `LRZ: ${family} · setup needed`
+      : `LRZ: job ${lrz.job_id} · setup needed`;
     el.className = "pill busy";
-    el.title = "First CUDA repair will load the PyTorch container on this job (or click Load GPU setup).";
+    el.title = target.reload_reason
+      || "First CUDA repair will load the PyTorch container on this job (or click Load GPU setup).";
   } else if (cuda && cuda.available) {
-    el.textContent = `LRZ: job ${lrz.job_id}`;
+    el.textContent = family ? `LRZ: ${family}` : `LRZ: job ${lrz.job_id}`;
     el.className = "pill ok";
-    el.title = cuda.detail || "";
+    el.title = [
+      cuda.detail,
+      target.gpu_name && `Connected ${target.gpu_name}`,
+      target.job_mem && `hold RAM ${target.job_mem}`,
+    ].filter(Boolean).join(" · ");
   } else {
-    el.textContent = `LRZ: job ${lrz.job_id}`;
+    el.textContent = family ? `LRZ: ${family}` : `LRZ: job ${lrz.job_id}`;
     el.className = "pill busy";
     el.title = cuda?.detail || "SSH is up; refresh the GPU dashboard on /repair/gpu";
   }
@@ -560,6 +577,9 @@ function watchGpuSetup() {
       const gpu = await r.json();
       const s = gpu.setup || {};
       if (snapshot?.backends?.lrz) snapshot.backends.lrz.setup = s;
+      if (snapshot?.backends?.lrz && gpu.gpu_target) {
+        snapshot.backends.lrz.gpu_target = gpu.gpu_target;
+      }
       lrzPill();
       if (s.message) $("msg").textContent = s.message;
       if (!s.inflight) {
@@ -586,10 +606,14 @@ function renderBackends() {
     if (!sel.options.length) {
       sel.innerHTML = '<option value="gsfix-gsplat">gsplat CUDA (GSFix3D)</option>';
     }
+    renderImageEditBackends();
     return;
   }
   const signature = list.map(b => `${b.id}:${b.available}`).join("|");
-  if (sel.dataset.sig === signature && sel.options.length) return;
+  if (sel.dataset.sig === signature && sel.options.length) {
+    renderImageEditBackends();
+    return;
+  }
   sel.dataset.sig = signature;
   sel.innerHTML = list.map(b => {
     const mark = b.available ? "" : " — unavailable";
@@ -600,6 +624,39 @@ function renderBackends() {
   else sel.value = "auto";
   const chosen = list.find(b => b.id === sel.value);
   sel.title = chosen?.detail || "";
+  renderImageEditBackends();
+}
+
+function renderImageEditBackends() {
+  const sel = $("in-image-edit");
+  if (!sel) return;
+  const info = snapshot?.image_edit;
+  const list = info?.backends || [];
+  const stored = localStorage.getItem("repair-image-edit");
+  const prev = sel.dataset.user || stored || info?.selected || sel.value || "gpt-image-2";
+  if (list.length) {
+    const signature = list.map(b => `${b.id}:${b.available}`).join("|");
+    if (sel.dataset.sig !== signature) {
+      sel.dataset.sig = signature;
+      sel.innerHTML = list.map(b => {
+        const mark = b.available === false ? " — unavailable" : "";
+        return `<option value="${esc(b.id)}" title="${esc(b.detail || "")}">${esc(b.label)}${mark}</option>`;
+      }).join("");
+    }
+  }
+  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  const chosen = list.find(b => b.id === sel.value);
+  const share = info?.same_gpu_as_photometric;
+  sel.title = chosen?.detail || (
+    share
+      ? `RGB repair on ${info?.device || "cuda:0"} (same GPU as photometric)`
+      : ""
+  );
+  const st = $("st-image-edit");
+  if (st) {
+    st.textContent = sel.value || info?.selected || "–";
+    st.title = sel.title;
+  }
 }
 
 function renderEpisodes() {
@@ -636,7 +693,7 @@ function viewBadge(v) {
   else if (regen && regen !== "ok" && !v.repaired_url) {
     bits.push(`<span class="badge err">${esc(regen)}</span>`);
   }
-  const r = (snapshot?.job?.results || []).find(x => x.step === v.step) || v.repair;
+  const r = viewRepair(v);
   const st = r?.status || v.repair_status;
   if (st) bits.push(`<span class="badge ${st === "ok" ? "ok" : "err"}">${esc(st)}</span>`);
   return bits.join("");
@@ -663,7 +720,21 @@ function viewRepair(v) {
   if (!v) return {};
   const live = [...(snapshot?.job?.results || [])].reverse().find(x => x.step === v.step);
   if (live) return live;
+  const job = snapshot?.job;
+  if (job?.status === "running" || job?.status === "stopping") return {};
   return v.repair || {};
+}
+function liveJobMessage(job) {
+  let msg = job?.message || "";
+  if (!msg) return "";
+  if (job?.status === "running" || job?.status === "stopping") {
+    const started = Number(job.started_at);
+    if (Number.isFinite(started) && started > 0) {
+      const s = Math.max(0, Math.round(Date.now() / 1000 - started));
+      msg = msg.replace(/ · \d+s$/, "") + ` · ${s}s`;
+    }
+  }
+  return msg;
 }
 function l1Info(r) {
   const before = fmtL1(r?.l1_before);
@@ -1033,7 +1104,7 @@ async function tick({ poll = false } = {}) {
     lrzPill();
     renderBackends();
     renderSaves();
-    if (snapshot?.job?.message) $("msg").textContent = snapshot.job.message;
+    if (snapshot?.job?.message) $("msg").textContent = liveJobMessage(snapshot.job);
     const status = snapshot?.job?.status || "idle";
     const wasActive = jobActive({ status: lastJobStatus });
     const nowActive = jobActive(snapshot.job);
@@ -1062,6 +1133,15 @@ $("in-backend").onchange = () => {
   sel.dataset.user = sel.value;
   try { localStorage.setItem("repair-backend", sel.value); } catch (_) {}
 };
+if ($("in-image-edit")) {
+  $("in-image-edit").onchange = () => {
+    const sel = $("in-image-edit");
+    sel.dataset.user = sel.value;
+    try { localStorage.setItem("repair-image-edit", sel.value); } catch (_) {}
+    const st = $("st-image-edit");
+    if (st) st.textContent = sel.value;
+  };
+}
 $("in-ep").onchange = () => {
   selectedStep = null;
   visorPly = null;
@@ -1121,7 +1201,10 @@ $("btn-add").onclick = async () => {
   const addBtn = $("btn-add");
   if (addBtn) addBtn.disabled = true;
   $("msg").textContent = "Capturing visor camera…";
-  const data = await post("/api/repair/add-view", { episode: selectedEp });
+  const data = await post("/api/repair/add-view", {
+    episode: selectedEp,
+    image_edit_backend: $("in-image-edit") ? $("in-image-edit").value : undefined,
+  });
   if (data && data.ok && data.step != null) {
     selectedStep = Number(data.step);
     looked = { ep: "", step: null };

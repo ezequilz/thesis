@@ -506,6 +506,21 @@ function connectedGpu() {
   if (rows.length === 1) return rows[0];
   return null;
 }
+function imageEditGpuNote() {
+  const ie = snap?.image_edit || {};
+  const selected = ie.selected || "gpt-image-2";
+  const device = ie.device || "cuda:0";
+  const photo = ie.photometric_device || "cuda:0";
+  let text;
+  if (String(selected).includes("qwen")) {
+    text = ie.same_gpu_as_photometric
+      ? `Qwen-Image-Edit-2511 shares this GPU with photometric repair (${device}). ~40GB bf16 resident; photometric stays under 3% VRAM. Dedicated card: image_edit.device or SPLAT_IMAGE_EDIT_DEVICE.`
+      : `Qwen-Image-Edit-2511 on ${device}; photometric stays on ${photo}.`;
+  } else {
+    text = `RGB repair is ${selected} (CliRelay). Set image_edit.backend to qwen-image-edit to run Qwen on this GPU (A100 80GB / H100 94GB).`;
+  }
+  return `<div class="gpu-sub">${esc(text)}</div>`;
+}
 function occupancyProcesses() {
   const occ = snap?.gpu_occupancy;
   if (occ?.processes?.length) return occ.processes;
@@ -576,9 +591,13 @@ function renderGpu() {
   const part = slurm?.partition || "–";
   const nproc = (g.processes || []).length;
   const idx = g.index != null ? `GPU ${g.index}` : "GPU";
+  const target = snap?.gpu_target || {};
+  const family = target.label || target.family || "";
+  const holdMem = target.job_mem || slurm?.mem || "";
   card.innerHTML = `<h2>Connected GPU</h2>
-    <div class="gpu-name">${esc(g.name || "GPU")}</div>
-    <div class="gpu-sub">${esc(idx)} · ${esc(node)} · ${esc(part)} · sm ${esc(g.compute_cap || "–")} · job ${esc(slurm?.job_id || "–")}</div>
+    <div class="gpu-name">${esc(g.name || "GPU")}${family ? ` · ${esc(family)}` : ""}</div>
+    <div class="gpu-sub">${esc(idx)} · ${esc(node)} · ${esc(part)} · sm ${esc(g.compute_cap || target.cuda_arch || "–")} · job ${esc(slurm?.job_id || "–")}</div>
+    ${imageEditGpuNote()}
     <div class="meters">
       <div class="meter">
         <div class="row"><span class="k">VRAM</span>
@@ -595,7 +614,9 @@ function renderGpu() {
       <span class="k">temperature</span><span class="v">${g.temperature_c != null ? esc(Math.round(g.temperature_c)) + " °C" : "–"}</span>
       <span class="k">power</span><span class="v">${g.power_w != null ? esc(Number(g.power_w).toFixed(0)) + " / " + esc(Number(g.power_limit_w || 0).toFixed(0)) + " W" : "–"}</span>
       <span class="k">job time</span><span class="v">${esc(slurm?.elapsed || "–")} / ${esc(slurm?.timelimit || "–")}</span>
-      <span class="k">compute cap</span><span class="v">${esc(g.compute_cap || "–")}</span>
+      <span class="k">compute cap</span><span class="v">${esc(g.compute_cap || target.cuda_arch || "–")}</span>
+      <span class="k">family</span><span class="v">${esc(family || "–")}</span>
+      <span class="k">hold RAM</span><span class="v">${esc(holdMem || "–")}</span>
       <span class="k">compute procs</span><span class="v">${esc(nproc)}</span>
       <span class="k">name</span><span class="v">${esc(slurm?.name || "–")}</span>
     </div>`;
@@ -847,14 +868,17 @@ function renderSetup() {
 
 function setupLabel() {
   const s = snap?.setup || {};
+  const t = snap?.gpu_target || {};
   if (s.inflight) {
     const elapsed = fmtElapsed(s.elapsed_s);
     return (s.message || "loading…") + (elapsed ? ` · ${elapsed}` : "");
   }
+  if (t.needs_reload) return t.reload_reason || "reload needed for this GPU type";
   if (s.ok) {
-    const g = s.detail?.gpu || "";
-    const arch = s.detail?.cuda_arch ? ` sm ${s.detail.cuda_arch}` : "";
-    return g ? `ready · ${g}${arch}` : (s.message || "ready");
+    const g = s.detail?.gpu || t.gpu_name || "";
+    const arch = s.detail?.cuda_arch || t.cuda_arch ? ` sm ${s.detail?.cuda_arch || t.cuda_arch}` : "";
+    const family = t.family ? ` · ${t.family}` : "";
+    return g ? `ready · ${g}${arch}${family}` : (s.message || "ready");
   }
   if (s.error) return s.error;
   if (snap?.slurm?.state === "R") return "not loaded — click Load GPU setup";
@@ -1039,12 +1063,16 @@ function renderChrome() {
       : "Loading GPU setup…";
   } else if (needsOverwrite) {
     $("btn-setup").textContent = "Load GPU setup (clear leftover)";
+  } else if (snap?.gpu_target?.needs_reload) {
+    $("btn-setup").textContent = "Load GPU setup (new GPU)";
   } else {
     $("btn-setup").textContent = snap?.setup?.ok ? "Reload GPU setup" : "Load GPU setup";
   }
   $("btn-setup").title = needsOverwrite
     ? (setupNeedsOverwrite() || "Clears leftover processes on THIS reserved GPU, then loads splat-explorer.")
-    : "Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh. /repair also does this on the first CUDA run.";
+    : (snap?.gpu_target?.needs_reload
+      ? (snap.gpu_target.reload_reason || "This allocation is a different GPU type than the last setup. Reload so gsplat matches the card.")
+      : "Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh. /repair also does this on the first CUDA run.");
   $("btn-hist").disabled = probeBusy || setupBusy || !session;
   const canOcc = session && Boolean(snap?.connection?.job_id || snap?.slurm?.job_id);
   if ($("btn-occ-reload")) {

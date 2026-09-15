@@ -180,6 +180,7 @@ def test_srun_worker_overlaps_sleep_hold():
     assert "--overlap" in cmd
     assert "--jobid=5777469" in cmd
     assert "--gres=gpu:1" in cmd
+    assert "--mem=56G" in cmd
     assert "/workspace/python" in cmd
     assert "--container-name=splat-repair-5777469" in cmd
 
@@ -230,6 +231,11 @@ def test_parse_squeue_and_nvidia_smi():
     )
     assert waiting["name"] == "gs-24h"
     assert waiting["start_time"] == "2026-09-10T03:10:58"
+    held = parse_squeue_line(
+        "5786047|R|lrz-dgx-a100-80x8|lrz-dgx-a100-002|1:02|48:00:00|None|gs-48h|2026-09-13T15:00:00|32G"
+    )
+    assert held["mem"] == "32G"
+    assert held["partition"] == "lrz-dgx-a100-80x8"
 
     gpus = parse_nvidia_smi_csv(
         "0, NVIDIA A100-SXM4-80GB, 0, 81920, 0, 0, 29, 61.00, 400.00, 8.0\n"
@@ -396,6 +402,7 @@ def test_nvidia_smi_command_overlaps_hold_job():
     assert "--jobid=5777469" in cmd
     assert "nvidia-smi" in cmd
     assert "--gres=gpu:1" in cmd
+    assert "--mem=1G" in cmd
     assert "GPUCSV" in cmd
     assert "query-compute-apps" in cmd
     assert "CUDA_VISIBLE_DEVICES" in cmd
@@ -1648,6 +1655,284 @@ def test_ensure_lrz_gpu_ready_reuses_dss_marker(monkeypatch):
     assert started == []
     assert "A100" in (body.get("message") or "")
     reset_setup_cache()
+
+
+def test_srun_mem_flag_leaves_headroom_on_32g_hold():
+    from splat_explorer.repair_lrz import srun_mem_flag
+
+    assert srun_mem_flag({"mem": "32G"}) == "--mem=24G"
+    assert srun_mem_flag({"mem": "64G"}) == "--mem=56G"
+    assert srun_mem_flag({"mem": "32G"}, probe=True) == "--mem=1G"
+
+
+def test_tight_host_ram_32g_vs_64g():
+    from splat_explorer.repair_lrz import tight_host_ram
+
+    assert tight_host_ram({"mem": "32G"}, cgroup_mb=80 * 1024) is True
+    assert tight_host_ram({"mem": "64G"}, cgroup_mb=80 * 1024) is False
+    assert tight_host_ram({"mem": "64G"}, cgroup_mb=32 * 1024) is True
+
+
+def test_lrz_params_enable_packed_on_32g_hold():
+    from splat_explorer.repair_lrz import (
+        LrzRemoteRepair, remember_live_allocation, reset_live_allocation,
+    )
+
+    reset_live_allocation()
+    remember_live_allocation(
+        job_id="5786047", state="R", mem="32G",
+        partition="lrz-dgx-a100-80x8", node="lrz-dgx-a100-002",
+    )
+    try:
+        params = LrzRemoteRepair()._params()
+        assert params["packed"] is True
+        assert params["train_max_edge"] == 512
+        assert params["sparse_grad"] is True
+    finally:
+        reset_live_allocation()
+    wide = LrzRemoteRepair()._params()
+    assert wide["packed"] is False
+    assert wide["train_max_edge"] == 0
+    assert wide["sparse_grad"] is False
+
+
+def test_enable_packed_job_params(tmp_path):
+    from splat_explorer.repair_lrz import PARAMS_JSON, enable_packed_job_params
+
+    path = tmp_path / PARAMS_JSON
+    path.write_text('{"method": "gsfix-gsplat", "packed": false}')
+    assert enable_packed_job_params(tmp_path) is True
+    assert json.loads(path.read_text())["packed"] is True
+    assert enable_packed_job_params(tmp_path) is False
+
+
+def test_enable_tighter_job_params_packs_and_shrinks(tmp_path):
+    from splat_explorer.repair_lrz import PARAMS_JSON, enable_tighter_job_params
+
+    path = tmp_path / PARAMS_JSON
+    path.write_text('{"method": "gsfix-gsplat", "packed": false}')
+    assert enable_tighter_job_params(tmp_path) is True
+    body = json.loads(path.read_text())
+    assert body["packed"] is True
+    assert body["sparse_grad"] is True
+    assert body["train_max_edge"] == 512
+    assert enable_tighter_job_params(tmp_path) is True
+    assert json.loads(path.read_text())["train_max_edge"] == 384
+
+
+def test_overlapping_step_ids_skips_hold():
+    from splat_explorer.repair_lrz import overlapping_step_ids
+
+    text = (
+        "5786047.extern PD\n"
+        "5786047.105 R\n"
+        "5786047.batch R\n"
+        "5786047 R\n"
+        "999.1 R\n"
+    )
+    assert overlapping_step_ids(text, "5786047") == ["5786047.105"]
+
+
+def test_pythonpath_exports_single_compile_job_on_32g_hold():
+    from splat_explorer.repair_lrz import _remote_pythonpath_exports
+
+    tight = _remote_pythonpath_exports({"mem": "64G", "job_mem": "32G"})
+    assert "MAX_JOBS=1" in tight
+    assert "TORCH_NUM_THREADS=1" in tight
+    wide = _remote_pythonpath_exports({"mem": "64G"})
+    assert "MAX_JOBS=4" in wide
+
+
+def test_oom_error_does_not_dump_ply_loader_logs():
+    import subprocess
+
+    from splat_explorer.repair_lrz import format_remote_command_error
+
+    result = subprocess.CompletedProcess(
+        ["ssh", "go73kaf2@login.ai.lrz.de", "srun"],
+        1,
+        stdout="2026-09-14 INFO splat_explorer.scene.ply_loader: Loading 3DGS PLY scene.ply\n",
+        stderr=(
+            "slurmstepd: error: Detected 2 oom_kill events in StepId=5786047.67. "
+            "Some of the step tasks have been OOM Killed.\n"
+            "srun: error: lrz-dgx-a100-002: task 0: Out Of Memory\n"
+        ),
+    )
+    msg = format_remote_command_error(["/usr/bin/ssh", "-4", "srun"], result)
+    assert "host RAM" in msg
+    assert "ply_loader" not in msg
+    assert "oom_kill" in msg.lower() or "Out Of Memory" in msg
+
+
+def test_overlay_running_job_uses_packed_status():
+    from splat_explorer.repair_lrz import overlay_running_job_message
+
+    job = overlay_running_job_message(
+        {"status": "running", "started_at": 100.0, "message": "Step 13 rsync_up via LRZ ControlMaster · 0s"},
+        {"phase": "cuda_ready", "message": "GPU ready: NVIDIA A100-SXM4-80GB. Starting photometric refine…"},
+    )
+    assert "rsync_up" not in job["message"]
+    assert "GPU ready" in job["message"]
+    assert job["message"].endswith("s")
+
+
+def test_occupancy_probe_skips_second_srun_during_repair(monkeypatch):
+    from splat_explorer.repair_lrz import probe_gpu_occupancy
+
+    monkeypatch.setattr("splat_explorer.repair_lrz.gpu_work_owner", lambda: "repair")
+    called = []
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz._ssh_run",
+        lambda *a, **k: called.append(True) or (_ for _ in ()).throw(AssertionError("ssh")),
+    )
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz._cached_occupancy_raw",
+        lambda: ({"gpus": [{"index": 0, "name": "A100"}]}, 1.0),
+    )
+    occ = probe_gpu_occupancy({"job_id": "5786047"})
+    assert occ["deferred"] is True
+    assert called == []
+
+
+def test_catalog_entry_matches_truncated_squeue_partition():
+    from splat_explorer.repair_lrz import catalog_entry_for_partition
+
+    dgx = catalog_entry_for_partition("lrz-dgx-a")
+    assert dgx["id"] == "lrz-dgx-a100-80x8"
+    assert dgx["family"] == "A100"
+    h100 = catalog_entry_for_partition("lrz-hgx-h100-94x4")
+    assert h100["family"] == "H100"
+    hgx = catalog_entry_for_partition("lrz-hgx-a100-80x4")
+    assert hgx["label"].startswith("HGX A100")
+
+
+def test_setup_matches_allocation_rejects_h100_marker_on_a100():
+    from splat_explorer.repair_lrz import setup_matches_allocation
+
+    ok, reason = setup_matches_allocation(
+        {
+            "ok": True, "job_id": "1", "gpu": "NVIDIA H100 80GB HBM3",
+            "cuda_arch": "9.0", "family": "H100",
+        },
+        job_id="1",
+        slurm={"partition": "lrz-dgx-a100-80x8"},
+        connected={"name": "NVIDIA A100-SXM4-80GB", "compute_cap": "8.0"},
+    )
+    assert ok is False
+    assert "H100" in reason
+    assert "A100" in reason
+    same, _ = setup_matches_allocation(
+        {
+            "ok": True, "job_id": "5786047", "gpu": "NVIDIA A100-SXM4-80GB",
+            "cuda_arch": "8.0",
+        },
+        job_id="5786047",
+        slurm={"partition": "lrz-dgx-a100-80x8", "job_id": "5786047"},
+        connected={"name": "NVIDIA A100-SXM4-80GB", "compute_cap": "8.0"},
+    )
+    assert same is True
+
+
+def test_srun_mem_flag_uses_live_hold_not_yaml_64g():
+    from splat_explorer.repair_lrz import (
+        remember_live_allocation, reset_live_allocation, srun_mem_flag,
+    )
+
+    reset_live_allocation()
+    remember_live_allocation(
+        job_id="5786047", state="R", mem="32G",
+        partition="lrz-dgx-a100-80x8", node="lrz-dgx-a100-002",
+    )
+    try:
+        assert srun_mem_flag({"mem": "64G", "job_id": "5786047"}) == "--mem=24G"
+        assert srun_mem_flag({"mem": "64G", "job_id": "999"}) == "--mem=56G"
+        assert "--mem=56G" in (
+            __import__("splat_explorer.repair_lrz", fromlist=["srun_worker_command"])
+            .srun_worker_command(
+                {
+                    "job_id": "5777469", "cpus": 4, "workspace": "/dss/ws",
+                    "container": "/dss/ws/containers/pytorch.sqsh",
+                    "container_name": "splat-repair", "mem": "64G",
+                },
+                "abc",
+            )
+        )
+    finally:
+        reset_live_allocation()
+
+
+def test_memory_required_error_mentions_live_hold():
+    import subprocess
+
+    from splat_explorer.repair_lrz import (
+        format_remote_command_error, remember_live_allocation, reset_live_allocation,
+    )
+
+    reset_live_allocation()
+    remember_live_allocation(job_id="5786047", state="R", mem="32G")
+    try:
+        result = subprocess.CompletedProcess(
+            ["ssh", "go73kaf2@login.ai.lrz.de", "srun"],
+            1,
+            stdout="",
+            stderr="srun: error: Unable to create step for job 5786047: Memory required by task is not available\n",
+        )
+        msg = format_remote_command_error(["/usr/bin/ssh", "-4", "srun"], result)
+        assert "32G" in msg
+        assert "Memory required" in msg or "free host RAM" in msg
+        assert "yaml" in msg.lower()
+    finally:
+        reset_live_allocation()
+
+
+def test_ensure_lrz_gpu_ready_reloads_on_family_mismatch(monkeypatch):
+    from splat_explorer.repair_lrz import ensure_lrz_gpu_ready, reset_setup_cache
+
+    reset_setup_cache()
+    started = []
+    monkeypatch.setattr("splat_explorer.repair_lrz.lrz_session_alive", lambda cfg=None: True)
+    monkeypatch.setattr("splat_explorer.repair_lrz.probe_job", lambda cfg=None: "R")
+    monkeypatch.setattr("splat_explorer.repair_lrz.load_lrz_config", lambda: {
+        "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "5786047",
+        "workspace": "/dss/ws", "container": "/dss/ws/containers/pytorch.sqsh",
+        "cpus": 4, "mem": "64G", "container_name": "splat-repair",
+    })
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz.live_allocation",
+        lambda job_id=None: {
+            "job_id": "5786047", "state": "R", "mem": "32G",
+            "partition": "lrz-dgx-a100-80x8", "node": "lrz-dgx-a100-002",
+        },
+    )
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz._cached_occupancy_raw",
+        lambda: ({
+            "gpus": [{
+                "index": 0, "name": "NVIDIA A100-SXM4-80GB",
+                "compute_cap": "8.0", "allocated": True,
+            }],
+        }, 1.0),
+    )
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz.read_remote_setup_marker",
+        lambda cfg=None: {
+            "ok": True, "job_id": "5786047", "gpu": "NVIDIA H100 80GB HBM3",
+            "cuda_arch": "9.0", "family": "H100",
+        },
+    )
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz.request_lrz_setup",
+        lambda **kwargs: started.append(kwargs) or {"inflight": True},
+    )
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz.wait_for_lrz_setup",
+        lambda cfg=None: {"ok": True, "reloaded": True, "job_id": "5786047"},
+    )
+    body = ensure_lrz_gpu_ready()
+    assert started and started[0].get("force") is True
+    assert body.get("reloaded") is True
+    reset_setup_cache()
+
 
 
 

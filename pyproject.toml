@@ -27,6 +27,14 @@ apple = [
 ]
 # VLM API access (openai client is also used for the CliRelay backend)
 vlm = ["openai>=1.40"]
+# Self-hosted Qwen-Image-Edit-2511 (RGB repair). Needs CUDA torch from [gpu].
+# Diffusers >=0.36 ships QwenImageEditPlusPipeline (the 2511 model-card class).
+image-edit = [
+    "diffusers>=0.36.0",
+    "transformers>=4.51.3",
+    "accelerate>=1.2.0",
+    "safetensors>=0.4.5",
+]
 
 [project.scripts]
 splat-explorer = "splat_explorer.cli:main"

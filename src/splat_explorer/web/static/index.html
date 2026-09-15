@@ -291,8 +291,15 @@
         <input type="checkbox" id="in-compute-coverage">compute coverage map
       </label>
       <div class="hint">repairs</div>
-      <label class="chk" title="When the inspector sets regenerate=yes, send the RGB view to gpt-image-2 (~4¢/call). Off: record the decision only — no paid request.">
-        <input type="checkbox" id="in-regen">image regeneration (4ct)
+      <label class="chk" title="When the inspector sets regenerate=yes, send the RGB view to the selected image-edit backend. Off: record the decision only — no paid / GPU request.">
+        <input type="checkbox" id="in-regen">image regeneration
+      </label>
+      <label title="RGB repair backend for regenerate=yes views. gpt-image-2 uses CliRelay. Qwen-Image-Edit-2511 runs on the connected CUDA GPU (same card as photometric by default).">
+        RGB repair
+        <select id="in-image-edit">
+          <option value="gpt-image-2">gpt-image-2 (CliRelay)</option>
+          <option value="qwen-image-edit">Qwen-Image-Edit-2511 (GPU)</option>
+        </select>
       </label>
     </div>
   </div>
@@ -359,6 +366,14 @@ function fmtSecs(s) {
 function esc(t) {
   return String(t).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 }
+function imageEditCaption(step) {
+  const id = step?.image_edit_backend
+    || activeRun()?.params?.image_edit_backend
+    || state?.defaults?.image_edit_backend
+    || "gpt-image-2";
+  if (String(id).toLowerCase().includes("qwen")) return "Qwen-Image-Edit-2511";
+  return "gpt-image-2";
+}
 
 async function poll() {
   try {
@@ -416,6 +431,17 @@ function render() {
   if (!$("in-regen").dataset.init) {
     $("in-regen").checked = !!defaults.image_regeneration;
     $("in-regen").dataset.init = "1";
+  }
+  if ($("in-image-edit") && !$("in-image-edit").dataset.init) {
+    const list = defaults.image_edit?.backends || [];
+    if (list.length) {
+      $("in-image-edit").innerHTML = list.map(b => {
+        const mark = b.available === false ? " — unavailable" : "";
+        return `<option value="${esc(b.id)}" title="${esc(b.detail || "")}">${esc(b.label)}${mark}</option>`;
+      }).join("");
+    }
+    $("in-image-edit").value = defaults.image_edit_backend || "gpt-image-2";
+    $("in-image-edit").dataset.init = "1";
   }
   $("spectator-link").href = "/spectator";
   const frame = $("viser-frame");
@@ -554,12 +580,13 @@ function renderDetail() {
       <img class="frame" src="${url}" alt="${alt}">
     </figure>`;
   const rgbFig = fig(`RGB — sent to the VLM (${vlmSize}, aspect preserved)`, s.frame_url, `step ${s.step} RGB`);
+  const regenModel = imageEditCaption(s);
   const regenCaption = s.regen_frame_url
-    ? "REGENERATED RGB — gpt-image-2 repair of this view"
+    ? `REGENERATED RGB — ${regenModel} repair of this view`
     : (s.regen_status === "queued"
-        ? "REGENERATED RGB — queued (gpt-image-2, still running)"
+        ? `REGENERATED RGB — queued (${regenModel}, still running)`
         : (s.regen_status === "disabled"
-            ? "REGENERATED RGB — inspector asked to regenerate; setting off (no paid call)"
+            ? "REGENERATED RGB — inspector asked to regenerate; setting off (no image-edit call)"
             : (s.regen_status && s.regen_status !== "ok"
                 ? `REGENERATED RGB — ${s.regen_status}${s.regen_error ? ": " + s.regen_error : ""}`
                 : "")));
@@ -624,6 +651,7 @@ $("btn-start").onclick = () => {
     compute_depth: $("in-compute-depth").checked,
     compute_coverage: $("in-compute-coverage").checked,
     image_regeneration: $("in-regen").checked,
+    image_edit_backend: $("in-image-edit") ? $("in-image-edit").value : "gpt-image-2",
   });
 };
 $("btn-stop").onclick = () => post("/api/stop");

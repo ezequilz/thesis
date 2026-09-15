@@ -42,7 +42,9 @@ src/splat_explorer/
     vlm.py                        Policies: scripted (works) / OpenAI-compatible [STUB]
     cli_relay.py                  CliRelay backend: Gemini/Claude/OpenAI via one proxy
     loop.py                       observe → decide → act episode loop + logging
-    regenerate.py                 gpt-image-2 repair of reported artifact frames
+    regenerate.py                 RGB repair of reported frames (gpt-image-2 or Qwen)
+  image_edit.py                 Swap-in RGB backends (gpt-image-2 / Qwen-Image-Edit-2511)
+  image_edit_qwen.py            Local QwenImageEditPlusPipeline on the connected GPU
   repair.py                     3DGS view-local lift after a regen PNG
   repair_gsfix3d.py             CUDA/gsplat GSFix3D paper refine (default)
   repair_gsfix.py               Frozen CUDA baseline (uncapped RGB; A/B)

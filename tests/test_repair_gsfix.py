@@ -12,20 +12,46 @@ from splat_explorer.repair import (
     make_repair_backend,
     repaired_render_name,
 )
-from splat_explorer.repair_gsfix import photometric_loss, ssim
+from splat_explorer.repair_gsfix import camera_for_train, photometric_loss, ssim, train_hw
 
 
 def test_repaired_render_name():
     assert repaired_render_name(2) == "step_002_repaired_render.png"
 
 
-def test_make_repair_backend_explicit_cpu_photometric():
-    from splat_explorer.repair import PhotometricViewRepair
+def test_train_hw_and_camera_for_train():
+    from splat_explorer.agent.camera_rig import CameraRig
 
-    backend = make_repair_backend("cpu-photometric")
-    assert isinstance(backend, PhotometricViewRepair)
-    backend = make_repair_backend("cpu-project")
-    assert isinstance(backend, ProjectedViewRepair)
+    assert train_hw(960, 720, 0) == (960, 720)
+    assert train_hw(960, 720, 512) == (512, 384)
+    camera = CameraRig(np.array([0.0, 0.0, -2.0]), up_axis="+y").camera(960, 720, 75.0)
+    small = camera_for_train(camera, 512)
+    assert small.width == 512
+    assert small.height == 384
+    assert small.fov_deg == camera.fov_deg
+    np.testing.assert_allclose(small.fx / small.width, camera.fx / camera.width, atol=1e-5)
+
+
+def test_should_persist_repair_checkpoint():
+    from splat_explorer.repair import should_persist_repair_checkpoint
+
+    assert should_persist_repair_checkpoint({"phase": "cuda_ready", "n_iters": 0}) is False
+    assert should_persist_repair_checkpoint({"phase": "srun", "n_iters": 0}) is False
+    assert should_persist_repair_checkpoint({"phase": "refine", "n_iters": 1}) is True
+    assert should_persist_repair_checkpoint(
+        {"phase": "refine", "n_iters": 1}, last_iters=1,
+    ) is False
+    assert should_persist_repair_checkpoint({"backend": "cpu-photometric", "n_updated": 4}) is True
+    assert should_persist_repair_checkpoint({"render_rgb": np.zeros((2, 2, 3), np.uint8)}) is True
+
+
+def test_make_repair_backend_explicit_cpu_photometric():
+    import splat_explorer.repair as repair_mod
+
+    backend = repair_mod.make_repair_backend("cpu-photometric")
+    assert type(backend).__name__ == "PhotometricViewRepair"
+    backend = repair_mod.make_repair_backend("cpu-project")
+    assert type(backend).__name__ == "ProjectedViewRepair"
 
 
 def test_make_repair_backend_rejects_unknown_name():
@@ -129,10 +155,13 @@ def test_make_repair_backend_falls_back_without_cuda():
 def test_repair_progress_suffix_does_not_call_updates_stamped():
     from splat_explorer.repair import repair_progress_suffix
 
-    text = repair_progress_suffix({"n_updated": 387316, "n_iters": 340, "n_stamped": 0})
+    text = repair_progress_suffix({
+        "n_updated": 387316, "n_iters": 340, "n_stamped": 0, "l1": 0.0421,
+    })
     assert "stamped" not in text
     assert "387316 gaussians" in text
     assert "340 iters" in text
+    assert "L1 0.0421" in text
     stamped = repair_progress_suffix({"n_stamped": 12, "n_updated": 99})
     assert "12 stamped" in stamped
     assert "99" not in stamped

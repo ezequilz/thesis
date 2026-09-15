@@ -35,6 +35,12 @@ from ..scene.catalog import SceneSpec, publish_live_scene
 
 logger = logging.getLogger(__name__)
 
+
+def _image_edit_snapshot(cfg) -> dict:
+    from ..image_edit import list_image_edit_backends
+
+    return list_image_edit_backends(cfg)
+
 # Focused "Repair this view" safety net. CUDA GSFix3D used to exit after one
 # 20-iter paper chunk (~11s) and then always print "Reached 1h cap".
 FOCUSED_REPAIR_MAX_SECONDS = 12 * 3600
@@ -158,6 +164,7 @@ class RepairStudio:
         self.showing_save: int | None = None  # numbered snapshot, or None = working ply
         self._last_preview_at: float = 0.0
         self._regenerator = None
+        self._regen_key = None
         self._regenerator_lock = threading.Lock()
 
     @staticmethod
@@ -196,6 +203,14 @@ class RepairStudio:
             showing_episode = self.showing_episode
             showing_highlight = self.showing_highlight
             showing_save = self.showing_save
+        if job.get("status") in ("running", "stopping"):
+            try:
+                from ..repair_lrz import list_packed_jobs, overlay_running_job_message
+
+                packed = list_packed_jobs(limit=1)
+                job = overlay_running_job_message(job, packed[0] if packed else None)
+            except Exception:
+                job = dict(job)
         ep = episode_id or job.get("episode") or live_ep
         detail = self.episode_review(ep) if ep else None
         episode_scene = None
@@ -235,6 +250,7 @@ class RepairStudio:
             "capture_height": capture_height,
             "up_axis": up_axis,
             "backends": list_repair_backends(),
+            "image_edit": _image_edit_snapshot(self.app.cfg),
             "episode": detail,
             "pending_regen": bool(
                 detail
@@ -260,13 +276,15 @@ class RepairStudio:
 
         with self._lock:
             job = dict(self.job)
-        return lrz_dashboard_snapshot(
+        snap = lrz_dashboard_snapshot(
             repair_job=job,
             request_probe=probe,
             force_probe=force,
             history_start=history_start,
             history_end=history_end,
         )
+        snap["image_edit"] = _image_edit_snapshot(self.app.cfg)
+        return snap
 
     def gpu_allocate(
         self,
@@ -591,12 +609,14 @@ class RepairStudio:
         }
         return True, f"Saved snapshot {index} as {dest.name}.", extra
 
-    def add_view(self, episode_id: str) -> tuple[bool, str, dict]:
+    def add_view(
+        self, episode_id: str, image_edit_backend: str | None = None,
+    ) -> tuple[bool, str, dict]:
         """Capture the live visor camera as a dashboard-only repair view.
 
-        Writes `repair_custom_views.jsonl` + `step_NNN.png` and queues gpt-image-2
-        on the studio Regenerator thread pool. Does not touch actions.jsonl,
-        meta.json, or a running harness episode.
+        Writes `repair_custom_views.jsonl` + `step_NNN.png` and queues RGB
+        image repair (gpt-image-2 or Qwen, per image_edit.backend). Does not
+        touch actions.jsonl, meta.json, or a running harness episode.
         """
         extra: dict = {}
         with self._lock:
@@ -664,7 +684,7 @@ class RepairStudio:
         queued = False
         regen_error = None
         try:
-            regen = self._ensure_regenerator()
+            regen = self._ensure_regenerator(image_edit_backend)
             regen.submit(d / frame_name, d, step)
             queued = True
         except Exception as exc:
@@ -751,11 +771,17 @@ class RepairStudio:
             img = _center_crop_and_resize(img, need_w, need_h)
         return img
 
-    def _ensure_regenerator(self):
+    def _ensure_regenerator(self, backend_name: str | None = None):
+        from ..agent.regenerate import regenerator_from_config
+        from ..image_edit import overlay_image_edit_cfg, resolve_image_edit_backend
+
+        name = resolve_image_edit_backend(backend_name, cfg=self.app.cfg)
         with self._regenerator_lock:
-            if self._regenerator is None:
-                from ..agent.regenerate import regenerator_from_config
-                self._regenerator = regenerator_from_config(self.app.cfg)
+            if self._regenerator is None or self._regen_key != name:
+                self._regenerator = regenerator_from_config(
+                    overlay_image_edit_cfg(self.app.cfg, backend=name),
+                )
+                self._regen_key = name
             return self._regenerator
 
     def ensure_catalog_scene(self, episode_id: str) -> tuple[bool, str]:
@@ -1020,11 +1046,14 @@ class RepairStudio:
                             f"Packed for LRZ. If CUDA is greyed out, run `{cmd}` "
                             "and type your password once (ControlMaster ~/.ssh/cm-lrz)."
                         )
-                    elif str(phase) in ("rsync_up", "srun", "rsync_down"):
-                        self.job["message"] = (
+                    elif str(phase) in (
+                        "rsync_up", "srun", "rsync_down",
+                        "gpu_ready", "cuda_import", "cuda_ready",
+                    ):
+                        msg = stats.get("message") or (
                             f"Step {views[0].get('step')} {phase} via LRZ ControlMaster"
-                            f" · {elapsed:.0f}s"
                         )
+                        self.job["message"] = f"{msg} · {elapsed:.0f}s"
                     else:
                         self.job["message"] = (
                             f"Step {views[0].get('step')} {phase}"
@@ -1037,7 +1066,14 @@ class RepairStudio:
                             )
                         )
                 now = time.time()
-                if now - self._last_preview_at >= 10.0:
+                progressed = (
+                    str(phase) == "refine"
+                    and (
+                        int(stats.get("n_iters") or 0) > 0
+                        or int(stats.get("n_updated") or 0) > 0
+                    )
+                )
+                if progressed and now - self._last_preview_at >= 10.0:
                     self._last_preview_at = now
                     self.show(
                         episode_id, "repaired", force=True,

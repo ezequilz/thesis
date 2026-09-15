@@ -34,6 +34,36 @@ from .scene import GaussianScene
 
 logger = logging.getLogger(__name__)
 
+
+def train_hw(width: int, height: int, max_side: int = 0) -> tuple[int, int]:
+    """Keep aspect ratio; ``max_side<=0`` means native resolution."""
+    width, height = max(1, int(width)), max(1, int(height))
+    cap = int(max_side or 0)
+    if cap <= 0 or max(width, height) <= cap:
+        return width, height
+    scale = cap / float(max(width, height))
+    return max(16, int(round(width * scale))), max(16, int(round(height * scale)))
+
+
+def camera_for_train(camera: Camera, max_side: int = 0) -> Camera:
+    """Copy with fov-scaled intrinsics at the training resolution."""
+    width, height = train_hw(int(camera.width), int(camera.height), max_side)
+    if width == int(camera.width) and height == int(camera.height):
+        return camera
+    return replace(camera, width=width, height=height)
+
+
+def upsample_uint8(image: np.ndarray, width: int, height: int) -> np.ndarray:
+    arr = np.asarray(image, dtype=np.uint8)
+    if arr.shape[0] == int(height) and arr.shape[1] == int(width):
+        return arr
+    from PIL import Image
+
+    return np.asarray(
+        Image.fromarray(arr).resize((int(width), int(height)), Image.Resampling.LANCZOS),
+        dtype=np.uint8,
+    )
+
 # Same mix as GSFix3D refine_gs.py / Kerbl et al.
 _LAMBDA_DSSIM = 0.2
 _SSIM_WINDOW = 11
@@ -215,6 +245,7 @@ class GsplatPhotometricRepair:
                 "gpu_memory_total_mib": int(props.total_memory / (1024 * 1024)),
                 "n_gaussians": int(scene.num_gaussians),
                 "n_iters": 0,
+                "packed": bool(self.packed),
             })
         target = _image_to_tensor(repaired_rgb, w, h, torch, device)
         rendered = _image_to_tensor(rendered_rgb, w, h, torch, device)
@@ -356,7 +387,11 @@ def _image_to_tensor(image: np.ndarray, width: int, height: int, torch, device):
     return torch.from_numpy(arr.astype(np.float32) / 255.0).to(device)
 
 
-def _rasterize(gsplat, means, quats, scales, opacities, colors, viewmat, K, width, height, background, packed=False):
+def _rasterize(
+    gsplat, means, quats, scales, opacities, colors, viewmat, K, width, height,
+    background, packed=False, sparse_grad=None, absgrad=None,
+):
+    packed = bool(packed)
     kwargs = dict(
         means=means,
         quats=quats,
@@ -367,17 +402,29 @@ def _rasterize(gsplat, means, quats, scales, opacities, colors, viewmat, K, widt
         Ks=K,
         width=int(width),
         height=int(height),
-        packed=bool(packed),
+        packed=packed,
     )
-    extra = dict(backgrounds=background.unsqueeze(0), render_mode="RGB", absgrad=True)
+    extra = dict(backgrounds=background.unsqueeze(0), render_mode="RGB")
+    if absgrad is None:
+        absgrad = not packed
+    if absgrad:
+        extra["absgrad"] = True
+    if sparse_grad is None:
+        sparse_grad = packed
+    if sparse_grad:
+        extra["sparse_grad"] = True
     try:
         out = gsplat.rasterization(**kwargs, **extra)
     except TypeError:
-        extra.pop("absgrad", None)
+        extra.pop("sparse_grad", None)
         try:
             out = gsplat.rasterization(**kwargs, **extra)
         except TypeError:
-            out = gsplat.rasterization(**kwargs)
+            extra.pop("absgrad", None)
+            try:
+                out = gsplat.rasterization(**kwargs, **extra)
+            except TypeError:
+                out = gsplat.rasterization(**kwargs)
     colors_out, _alphas, info = out[0], out[1], out[2] if len(out) > 2 else {}
     rgb = colors_out[0]
     if rgb.shape[-1] > 3:

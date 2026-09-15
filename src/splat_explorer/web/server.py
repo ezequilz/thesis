@@ -43,7 +43,7 @@ Endpoints:
   GET  /api/episodes/<id>      full trace of one past run (steps + artifacts)
   GET  /api/episodes/<id>/log  that run's episode.log
   GET  /api/episodes/<id>/video  RGB|map video (renders once, then cached on disk)
-  POST /api/run           start an episode  {backend, model, max_steps, width, height, send_depth, send_map, send_coverage, compute_depth, compute_coverage, image_regeneration}
+  POST /api/run           start an episode  {backend, model, max_steps, width, height, send_depth, send_map, send_coverage, compute_depth, compute_coverage, image_regeneration, image_edit_backend}
   POST /api/stop          request cooperative stop of the running episode
   POST /api/scene         switch the loaded splat  {id}
   POST /api/select        pin the viser overlay to a step {step: int} / back to live {step: null}
@@ -76,8 +76,21 @@ RUN_DEFAULTS = {"backend": "cli_relay", "model": "", "max_steps": 10,
                 "width": 960, "height": 720, "send_depth": False,
                 "send_map": True, "send_coverage": False,
                 "compute_depth": False, "compute_coverage": False,
-                "image_regeneration": False}
+                "image_regeneration": False, "image_edit_backend": ""}
 RUN_LIMITS = {"max_steps": 200, "width": 1920, "height": 1440}
+
+
+def _default_image_edit_backend(cfg) -> str:
+    from ..image_edit import resolve_image_edit_backend
+
+    return resolve_image_edit_backend(cfg=cfg)
+
+
+def _image_edit_catalog(cfg) -> dict:
+    from ..image_edit import list_image_edit_backends
+
+    return list_image_edit_backends(cfg)
+
 
 
 def _attach_regen_files(
@@ -365,6 +378,13 @@ class DashboardApp:
         clean["compute_depth"] = bool(clean["compute_depth"])
         clean["compute_coverage"] = bool(clean["compute_coverage"])
         clean["image_regeneration"] = bool(clean["image_regeneration"])
+        from ..image_edit import resolve_image_edit_backend
+        try:
+            clean["image_edit_backend"] = resolve_image_edit_backend(
+                clean.get("image_edit_backend") or None, cfg=self.cfg,
+            )
+        except ValueError:
+            clean["image_edit_backend"] = resolve_image_edit_backend(cfg=self.cfg)
         # Sending a view implies computing it.
         if clean["send_depth"]:
             clean["compute_depth"] = True
@@ -446,6 +466,16 @@ class DashboardApp:
                 meta_params["scene"] = spec.id
                 meta_params["scene_label"] = spec.label
                 meta_params["scene_path"] = str(spec.path)
+            regenerator = None
+            if params["image_regeneration"]:
+                from ..agent.regenerate import regenerator_from_config
+                from ..image_edit import overlay_image_edit_cfg
+
+                regenerator = regenerator_from_config(
+                    overlay_image_edit_cfg(
+                        self.cfg, backend=params.get("image_edit_backend"),
+                    )
+                )
             run_episode(
                 renderer=self.renderer,
                 rig=rig,
@@ -465,6 +495,7 @@ class DashboardApp:
                 compute_depth=params["compute_depth"],
                 compute_coverage=params["compute_coverage"],
                 image_regeneration=params["image_regeneration"],
+                regenerator=regenerator,
                 run_meta={"params": meta_params},
                 on_step=self._on_step,
                 should_stop=self._stop.is_set,
@@ -700,6 +731,8 @@ class DashboardApp:
                     "compute_depth": bool(self.cfg.agent.get("compute_depth", False)),
                     "compute_coverage": bool(self.cfg.agent.get("compute_coverage", False)),
                     "image_regeneration": bool(self.cfg.agent.get("image_regeneration", False)),
+                    "image_edit_backend": _default_image_edit_backend(self.cfg),
+                    "image_edit": _image_edit_catalog(self.cfg),
                     "viewer_url": f"http://localhost:{self.cfg.viewer.port}",
                     "spectator_path": "/spectator",
                 },
@@ -910,7 +943,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not ep:
                 self._send_json({"ok": False, "message": "Missing episode id."}, 400)
                 return
-            ok, message, extra = studio.add_view(str(ep))
+            ok, message, extra = studio.add_view(
+                str(ep), image_edit_backend=body.get("image_edit_backend"),
+            )
             payload = {"ok": ok, "message": message, **(extra or {})}
             self._send_json(payload, 200 if ok else 409)
             return

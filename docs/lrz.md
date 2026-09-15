@@ -261,6 +261,22 @@ empty until a row is `ST=R`. Reserve a new hold (or **Use** an already-running
 row), then **Load GPU setup**. **Cancel** on a reserved row runs one `scancel`;
 a running (`ST=R`) job asks **cancel?** in red before it fires.
 
+## Qwen RGB edit on the same GPU
+
+`image_edit.backend: qwen-image-edit` (or `--image-edit-backend qwen-image-edit`
+/ `SPLAT_IMAGE_EDIT_BACKEND`) runs Qwen-Image-Edit-2511 on the **one** GPU
+this job already holds (`srun --gres=gpu:1`). Default device is `cuda:0`,
+the same visible card photometric GSFix3D uses. That works on
+`lrz-hgx-a100-80x4`, `lrz-dgx-a100-80x8`, and `lrz-hgx-h100-94x4` (bf16,
+~40GB weights; photometric is <3% VRAM).
+
+Do not request extra GPUs for Qwen. If the 80GB card OOMs, set
+`image_edit.offload: sequential` or allocate a **second** one-GPU job and
+point Qwen at it with `image_edit.device` / `SPLAT_IMAGE_EDIT_DEVICE`
+(never `torch.cuda.set_device`, which would steal photometric's current
+device). Weights stay resident across one-by-one repairs; first fetch is
+~20GB (`image_edit.download: true` or `SPLAT_IMAGE_EDIT_DOWNLOAD=1`).
+
 ## Scripts
 
 | Script | What it does |
