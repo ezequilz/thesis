@@ -66,7 +66,7 @@ _DEFAULTS = {
     "workspace": "/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000/go73kaf2/splat-explorer",
     "container": "/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000/go73kaf2/splat-explorer/containers/pytorch.sqsh",
     "cpus": 4,
-    "mem": "256G",
+    "mem": "128G",
     "container_name": "splat-repair",
 }
 
@@ -513,7 +513,7 @@ def sbatch_hold_command(
     begin: str | None = None,
     nodelist: str | None = None,
     cpus: int = 4,
-    mem: str = "256G",
+    mem: str = "128G",
     gres: str = "gpu:1",
 ) -> str:
     """One sleep hold job. Does not wait in the queue."""
@@ -3126,7 +3126,7 @@ def allocate_lrz_gpu(
         after_job=after_job,
         begin=begin_spec,
         cpus=int(cfg.get("cpus") or 4),
-        mem=str(cfg.get("mem") or "256G"),
+        mem=str(cfg.get("mem") or "128G"),
     )
     with _ALLOCATE["lock"]:
         if _ALLOCATE["inflight"]:

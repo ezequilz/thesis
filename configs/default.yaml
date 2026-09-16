@@ -192,7 +192,7 @@ image_edit:
   # GSFix3D (`torch.device("cuda")` / cuda:0). LRZ srun --gres=gpu:1 already
   # pins one card on lrz-hgx-a100-80x4, lrz-dgx-a100-80x8, or lrz-hgx-h100-94x4.
   # Dedicated GPU: set 1 (or SPLAT_IMAGE_EDIT_DEVICE) without occupying all 4/8.
-  # Scene-runs keep this pipeline resident on 256G/1-GPU holds.
+  # Scene-runs keep this pipeline resident on 128G/1-GPU holds.
   device: 0
   dtype: bfloat16
   # none = keep ~40GB bf16 weights resident (preferred for one-by-one repairs).

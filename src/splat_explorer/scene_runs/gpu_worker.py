@@ -83,7 +83,7 @@ logger = logging.getLogger(__name__)
 def memory_snapshot() -> dict[str, Any]:
     """Host-cgroup and CUDA memory at this instant; empty dict if unavailable.
 
-    Scene-runs log this while Qwen stays resident so a 256G/1-GPU hold can
+    Scene-runs log this while Qwen stays resident so a 128G/1-GPU hold can
     confirm GSFix uses a few GB of VRAM, not the full 80GB card.
     """
     body: dict[str, Any] = {}

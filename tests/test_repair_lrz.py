@@ -295,7 +295,7 @@ def test_srun_worker_overlaps_sleep_hold():
     assert "--overlap" in cmd
     assert "--jobid=5777469" in cmd
     assert "--gres=gpu:1" in cmd
-    assert "--mem=254G" in cmd
+    assert "--mem=126G" in cmd
     assert "/workspace/python" in cmd
     assert "--container-name=splat-repair-5777469" in cmd
 
@@ -633,7 +633,7 @@ def test_sbatch_hold_8h_24h_and_after():
     assert "--job-name=gs-8h" in eight
     assert "lrz-hgx-a100-80x4,lrz-dgx-a100-80x8" in eight
     assert "--gres=gpu:1" in eight
-    assert "--mem=256G" in eight
+    assert "--mem=128G" in eight
     six = sbatch_hold_command(6, begin="2026-09-10T09:00", partition="lrz-hgx-h100-94x4")
     assert "--time=06:00:00" in six
     assert "sleep 21600" in six
@@ -1870,6 +1870,7 @@ def test_srun_mem_flag_leaves_headroom_on_32g_hold():
 
     assert srun_mem_flag({"mem": "32G"}) == "--mem=24G"
     assert srun_mem_flag({"mem": "64G"}) == "--mem=62G"
+    assert srun_mem_flag({"mem": "128G"}) == "--mem=126G"
     assert srun_mem_flag({"mem": "256G"}) == "--mem=254G"
     assert srun_mem_flag({"mem": "32G"}, probe=True) == "--mem=1G"
 
@@ -2241,7 +2242,7 @@ def test_scene_run_protocol_and_srun_commands():
     assert looped["repair"]["max_chunks"] == 0
     assert looped["repair"]["repair_type"] == "looped"
     assert looped["image_edit_subprocess"] is True
-    transport.cfg = {"mem": "256G"}
+    transport.cfg = {"mem": "128G"}
     wide = transport._worker_config({"repair_type": "original"})
     assert wide["image_edit_subprocess"] is False
     launch = scene_worker_launch_command(

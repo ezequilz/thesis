@@ -82,7 +82,7 @@ That submits (8h example):
 ```bash
 sbatch --job-name=gs-8h \
   --partition=lrz-hgx-a100-80x4,lrz-dgx-a100-80x8 \
-  --nodes=1 --ntasks=1 --gres=gpu:1 --cpus-per-task=4 --mem=256G \
+  --nodes=1 --ntasks=1 --gres=gpu:1 --cpus-per-task=4 --mem=128G \
   --time=08:00:00 --output=gs-8h-%j.log \
   --wrap='sleep 28800'
 ```
@@ -270,16 +270,17 @@ the same visible card photometric GSFix3D uses. That works on
 `lrz-hgx-a100-80x4`, `lrz-dgx-a100-80x8`, and `lrz-hgx-h100-94x4` (bf16,
 ~40GB weights; photometric is <3% VRAM).
 
-New holds request `--mem=256G` so Qwen stays resident in the scene-run
+New holds request `--mem=128G` so Qwen stays resident in the scene-run
 worker: edit, `empty_cache` activations only, then GSFix on the leftover
-VRAM. Do not reload the 40GB weights per view. 64G (and tighter) holds
+VRAM. Do not reload the 40GB weights per view. If that cgroup still
+host-OOM-kills, raise the hold to `--mem=256G`. 64G (and tighter) holds
 still isolate each edit in a subprocess because Qwen's host-side loading
 buffers plus GSFix overflow that cgroup — that is a **CPU RAM** limit, not
 the 80GB HBM.
 
 Do not request extra GPUs for Qwen. A second GPU in the same hold shares
 the host-RAM cgroup and does not overlap Qwen with GSFix (the runner is
-sequential). If a 256G / 1-GPU hold still CUDA-OOMs with Qwen resident,
+sequential). If the 80GB card still CUDA-OOMs with Qwen resident,
 allocate `--gres=gpu:2` and set `image_edit.device: 1` /
 `SPLAT_IMAGE_EDIT_DEVICE` (never `torch.cuda.set_device`, which would steal
 photometric's current device). Keep Qwen loaded on that card; do not
