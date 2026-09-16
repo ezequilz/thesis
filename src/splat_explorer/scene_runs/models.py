@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Mapping
@@ -16,6 +16,23 @@ class RepairTrigger(str, Enum):
     EVERY_STEP = "every_step"
     EVERY_ARTIFACT = "every_artifact"
     REGENERATE_YES = "regenerate_yes"
+
+
+class RepairType(str, Enum):
+    """How each triggered view is lifted back into the 3D Gaussians."""
+
+    ORIGINAL = "original"
+    LOOPED = "looped"
+
+
+REPAIR_TYPE_ALIASES = {
+    "original": RepairType.ORIGINAL,
+    "original_gsfix3d": RepairType.ORIGINAL,
+    "gsfix3d": RepairType.ORIGINAL,
+    "paper": RepairType.ORIGINAL,
+    "looped": RepairType.LOOPED,
+    "loop": RepairType.LOOPED,
+}
 
 
 class RunStatus(str, Enum):
@@ -46,6 +63,7 @@ class SceneRunConfig:
     image_edit_backend: str = "qwen-image-edit"
     repair_backend: str = "gsfix-gsplat"
     repair_trigger: RepairTrigger = RepairTrigger.REGENERATE_YES
+    repair_type: RepairType = RepairType.ORIGINAL
     repair_seconds: int = 180
 
     def __post_init__(self) -> None:
@@ -67,6 +85,16 @@ class SceneRunConfig:
             choices = ", ".join(item.value for item in RepairTrigger)
             raise ValueError(f"repair_trigger must be one of: {choices}") from exc
         object.__setattr__(self, "repair_trigger", trigger)
+        raw_type = self.repair_type
+        if isinstance(raw_type, RepairType):
+            kind = raw_type
+        else:
+            key = str(raw_type or "").strip().lower()
+            kind = REPAIR_TYPE_ALIASES.get(key)
+        if kind is None:
+            choices = ", ".join(item.value for item in RepairType)
+            raise ValueError(f"repair_type must be one of: {choices}")
+        object.__setattr__(self, "repair_type", kind)
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any] | None = None) -> "SceneRunConfig":
@@ -76,11 +104,13 @@ class SceneRunConfig:
             return cls()
         if not isinstance(value, Mapping):
             raise TypeError("config must be a mapping")
-        return cls(**dict(value))
+        allowed = {item.name for item in fields(cls)}
+        return cls(**{key: item for key, item in dict(value).items() if key in allowed})
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["repair_trigger"] = self.repair_trigger.value
+        data["repair_type"] = self.repair_type.value
         return data
 
 

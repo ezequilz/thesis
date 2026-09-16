@@ -111,3 +111,21 @@ def test_manager_runs_one_ready_item(tmp_path, monkeypatch):
     assert store.released is True
     assert any(fields.get("gpu", {}).get("job_id") == "1234"
                for _, fields in store.updates)
+
+
+def test_manager_requeues_starting_runs_but_errors_running_ones(tmp_path):
+    store = _Store()
+    store.rows = [
+        {"id": "run_start", "created_at": 1.0, "status": "starting"},
+        {"id": "run_live", "created_at": 2.0, "status": "running"},
+    ]
+    store.details = {
+        "run_start": {"id": "run_start", "config": {}, "status": {}},
+        "run_live": {"id": "run_live", "config": {}, "status": {}},
+    }
+    manager = SceneRunManager(_cfg(tmp_path), store=store)
+    manager._recover_interrupted()
+    assert store.updates[0][0] == "run_start"
+    assert store.updates[0][1]["status"] == "queued"
+    assert store.updates[1][0] == "run_live"
+    assert store.updates[1][1]["status"] == "error"

@@ -16,6 +16,7 @@ so callers must check it before entering the context manager.
 
 from .models import (
     RepairTrigger,
+    RepairType,
     RunState,
     RunStatus,
     SceneRun,
@@ -32,6 +33,7 @@ __all__ = [
     "DEFAULT_ROOT",
     "GpuLease",
     "RepairTrigger",
+    "RepairType",
     "RunState",
     "RunStatus",
     "SceneRun",

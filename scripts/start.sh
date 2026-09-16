@@ -6,6 +6,7 @@
 #                          cloned to $CLIRELAY_DIR on first run)
 #   2. splat-explorer      image build + viser debug viewer at :8080
 #                          + episode dashboard at :8090
+#                          + scene-run manager (always restarted)
 #
 # Usage:
 #   scripts/start.sh                 (re)start CliRelay + viewer + dashboard
@@ -58,6 +59,57 @@ stop_scene_run_manager() {
       kill "$pid" || true
     fi
     rm -f outputs/scene-run-manager.pid
+  fi
+  local leftover pid
+  leftover=$(pgrep -f "[s]plat-explorer scene-run-manager" || true)
+  for pid in $leftover; do
+    echo "    Stopping leftover scene-run manager (pid $pid)"
+    kill "$pid" || true
+  done
+  for _ in $(seq 1 20); do
+    leftover=$(pgrep -f "[s]plat-explorer scene-run-manager" || true)
+    [ -z "$leftover" ] && break
+    sleep 0.25
+  done
+  leftover=$(pgrep -f "[s]plat-explorer scene-run-manager" || true)
+  for pid in $leftover; do
+    echo "    Force-stopping scene-run manager (pid $pid)"
+    kill -9 "$pid" 2>/dev/null || true
+  done
+}
+
+start_scene_run_manager() {
+  stop_scene_run_manager
+  mkdir -p outputs/scene-runs
+  echo "    Starting persistent scene-run manager"
+  export CLIRELAY_BASE_URL="${CLIRELAY_BASE_URL:-http://localhost:8317/v1}"
+  export VISER_RENDER_URL="${VISER_RENDER_URL:-http://localhost:8081}"
+  export VISER_VIEWER_URL="${VISER_VIEWER_URL:-http://localhost:8080}"
+  nohup .venv/bin/splat-explorer scene-run-manager >> outputs/scene-run-manager.log 2>&1 </dev/null &
+  echo $! > outputs/scene-run-manager.pid
+  disown $! 2>/dev/null || true
+  local pid
+  pid=$(cat outputs/scene-run-manager.pid)
+  echo "    Scene-run manager pid $pid  (logs: outputs/scene-run-manager.log)"
+  printf "    Waiting for scene-run manager"
+  local up=0
+  for _ in $(seq 1 40); do
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
+      && [ -f outputs/scene-runs/manager.json ] \
+      && .venv/bin/python -c "import json,sys,time; from pathlib import Path; want=int(sys.argv[1]); body=json.loads(Path('outputs/scene-runs/manager.json').read_text()); sys.exit(0 if int(body.get('pid') or 0)==want and body.get('status')=='running' and time.time()-float(body.get('updated_at') or 0)<15 else 1)" "$pid"
+    then
+      echo "  up"
+      up=1
+      break
+    fi
+    printf "."
+    sleep 0.25
+  done
+  if [ "$up" != 1 ]; then
+    echo "  ERROR"
+    echo "    Scene-run manager did not heartbeat. Last log lines:"
+    tail -n 40 outputs/scene-run-manager.log || true
+    exit 1
   fi
 }
 
@@ -146,9 +198,11 @@ fi
 echo "    Installing host scene-run manager extras [$HOST_EXTRAS] into .venv"
 .venv/bin/pip install -e ".[$HOST_EXTRAS]"
 
-echo "==> [3/4] (Re)starting viser viewer (:8080) + episode dashboard (:8090)"
+echo "==> [3/4] (Re)starting viser viewer (:8080) + episode dashboard (:8090) + scene-run manager"
 stop_host_dashboard
-# Drop the last visor pointer so a restart loads the catalog room, not a leftover repair PLY.
+stop_scene_run_manager
+# Drop leftover episode-repair PLY pointers. Dashboard boot then prefers a
+# queued/active scene-run room over the YAML Starter Scene default.
 rm -f outputs/live/scene.json
 docker compose down --remove-orphans
 # Ports may be held by stale locally-run instances ("splat-explorer viewer" /
@@ -228,21 +282,7 @@ elif [ "$HOST_DASHBOARD" != 1 ] && [ "$DASH_FREE" = 1 ]; then
   docker compose up -d dashboard
 fi
 
-if [ -f outputs/scene-run-manager.pid ] \
-  && kill -0 "$(cat outputs/scene-run-manager.pid 2>/dev/null || true)" 2>/dev/null; then
-  echo "    Scene-run manager already running (pid $(cat outputs/scene-run-manager.pid))"
-else
-  rm -f outputs/scene-run-manager.pid
-  mkdir -p outputs/scene-runs
-  echo "    Starting persistent scene-run manager"
-  export CLIRELAY_BASE_URL="${CLIRELAY_BASE_URL:-http://localhost:8317/v1}"
-  export VISER_RENDER_URL="${VISER_RENDER_URL:-http://localhost:8081}"
-  export VISER_VIEWER_URL="${VISER_VIEWER_URL:-http://localhost:8080}"
-  nohup .venv/bin/splat-explorer scene-run-manager >> outputs/scene-run-manager.log 2>&1 </dev/null &
-  echo $! > outputs/scene-run-manager.pid
-  disown $! 2>/dev/null || true
-  echo "    Scene-run manager pid $(cat outputs/scene-run-manager.pid)  (logs: outputs/scene-run-manager.log)"
-fi
+start_scene_run_manager
 
 echo "==> [4/4] Optional one-off jobs"
 if [ "$RENDER_TEST" = 1 ]; then

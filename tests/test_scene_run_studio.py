@@ -84,7 +84,20 @@ def test_defaults_and_start_validation_are_isolated(tmp_path: Path):
     assert run["run_id"] == "run_20260915_200000"
     assert store.created[0]["duration_seconds"] == 7200
     assert store.created[0]["send_map"] is True
+    assert store.created[0]["repair_type"] == "original"
     assert not hasattr(studio, "_thread")
+
+
+def test_queued_run_pins_capture_visor_to_its_scene(tmp_path: Path):
+    app, studio, _store = _app(tmp_path)
+    selected = []
+    app.select_scene = lambda scene_id: selected.append(scene_id) or (True, "ok")
+    assert studio.preferred_visor_scene_id() == "venetian-balcony"
+    studio.create({
+        "scene_id": "venetian-balcony",
+        "duration_seconds": 3600,
+    })
+    assert selected == ["venetian-balcony"]
 
 
 @pytest.mark.parametrize(
@@ -96,6 +109,7 @@ def test_defaults_and_start_validation_are_isolated(tmp_path: Path):
         ("duration_seconds", 0),
         ("repair_seconds", 50000),
         ("repair_trigger", "sometimes"),
+        ("repair_type", "neon"),
         ("backend", "scripted"),
     ],
 )
@@ -170,6 +184,8 @@ def test_scene_run_routes_and_safe_files(tmp_path: Path):
         code, page = _request(base, "/scene-runs")
         assert code == 200
         assert b"Create isolated run" in page
+        assert b"original GSFix3D" in page
+        assert b"Repair Time" in page
 
         code, state = _request(base, "/api/scene-runs/state")
         assert code == 200

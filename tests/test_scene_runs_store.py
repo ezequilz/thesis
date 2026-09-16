@@ -38,6 +38,7 @@ def test_config_defaults_and_validation():
         "image_edit_backend": "qwen-image-edit",
         "repair_backend": "gsfix-gsplat",
         "repair_trigger": "regenerate_yes",
+        "repair_type": "original",
         "repair_seconds": 180,
     }
     assert SceneRunConfig.from_dict({"model": "demo", "width": 640}).width == 640
@@ -47,6 +48,11 @@ def test_config_defaults_and_validation():
         SceneRunConfig(duration_seconds=0)
     with pytest.raises(ValueError, match="repair_trigger"):
         SceneRunConfig(repair_trigger="sometimes")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="repair_type"):
+        SceneRunConfig(repair_type="neon")  # type: ignore[arg-type]
+    assert SceneRunConfig(repair_type="paper").repair_type.value == "original"
+    assert SceneRunConfig(repair_type="loop").repair_type.value == "looped"
+    assert SceneRunConfig.from_dict({"model": "demo", "future_flag": True}).model == "demo"
 
 
 def test_create_collision_list_detail_status_events_and_stop(tmp_path):

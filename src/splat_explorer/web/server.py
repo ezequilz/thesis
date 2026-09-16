@@ -191,6 +191,14 @@ class DashboardApp:
     def _startup_spec(self):
         from ..scene.catalog import catalog_id_from_live, current_spec, read_live_scene, spec_by_id
 
+        studio = getattr(self, "scene_runs", None)
+        preferred = getattr(studio, "preferred_visor_scene_id", None)
+        if callable(preferred):
+            run_scene = preferred()
+            if run_scene:
+                spec = spec_by_id(self.cfg, run_scene)
+                if spec is not None:
+                    return spec
         live = read_live_scene()
         cid = catalog_id_from_live(live)
         if cid:

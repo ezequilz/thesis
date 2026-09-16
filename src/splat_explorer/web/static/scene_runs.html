@@ -126,12 +126,16 @@
           <option value="gpt-image-2" disabled>gpt-image-2 (debug dashboard only for now)</option>
         </select></label>
         <label>3D repair<input id="repair-backend" name="repair_backend" value="gsfix-gsplat" readonly></label>
+        <label>Repair type<select id="repair-type" name="repair_type">
+          <option value="original">original GSFix3D</option>
+          <option value="looped">looped</option>
+        </select></label>
         <label>Repair trigger<select id="repair-trigger" name="repair_trigger">
           <option value="regenerate_yes">regenerate=yes</option>
           <option value="every_artifact">every artifact</option>
           <option value="every_step">every step after first artifact</option>
         </select></label>
-        <label>Repair budget (seconds)<input id="repair-seconds" name="repair_seconds" type="number" min="1" max="43200" value="180"></label>
+        <label id="repair-time-wrap" style="display:none">Repair Time (seconds)<input id="repair-seconds" name="repair_seconds" type="number" min="1" max="43200" value="180"></label>
         <label class="wide locked" title="Scene runs always render and send the exploration map.">
           <input id="send-map" type="checkbox" checked disabled> Send exploration map (locked)
         </label>
@@ -227,10 +231,15 @@ function setDefaults(defaults, scenes) {
   $("duration").value = Number(defaults.duration_seconds || 3600) / 3600;
   for (const [id,key] of [["backend","backend"],["model","model"],["width","width"],["height","height"],
     ["image-edit","image_edit_backend"],["repair-backend","repair_backend"],
-    ["repair-trigger","repair_trigger"],["repair-seconds","repair_seconds"]]) {
+    ["repair-type","repair_type"],["repair-trigger","repair_trigger"],["repair-seconds","repair_seconds"]]) {
     if (defaults[key] !== undefined) $(id).value = defaults[key];
   }
+  syncRepairTime();
   layoutCapture();
+}
+function syncRepairTime() {
+  const looped = $("repair-type").value === "looped";
+  $("repair-time-wrap").style.display = looped ? "" : "none";
 }
 function layoutCapture() {
   const active = (state?.runs || []).find(run => ["starting","running","stopping"].includes(statusOf(run)));
@@ -326,6 +335,7 @@ function renderDetail() {
     ["VLM", [cfg.backend,cfg.model].filter(Boolean).join(" · ") || "–"],
     ["resolution", cfg.width && cfg.height ? `${cfg.width}×${cfg.height}` : "–"],
     ["image / repair", [cfg.image_edit_backend,cfg.repair_backend].filter(Boolean).join(" → ") || "–"],
+    ["repair type", cfg.repair_type === "looped" ? "looped" : "original GSFix3D"],
     ["repair trigger", cfg.repair_trigger || "–"],
     ["created", fmtTime(firstValue(b, ["created_at"]))],
     ["started", fmtTime(firstValue(b, ["started_at"]))],
@@ -382,7 +392,8 @@ $("run-form").onsubmit = async event => {
     scene_id:$("scene").value, duration_seconds:Math.round(Number($("duration").value) * 3600),
     backend:$("backend").value, model:$("model").value, width:Number($("width").value),
     height:Number($("height").value), send_map:true, image_edit_backend:$("image-edit").value,
-    repair_backend:$("repair-backend").value, repair_trigger:$("repair-trigger").value,
+    repair_backend:$("repair-backend").value, repair_type:$("repair-type").value,
+    repair_trigger:$("repair-trigger").value,
     repair_seconds:Number($("repair-seconds").value),
   };
   try {
@@ -408,6 +419,7 @@ async function stopRun() {
   } catch (error) { $("message").textContent = error.message; $("stop").disabled = false; }
 }
 tick();
+$("repair-type").addEventListener("change", syncRepairTime);
 </script>
 </body>
 </html>

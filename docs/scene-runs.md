@@ -13,7 +13,8 @@ remain available for isolated testing.
 Open `http://127.0.0.1:8090/scene-runs`. Before a queued run can start,
 `/repair/gpu` must show a selected LRZ allocation in `ST=R` with its setup
 loaded. The local scene-run manager is independent of the browser and writes
-its log to `outputs/scene-run-manager.log`.
+`outputs/scene-run-manager.log`. `./scripts/start.sh` always stops and
+restarts that manager so queued runs pick up the current scene-run code.
 
 Each run starts from the selected catalog scene and writes only below:
 
@@ -37,8 +38,12 @@ checkpoint used by both the GPU worker and the local viser/VLM harness.
 5. Stop at the earlier of the user deadline and LRZ reservation deadline.
 
 The default path is Venetian Balcony, 960×720, RGB plus bird's-eye map,
-one hour, Qwen-Image-Edit-2511, `regenerate_yes`, and the original working
-GSFix3D CUDA implementation with a three-minute refine cap per triggered view.
+one hour, Qwen-Image-Edit-2511, `regenerate_yes`, and the original GSFix3D
+CUDA refine from [refine_gs.py](https://github.com/GSFix3D/GSFix3D/blob/main/scripts/gsfix3d/refine_gs.py):
+20 photometric iterations per repaired view (0.8 L1 + 0.2 SSIM, densify every
+5 steps). Repeated triggered views incrementally update `scene_repaired.ply`.
+The dashboard **Repair type** dropdown can switch to `looped`, which repeats
+those 20-iter chunks until **Repair Time** (default 180s) or Stop.
 
 ## GPU ownership and recovery
 

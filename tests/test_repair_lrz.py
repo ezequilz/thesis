@@ -2212,6 +2212,17 @@ def test_scene_run_protocol_and_srun_commands():
     assert "--container-name=splat-repair-5786047" in srun
     assert "splat_explorer.scene_runs.gpu_worker" in srun
     assert "/workspace/scene-runs/run-abc" in srun
+    from splat_explorer.scene_runs.lrz_transport import LrzSceneRunTransport
+
+    transport = object.__new__(LrzSceneRunTransport)
+    transport.app_cfg = {}
+    transport.run_id = "run-abc"
+    original = transport._worker_config({"repair_type": "original"})
+    assert original["repair"]["max_chunks"] == 1
+    assert original["repair"]["upstream_gsfix3d"] is True
+    looped = transport._worker_config({"repair_type": "looped"})
+    assert looped["repair"]["max_chunks"] == 0
+    assert looped["repair"]["repair_type"] == "looped"
     launch = scene_worker_launch_command(
         cfg, "run-abc", overall_deadline=2_000_000_000,
     )
@@ -2274,8 +2285,7 @@ def test_scene_gpu_worker_keeps_scene_and_qwen_backend_resident(tmp_path):
             return stats
 
     def make_repair(params):
-        assert params["max_chunks"] == 0
-        assert params["densify"] is True
+        assert params.get("repair_type", "original") in (None, "", "original")
         return Repair()
 
     worker = SceneRunGpuWorker(

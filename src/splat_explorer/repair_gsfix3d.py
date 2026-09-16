@@ -1,20 +1,24 @@
-"""GSFix3D §3.3 photometric lift (CUDA / gsplat) — research default.
+"""GSFix3D photometric lift without ADC — not the GitHub original.
 
-Ports ``scripts/gsfix3d/refine_gs.py`` onto ``GaussianScene``. No color
-stamp. Subclass this (or add a sibling backend id) to try a new idea;
-leave ``repair_gsfix.GsplatPhotometricRepair`` frozen as the A/B baseline.
+The true upstream loop is
+https://github.com/GSFix3D/GSFix3D/blob/main/scripts/gsfix3d/refine_gs.py:
+20 iters/view of 0.8 L1 + 0.2 SSIM, densify every 5, prune on the last
+iter, then Adam. Scene-runs "original GSFix3D" uses that schedule on
+``repair_gsfix3d_working_backup.GsplatGsfix3dRepair`` (``upstream_gsfix3d``).
 
-Per repaired view (``iters=20``, paper default)::
+This module keeps a densify-less photometric variant for episode A/B.
+Leave ``repair_gsfix.GsplatPhotometricRepair`` frozen as the baseline.
+
+Per repaired view (``iters=20``)::
 
     I_gs = rasterize(gaussians, camera)
     L = 0.8 ||I_fixed - I_gs||_1 + 0.2 (1 - SSIM)
     backward
     Adam step
 
-Kerbl clone/split densify is not in this loop. The upstream
-``scripts/gsfix3d/refine_gs.py`` does call ``gaussians.densify`` every 5
-iters; that path lives only on ``GsplatGsfix3dVisPruneRepair``. PLY
-opacities are 1-D, and ``.repeat(2, 1)`` then crashes the paper split.
+Kerbl clone/split densify is not in this loop. The GitHub script does
+call ``gaussians.densify`` every 5 iters; that ADC path lives on the
+working-backup / vis-prune backends.
 
 Colors are optimized as SH DC coefficients (RGB2SH / SH2RGB), matching
 the INRIA ``GaussianModel``, not as raw RGB. That is what stopped the

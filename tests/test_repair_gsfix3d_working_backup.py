@@ -186,6 +186,27 @@ def test_working_backup_apply_until_freezes_geometry_after_first_chunk():
     assert frozen_calls == [1]
 
 
+def test_github_original_apply_until_runs_one_chunk_without_freeze():
+    backend = GsplatGsfix3dRepair(
+        max_chunks=1,
+        upstream_gsfix3d=True,
+        freeze_geometry_after_first_chunk=False,
+    )
+    chunks: list[int] = []
+    frozen_calls: list[int] = []
+
+    def fake_chunk(scene, camera, rendered_rgb, repaired_rgb, state):
+        chunks.append(1)
+        return {"n_iters": 20, "l1_before": 0.5, "l1_after": 0.4}
+
+    backend._step_chunk = fake_chunk
+    backend._freeze_geometry = lambda ctx: frozen_calls.append(1)
+    stats = backend.apply_until(object(), object(), object(), object())
+    assert chunks == [1]
+    assert frozen_calls == []
+    assert stats["n_chunks"] == 1
+
+
 def test_clamp_log_scales_caps_needles():
     torch = pytest.importorskip("torch")
     log_scales = torch.log(torch.tensor([[1e-6, 1e-6, 80.0], [0.02, 0.02, 0.02]]))

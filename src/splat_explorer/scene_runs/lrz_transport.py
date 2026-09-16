@@ -241,8 +241,21 @@ class LrzSceneRunTransport:
         # fetch. Subsequent runs reuse the DSS-backed Hugging Face cache.
         image_edit["download"] = True
         repair = dict(config.get("repair") or {})
-        repair["densify"] = True
-        repair.setdefault("max_chunks", 0)
+        repair_type = str(
+            repair.get("repair_type")
+            or config.get("repair_type")
+            or "original"
+        ).strip().lower()
+        if repair_type in {"looped", "loop"}:
+            repair["repair_type"] = "looped"
+            repair["densify"] = True
+            repair["max_chunks"] = 0
+        else:
+            repair["repair_type"] = "original"
+            repair["iters"] = 20
+            repair["max_chunks"] = 1
+            repair["densify"] = True
+            repair["upstream_gsfix3d"] = True
         return {
             "protocol": 1,
             "run_id": self.run_id,

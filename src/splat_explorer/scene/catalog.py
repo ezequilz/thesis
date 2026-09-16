@@ -226,7 +226,11 @@ def catalog_id_from_live(live: dict | None) -> str | None:
         return None
     for key in ("catalog_id", "id"):
         value = str(live.get(key) or "").strip()
-        if value and not value.startswith("repair-"):
+        if (
+            value
+            and not value.startswith("repair-")
+            and not value.startswith("scene-run-")
+        ):
             return value
     return None
 

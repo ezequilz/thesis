@@ -28,11 +28,21 @@ SCENE_RUN_DEFAULTS = {
     "image_edit_backend": "qwen-image-edit",
     "repair_backend": "gsfix-gsplat",
     "repair_trigger": "regenerate_yes",
+    "repair_type": "original",
     "repair_seconds": 180,
 }
 
 ACTIVE_STATUSES = {"queued", "waiting_gpu", "starting", "running", "stopping"}
 REPAIR_TRIGGERS = {"every_step", "every_artifact", "regenerate_yes"}
+REPAIR_TYPES = {"original", "looped"}
+REPAIR_TYPE_ALIASES = {
+    "original": "original",
+    "original_gsfix3d": "original",
+    "gsfix3d": "original",
+    "paper": "original",
+    "looped": "looped",
+    "loop": "looped",
+}
 
 
 class SceneRunValidationError(ValueError):
@@ -114,6 +124,23 @@ class SceneRunStudio:
             self._visor = SceneRunViser(self)
         return self._visor
 
+    def preferred_visor_scene_id(self) -> str | None:
+        """Catalog room for a queued or live scene-run, if any.
+
+        The shared :8080 capture visor otherwise falls back to Starter Scene
+        after ``scripts/start.sh`` clears ``outputs/live/scene.json``.
+        """
+        for run in self.list_runs():
+            if self._status(run) not in ACTIVE_STATUSES:
+                continue
+            config = run.get("config") if isinstance(run, Mapping) else None
+            if not isinstance(config, Mapping):
+                continue
+            scene_id = str(config.get("scene_id") or "").strip()
+            if scene_id:
+                return scene_id
+        return None
+
     def ply_status(self, run_id: str) -> dict:
         """Whether this run has original/repaired PLYs, plus the visor URL."""
         visor_path = f"/{run_id}/viser"
@@ -160,6 +187,8 @@ class SceneRunStudio:
         clean["image_edit_backend"] = str(clean["image_edit_backend"]).strip()
         clean["repair_backend"] = str(clean["repair_backend"]).strip()
         clean["repair_trigger"] = str(clean["repair_trigger"]).strip()
+        raw_type = str(clean.get("repair_type") or "original").strip().lower()
+        clean["repair_type"] = REPAIR_TYPE_ALIASES.get(raw_type, raw_type)
         for key in ("scene_id", "backend", "image_edit_backend", "repair_backend"):
             if not clean[key]:
                 raise SceneRunValidationError(f"{key} is required.")
@@ -186,6 +215,9 @@ class SceneRunStudio:
         if clean["repair_trigger"] not in REPAIR_TRIGGERS:
             allowed = ", ".join(sorted(REPAIR_TRIGGERS))
             raise SceneRunValidationError(f"repair_trigger must be one of: {allowed}.")
+        if clean["repair_type"] not in REPAIR_TYPES:
+            allowed = ", ".join(sorted(REPAIR_TYPES))
+            raise SceneRunValidationError(f"repair_type must be one of: {allowed}.")
 
         clean["width"] = _positive_int(clean["width"], "width", minimum=64, maximum=3840)
         clean["height"] = _positive_int(clean["height"], "height", minimum=64, maximum=2160)
@@ -232,6 +264,16 @@ class SceneRunStudio:
             return detail or {"id": run, "status": "queued"}
         if not isinstance(run, dict):
             raise RuntimeError("SceneRunStore.create() returned no run detail.")
+        scene_id = ""
+        config = run.get("config")
+        if isinstance(config, Mapping):
+            scene_id = str(config.get("scene_id") or "").strip()
+        select = getattr(self.app, "select_scene", None)
+        if callable(select) and scene_id:
+            try:
+                select(scene_id)
+            except Exception:
+                pass
         return run
 
     def request_stop(self, run_id: str) -> dict:

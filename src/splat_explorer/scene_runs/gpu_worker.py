@@ -37,6 +37,41 @@ STOP_NAME = "STOP"
 HEARTBEAT_NAME = "heartbeat.json"
 WORKER_NAME = "worker.json"
 DEFAULT_REPAIR_SECONDS = 180.0
+ORIGINAL_REPAIR_TYPE = "original"
+LOOPED_REPAIR_TYPE = "looped"
+REPAIR_TYPE_ALIASES = {
+    "original": ORIGINAL_REPAIR_TYPE,
+    "original_gsfix3d": ORIGINAL_REPAIR_TYPE,
+    "gsfix3d": ORIGINAL_REPAIR_TYPE,
+    "paper": ORIGINAL_REPAIR_TYPE,
+    "looped": LOOPED_REPAIR_TYPE,
+    "loop": LOOPED_REPAIR_TYPE,
+}
+# https://github.com/GSFix3D/GSFix3D/blob/main/scripts/gsfix3d/refine_gs.py
+# --iters 20, 0.8 L1 + 0.2 SSIM, densify every 5, prune last iter.
+# LRs from gs/arguments.py OptimizationParams (position_lr_init=0.00032).
+UPSTREAM_GSFIX3D = {
+    "iters": 20,
+    "max_chunks": 1,
+    "densify": True,
+    "densify_every": 5,
+    "densify_grad_thresh": 0.005,
+    "prune_opacity": 0.005,
+    "split_scale": 0.1,
+    "lr_means": 0.00032,
+    "lr_colors": 0.0025,
+    "lr_opacities": 0.025,
+    "lr_scales": 0.002,
+    "lr_quats": 0.001,
+    "lambda_dssim": 0.2,
+    "lambda_preserve": 0.0,
+    "lambda_color_bound": 0.0,
+    "lambda_color_reg": 0.0,
+    "min_fix_weight": 1.0,
+    "sh_clip": 0.0,
+    "freeze_geometry_after_first_chunk": False,
+    "upstream_gsfix3d": True,
+}
 DEFAULT_PROMPT = (
     "Repair visible 3D Gaussian rendering artifacts in this image while "
     "preserving the scene geometry, materials, lighting, and composition."
@@ -138,15 +173,28 @@ def _default_image_edit_factory(config: dict[str, Any]):
     return QwenImageEditBackend.from_config(config)
 
 
+def normalize_repair_type(value: Any) -> str:
+    """Map dashboard / request aliases onto original vs looped refine."""
+    key = str(value or ORIGINAL_REPAIR_TYPE).strip().lower()
+    return REPAIR_TYPE_ALIASES.get(key, ORIGINAL_REPAIR_TYPE)
+
+
 def _default_repair_factory(params: dict[str, Any]):
-    # Deliberately use the preserved paper implementation for scene-runs.
+    # Scene-runs share the working-backup ADC implementation. "original"
+    # locks the GitHub refine_gs.py 20-iter schedule; "looped" keeps the
+    # time-budget repeat.
     from ..repair_gsfix3d_working_backup import GsplatGsfix3dRepair
 
+    body = dict(params or {})
+    kind = normalize_repair_type(body.get("repair_type"))
     allowed = {field.name for field in fields(GsplatGsfix3dRepair)}
-    kwargs = {key: value for key, value in params.items() if key in allowed}
-    # GSFix3D §3.3 enables the original 3DGS adaptive density control.
-    kwargs["densify"] = True
-    kwargs["max_chunks"] = 0
+    if kind == LOOPED_REPAIR_TYPE:
+        kwargs = {key: value for key, value in body.items() if key in allowed}
+        kwargs["densify"] = True
+        kwargs["max_chunks"] = 0
+        kwargs["upstream_gsfix3d"] = False
+        return GsplatGsfix3dRepair(**kwargs)
+    kwargs = {key: value for key, value in UPSTREAM_GSFIX3D.items() if key in allowed}
     return GsplatGsfix3dRepair(**kwargs)
 
 
@@ -389,16 +437,28 @@ class SceneRunGpuWorker:
             )
             repair_params = dict(self.config.get("repair") or {})
             repair_params.update(dict(request.get("repair") or {}))
-            repair_params["densify"] = True
-            repair_params["max_chunks"] = 0
+            scene_run = self.config.get("scene_run") or {}
+            if not repair_params.get("repair_type"):
+                repair_params["repair_type"] = (
+                    scene_run.get("repair_type")
+                    or self.config.get("repair_type")
+                    or ORIGINAL_REPAIR_TYPE
+                )
+            kind = normalize_repair_type(repair_params.get("repair_type"))
             backend = self.repair_factory(repair_params)
-            deadline = bounded_repair_deadline(
-                request, now=self.clock(), overall_deadline=self.overall_deadline,
-            )
+            deadline = None
+            if kind == LOOPED_REPAIR_TYPE:
+                deadline = bounded_repair_deadline(
+                    request, now=self.clock(), overall_deadline=self.overall_deadline,
+                )
+            elif self.overall_deadline not in (None, 0, 0.0):
+                deadline = float(self.overall_deadline)
             self._phase = "repair"
             self._heartbeat()
 
             def should_stop() -> bool:
+                if deadline is None:
+                    return self._global_stop() or (request_dir / STOP_NAME).is_file()
                 return self._request_stop(request_dir, deadline)
 
             def checkpoint(stats: dict[str, Any]) -> None:
@@ -445,8 +505,8 @@ class SceneRunGpuWorker:
                 or self._stop.is_set()
             )
             response.update(
-                # Hitting repair_seconds is the normal completion condition for
-                # max_chunks=0 and still yields a usable partial checkpoint.
+                # Hitting Stop is the only early-exit for original 20-iter
+                # refine; looped still treats repair_seconds as completion.
                 status="stopped" if stopped else "ok",
                 regenerated=REGENERATED_NAME,
                 checkpoint=CHECKPOINT_NAME,

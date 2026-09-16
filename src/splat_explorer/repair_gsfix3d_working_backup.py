@@ -1,9 +1,14 @@
 """src/splat_explorer/repair_gsfix3d_working_backup.py
 GSFix3D §3.3 photometric lift (CUDA / gsplat) — scene-run default.
 
-This is the paper ADC path used by scene-runs. Scene loading stays
-outside this module. Later research in ``repair_gsfix3d.py`` showed the
-neon artifacts come from two mistakes relative to INRIA / GSFix3D:
+This is the ADC path used by scene-runs. ``upstream_gsfix3d=True``
+locks the GitHub ``refine_gs.py`` schedule (20 photometric iters,
+densify every 5, prune last, then Adam, Inria LRs). ``False`` is the
+time-budget "looped" variant with residual loss and extra clamps.
+
+Scene loading stays outside this module. Later research in
+``repair_gsfix3d.py`` showed the neon artifacts come from two mistakes
+relative to INRIA / GSFix3D:
 
 1. Optimizing raw RGB, then hard-clipping to ``[0, 1]`` every chunk.
    Saturated channels get zero gradient through the clip, Adam keeps
@@ -67,6 +72,7 @@ from .repair_gsfix import (
     _require_torch,
     _to_uint8,
     camera_for_train,
+    photometric_loss,
     ssim,
     upsample_uint8,
 )
@@ -357,6 +363,7 @@ class GsplatGsfix3dRepair:
     max_scale: float = 0.0
     max_aniso: float = _DEFAULT_MAX_ANISO
     freeze_geometry_after_first_chunk: bool = True
+    upstream_gsfix3d: bool = False
     on_progress: Callable[[dict], None] | None = None
 
     def apply(
@@ -682,12 +689,13 @@ class GsplatGsfix3dRepair:
         log_scales = ctx["log_scales"]
         logit_opacities = ctx["logit_opacities"]
         with torch.no_grad():
-            clamp_log_scales(
-                log_scales,
-                min_scale=float(ctx.get("min_scale") or self.min_scale),
-                max_scale=float(ctx.get("max_scale") or self.max_scale or 1.0),
-                max_aniso=float(ctx.get("max_aniso") or self.max_aniso),
-            )
+            if not self.upstream_gsfix3d:
+                clamp_log_scales(
+                    log_scales,
+                    min_scale=float(ctx.get("min_scale") or self.min_scale),
+                    max_scale=float(ctx.get("max_scale") or self.max_scale or 1.0),
+                    max_aniso=float(ctx.get("max_aniso") or self.max_aniso),
+                )
             scales = torch.exp(log_scales)
             opacities = torch.sigmoid(logit_opacities)
             quats_n = torch.nn.functional.normalize(quats, dim=-1)
@@ -761,20 +769,24 @@ class GsplatGsfix3dRepair:
             means2d = info.get("means2d") if isinstance(info, dict) else None
             if means2d is not None and means2d.requires_grad:
                 means2d.retain_grad()
-            loss, l1 = repaired_view_loss(
-                rgb, target, rendered, torch,
-                lambda_dssim=self.lambda_dssim,
-                lambda_preserve=self.lambda_preserve,
-                lambda_color_bound=self.lambda_color_bound,
-                colors_rgb=colors,
-                min_fix_weight=self.min_fix_weight,
-            )
-            if (
-                f_dc_orig is not None
-                and float(self.lambda_color_reg) > 0
-                and f_dc_orig.shape == f_dc.shape
-            ):
-                loss = loss + float(self.lambda_color_reg) * (f_dc - f_dc_orig).square().mean()
+            paper = bool(self.upstream_gsfix3d)
+            if paper:
+                loss, l1 = photometric_loss(rgb, target, torch, self.lambda_dssim)
+            else:
+                loss, l1 = repaired_view_loss(
+                    rgb, target, rendered, torch,
+                    lambda_dssim=self.lambda_dssim,
+                    lambda_preserve=self.lambda_preserve,
+                    lambda_color_bound=self.lambda_color_bound,
+                    colors_rgb=colors,
+                    min_fix_weight=self.min_fix_weight,
+                )
+                if (
+                    f_dc_orig is not None
+                    and float(self.lambda_color_reg) > 0
+                    and f_dc_orig.shape == f_dc.shape
+                ):
+                    loss = loss + float(self.lambda_color_reg) * (f_dc - f_dc_orig).square().mean()
             last_l1 = float(l1.item())
             if ctx["total_iters"] == 0 and it == 0 and self.on_progress is not None:
                 self.on_progress({
@@ -818,30 +830,21 @@ class GsplatGsfix3dRepair:
                 xyz_grad_accum = xyz_grad_accum + vis_norm
                 xyz_grad_denom = xyz_grad_denom + vis.to(xyz_grad_accum.dtype)
 
-            # Adam on this iteration's graph, then densify. Recreating the
-            # optimizer before step() would drop .grad (unlike INRIA's cat).
-            opt.step()
-            opt.zero_grad(set_to_none=True)
-            with torch.no_grad():
-                quats.copy_(torch.nn.functional.normalize(quats, dim=-1))
-                if sh_clip > 0:
-                    f_dc.clamp_(-sh_clip, sh_clip)
-                if not geometry_frozen:
-                    clamp_log_scales(
-                        log_scales,
-                        min_scale=min_scale,
-                        max_scale=max_scale,
-                        max_aniso=max_aniso,
-                    )
-
             last_iter = it == int(self.iters) - 1
-            if (
+            densify_now = (
                 self.densify
                 and not geometry_frozen
-                and (it + 1) % int(self.densify_every) == 0
-                and not last_iter
                 and means.shape[0] < int(self.max_gaussians)
-            ):
+                and (
+                    it % int(self.densify_every) == 0
+                    if paper
+                    else ((it + 1) % int(self.densify_every) == 0 and not last_iter)
+                )
+            )
+
+            def run_densify():
+                nonlocal means, quats, f_dc, log_scales, logit_opacities, opt
+                nonlocal n_spawned, f_dc_orig, xyz_grad_accum, xyz_grad_denom
                 avg = xyz_grad_accum / xyz_grad_denom.clamp(min=1.0)
                 packed = densify_clone_split(
                     torch, means, quats, f_dc, log_scales, logit_opacities, avg,
@@ -850,30 +853,69 @@ class GsplatGsfix3dRepair:
                     max_clone=self.max_clone,
                     max_gaussians=self.max_gaussians,
                 )
-                if packed is not None:
-                    means, quats, f_dc, log_scales, logit_opacities, n_new = packed
-                    n_spawned += n_new
-                    f_dc_orig = f_dc.detach().clone()
-                    xyz_grad_accum = torch.zeros(means.shape[0], device=means.device)
-                    xyz_grad_denom = torch.zeros(means.shape[0], device=means.device)
-                    opt = self._make_opt(
-                        torch, means, quats, f_dc, log_scales, logit_opacities,
-                    )
+                if packed is None:
+                    return
+                means, quats, f_dc, log_scales, logit_opacities, n_new = packed
+                n_spawned += n_new
+                f_dc_orig = f_dc.detach().clone()
+                xyz_grad_accum = torch.zeros(means.shape[0], device=means.device)
+                xyz_grad_denom = torch.zeros(means.shape[0], device=means.device)
+                opt = self._make_opt(
+                    torch, means, quats, f_dc, log_scales, logit_opacities,
+                )
 
-            if last_iter and self.densify and not geometry_frozen and means.shape[0] > 32:
+            def run_prune():
+                nonlocal means, quats, f_dc, log_scales, logit_opacities, opt
+                nonlocal f_dc_orig, xyz_grad_accum, xyz_grad_denom
+                if not (
+                    last_iter and self.densify
+                    and not geometry_frozen and means.shape[0] > 32
+                ):
+                    return
                 keep = torch.sigmoid(logit_opacities).reshape(-1) > float(self.prune_opacity)
-                if int(keep.sum()) >= 32 and int((~keep).sum()) > 0:
-                    means, quats, f_dc, log_scales, logit_opacities = (
-                        _as_leaf(means[keep]), _as_leaf(quats[keep]),
-                        _as_leaf(f_dc[keep]), _as_leaf(log_scales[keep]),
-                        _as_leaf(logit_opacities[keep]),
-                    )
-                    f_dc_orig = f_dc.detach().clone()
-                    xyz_grad_accum = torch.zeros(means.shape[0], device=means.device)
-                    xyz_grad_denom = torch.zeros(means.shape[0], device=means.device)
-                    opt = self._make_opt(
-                        torch, means, quats, f_dc, log_scales, logit_opacities,
-                    )
+                if int(keep.sum()) < 32 or int((~keep).sum()) == 0:
+                    return
+                means, quats, f_dc, log_scales, logit_opacities = (
+                    _as_leaf(means[keep]), _as_leaf(quats[keep]),
+                    _as_leaf(f_dc[keep]), _as_leaf(log_scales[keep]),
+                    _as_leaf(logit_opacities[keep]),
+                )
+                f_dc_orig = f_dc.detach().clone()
+                xyz_grad_accum = torch.zeros(means.shape[0], device=means.device)
+                xyz_grad_denom = torch.zeros(means.shape[0], device=means.device)
+                opt = self._make_opt(
+                    torch, means, quats, f_dc, log_scales, logit_opacities,
+                )
+
+            def adam_step(*, clip_scales: bool):
+                opt.step()
+                opt.zero_grad(set_to_none=True)
+                with torch.no_grad():
+                    quats.copy_(torch.nn.functional.normalize(quats, dim=-1))
+                    if clip_scales:
+                        if sh_clip > 0:
+                            f_dc.clamp_(-sh_clip, sh_clip)
+                        if not geometry_frozen:
+                            clamp_log_scales(
+                                log_scales,
+                                min_scale=min_scale,
+                                max_scale=max_scale,
+                                max_aniso=max_aniso,
+                            )
+
+            # GitHub refine_gs.py densifies, then prunes on the last iter, then
+            # Adam-steps. The looped path steps first so densify does not drop
+            # this iteration's .grad.
+            if paper:
+                if densify_now:
+                    run_densify()
+                run_prune()
+                adam_step(clip_scales=False)
+            else:
+                adam_step(clip_scales=True)
+                if densify_now:
+                    run_densify()
+                run_prune()
 
             ran += 1
             done = ctx["total_iters"] + ran

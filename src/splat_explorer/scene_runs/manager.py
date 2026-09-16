@@ -179,6 +179,15 @@ class SceneRunManager:
             if status not in ACTIVE_STATUSES:
                 continue
             run_id = str(row.get("id") or row.get("run_id") or "")
+            if status == "starting":
+                self._update(
+                    run_id,
+                    status="queued",
+                    phase="queued",
+                    error=None,
+                    message="Requeued after scene-run manager restart",
+                )
+                continue
             self._update(
                 run_id,
                 status="error",
