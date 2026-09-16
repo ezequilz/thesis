@@ -318,6 +318,49 @@ def test_build_qwen_pipeline_is_the_official_loader():
     assert callable(build_qwen_pipeline)
 
 
+def test_build_qwen_pipeline_requests_low_cpu_mem_usage(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    seen = {}
+
+    class Pipe:
+        def to(self, device):
+            self.device = device
+            return self
+
+        def enable_vae_tiling(self):
+            self.vae_tiled = True
+
+        def set_progress_bar_config(self, **_kwargs):
+            pass
+
+    class QwenImageEditPlusPipeline:
+        @staticmethod
+        def from_pretrained(model_id, **kwargs):
+            seen["model_id"] = model_id
+            seen.update(kwargs)
+            return Pipe()
+
+    monkeypatch.setitem(
+        sys.modules, "diffusers",
+        SimpleNamespace(QwenImageEditPlusPipeline=QwenImageEditPlusPipeline),
+    )
+    pipe = build_qwen_pipeline(
+        model_id=QWEN_MODEL_ID,
+        torch_dtype="bf16",
+        device="cuda:0",
+        vae_tiling=True,
+        attention_slicing=False,
+        offload="none",
+        local_files_only=True,
+    )
+    assert seen["low_cpu_mem_usage"] is True
+    assert seen["local_files_only"] is True
+    assert pipe.device == "cuda:0"
+    assert pipe.vae_tiled is True
+
+
 def test_repair_studio_snapshot_includes_image_edit(tmp_path: Path, monkeypatch):
     from splat_explorer.config import Config
     from splat_explorer.web.repair_studio import RepairStudio

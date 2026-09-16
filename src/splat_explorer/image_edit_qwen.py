@@ -9,11 +9,15 @@ Memory (A100 80GB / H100 94GB, one Slurm GPU):
 
 - Weights stay resident in bf16 (~20B params, ~40GB). Photometric refine
   is <3% VRAM, so co-residency on the allocated card is the default.
+- ``from_pretrained(..., low_cpu_mem_usage=True)`` avoids duplicating the
+  20B weights on the CPU. Scene-runs still need a 128G/256G *host* RAM
+  cgroup; 64G holds isolate Qwen in a subprocess.
 - VAE tiling on; attention slicing / sequential CPU offload only when
   configured (OOM path).
-- Never ``torch.cuda.set_device`` or ``empty_cache`` during a live
-  photometric kernel. Dedicated GPU: ``image_edit.device: 1`` (or
-  ``SPLAT_IMAGE_EDIT_DEVICE``) without changing the current CUDA device.
+- Never ``torch.cuda.set_device`` during a live photometric kernel.
+  ``empty_cache`` is OK *between* Qwen edit and GSFix, not during either.
+  Dedicated GPU: ``image_edit.device: 1`` (or ``SPLAT_IMAGE_EDIT_DEVICE``)
+  without changing the current CUDA device.
 
 Weights are not reloaded per view. First ``edit()`` instantiates the
 pipeline; later one-by-one Regenerator jobs reuse it.
@@ -139,11 +143,16 @@ def build_qwen_pipeline(
     """Official Diffusers load. Isolated so tests can mock without 20GB weights."""
     from diffusers import QwenImageEditPlusPipeline
 
-    pipeline = QwenImageEditPlusPipeline.from_pretrained(
-        model_id,
+    kwargs = dict(
         torch_dtype=torch_dtype,
         local_files_only=local_files_only,
+        low_cpu_mem_usage=True,
     )
+    try:
+        pipeline = QwenImageEditPlusPipeline.from_pretrained(model_id, **kwargs)
+    except TypeError:
+        kwargs.pop("low_cpu_mem_usage", None)
+        pipeline = QwenImageEditPlusPipeline.from_pretrained(model_id, **kwargs)
     offload_key = str(offload or "none").strip().lower()
     if offload_key in ("sequential", "sequential_cpu", "cpu"):
         pipeline.enable_sequential_cpu_offload()

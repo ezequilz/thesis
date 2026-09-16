@@ -66,7 +66,7 @@ _DEFAULTS = {
     "workspace": "/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000/go73kaf2/splat-explorer",
     "container": "/dss/dssmcmlfs01/pn25pi/pn25pi-dss-0000/go73kaf2/splat-explorer/containers/pytorch.sqsh",
     "cpus": 4,
-    "mem": "64G",
+    "mem": "256G",
     "container_name": "splat-repair",
 }
 
@@ -513,7 +513,7 @@ def sbatch_hold_command(
     begin: str | None = None,
     nodelist: str | None = None,
     cpus: int = 4,
-    mem: str = "64G",
+    mem: str = "256G",
     gres: str = "gpu:1",
 ) -> str:
     """One sleep hold job. Does not wait in the queue."""
@@ -640,6 +640,25 @@ SRUN_MIN_WORKER_MB = 8 * 1024
 TIGHT_HOST_RAM_MB = 40 * 1024
 TIGHT_TRAIN_MAX_EDGE = 512
 TIGHT_TRAIN_RETRY_EDGES = (512, 384, 320)
+# 64G cgroups OOM if Qwen's host leftovers coexist with GSFix. 128G/256G
+# holds keep QwenImageEditPlusPipeline resident on the one allocated GPU.
+QWEN_SUBPROCESS_HOST_RAM_MB = 80 * 1024
+
+
+def _cgroup_bytes(path: Path) -> int | None:
+    try:
+        raw = path.read_text().strip()
+    except OSError:
+        return None
+    if not raw or raw.lower() == "max":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if value <= 0 or value >= 1 << 60:
+        return None
+    return value
 
 
 def host_cgroup_mem_mb() -> int | None:
@@ -648,20 +667,31 @@ def host_cgroup_mem_mb() -> int | None:
         Path("/sys/fs/cgroup/memory.max"),
         Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
     ):
-        try:
-            raw = path.read_text().strip()
-        except OSError:
-            continue
-        if not raw or raw.lower() == "max":
-            continue
-        try:
-            value = int(raw)
-        except ValueError:
-            continue
-        if value <= 0 or value >= 1 << 60:
-            continue
-        return max(1, value // (1024 * 1024))
+        value = _cgroup_bytes(path)
+        if value is not None:
+            return max(1, value // (1024 * 1024))
     return None
+
+
+def host_cgroup_current_mb() -> int | None:
+    """Current Slurm step cgroup usage in MiB, or None if unreadable."""
+    for path in (
+        Path("/sys/fs/cgroup/memory.current"),
+        Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    ):
+        value = _cgroup_bytes(path)
+        if value is not None:
+            return max(0, value // (1024 * 1024))
+    return None
+
+
+def qwen_image_edit_subprocess(cfg: dict | None = None) -> bool:
+    """True when the live hold cannot keep Qwen host buffers next to GSFix.
+
+    64G (and tighter) steps still isolate Qwen in a disposable child.
+    128G/256G holds keep the pipeline resident on the one allocated GPU.
+    """
+    return hold_mem_mb(cfg) <= QWEN_SUBPROCESS_HOST_RAM_MB
 
 
 def tight_host_ram(
@@ -3096,7 +3126,7 @@ def allocate_lrz_gpu(
         after_job=after_job,
         begin=begin_spec,
         cpus=int(cfg.get("cpus") or 4),
-        mem=str(cfg.get("mem") or "64G"),
+        mem=str(cfg.get("mem") or "256G"),
     )
     with _ALLOCATE["lock"]:
         if _ALLOCATE["inflight"]:

@@ -295,7 +295,7 @@ def test_srun_worker_overlaps_sleep_hold():
     assert "--overlap" in cmd
     assert "--jobid=5777469" in cmd
     assert "--gres=gpu:1" in cmd
-    assert "--mem=62G" in cmd
+    assert "--mem=254G" in cmd
     assert "/workspace/python" in cmd
     assert "--container-name=splat-repair-5777469" in cmd
 
@@ -633,7 +633,7 @@ def test_sbatch_hold_8h_24h_and_after():
     assert "--job-name=gs-8h" in eight
     assert "lrz-hgx-a100-80x4,lrz-dgx-a100-80x8" in eight
     assert "--gres=gpu:1" in eight
-    assert "--mem=64G" in eight
+    assert "--mem=256G" in eight
     six = sbatch_hold_command(6, begin="2026-09-10T09:00", partition="lrz-hgx-h100-94x4")
     assert "--time=06:00:00" in six
     assert "sleep 21600" in six
@@ -1870,6 +1870,7 @@ def test_srun_mem_flag_leaves_headroom_on_32g_hold():
 
     assert srun_mem_flag({"mem": "32G"}) == "--mem=24G"
     assert srun_mem_flag({"mem": "64G"}) == "--mem=62G"
+    assert srun_mem_flag({"mem": "256G"}) == "--mem=254G"
     assert srun_mem_flag({"mem": "32G"}, probe=True) == "--mem=1G"
 
 
@@ -1879,6 +1880,18 @@ def test_tight_host_ram_32g_vs_64g():
     assert tight_host_ram({"mem": "32G"}, cgroup_mb=80 * 1024) is True
     assert tight_host_ram({"mem": "64G"}, cgroup_mb=80 * 1024) is False
     assert tight_host_ram({"mem": "64G"}, cgroup_mb=32 * 1024) is True
+
+
+def test_qwen_image_edit_subprocess_gates_on_hold_mem():
+    from splat_explorer.repair_lrz import (
+        qwen_image_edit_subprocess, reset_live_allocation,
+    )
+
+    reset_live_allocation()
+    assert qwen_image_edit_subprocess({"mem": "32G"}) is True
+    assert qwen_image_edit_subprocess({"mem": "64G"}) is True
+    assert qwen_image_edit_subprocess({"mem": "128G"}) is False
+    assert qwen_image_edit_subprocess({"mem": "256G"}) is False
 
 
 def test_lrz_params_enable_packed_on_32g_hold():
@@ -2213,16 +2226,24 @@ def test_scene_run_protocol_and_srun_commands():
     assert "splat_explorer.scene_runs.gpu_worker" in srun
     assert "/workspace/scene-runs/run-abc" in srun
     from splat_explorer.scene_runs.lrz_transport import LrzSceneRunTransport
+    from splat_explorer.repair_lrz import reset_live_allocation
 
+    reset_live_allocation()
     transport = object.__new__(LrzSceneRunTransport)
     transport.app_cfg = {}
     transport.run_id = "run-abc"
+    transport.cfg = {"mem": "64G"}
     original = transport._worker_config({"repair_type": "original"})
     assert original["repair"]["max_chunks"] == 1
     assert original["repair"]["upstream_gsfix3d"] is True
+    assert original["image_edit_subprocess"] is True
     looped = transport._worker_config({"repair_type": "looped"})
     assert looped["repair"]["max_chunks"] == 0
     assert looped["repair"]["repair_type"] == "looped"
+    assert looped["image_edit_subprocess"] is True
+    transport.cfg = {"mem": "256G"}
+    wide = transport._worker_config({"repair_type": "original"})
+    assert wide["image_edit_subprocess"] is False
     launch = scene_worker_launch_command(
         cfg, "run-abc", overall_deadline=2_000_000_000,
     )
@@ -2323,6 +2344,11 @@ def test_scene_gpu_worker_keeps_scene_and_qwen_backend_resident(tmp_path):
     assert calls == {"load": 1, "editor": 1, "edit": 2, "repair": 2}
     assert scene.value == 2
     assert (run_dir / CHECKPOINT_NAME).read_bytes() == b"scene-2"
+    metrics = json.loads((run_dir / "requests" / "step-00001" / METRICS_NAME).read_text())
+    assert metrics["memory"]["qwen_resident"] is True
+    assert "after_image_edit" in metrics["memory"]
+    assert "before_repair" in metrics["memory"]
+    assert "after_repair" in metrics["memory"]
 
 
 
