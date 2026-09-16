@@ -344,6 +344,8 @@ def test_catalog_id_from_live_ignores_repair_preview():
     assert catalog_id_from_live({"id": "scene-run-run_20260916_000151"}) is None
 
 
+
+
 def test_live_scene_reload_follows_newer_path_even_if_generation_drops():
     from splat_explorer.scene.catalog import live_scene_reload_action
 
