@@ -2214,7 +2214,7 @@ def test_scene_run_protocol_and_srun_commands():
     assert body["camera"]["width"] == 32
     assert body["repair_seconds"] == 180.0
     assert body["deadline_unix"] == 2_000_000_000.0
-    assert "Repair visible 3D Gaussian rendering artifacts" in body["prompt"]
+    assert "Regenerate and fix this image. Repair artifacts" in body["prompt"]
     queue = active_job_squeue_command("5786047")
     assert "--job=5786047" in queue
     assert "%e|%L" in queue

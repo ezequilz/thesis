@@ -27,23 +27,28 @@ class _Renderer:
         return np.ones((camera.height, camera.width), dtype=np.float32)
 
 
-def test_image_edit_prompt_includes_artifact_report():
+def test_image_edit_prompt_is_static():
     from splat_explorer.agent.actions import Action
+    from splat_explorer.scene_runs.gpu_worker import DEFAULT_PROMPT
     from splat_explorer.scene_runs.runner import _image_edit_prompt
 
+    expected = (
+        "Regenerate and fix this image. Repair artifacts, reconstruct plausible "
+        "geometry and upscale to higher resolution."
+    )
+    assert DEFAULT_PROMPT == expected
     generic = _image_edit_prompt(Action("rotate", {"yaw_degrees": 15}), {})
-    assert "Repair visible 3D Gaussian rendering artifacts" in generic
     prompt = _image_edit_prompt(
         Action("report_artifact", {
             "description": "stretched smears on the right windows",
             "image_region": "right third",
             "severity": "high",
         }),
-        {},
+        {"image_edit_prompt": "do not use this override"},
     )
-    assert "stretched smears on the right windows" in prompt
-    assert "Focus on: right third." in prompt
-    assert "Severity: high." in prompt
+    assert generic == expected
+    assert prompt == expected
+    assert "stretched smears on the right windows" not in prompt
     policy = SimpleNamespace(last_debug={
         "backend": "cli_relay",
         "fallback": True,

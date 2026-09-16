@@ -97,30 +97,13 @@ def _triggered(mode: str, action: Action) -> bool:
     return key == "every_artifact" or wants_regenerate(action.args)
 
 
-def _image_edit_prompt(action: Action, params: dict[str, Any] | None = None) -> str:
-    """Build the Qwen instruction from the run default plus any artifact report."""
+def _image_edit_prompt(
+    _action: Action | None = None, _params: dict[str, Any] | None = None,
+) -> str:
+    """Return the static Qwen instruction used for every repaired view."""
     from .gpu_worker import DEFAULT_PROMPT
 
-    configured = ""
-    if params:
-        configured = str(params.get("image_edit_prompt") or "").strip()
-    prompt = configured or DEFAULT_PROMPT
-    if action.name != "report_artifact":
-        return prompt
-    args = dict(action.args or {})
-    details = []
-    description = str(args.get("description") or "").strip()
-    region = str(args.get("image_region") or "").strip()
-    severity = str(args.get("severity") or "").strip()
-    if description:
-        details.append(description)
-    if region:
-        details.append(f"Focus on: {region}.")
-    if severity:
-        details.append(f"Severity: {severity}.")
-    if not details:
-        return prompt
-    return f"{prompt} Specific artifact to repair: {' '.join(details)}"
+    return DEFAULT_PROMPT
 
 
 def _repair_trigger_state(

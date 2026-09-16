@@ -73,8 +73,8 @@ UPSTREAM_GSFIX3D = {
     "upstream_gsfix3d": True,
 }
 DEFAULT_PROMPT = (
-    "Repair visible 3D Gaussian rendering artifacts in this image while "
-    "preserving the scene geometry, materials, lighting, and composition."
+    "Regenerate and fix this image. Repair artifacts, reconstruct plausible "
+    "geometry and upscale to higher resolution."
 )
 
 logger = logging.getLogger(__name__)
