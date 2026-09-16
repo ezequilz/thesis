@@ -45,16 +45,6 @@ CUDA refine from [refine_gs.py](https://github.com/GSFix3D/GSFix3D/blob/main/scr
 The dashboard **Repair type** dropdown can switch to `looped`, which repeats
 those 20-iter chunks until **Repair Time** (default 180s) or Stop.
 
-On a 128G / 1-GPU hold the remote worker keeps Qwen-Image-Edit-2511 on
-`cuda:0` for the whole run. Each triggered view is edit → activation
-`empty_cache` → GSFix3D, without reloading the ~40GB weights. Heartbeat
-and `metrics.json` record host-cgroup and CUDA memory at those handoffs
-(`memory.qwen_resident`). If that cgroup still OOM-kills, allocate 256G.
-64G holds still spawn a disposable Qwen child before GSFix so the 62 GiB
-cgroup does not OOM. Two GPUs are not required and do not overlap these
-sequential phases; `image_edit.device: 1` is only a VRAM-isolation fallback
-after a measured CUDA OOM.
-
 ## GPU ownership and recovery
 
 One scene-run owns the selected allocation for its duration. Mutating repair

@@ -13,15 +13,8 @@ from splat_explorer.scene_runs.gpu_worker import (
     SCENE_NAME,
     SceneRunGpuWorker,
     _default_repair_factory,
-    memory_snapshot,
     pending_request_dirs,
 )
-
-
-def test_memory_snapshot_is_json_safe():
-    snap = memory_snapshot()
-    assert isinstance(snap, dict)
-    json.dumps(snap)
 
 
 class _Scene:

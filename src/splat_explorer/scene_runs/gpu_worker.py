@@ -80,63 +80,6 @@ DEFAULT_PROMPT = (
 logger = logging.getLogger(__name__)
 
 
-def memory_snapshot() -> dict[str, Any]:
-    """Host-cgroup and CUDA memory at this instant; empty dict if unavailable.
-
-    Scene-runs log this while Qwen stays resident so a 128G/1-GPU hold can
-    confirm GSFix uses a few GB of VRAM, not the full 80GB card.
-    """
-    body: dict[str, Any] = {}
-    for key, path in (
-        ("host_current_mb", Path("/sys/fs/cgroup/memory.current")),
-        ("host_limit_mb", Path("/sys/fs/cgroup/memory.max")),
-        ("host_current_mb", Path("/sys/fs/cgroup/memory/memory.usage_in_bytes")),
-        ("host_limit_mb", Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")),
-    ):
-        if key in body:
-            continue
-        try:
-            raw = path.read_text().strip()
-        except OSError:
-            continue
-        if not raw or raw.lower() == "max":
-            continue
-        try:
-            value = int(raw)
-        except ValueError:
-            continue
-        if value < 0 or value >= 1 << 60:
-            continue
-        body[key] = max(0, value // (1024 * 1024))
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            body["cuda_allocated_mb"] = round(
-                torch.cuda.memory_allocated() / (1024 * 1024),
-            )
-            body["cuda_reserved_mb"] = round(
-                torch.cuda.memory_reserved() / (1024 * 1024),
-            )
-            free, total = torch.cuda.mem_get_info()
-            body["cuda_free_mb"] = round(free / (1024 * 1024))
-            body["cuda_total_mb"] = round(total / (1024 * 1024))
-    except (ImportError, RuntimeError, TypeError, ValueError):
-        pass
-    return body
-
-
-def _empty_cuda_activation_cache() -> None:
-    """Return unused CUDA blocks after Qwen edit. Does not delete the pipeline."""
-    gc.collect()
-    try:
-        import torch
-
-        torch.cuda.empty_cache()
-    except (ImportError, RuntimeError):
-        pass
-
-
 def _jsonable(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -351,9 +294,6 @@ class SceneRunGpuWorker:
         }
         if error:
             body["error"] = error
-        snap = memory_snapshot()
-        if snap:
-            body["memory"] = snap
         with self._heartbeat_lock:
             atomic_write_json(self.run_dir / HEARTBEAT_NAME, body)
 
@@ -432,7 +372,6 @@ class SceneRunGpuWorker:
                 raise FileNotFoundError(f"{RENDERED_NAME} missing for {request_id}")
             self._phase = "image_edit"
             self._heartbeat()
-            logger.info("memory before image_edit %s", memory_snapshot())
             prompt = str(
                 request.get("prompt")
                 or self.config.get("image_edit_prompt")
@@ -475,10 +414,6 @@ class SceneRunGpuWorker:
                 atomic_write_bytes(request_dir / REGENERATED_NAME, images[0])
                 edit_payload = _jsonable(getattr(edit, "payload", {}) or {})
                 edit_payload["prompt"] = prompt
-                # Drop diffusion activations; keep Qwen weights on the GPU.
-                _empty_cuda_activation_cache()
-            memory_after_edit = memory_snapshot()
-            logger.info("memory after image_edit %s", memory_after_edit)
             if (
                 not self.config.get("image_edit_subprocess", False)
                 and self.config.get("release_image_editor_before_repair", False)
@@ -489,7 +424,12 @@ class SceneRunGpuWorker:
                 self.image_editor = None
                 del edit
                 gc.collect()
-                _empty_cuda_activation_cache()
+                try:
+                    import torch
+
+                    torch.cuda.empty_cache()
+                except (ImportError, RuntimeError):
+                    pass
 
             rendered = np.asarray(Image.open(rendered_path).convert("RGB"), dtype=np.uint8)
             regenerated = np.asarray(
@@ -515,8 +455,6 @@ class SceneRunGpuWorker:
                 deadline = float(self.overall_deadline)
             self._phase = "repair"
             self._heartbeat()
-            memory_before_repair = memory_snapshot()
-            logger.info("memory before repair %s", memory_before_repair)
 
             def should_stop() -> bool:
                 if deadline is None:
@@ -548,8 +486,6 @@ class SceneRunGpuWorker:
             )
             # The prior CUDA renderer owns tensors from the pre-repair scene.
             self.renderer = None
-            memory_after_repair = memory_snapshot()
-            logger.info("memory after repair %s", memory_after_repair)
             metrics = {
                 key: _jsonable(value)
                 for key, value in dict(stats or {}).items()
@@ -561,15 +497,6 @@ class SceneRunGpuWorker:
                 image_edit=edit_payload,
                 repair_deadline=deadline,
                 finished_at=self.clock(),
-                memory={
-                    "after_image_edit": memory_after_edit,
-                    "before_repair": memory_before_repair,
-                    "after_repair": memory_after_repair,
-                    "qwen_resident": (
-                        not self.config.get("image_edit_subprocess", False)
-                        and self.image_editor is not None
-                    ),
-                },
             )
             self._checkpoint(request_dir, metrics)
             stopped = (

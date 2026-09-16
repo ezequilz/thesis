@@ -262,12 +262,9 @@ class LrzSceneRunTransport:
             "scene_run": dict(config),
             "image_edit": image_edit,
             "image_edit_prompt": config.get("image_edit_prompt"),
-            # 64G LRZ steps still isolate Qwen in a child so process exit
-            # reclaims host buffers before GSFix. 128G/256G holds keep the
-            # pipeline resident on the one allocated GPU.
-            "image_edit_subprocess": repair_lrz.qwen_image_edit_subprocess(
-                getattr(self, "cfg", None),
-            ),
+            # LRZ steps commonly have 62 GiB host memory. Process exit is the
+            # only reliable way to reclaim Qwen loading buffers before GSFix.
+            "image_edit_subprocess": True,
             "repair": repair,
         }
 
