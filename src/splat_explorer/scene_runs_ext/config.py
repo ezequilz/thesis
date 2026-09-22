@@ -2,7 +2,7 @@
 from __future__ import annotations
 import math
 
-DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 200,
+DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 1000,
             "inference_steps": 4, "seed": 42, "camera_scale": 1.0}
 # 4:3, 3× the 640×480 VLM default, and a multiple of 16 for the GPU rasterizer.
 REPAIR_WIDTH = 1920
@@ -60,20 +60,15 @@ def validate_repair_resolution(width, height, repair_width, repair_height):
 
 def proposal(action):
     args = action.args or {}
-    intervention = str(args.get("intervention") or "structure")
-    if intervention not in {"appearance", "structure"}:
-        intervention = "structure"
-    return {"intervention": intervention,
+    return {
             "description": str(args.get("description") or "Improve visible rendering artifacts")[:2000],
             "image_region": str(args.get("image_region") or "current view")[:300]}
 
 
 def edit_prompt(action):
     p = proposal(action)
-    intent = ("Improve texture, color and sharpness without changing object shape."
-              if p["intervention"] == "appearance" else
-              "Repair fuzzy or inconsistent structure while preserving the scene's layout and objects.")
-    return (f"Repair this rendering of a static 3D scene. {intent} "
+    return ("Repair this rendering of a static 3D scene. "
+            "Repair fuzzy or inconsistent structure and appearance while preserving the scene's layout and objects. "
             "Keep the exact camera viewpoint, perspective, framing and image dimensions. "
             "Preserve unaffected content. Do not add objects or change lighting. "
             f"Region: {p['image_region']}. Observed defect: {p['description']}")
@@ -91,9 +86,11 @@ def configure_policy(policy):
             fn["description"] = (
                 "Select a visible region for repair. regenerate=yes pauses exploration, edits "
                 "this anchor, propagates it across nearby calibrated views with ArtiFixer, "
-                "and fits an updated scene before continuing. Choose an intervention."
+                "and jointly fits geometry, opacity and color to the generated views before continuing."
             )
-            fn["parameters"]["properties"]["intervention"] = {
-                "type": "string", "enum": ["appearance", "structure"],
-                "description": "appearance freezes geometry; structure also optimizes shape and opacity.",
-            }
+            # Old policies may already contain the experimental routing field.
+            fn["parameters"]["properties"].pop("intervention", None)
+            if "required" in fn["parameters"]:
+                fn["parameters"]["required"] = [
+                    key for key in fn["parameters"]["required"] if key != "intervention"
+                ]

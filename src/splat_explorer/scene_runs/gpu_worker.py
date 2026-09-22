@@ -504,7 +504,7 @@ class SceneRunGpuWorker:
                     self.scene, camera, regenerated_path, request_dir,
                     options=(self.config.get("scene_run") or {}).get("extended"),
                     runtime=self.config.get("extended_runtime"),
-                    proposal=request.get("proposal") or {"intervention": "structure"},
+                    proposal=request.get("proposal") or {},
                     should_stop=lambda: self._request_stop(request_dir, ext_deadline),
                     on_progress=ext_progress,
                 )

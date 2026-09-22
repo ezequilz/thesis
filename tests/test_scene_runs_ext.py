@@ -11,7 +11,7 @@ from splat_explorer.scene import GaussianScene
 from splat_explorer.scene_runs.store import SceneRunStore
 from splat_explorer.scene_runs.models import SceneRunConfig
 from splat_explorer.scene_runs_ext.config import (
-    configure_policy, edit_prompt, validate_options, validate_repair_resolution,
+    configure_policy, edit_prompt, proposal, validate_options, validate_repair_resolution,
 )
 from splat_explorer.scene_runs_ext.bundle import camera_bundle, transforms
 from splat_explorer.scene_runs_ext.pipeline import repair
@@ -46,7 +46,7 @@ def test_extended_config_policy_and_baseline_are_separate(tmp_path):
     policy=SimpleNamespace(_tools=ACTION_TOOLS)
     configure_policy(policy)
     assert json.dumps(ACTION_TOOLS)==original
-    assert "intervention" in next(t for t in policy._tools if t["function"]["name"]=="report_artifact")["function"]["parameters"]["properties"]
+    assert "intervention" not in next(t for t in policy._tools if t["function"]["name"]=="report_artifact")["function"]["parameters"]["properties"]
     assert "cabinet" in edit_prompt(Action("report_artifact",{"description":"cabinet", "intervention":"appearance"}))
     assert "pipeline" not in SceneRunConfig().to_dict()
     with pytest.raises(ValueError): validate_options({"frames": 10})
@@ -111,8 +111,10 @@ def test_repair_fits_every_propagated_view_and_commits_only_clone(tmp_path):
     s=scene(); Image.new("RGB",(64,64)).save(tmp_path/"anchor.png")
     phases=[]
     def fitter(candidate,views,targets,**kw):
-        assert len(views)==len(targets)==10
-        assert kw["intervention"]=="appearance"
+        assert len(views)==len(targets)==9
+        assert "intervention" not in kw
+        # The independently edited black anchor must never become a fit target.
+        assert all(np.array_equal(t[0,0], [100,110,120]) for t in targets)
         candidate.colors[:]=.8
         return {"n_iters":3}
     candidate, metrics=repair(s,camera(),tmp_path/"anchor.png",tmp_path,
@@ -123,6 +125,8 @@ def test_repair_fits_every_propagated_view_and_commits_only_clone(tmp_path):
     np.testing.assert_allclose(s.colors,.4)
     np.testing.assert_allclose(candidate.colors,.8)
     assert metrics["generated_frames"]==9
+    assert metrics["anchor_role"] == "generation_reference_only"
+    assert metrics["fitting_resolution"] == [32,32]
     assert len(list((tmp_path/"extended/targets").glob("*.png")))==9
 
 
@@ -334,3 +338,37 @@ def test_bootstrap_failure_reports_missing_pip(tmp_path, monkeypatch):
     monkeypatch.setattr(setup.urllib.request, "urlopen", urlopen)
     with pytest.raises(RuntimeError, match="no pip module"):
         setup.ensure_venv(tmp_path / "artifixer-venv", {"TMPDIR": str(tmp_path)}, lambda *a, **k: None)
+
+
+def test_legacy_intervention_cannot_change_repair_prompt_or_routing():
+    a = Action("report_artifact", {"description": "smeared door", "intervention": "appearance"})
+    b = Action("report_artifact", {"description": "smeared door", "intervention": "structure"})
+    assert proposal(a) == proposal(b)
+    assert "intervention" not in proposal(a)
+    assert edit_prompt(a) == edit_prompt(b)
+    assert validate_options()["fit_iterations"] == 1000
+
+
+def test_joint_optimizer_updates_geometry_and_opacity(monkeypatch):
+    # Exercise real autograd and Adam with a differentiable stand-in rasterizer.
+    # This verifies optimizer wiring; CUDA rendering requires the GPU smoke test.
+    import sys
+    torch = pytest.importorskip("torch")
+    from splat_explorer.scene_runs_ext.fitting import fit_views
+    def rasterization(**kw):
+        value = (kw["colors"].mean() + kw["means"].mean()
+                 + kw["scales"].mean() + kw["opacities"].mean()
+                 + kw["quats"][:, 1:].mean()) / 5
+        return value.expand(1, kw["height"], kw["width"], 3), None, None
+    monkeypatch.setitem(sys.modules, "gsplat", SimpleNamespace(rasterization=rasterization))
+    s = scene()
+    s.opacities[:] = .5
+    before = s.copy()
+    metrics = fit_views(s, [camera()], [np.full((32,32,3), 200, np.uint8)],
+                        iterations=3, should_stop=lambda: False,
+                        on_progress=lambda _: None, device="cpu")
+    for name in ("means", "scales", "quats", "opacities", "colors"):
+        assert not np.array_equal(getattr(s,name), getattr(before,name)), name
+    assert metrics["after"]["target_l1"] < metrics["before"]["target_l1"]
+    assert metrics["view_updates"] == [3]
+    assert s.num_gaussians == before.num_gaussians

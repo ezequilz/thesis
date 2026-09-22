@@ -153,17 +153,18 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
             targets.append(np.asarray(image.convert("RGB")))
         shutil.copy2(path, preview / path.name)
     propagate_seconds = time.monotonic()-started-render_seconds
-    # Anchor remains an explicit training view instead of relying on exact propagation.
-    with Image.open(root / "anchor.png") as image:
-        targets.append(np.asarray(image.convert("RGB")))
+    # The edited anchor conditions generation only. Fit the coherent generated
+    # sequence, not an additional independently edited target at the same pose.
     candidate = scene.copy()
     on_progress({"phase": "multiview_fit"})
-    metrics = fitter(candidate, cameras+[camera], targets,
+    metrics = fitter(candidate, cameras, targets,
                      iterations=options["fit_iterations"],
-                     intervention=proposal.get("intervention", "structure"),
                      should_stop=should_stop, on_progress=on_progress)
     check()
     metrics.update(pipeline="extended", backend="artifixer-gsplat", proposal=proposal,
                    render_seconds=render_seconds, propagation_seconds=propagate_seconds,
-                   total_seconds=time.monotonic()-started, generated_frames=len(cameras))
+                   total_seconds=time.monotonic()-started, generated_frames=len(cameras),
+                   baseline="artifixer-generated-views-v1",
+                   anchor_role="generation_reference_only",
+                   fitting_resolution=[camera.width, camera.height])
     return candidate, metrics
