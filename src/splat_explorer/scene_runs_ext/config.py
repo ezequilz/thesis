@@ -4,6 +4,9 @@ import math
 
 DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 200,
             "inference_steps": 4, "seed": 42, "camera_scale": 1.0}
+# 4:3, 3× the 640×480 VLM default, and a multiple of 16 for the GPU rasterizer.
+REPAIR_WIDTH = 1920
+REPAIR_HEIGHT = 1440
 RUNTIME_DEFAULTS = {
     "repo": "/workspace/third_party/ArtiFixer",
     "python": "/workspace/artifixer-venv/bin/python",
@@ -34,6 +37,25 @@ def validate_options(value=None):
             raise ValueError(f"{key} must be between {lower} and {upper}")
         result[key] = float(n)
     return result
+
+
+def validate_repair_resolution(width, height, repair_width, repair_height):
+    """Image-model resolution. Zero keeps the VLM frame for that axis pair."""
+    if repair_width == 0 and repair_height == 0:
+        return 0, 0
+    for name, value, lower, upper in (
+        ("repair_width", repair_width, 64, 3840),
+        ("repair_height", repair_height, 64, 2880),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or not lower <= value <= upper:
+            raise ValueError(f"{name} must be an integer between {lower} and {upper}")
+    if repair_width % 16 or repair_height % 16:
+        raise ValueError("Image repair width and height must be multiples of 16")
+    if int(repair_width) * int(height) != int(repair_height) * int(width):
+        raise ValueError(
+            "Image repair resolution must keep the same aspect ratio as the VLM resolution"
+        )
+    return int(repair_width), int(repair_height)
 
 
 def proposal(action):

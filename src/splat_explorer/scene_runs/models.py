@@ -66,6 +66,8 @@ class SceneRunConfig:
     repair_trigger: RepairTrigger = RepairTrigger.REGENERATE_YES
     repair_type: RepairType = RepairType.ORIGINAL
     repair_seconds: int = 180
+    repair_width: int = 0
+    repair_height: int = 0
     pipeline: str = "baseline"
     extended: dict[str, Any] = field(default_factory=dict)
 
@@ -73,10 +75,15 @@ class SceneRunConfig:
         if self.pipeline not in {"baseline", "extended"}:
             raise ValueError("pipeline must be baseline or extended")
         if self.pipeline == "extended":
-            from ..scene_runs_ext.config import validate_options
+            from ..scene_runs_ext.config import validate_options, validate_repair_resolution
             object.__setattr__(self, "extended", validate_options(self.extended))
             if self.width % 16 or self.height % 16:
                 raise ValueError("Extended width and height must be multiples of 16")
+            repair_width, repair_height = validate_repair_resolution(
+                self.width, self.height, self.repair_width, self.repair_height,
+            )
+            object.__setattr__(self, "repair_width", repair_width)
+            object.__setattr__(self, "repair_height", repair_height)
         for name in ("scene_id", "backend", "image_edit_backend", "repair_backend"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
@@ -129,6 +136,11 @@ class SceneRunConfig:
         if self.pipeline == "baseline":
             data.pop("pipeline")
             data.pop("extended")
+            data.pop("repair_width", None)
+            data.pop("repair_height", None)
+        elif not self.repair_width or not self.repair_height:
+            data.pop("repair_width", None)
+            data.pop("repair_height", None)
         return data
 
 

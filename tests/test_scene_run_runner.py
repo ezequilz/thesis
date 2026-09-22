@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from splat_explorer.agent.actions import Action
 from splat_explorer.config import Config
@@ -185,3 +186,177 @@ def test_repair_reload_keeps_policy_and_pose_state(tmp_path, monkeypatch):
     assert detail["state"]["status"] == "stopped"
     actions = (store.run_path(created.run_id) / "actions.jsonl").read_text()
     assert actions.count('"step":') == 2
+    assert not (store.run_path(created.run_id) / "step_00000_repair.png").exists()
+
+
+def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_path, monkeypatch):
+    now = datetime(2026, 9, 15, 18, 43, tzinfo=timezone.utc)
+    store = SceneRunStore(tmp_path / "scene-runs", clock=lambda: now)
+    created = store.create_run({
+        "pipeline": "extended",
+        "width": 32,
+        "height": 32,
+        "repair_width": 64,
+        "repair_height": 64,
+        "duration_seconds": 30,
+        "repair_trigger": "every_step",
+        "repair_backend": "artifixer-gsplat",
+    }, now=now)
+    cfg = _run_cfg(tmp_path)
+    seen = []
+    repairs = []
+
+    class Policy:
+        last_debug = {"backend": "fake"}
+
+        def decide(self, rgb, _pose, step, **_kwargs):
+            seen.append(rgb.shape)
+            if step == 0:
+                return Action("report_artifact", {
+                    "description": "floater",
+                    "image_region": "center",
+                    "severity": "high",
+                    "regenerate": "no",
+                })
+            if step == 1:
+                return Action("rotate", {"yaw_degrees": 15})
+            store.request_stop(created.run_id)
+            return Action("rotate", {"yaw_degrees": 15})
+
+    class Gpu:
+        def start(self, **_kwargs):
+            return {}
+
+        def render(self, *, step, camera, deadline, should_stop, purpose=""):
+            rgb = np.full((camera.height, camera.width, 3), 90 if purpose else 20, np.uint8)
+            depth = np.ones((camera.height, camera.width), np.float32)
+            return rgb, depth
+
+        def repair(self, **kwargs):
+            repairs.append(kwargs)
+            path = store.run_path(created.run_id) / "scene_repaired.ply"
+            path.write_bytes(b"repaired")
+            return {"status": "ok", "checkpoint": str(path)}
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "splat_explorer.scene_runs.runner.save_ply",
+        lambda _scene, path: Path(path).write_bytes(b"ply"),
+    )
+    monkeypatch.setattr(
+        "splat_explorer.scene_runs.runner.load_ply", lambda _path: _Scene(),
+    )
+    monkeypatch.setattr(
+        "splat_explorer.scene_runs.runner.make_renderer", lambda *_args: _Renderer(),
+    )
+    monkeypatch.setattr(
+        "splat_explorer.scene_runs.runner.make_policy", lambda _cfg: Policy(),
+    )
+    monkeypatch.setattr(
+        "splat_explorer.scene_runs.runner._build_navigation",
+        lambda *_args: (None, None),
+    )
+
+    class Executor(SceneRunExecutor):
+        def _load_source(self, _params):
+            return cfg, SceneSpec("venetian-balcony", "Venetian", Path("x")), _Scene()
+
+        def _publish_and_wait(self, *_args, **_kwargs):
+            return None
+
+    executor = Executor(cfg, store, gpu_factory=lambda *_args: Gpu())
+    executor.execute(created.run_id)
+    run_dir = store.run_path(created.run_id)
+
+    assert seen == [(32, 32, 3), (32, 32, 3), (32, 32, 3)]
+    assert Image.open(run_dir / "step_00000.png").size == (32, 32)
+    assert Image.open(run_dir / "step_00000_repair.png").size == (64, 64)
+    assert Image.open(run_dir / "step_00001_repair.png").size == (64, 64)
+    assert not (run_dir / "step_00002_repair.png").exists()
+    assert [Path(item["rendered_path"]).name for item in repairs] == [
+        "step_00000_repair.png", "step_00001_repair.png",
+    ]
+    assert all(item["camera"].width == 32 and item["camera"].height == 32 for item in repairs)
+
+
+def test_report_artifact_saves_repair_frame_without_calling_the_image_model(tmp_path, monkeypatch):
+    now = datetime(2026, 9, 15, 18, 44, tzinfo=timezone.utc)
+    store = SceneRunStore(tmp_path / "scene-runs", clock=lambda: now)
+    created = store.create_run({
+        "pipeline": "extended",
+        "width": 32,
+        "height": 32,
+        "repair_width": 64,
+        "repair_height": 64,
+        "duration_seconds": 30,
+        "repair_trigger": "regenerate_yes",
+    }, now=now)
+    cfg = _run_cfg(tmp_path)
+    repairs = []
+
+    class Policy:
+        last_debug = {"backend": "fake"}
+
+        def decide(self, rgb, _pose, step, **_kwargs):
+            assert rgb.shape == (32, 32, 3)
+            if step == 0:
+                return Action("report_artifact", {
+                    "description": "smear",
+                    "regenerate": "no",
+                })
+            store.request_stop(created.run_id)
+            return Action("rotate", {"yaw_degrees": 10})
+
+    class Gpu:
+        def start(self, **_kwargs):
+            return {}
+
+        def render(self, *, camera, purpose="", **_kwargs):
+            return (
+                np.full((camera.height, camera.width, 3), 30, np.uint8),
+                np.ones((camera.height, camera.width), np.float32),
+            )
+
+        def repair(self, **kwargs):
+            repairs.append(kwargs)
+            return {"status": "ok"}
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "splat_explorer.scene_runs.runner.save_ply",
+        lambda _scene, path: Path(path).write_bytes(b"ply"),
+    )
+    monkeypatch.setattr(
+        "splat_explorer.scene_runs.runner.make_renderer", lambda *_args: _Renderer(),
+    )
+    monkeypatch.setattr(
+        "splat_explorer.scene_runs.runner.make_policy", lambda _cfg: Policy(),
+    )
+    monkeypatch.setattr(
+        "splat_explorer.scene_runs.runner._build_navigation",
+        lambda *_args: (None, None),
+    )
+
+    class Executor(SceneRunExecutor):
+        def _load_source(self, _params):
+            return cfg, SceneSpec("venetian-balcony", "Venetian", Path("x")), _Scene()
+
+        def _publish_and_wait(self, *_args, **_kwargs):
+            return None
+
+    Executor(cfg, store, gpu_factory=lambda *_args: Gpu()).execute(created.run_id)
+    run_dir = store.run_path(created.run_id)
+    assert Image.open(run_dir / "step_00000_repair.png").size == (64, 64)
+    assert Image.open(run_dir / "step_00001.png").size == (32, 32)
+    assert not (run_dir / "step_00001_repair.png").exists()
+    assert repairs == []

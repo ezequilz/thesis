@@ -169,9 +169,10 @@ class SceneRunStudio:
             _cfg_get(self.cfg, "agent.model", "") or defaults["model"]
         )
         if self.pipeline == "extended":
-            from ..scene_runs_ext.config import DEFAULTS
+            from ..scene_runs_ext.config import DEFAULTS, REPAIR_HEIGHT, REPAIR_WIDTH
             defaults.update(pipeline="extended", extended=dict(DEFAULTS),
-                            width=640, height=480, repair_backend="artifixer-gsplat")
+                            width=640, height=480, repair_backend="artifixer-gsplat",
+                            repair_width=REPAIR_WIDTH, repair_height=REPAIR_HEIGHT)
         return defaults
 
     def validate_config(self, body: Mapping[str, Any] | None) -> dict:
@@ -250,6 +251,23 @@ class SceneRunStudio:
                 raise SceneRunValidationError(str(exc)) from exc
             if clean["width"] % 16 or clean["height"] % 16:
                 raise SceneRunValidationError("Extended width and height must be multiples of 16")
+            from ..scene_runs_ext.config import validate_repair_resolution
+            repair_width = (
+                0 if not clean.get("repair_width")
+                else _positive_int(clean["repair_width"], "repair_width", minimum=64, maximum=3840)
+            )
+            repair_height = (
+                0 if not clean.get("repair_height")
+                else _positive_int(clean["repair_height"], "repair_height", minimum=64, maximum=2880)
+            )
+            try:
+                repair_width, repair_height = validate_repair_resolution(
+                    clean["width"], clean["height"], repair_width, repair_height,
+                )
+            except ValueError as exc:
+                raise SceneRunValidationError(str(exc)) from exc
+            clean["repair_width"] = repair_width
+            clean["repair_height"] = repair_height
             if is_qwen_backend(clean["image_edit_backend"]):
                 raise SceneRunValidationError("Extended runs currently use CliRelay image editing; choose a GPT image model")
             clean["pipeline"] = "extended"

@@ -10,7 +10,9 @@ from splat_explorer.rendering.base import Camera
 from splat_explorer.scene import GaussianScene
 from splat_explorer.scene_runs.store import SceneRunStore
 from splat_explorer.scene_runs.models import SceneRunConfig
-from splat_explorer.scene_runs_ext.config import configure_policy, edit_prompt, validate_options
+from splat_explorer.scene_runs_ext.config import (
+    configure_policy, edit_prompt, validate_options, validate_repair_resolution,
+)
 from splat_explorer.scene_runs_ext.bundle import camera_bundle, transforms
 from splat_explorer.scene_runs_ext.pipeline import repair
 from splat_explorer.web.scene_run_studio import SceneRunStudio, SceneRunValidationError
@@ -60,8 +62,21 @@ def test_extended_config_policy_and_baseline_are_separate(tmp_path):
     assert new["config"]["pipeline"]=="extended"
     assert new["config"]["extended"]["frames"]==9
     assert old["config"]["repair_backend"]=="gsfix-gsplat"
+    assert new["config"]["width"] == 640 and new["config"]["repair_width"] == 1920
+    assert new["config"]["repair_height"] == 1440
     with pytest.raises(SceneRunValidationError): extended.validate_config({"width":641})
     with pytest.raises(SceneRunValidationError): extended.validate_config({"image_edit_backend":"qwen-image-edit"})
+    with pytest.raises(SceneRunValidationError, match="multiples of 16"):
+        extended.validate_config({"repair_width":1928, "repair_height":1440})
+    with pytest.raises(SceneRunValidationError, match="aspect ratio"):
+        extended.validate_config({"repair_width":1920, "repair_height":1088})
+    assert validate_repair_resolution(640, 480, 0, 0) == (0, 0)
+    tuned = SceneRunConfig(pipeline="extended", width=640, height=480,
+                            repair_width=1280, repair_height=960)
+    assert tuned.to_dict()["repair_width"] == 1280
+    with pytest.raises(ValueError, match="aspect ratio"):
+        SceneRunConfig(pipeline="extended", width=640, height=480,
+                       repair_width=1920, repair_height=1088)
 
 
 def test_setup_and_both_pipelines_share_one_lease(tmp_path):

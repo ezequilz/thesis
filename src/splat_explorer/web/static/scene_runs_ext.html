@@ -178,8 +178,10 @@
         <label class="wide">Scene<select id="scene" name="scene_id"></select></label>
         <label>Duration (hours)<span class="stepper"><input id="duration" type="number" min="0.01" max="168" step="0.25" value="1"><span class="nudge"><button type="button" data-step="1" aria-label="Increase duration">▴</button><button type="button" data-step="-1" aria-label="Decrease duration">▾</button></span></span></label>
         <label>VLM backend<input id="backend" name="backend" value="cli_relay" readonly></label>
-        <label>Width<input id="width" name="width" type="number" min="64" max="3840" value="960"></label>
-        <label>Height<input id="height" name="height" type="number" min="64" max="2160" value="720"></label>
+        <label title="Resolution the VLM agent sees on every step.">VLM width<input id="width" name="width" type="number" min="64" max="3840" value="640"></label>
+        <label title="Resolution the VLM agent sees on every step.">VLM height<input id="height" name="height" type="number" min="64" max="2160" value="480"></label>
+        <label title="Rendered on report_artifact and sent to the image model. Saved for debugging. The agent still receives the VLM resolution.">Image repair width<input id="repair-width" name="repair_width" type="number" min="64" max="3840" value="1920"></label>
+        <label title="Must keep the same aspect ratio as the VLM resolution. Multiples of 16.">Image repair height<input id="repair-height" name="repair_height" type="number" min="64" max="2880" value="1440"></label>
         <label class="wide">VLM model<input id="model" name="model" value="gpt-5.6-luna"></label>
         <label>Image edit<select id="image-edit" name="image_edit_backend">
           <option value="gpt-image-2.5-sunburst">gpt-image-2.5 sunburst (CliRelay)</option>
@@ -332,6 +334,7 @@ function setDefaults(defaults, scenes) {
   $("duration").value = Number(defaults.duration_seconds || 3600) / 3600;
   snapSteppers();
   for (const [id,key] of [["backend","backend"],["model","model"],["width","width"],["height","height"],
+    ["repair-width","repair_width"],["repair-height","repair_height"],
     ["image-edit","image_edit_backend"],["repair-backend","repair_backend"],
     ["repair-type","repair_type"],["repair-trigger","repair_trigger"],["repair-seconds","repair_seconds"]]) {
     if (defaults[key] !== undefined) $(id).value = defaults[key];
@@ -445,7 +448,8 @@ function renderDetail() {
   const rows = [
     ["scene", cfg.scene_id || firstValue(b, ["scene_id","scene"]) || "–"],
     ["VLM", [cfg.backend,cfg.model].filter(Boolean).join(" · ") || "–"],
-    ["resolution", cfg.width && cfg.height ? `${cfg.width}×${cfg.height}` : "–"],
+    ["VLM resolution", cfg.width && cfg.height ? `${cfg.width}×${cfg.height}` : "–"],
+    ["image repair", cfg.repair_width && cfg.repair_height ? `${cfg.repair_width}×${cfg.repair_height}` : "–"],
     ["image / repair", [cfg.image_edit_backend,cfg.repair_backend].filter(Boolean).join(" → ") || "–"],
     ["repair type", cfg.repair_type === "looped" ? "looped" : "original GSFix3D"],
     ["repair trigger", cfg.repair_trigger || "–"],
@@ -513,7 +517,9 @@ $("run-form").onsubmit = async event => {
   const body = {
     scene_id:$("scene").value, duration_seconds:Math.round(Number($("duration").value) * 3600),
     backend:$("backend").value, model:$("model").value, width:Number($("width").value),
-    height:Number($("height").value), send_map:true, image_edit_backend:$("image-edit").value,
+    height:Number($("height").value),
+    repair_width:Number($("repair-width").value), repair_height:Number($("repair-height").value),
+    send_map:true, image_edit_backend:$("image-edit").value,
     repair_backend:$("repair-backend").value, repair_type:$("repair-type").value,
     extended:{frames:Number($("ext-frames").value), span_fraction:Number($("ext-span").value), fit_iterations:Number($("ext-iters").value), camera_scale:Number($("ext-scale").value)},
     repair_trigger:$("repair-trigger").value,

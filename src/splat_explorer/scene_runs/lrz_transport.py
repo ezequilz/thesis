@@ -500,11 +500,13 @@ class LrzSceneRunTransport:
         camera,
         deadline: float,
         should_stop: Callable[[], bool],
+        purpose: str = "",
     ):
         """Render on LRZ so scene-runs continue without an open browser tab."""
         if not self._started:
             raise RuntimeError("LRZ scene-run worker has not been started")
-        request_id = f"render-{int(step):05d}"
+        suffix = f"-{_safe_id(purpose, label='purpose')}" if purpose else ""
+        request_id = f"render-{int(step):05d}{suffix}"
         local_dir = self.run_dir / "requests" / request_id
         local_dir.mkdir(parents=True, exist_ok=True)
         request_deadline = min(

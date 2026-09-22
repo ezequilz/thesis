@@ -57,6 +57,7 @@ class SceneRunGpu(Protocol):
     def render(
         self, *, step: int, camera, deadline: float,
         should_stop: Callable[[], bool],
+        purpose: str = "",
     ): ...
 
     def stop(self) -> None: ...
@@ -118,6 +119,21 @@ def _repair_trigger_state(
         return _triggered(key, action), every_step_armed
     armed = every_step_armed or action.name == "report_artifact"
     return armed, armed
+
+
+def _repair_image_size(params: dict[str, Any]) -> tuple[int, int] | None:
+    """Extended image-model resolution, when it is larger than the VLM frame."""
+    if params.get("pipeline") != "extended":
+        return None
+    width = int(params.get("width") or 960)
+    height = int(params.get("height") or 720)
+    repair_width = int(params.get("repair_width") or 0)
+    repair_height = int(params.get("repair_height") or 0)
+    if repair_width <= 0 or repair_height <= 0:
+        return None
+    if (repair_width, repair_height) == (width, height):
+        return None
+    return repair_width, repair_height
 
 
 def _require_vlm_response(policy: Any) -> None:
@@ -403,6 +419,20 @@ class SceneRunExecutor:
                     action,
                     every_step_armed,
                 )
+                repair_frame = None
+                repair_size = _repair_image_size(params)
+                # report_artifact always keeps a debug render. Image-model calls
+                # on later steps use the same resolution, never the VLM frame.
+                if repair_size is not None and (is_artifact or trigger) and not self._stop_requested():
+                    repair_frame = self._save_repair_frame(
+                        step=step,
+                        rig=rig,
+                        fov_deg=float(run_cfg.renderer.fov_deg),
+                        size=repair_size,
+                        renderer=renderer,
+                        gpu_render=gpu_render if callable(gpu_render) else None,
+                        deadline=effective_deadline,
+                    )
                 record: dict[str, Any] = {
                     "step": step,
                     "pose": rig.state_description(),
@@ -416,6 +446,7 @@ class SceneRunExecutor:
                     "coverage_frame": coverage_name,
                     "repair_triggered": trigger,
                     "every_step_armed": every_step_armed,
+                    "repair_frame": None if repair_frame is None else repair_frame.name,
                     "vlm": getattr(policy, "last_debug", None),
                 }
                 self._event(
@@ -443,7 +474,7 @@ class SceneRunExecutor:
                     result = gpu.repair(
                         step=step,
                         camera=camera,
-                        rendered_path=frame_path,
+                        rendered_path=repair_frame or frame_path,
                         repair_seconds=float(params.get("repair_seconds") or 180),
                         deadline=effective_deadline,
                         should_stop=self._stop_requested,
@@ -588,6 +619,41 @@ class SceneRunExecutor:
                 artifacts=artifacts,
             )
         return self._detail(self._run_id)
+
+    def _save_repair_frame(
+        self,
+        *,
+        step: int,
+        rig: CameraRig,
+        fov_deg: float,
+        size: tuple[int, int],
+        renderer,
+        gpu_render,
+        deadline: float,
+    ) -> Path:
+        """Render the current pose at image-repair resolution and keep the PNG."""
+        width, height = size
+        camera = rig.camera(width, height, fov_deg)
+        if gpu_render is not None:
+            rgb, _depth = gpu_render(
+                step=step,
+                camera=camera,
+                deadline=deadline,
+                should_stop=self._stop_requested,
+                purpose="repair",
+            )
+        else:
+            rgb, _depth = _render_observation(renderer, camera, False)
+        path = self._run_dir / f"step_{step:05d}_repair.png"
+        Image.fromarray(rgb).save(path)
+        self._event(
+            "repair_frame_rendered",
+            step=step,
+            frame=path.name,
+            width=width,
+            height=height,
+        )
+        return path
 
     def _load_source(
         self, params: dict[str, Any],
