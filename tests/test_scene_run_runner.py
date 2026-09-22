@@ -194,6 +194,7 @@ def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_pat
     store = SceneRunStore(tmp_path / "scene-runs", clock=lambda: now)
     created = store.create_run({
         "pipeline": "extended",
+        "extended": {"repair_limit":1},
         "width": 32,
         "height": 32,
         "repair_width": 64,
@@ -218,8 +219,8 @@ def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_pat
                     "severity": "high",
                     "regenerate": "no",
                 })
-            if step == 1:
-                return Action("rotate", {"yaw_degrees": 15})
+            if step < 9:
+                return Action("move", {"direction":"right", "distance":1}) if step % 2 else Action("capture_repair_view")
             store.request_stop(created.run_id)
             return Action("rotate", {"yaw_degrees": 15})
 
@@ -273,13 +274,14 @@ def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_pat
     executor.execute(created.run_id)
     run_dir = store.run_path(created.run_id)
 
-    assert seen == [(32, 32, 3), (32, 32, 3), (32, 32, 3)]
+    assert seen == [(32, 32, 3)] * 9
     assert Image.open(run_dir / "step_00000.png").size == (32, 32)
     assert Image.open(run_dir / "step_00000_repair.png").size == (64, 64)
-    assert Image.open(run_dir / "step_00001_repair.png").size == (64, 64)
-    assert not (run_dir / "step_00002_repair.png").exists()
+    assert Image.open(run_dir / "step_00008_repair.png").size == (64, 64)
+    assert not (run_dir / "step_00001_repair.png").exists()
+    assert repairs[0]["proposal"]["view_steps"] == [0,2,4,6]
     assert [Path(item["rendered_path"]).name for item in repairs] == [
-        "step_00000_repair.png", "step_00001_repair.png",
+        "step_00008_repair.png",
     ]
     assert all(item["camera"].width == 32 and item["camera"].height == 32 for item in repairs)
 

@@ -10,6 +10,35 @@ from pathlib import Path
 import sys
 
 
+def crop_camera_conditioning(compute, cameras, indices, neighbors, *, box, source_size, scale):
+    """Compute original full-frame rays, then crop without recentering the lens.
+
+    Upstream's camera class rejects negative principal points. Off-center crops
+    can validly have these, so retain upstream distortion/pose conventions by
+    cropping its original rays and transforming its normalized K matrices.
+    """
+    import copy
+    original = copy.deepcopy(cameras)
+    left, top, right, bottom = box
+    width, height = right-left, bottom-top
+    source_w, source_h = source_size
+    for camera in [original, *original['frames']]:
+        camera['cx'] = camera.get('cx', cameras['cx']) + left
+        camera['cy'] = camera.get('cy', cameras['cy']) + top
+        camera['w'], camera['h'] = source_w, source_h
+    result = compute(original, indices, neighbors, scale=scale,
+                     image_shape=(source_h, source_w), skip_vae_check=True)
+    result['camera_rays'] = result['camera_rays'][:, top:bottom, left:right].contiguous()
+    for name in ('Ks', 'neighbor_Ks'):
+        k = result[name].clone()
+        k[:, 0, 0] *= source_w/width
+        k[:, 1, 1] *= source_h/height
+        k[:, 0, 2] = ((k[:, 0, 2]+.5)*source_w-left)/width-.5
+        k[:, 1, 2] = ((k[:, 1, 2]+.5)*source_h-top)/height-.5
+        result[name] = k
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--request", type=Path)
@@ -73,8 +102,14 @@ def main():
                     "encoded_prompt": load_encoded_prompt([])[0],
                     "frame_indices": torch.tensor(indices),
                     "valid_frames_mask": torch.ones(len(indices), dtype=torch.bool)}
-            item.update(compute_camera_rays(cameras, indices, neighbors,
-                        scale=options["camera_scale"], image_shape=renders.shape[-2:], skip_vae_check=True))
+            region = manifest.get("local_region")
+            if region:
+                item.update(crop_camera_conditioning(compute_camera_rays, cameras, indices, neighbors,
+                            box=region["crop"], source_size=region["source_size"],
+                            scale=options["camera_scale"]))
+            else:
+                item.update(compute_camera_rays(cameras, indices, neighbors,
+                            scale=options["camera_scale"], image_shape=renders.shape[-2:], skip_vae_check=True))
             # Separate observed viewpoints need separate temporal sequences:
             # concatenating them makes a video cut look like physical motion.
             if hasattr(pipe, "clear_inference_caches"):

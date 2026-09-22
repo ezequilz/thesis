@@ -429,3 +429,32 @@ def test_joint_optimizer_updates_geometry_and_opacity(monkeypatch):
     assert metrics["after"]["target_l1"] < metrics["before"]["target_l1"]
     assert metrics["view_updates"] == [3]
     assert s.num_gaussians == before.num_gaussians
+
+
+def test_coordinated_views_share_anchor_and_render_before_edits(tmp_path):
+    from splat_explorer.scene_runs.lrz_transport import LrzSceneRunTransport
+    from splat_explorer.repair_lrz import camera_to_dict
+    for step in range(4):
+        observed=tmp_path/f'render-{step:05d}';observed.mkdir()
+        (observed/'request.json').write_text(json.dumps({'step':step,'operation':'render','camera':camera_to_dict(camera())}))
+        (observed/'response.json').write_text(json.dumps({'status':'ok'}))
+    request=tmp_path/'repair-00004';request.mkdir()
+    current=request/'rendered.png';Image.new('RGB',(64,64)).save(current)
+    transport=object.__new__(LrzSceneRunTransport);transport._progress=lambda *a:None
+    renders=[];edits=[]
+    def render(**kw):
+        assert not edits
+        renders.append(kw)
+        return np.zeros((64,64,3),np.uint8),None
+    def edit(source,destination,prompt,references=None):
+        assert len(renders)==4 and len(references)<=4
+        assert all(p.exists() for p in references)
+        edits.append((source,destination,references))
+        Image.open(source).save(destination)
+        return {'model':'test'}
+    transport.render=render;transport._edit_with_clirelay=edit
+    transport._edit_coordinated_views(request,{'view_steps':[0,1,2,3]},4,current,'Repair railing',deadline=float('inf'),should_stop=lambda:False)
+    assert len(edits)==5
+    assert edits[0][0]==current
+    assert all(e[2][0]==request/'regenerated.png' for e in edits[1:])
+    assert len(selected_views(request,{'view_steps':[0,1,2,3]},4))==4

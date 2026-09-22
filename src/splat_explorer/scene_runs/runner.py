@@ -348,6 +348,7 @@ class SceneRunExecutor:
 
             step = 0
             every_step_armed = False
+            local_loop = None
             while self.clock() < effective_deadline and not self._stop_requested():
                 camera = rig.camera(
                     int(params.get("width") or 960),
@@ -393,24 +394,20 @@ class SceneRunExecutor:
                 )
 
                 pose = rig.state_description()
-                if params.get("pipeline") == "extended":
-                    pose += (
-                        f" | recorded view steps: 0..{step}. For joint repair select relevant "
-                        "earlier view_steps in report_artifact; current view is always included. "
-                        "Explore overlapping viewpoints before local repair, or diverse coverage "
-                        "before repair_scope=scene."
-                    )
+                if local_loop is not None:
+                    pose += " | " + local_loop.context()
                 if coverage is not None:
                     pose += f" | viewed-area coverage {coverage:.0%}"
                 if motion_note:
                     pose += f" | {motion_note}"
                 depth_image = depth_to_image(depth) if depth is not None else None
+                collecting_views = local_loop is not None
                 action = policy.decide(
                     observation,
                     pose,
                     step,
                     depth_image=depth_image if send_depth_once else None,
-                    map_image=map_image,  # fixed on for scene-runs
+                    map_image=map_image if local_loop is None else None,
                     coverage_image=coverage_image if send_coverage_once else None,
                 )
                 _require_vlm_response(policy)
@@ -426,6 +423,29 @@ class SceneRunExecutor:
                     action,
                     every_step_armed,
                 )
+                if params.get("pipeline") == "extended":
+                    if local_loop is not None:
+                        action, collection_state = local_loop.handle(action, step, rig)
+                        trigger = collection_state == "ready"
+                        self._event("local_collection", step=step, state=collection_state,
+                                    views=list(local_loop.steps), note=local_loop.note)
+                        if collection_state != "collecting":
+                            local_loop = None
+                        is_artifact = trigger
+                    elif trigger and is_artifact:
+                        from ..scene_runs_ext.local_loop import LocalRepairLoop
+                        controls = params.get("extended") or {}
+                        local_loop = LocalRepairLoop(policy, action, step, rig, depth,
+                            float(run_cfg.agent.max_move_distance),
+                            views=controls.get("local_view_count",5),
+                            max_turns=controls.get("local_max_turns",30),
+                            step_fraction=controls.get("local_step_fraction",.025),
+                            rotation_degrees=controls.get("local_rotation_degrees",5.))
+                        trigger = False
+                        self._event("local_collection", step=step, state="started", views=[step])
+                    else:
+                        # Extended repairs always begin with one reported artifact.
+                        trigger = False
                 repair_frame = None
                 repair_size = _repair_image_size(params)
                 # report_artifact always keeps a debug render. Image-model calls
@@ -449,7 +469,7 @@ class SceneRunExecutor:
                     "action": {"name": action.name, "args": action.args},
                     "frame": frame_path.name,
                     "map_frame": map_name,
-                    "map_sent": map_image is not None,
+                    "map_sent": map_image is not None and not collecting_views,
                     "coverage_frame": coverage_name,
                     "repair_triggered": trigger,
                     "every_step_armed": every_step_armed,
@@ -541,7 +561,7 @@ class SceneRunExecutor:
                             world=nav,
                             camera=camera,
                             depth=depth,
-                            waypoints=getattr(spawn, "waypoints", None),
+                            waypoints=getattr(spawn, "waypoints", None) if local_loop is None else None,
                             pose_history=pose_history,
                         ),
                     )
@@ -563,13 +583,17 @@ class SceneRunExecutor:
                 steps_done = step + 1
                 self._status(
                     status="running",
-                    phase="explore",
+                    phase="local_views" if local_loop is not None else "explore",
                     step=steps_done,
                     repairs=repairs,
                     artifacts=artifacts,
-                    message=f"Exploring step {steps_done}",
+                    message=(f"Collecting local views at step {steps_done}" if local_loop is not None
+                             else f"Exploring step {steps_done}"),
                 )
                 step += 1
+                repair_limit = (params.get("extended") or {}).get("repair_limit",0)
+                if repair_limit and repairs >= repair_limit:
+                    break
 
             if self._stop_requested():
                 terminal = "stopped"

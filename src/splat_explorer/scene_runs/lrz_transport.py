@@ -576,20 +576,16 @@ class LrzSceneRunTransport:
         destination = local_dir / RENDERED_NAME
         if source.resolve() != destination.resolve():
             shutil.copy2(source, destination)
-        prompt_text = str(
-            prompt or self._run_config.get("image_edit_prompt") or ""
-        )
+        prompt_text = str(prompt or self._run_config.get("image_edit_prompt") or "")
         image_edit_result = None
-        if not self._qwen_required(self._run_config):
-            self._progress(
-                "image_edit",
-                f"CliRelay image edit for step {step}",
-            )
+        if self._run_config.get("pipeline") == "extended" and (proposal or {}).get("view_steps"):
+            image_edit_result = self._edit_coordinated_views(
+                local_dir, proposal, step, destination, prompt_text,
+                deadline=deadline, should_stop=should_stop)
+        elif not self._qwen_required(self._run_config):
+            self._progress("image_edit", f"CliRelay image edit for step {step}")
             image_edit_result = self._edit_with_clirelay(
-                destination,
-                local_dir / REGENERATED_NAME,
-                prompt_text,
-            )
+                destination, local_dir / REGENERATED_NAME, prompt_text)
         request_deadline = min(
             float(deadline),
             self._effective_deadline if self._effective_deadline is not None else float(deadline),
@@ -639,22 +635,75 @@ class LrzSceneRunTransport:
                 pass
         return response
 
+    def _edit_coordinated_views(self, request_dir, proposal, step, rendered_path, prompt,
+                                *, deadline, should_stop):
+        """Edit one object from collected views, sharing the first repaired anchor."""
+        from dataclasses import replace
+        from PIL import Image
+        from ..scene_runs_ext.bundle import selected_views
+        views = selected_views(request_dir, proposal, step)
+        with Image.open(rendered_path) as image:
+            width, height = image.size
+        sources = []
+        def check():
+            if should_stop() or time.time() >= deadline:
+                raise InterruptedError("Stopped during coordinated reference collection")
+        # Render every view from this scene version before making any edits.
+        for view in views:
+            check()
+            camera = view['camera']
+            if camera.width*height != camera.height*width:
+                raise ValueError("Selected view aspect ratio differs from repair image")
+            rgb, _ = self.render(step=view['step'], camera=replace(camera,width=width,height=height),
+                                 deadline=deadline, should_stop=should_stop, purpose=f"bundle-{step:05d}")
+            path = request_dir / f"reference-render-{view['step']:05d}.png"
+            Image.fromarray(rgb).save(path)
+            sources.append(path)
+        check()
+        anchor = request_dir / REGENERATED_NAME
+        roles = (" IMAGE 1 is the only target to output. Other images show the SAME physical "
+                 "artifact from neighboring cameras. Preserve IMAGE 1's exact viewpoint and framing. ")
+        self._progress('image_edit', 'Repairing shared anchor with neighboring view context')
+        result = self._edit_with_clirelay(rendered_path, anchor, prompt+roles, references=sources[:4])
+        for index, view in enumerate(views):
+            check()
+            context = [anchor, rendered_path] + [p for j,p in enumerate(sources) if j != index][:2]
+            self._progress('reference_collection', f"Repairing same object at view {view['step']}")
+            self._edit_with_clirelay(sources[index], request_dir / f"reference-{view['step']:05d}.png",
+                prompt+roles+" IMAGE 2 is the shared repaired anchor: retain the SAME physical "
+                "structure, object count, spacing and appearance, projected into IMAGE 1's camera. "
+                "Do not copy the anchor viewpoint or redesign other parts of the scene.", references=context)
+        return result
+
     def _edit_with_clirelay(
         self,
         image_path: Path,
         output_path: Path,
         prompt: str,
+        references: list[Path] | None = None,
     ) -> dict[str, Any]:
         """Run gpt-image-2 / 2.5 on the machine that can reach CliRelay."""
         from ..image_edit import make_image_edit_backend
 
         backend = self._image_backend(self._run_config)
         editor = make_image_edit_backend(backend, cfg=self.app_cfg)
-        result = editor.edit(Path(image_path), prompt)
+        if references:
+            edit = getattr(editor, "edit_with_references", None)
+            if edit is None:
+                raise RuntimeError(f"{backend} does not support coordinated multiview image editing")
+            result = edit(Path(image_path), references, prompt)
+        else:
+            result = editor.edit(Path(image_path), prompt)
         images = list(getattr(result, "images", None) or [])
         error = getattr(result, "error", None)
         if error or not images:
             raise RuntimeError(error or f"{backend} image edit returned no PNG")
+        if references:
+            import io
+            from PIL import Image
+            with Image.open(image_path) as source_image, Image.open(io.BytesIO(images[0])) as edited_image:
+                if source_image.width*edited_image.height != source_image.height*edited_image.width:
+                    raise ValueError("Image edit changed aspect ratio; cannot preserve camera calibration")
         atomic_write_bytes(output_path, images[0])
         payload = dict(getattr(result, "payload", None) or {})
         payload["external"] = True

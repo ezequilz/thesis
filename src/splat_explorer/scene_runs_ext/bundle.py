@@ -53,6 +53,11 @@ def selected_views(request_dir, proposal, current_step):
                 or json.loads(response.read_text()).get("status") != "ok"):
             raise ValueError(f"Selected step {step} is not a completed observation")
         view = {"step": step, "camera": camera_from_dict(body["camera"])}
+        bundled = Path(request_dir) / f"reference-{step:05d}.png"
+        if bundled.is_file():
+            view["reference_path"] = bundled
+            result.append(view)
+            continue
         edited = root / f"repair-{step:05d}" / "regenerated.png"
         edit_request = edited.with_name("request.json")
         if edited.is_file() and edit_request.is_file():

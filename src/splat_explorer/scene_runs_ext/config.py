@@ -4,7 +4,8 @@ import math
 
 DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 1000,
             "inference_steps": 4, "seed": 42, "camera_scale": 1.0,
-            "max_repair_pixels": 0}
+            "max_repair_pixels": 0, "local_view_count": 5, "local_max_turns": 30,
+            "local_step_fraction": .025, "local_rotation_degrees": 5., "repair_limit": 0}
 # 4:3, 3× the 640×480 VLM default, and a multiple of 16 for the GPU rasterizer.
 REPAIR_WIDTH = 1920
 REPAIR_HEIGHT = 1440
@@ -27,13 +28,15 @@ def validate_options(value=None):
     result = {**DEFAULTS, **(value or {})}
     for key, lower, upper in [("frames", 9, 81), ("fit_iterations", 1, 2000),
                               ("inference_steps", 1, 50), ("seed", 0, 2**31-1),
-                              ("max_repair_pixels", 0, 16777216)]:
+                              ("max_repair_pixels", 0, 16777216), ("local_view_count", 5, 9),
+                              ("local_max_turns", 5, 100), ("repair_limit", 0, 100)]:
         n = result[key]
         if isinstance(n, bool) or not isinstance(n, int) or not lower <= n <= upper:
             raise ValueError(f"{key} must be an integer between {lower} and {upper}")
     if (result["frames"] - 1) % 4:
         raise ValueError("frames must be 1 + 4*n (e.g. 25)")
-    for key, lower, upper in [("span_fraction", .005, .15), ("camera_scale", .0001, 10000)]:
+    for key, lower, upper in [("span_fraction", .005, .15), ("camera_scale", .0001, 10000),
+                              ("local_step_fraction", .001, .05), ("local_rotation_degrees", 1., 10.)]:
         n = result[key]
         if isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n) or not lower <= n <= upper:
             raise ValueError(f"{key} must be between {lower} and {upper}")
@@ -94,21 +97,13 @@ def configure_policy(policy):
         fn = tool["function"]
         if fn["name"] == "report_artifact":
             fn["description"] = (
-                "Select views for joint 3D reconstruction. Explore first with regenerate=no to "
-                "observe useful viewpoints. regenerate=yes edits the current anchor and runs "
-                "ArtiFixer on it and the recorded views selected by view_steps, then jointly fits "
-                "geometry, opacity and color at repaired-image resolution. Use local scope for "
-                "overlapping views of one defect, or scene scope for diverse views covering the "
-                "scene. Existing edited references at selected steps are reused. An observed "
-                "view without an edit supplies a rendered trajectory, not a clean photograph."
+                "Report a visible reconstruction artifact. regenerate=yes starts a separate "
+                "local inspection loop to collect five adjacent views of this SAME object before "
+                "repair. The outer loop should search for artifacts normally; it does not need "
+                "to preselect views. Describe one concrete defect and its image region."
             )
-            fn["parameters"]["properties"].update({
-                "repair_scope": {"type": "string", "enum": ["local", "scene"],
-                    "description": "local: one region from overlapping views; scene: jointly reconstruct observed scene coverage."},
-                "view_steps": {"type": "array", "items": {"type": "integer", "minimum": 0},
-                    "maxItems": 8, "uniqueItems": True,
-                    "description": "Earlier observed step IDs to fit together with the current view (always included). Select overlapping parallax views for local geometry, diverse coverage for scene scope. Never invent step IDs. Scene scope requires at least one earlier view."},
-            })
+            for key in ("repair_scope", "view_steps"):
+                fn["parameters"]["properties"].pop(key, None)
             # Old policies may already contain the experimental routing field.
             fn["parameters"]["properties"].pop("intervention", None)
             if "required" in fn["parameters"]:

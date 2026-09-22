@@ -52,6 +52,26 @@ class GptImageEditBackend:
         body.setdefault("model", self.model)
         return ImageEditResult(images=images, payload=body, error=error)
 
+    def edit_with_references(self, image_path: Path, references: list[Path],
+                             prompt: str) -> ImageEditResult:
+        """Edit the first image with explicit shared visual context.
+
+        Never silently fall back to unrelated single-image edits if the relay
+        cannot accept multiple images. The caller defines target/reference roles.
+        """
+        from contextlib import ExitStack
+        from .agent.regenerate import REQUEST_TIMEOUT_S, extract_images, response_to_dict
+        try:
+            with ExitStack() as stack:
+                images = [stack.enter_context(Path(p).open('rb'))
+                          for p in [image_path, *references]]
+                payload = response_to_dict(self.client.images.edit(
+                    model=self.model, image=images, prompt=prompt,
+                    timeout=self.timeout_s or REQUEST_TIMEOUT_S))
+            return ImageEditResult(images=extract_images(payload), payload=payload)
+        except Exception as exc:
+            return ImageEditResult(error=f'{type(exc).__name__}: {exc}')
+
 
 def _cli_relay_client(cfg=None):
     from .agent.cli_relay import CliRelayPolicy
