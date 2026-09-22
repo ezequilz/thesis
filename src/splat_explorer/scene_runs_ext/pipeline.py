@@ -9,10 +9,11 @@ import shutil
 import signal
 import subprocess
 import time
+from dataclasses import replace
 import numpy as np
 from PIL import Image
 from .config import RUNTIME_DEFAULTS, UPSTREAM_REVISION, validate_options
-from .bundle import camera_bundle, transforms
+from .bundle import camera_bundle, transforms, repair_camera
 from .fitting import BACKGROUND, fit_views
 
 
@@ -95,11 +96,13 @@ def propagate(root, runtime, should_stop):
 
 def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposal,
            should_stop, on_progress, renderer_factory=BundleRenderer,
-           propagator=propagate, fitter=fit_views):
+           propagator=propagate, fitter=fit_views, selected_views=None):
     """Return a fully fitted clone; never mutate the incumbent on failure/stop."""
     options = validate_options(options)
-    if camera.width % 16 or camera.height % 16:
-        raise ValueError("Extended rendering dimensions must be multiples of 16")
+    exploration_resolution = [camera.width, camera.height]
+    with Image.open(anchor_path) as image:
+        native_resolution = list(image.size)
+        camera = repair_camera(camera, image.size, max_pixels=options["max_repair_pixels"])
     root = Path(request_dir) / "extended"
     root.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
@@ -109,8 +112,39 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     check()
     on_progress({"phase": "bundle_render"})
     renderer = renderer_factory(scene)
-    _, _, depth = renderer.render(camera)
-    cameras = camera_bundle(camera, depth, frames=options["frames"], span_fraction=options["span_fraction"])
+    cameras, segments, validation_cameras = [], [], []
+    references = [{"path": "anchor.png", "frame_index": 0, "kind": "edited_render"}]
+    seeds = [{"camera": camera, "step": None}] + list(selected_views or [])
+    reference_dir = root / "references"
+    reference_dir.mkdir(exist_ok=True)
+    validation_dir = root / "validation"
+    validation_dir.mkdir(exist_ok=True)
+    for seed in seeds:
+        view = seed["camera"]
+        if view.width * camera.height != view.height * camera.width:
+            raise ValueError("Selected views must share the repaired image aspect ratio")
+        view = replace(view, width=camera.width, height=camera.height)
+        check()
+        _, _, depth = renderer.render(view)
+        start = len(cameras)
+        cameras.extend(camera_bundle(view, depth, frames=options["frames"],
+                                     span_fraction=options["span_fraction"]))
+        segments.append({"start": start, "count": options["frames"], "step": seed.get("step")})
+        held_out = camera_bundle(view, depth, frames=9,
+                                 span_fraction=2 * options["span_fraction"])[2]
+        for diagnostic_view in (view, held_out):
+            check()
+            rgb, _, _ = renderer.render(diagnostic_view)
+            Image.fromarray(rgb).save(validation_dir / f"before-{len(validation_cameras):03d}.png")
+            validation_cameras.append(diagnostic_view)
+        if seed.get("reference_path"):
+            with Image.open(seed["reference_path"]) as image:
+                if image.width * camera.height != image.height * camera.width:
+                    raise ValueError("Selected edited reference aspect ratio changed")
+                path = f"references/{len(references):05d}.png"
+                image.convert("RGB").resize((camera.width, camera.height), Image.Resampling.LANCZOS).save(root / path)
+            references.append({"path": path, "frame_index": start,
+                               "kind": "edited_render", "step": seed.get("step")})
     inputs = root / "inputs"
     inputs.mkdir(exist_ok=True)
     alphas = []
@@ -131,7 +165,11 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     digest = hashlib.sha256()
     for value in (scene.means, scene.scales, scene.quats, scene.opacities, scene.colors):
         digest.update(np.ascontiguousarray(value).tobytes())
-    manifest = {"protocol": 1, "transforms": transforms(cameras), "options": options,
+    manifest = {"protocol": 2, "transforms": transforms(cameras), "options": options,
+                "segments": segments, "references": references,
+                "validation_transforms": transforms(validation_cameras),
+                "native_reference_resolution": native_resolution,
+                "exploration_resolution": exploration_resolution,
                 "proposal": proposal, "parent_scene_sha256": digest.hexdigest(),
                 "reference_kind": "edited_render", "camera_convention": "OpenCV c2w",
                 "upstream_adapter_revision": UPSTREAM_REVISION}
@@ -158,13 +196,28 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     candidate = scene.copy()
     on_progress({"phase": "multiview_fit"})
     metrics = fitter(candidate, cameras, targets,
-                     iterations=options["fit_iterations"],
+                     iterations=options["fit_iterations"] * len(segments),
                      should_stop=should_stop, on_progress=on_progress)
     check()
+    on_progress({"phase": "native_validation"})
+    renderer = renderer_factory(candidate)
+    for i, view in enumerate(validation_cameras):
+        check()
+        rgb, _, _ = renderer.render(view)
+        Image.fromarray(rgb).save(validation_dir / f"after-{i:03d}.png")
+    del renderer
+    _release_cuda()
     metrics.update(pipeline="extended", backend="artifixer-gsplat", proposal=proposal,
                    render_seconds=render_seconds, propagation_seconds=propagate_seconds,
                    total_seconds=time.monotonic()-started, generated_frames=len(cameras),
-                   baseline="artifixer-generated-views-v1",
+                   baseline="artifixer-selected-views-native-v2",
                    anchor_role="generation_reference_only",
+                   selected_steps=[v["step"] for v in seeds[1:]],
+                   repair_scope=proposal.get("repair_scope", "local"),
+                   generation_segments=len(segments), reference_views=len(references),
+                   validation_views=len(validation_cameras),
+                   validation_kind="matched native anchor and held-out cameras; visual review, no score gate",
+                   native_reference_resolution=native_resolution,
+                   exploration_resolution=exploration_resolution,
                    fitting_resolution=[camera.width, camera.height])
     return candidate, metrics

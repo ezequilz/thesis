@@ -492,6 +492,8 @@ class SceneRunGpuWorker:
             )
             if (self.config.get("scene_run") or {}).get("pipeline") == "extended":
                 from ..scene_runs_ext.pipeline import repair as extended_repair
+                from ..scene_runs_ext.bundle import selected_views
+                views = selected_views(request_dir, request.get("proposal") or {}, request.get("step"))
                 self.renderer = None
                 gc.collect()
                 ext_deadline = min(float(request.get("deadline_unix") or float("inf")),
@@ -507,6 +509,7 @@ class SceneRunGpuWorker:
                     proposal=request.get("proposal") or {},
                     should_stop=lambda: self._request_stop(request_dir, ext_deadline),
                     on_progress=ext_progress,
+                    selected_views=views,
                 )
                 metrics.update(image_edit=edit_payload, request_id=request_id, step=request.get("step"))
                 # Only complete candidates reach disk and the explorer.

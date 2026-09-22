@@ -149,3 +149,39 @@ def test_pending_requests_ignore_atomic_incoming_directory(tmp_path: Path):
     (ready / REQUEST_NAME).write_text("{}")
 
     assert pending_request_dirs(tmp_path) == [ready]
+
+
+def test_extended_worker_passes_recorded_views_to_joint_reconstruction(tmp_path, monkeypatch):
+    from PIL import Image
+    from splat_explorer.scene_runs_ext import pipeline
+    request_dir = tmp_path / 'requests' / 'repair-00002'
+    request_dir.mkdir(parents=True)
+    camera = {'position':[0,0,0], 'rotation':np.eye(3).tolist(),
+              'width':32, 'height':32, 'fov_deg':75}
+    earlier = request_dir.parent / 'render-00000'
+    earlier.mkdir()
+    (earlier / REQUEST_NAME).write_text(json.dumps(
+        {'operation':'render','step':0,'camera':camera}))
+    (earlier / RESPONSE_NAME).write_text(json.dumps({'status':'ok'}))
+    Image.new('RGB',(64,64)).save(request_dir / RENDERED_NAME)
+    Image.new('RGB',(64,64)).save(request_dir / 'regenerated.png')
+    (request_dir / REQUEST_NAME).write_text(json.dumps({
+        'operation':'repair','step':2,'camera':camera,'skip_image_edit':True,
+        'proposal':{'repair_scope':'scene','view_steps':[0]},
+    }))
+    parent, candidate = _Scene(), _Scene()
+    seen = {}
+    def repair(scene, camera, anchor, request_dir, **kwargs):
+        assert scene is parent and camera.width == 32
+        seen.update(kwargs)
+        return candidate, {'fitting_resolution':[64,64]}
+    monkeypatch.setattr(pipeline,'repair',repair)
+    worker = SceneRunGpuWorker(tmp_path,
+        scene_saver=lambda scene,path: Path(path).write_bytes(b'candidate'))
+    worker.config = {'scene_run':{'pipeline':'extended'}}
+    worker.scene = parent
+    response = worker.process_request(request_dir)
+    assert response['status'] == 'ok'
+    assert worker.scene is candidate
+    assert [v['step'] for v in seen['selected_views']] == [0]
+    assert seen['selected_views'][0]['camera'].width == 32

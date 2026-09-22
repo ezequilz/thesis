@@ -199,9 +199,10 @@
           <option value="every_artifact">every artifact</option>
           <option value="every_step">every step after first artifact</option>
         </select></label>
-        <label>Propagation frames<input id="ext-frames" type="number" min="9" max="81" step="4" value="25"></label>
+        <label>Frames per selected view<input id="ext-frames" type="number" min="9" max="81" step="4" value="25"></label>
+        <label title="0 uses the largest exact-aspect resolution below the returned edited image. Set an explicit pixel budget only when GPU memory requires it; framing is preserved.">Reconstruction pixel budget (0 = native)<input id="ext-pixels" type="number" min="0" max="16777216" value="0"></label>
         <label>Trajectory span / depth<input id="ext-span" type="number" min="0.005" max="0.15" step="0.005" value="0.04"></label>
-        <label>Multiview fit iterations<input id="ext-iters" type="number" min="1" max="2000" value="1000"></label>
+        <label>Fit iterations per selected view<input id="ext-iters" type="number" min="1" max="2000" value="1000"></label>
         <label>Scene units → metres<span class="stepper"><input id="ext-scale" type="number" min="0.0001" max="10000" step="0.1" value="1"><span class="nudge"><button type="button" data-step="1" aria-label="Increase scene scale">▴</button><button type="button" data-step="-1" aria-label="Decrease scene scale">▾</button></span></span></label>
         <label id="repair-time-wrap" style="display:none">Repair Time (seconds)<input id="repair-seconds" name="repair_seconds" type="number" min="1" max="43200" value="180"></label>
         <label class="wide locked" title="Scene runs always render and send the exploration map.">
@@ -521,7 +522,7 @@ $("run-form").onsubmit = async event => {
     repair_width:Number($("repair-width").value), repair_height:Number($("repair-height").value),
     send_map:true, image_edit_backend:$("image-edit").value,
     repair_backend:$("repair-backend").value, repair_type:$("repair-type").value,
-    extended:{frames:Number($("ext-frames").value), span_fraction:Number($("ext-span").value), fit_iterations:Number($("ext-iters").value), camera_scale:Number($("ext-scale").value)},
+    extended:{frames:Number($("ext-frames").value), span_fraction:Number($("ext-span").value), fit_iterations:Number($("ext-iters").value), camera_scale:Number($("ext-scale").value), max_repair_pixels:Number($("ext-pixels").value)},
     repair_trigger:$("repair-trigger").value,
     repair_seconds:Number($("repair-seconds").value),
   };

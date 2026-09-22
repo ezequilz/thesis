@@ -3,7 +3,8 @@ from __future__ import annotations
 import math
 
 DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 1000,
-            "inference_steps": 4, "seed": 42, "camera_scale": 1.0}
+            "inference_steps": 4, "seed": 42, "camera_scale": 1.0,
+            "max_repair_pixels": 0}
 # 4:3, 3× the 640×480 VLM default, and a multiple of 16 for the GPU rasterizer.
 REPAIR_WIDTH = 1920
 REPAIR_HEIGHT = 1440
@@ -25,7 +26,8 @@ def validate_options(value=None):
         raise ValueError(f"Unknown extended options: {', '.join(sorted(unknown))}")
     result = {**DEFAULTS, **(value or {})}
     for key, lower, upper in [("frames", 9, 81), ("fit_iterations", 1, 2000),
-                              ("inference_steps", 1, 50), ("seed", 0, 2**31-1)]:
+                              ("inference_steps", 1, 50), ("seed", 0, 2**31-1),
+                              ("max_repair_pixels", 0, 16777216)]:
         n = result[key]
         if isinstance(n, bool) or not isinstance(n, int) or not lower <= n <= upper:
             raise ValueError(f"{key} must be an integer between {lower} and {upper}")
@@ -60,9 +62,17 @@ def validate_repair_resolution(width, height, repair_width, repair_height):
 
 def proposal(action):
     args = action.args or {}
+    scope = args.get("repair_scope", "local")
+    steps = args.get("view_steps", [])
+    if scope not in ("local", "scene"):
+        raise ValueError("repair_scope must be local or scene")
+    if (not isinstance(steps, list) or len(steps) > 8
+            or any(isinstance(s, bool) or not isinstance(s, int) or s < 0 for s in steps)):
+        raise ValueError("view_steps must contain at most eight observed nonnegative step IDs")
     return {
             "description": str(args.get("description") or "Improve visible rendering artifacts")[:2000],
-            "image_region": str(args.get("image_region") or "current view")[:300]}
+            "image_region": str(args.get("image_region") or "current view")[:300],
+            "repair_scope": scope, "view_steps": list(dict.fromkeys(steps))}
 
 
 def edit_prompt(action):
@@ -84,10 +94,21 @@ def configure_policy(policy):
         fn = tool["function"]
         if fn["name"] == "report_artifact":
             fn["description"] = (
-                "Select a visible region for repair. regenerate=yes pauses exploration, edits "
-                "this anchor, propagates it across nearby calibrated views with ArtiFixer, "
-                "and jointly fits geometry, opacity and color to the generated views before continuing."
+                "Select views for joint 3D reconstruction. Explore first with regenerate=no to "
+                "observe useful viewpoints. regenerate=yes edits the current anchor and runs "
+                "ArtiFixer on it and the recorded views selected by view_steps, then jointly fits "
+                "geometry, opacity and color at repaired-image resolution. Use local scope for "
+                "overlapping views of one defect, or scene scope for diverse views covering the "
+                "scene. Existing edited references at selected steps are reused. An observed "
+                "view without an edit supplies a rendered trajectory, not a clean photograph."
             )
+            fn["parameters"]["properties"].update({
+                "repair_scope": {"type": "string", "enum": ["local", "scene"],
+                    "description": "local: one region from overlapping views; scene: jointly reconstruct observed scene coverage."},
+                "view_steps": {"type": "array", "items": {"type": "integer", "minimum": 0},
+                    "maxItems": 8, "uniqueItems": True,
+                    "description": "Earlier observed step IDs to fit together with the current view (always included). Select overlapping parallax views for local geometry, diverse coverage for scene scope. Never invent step IDs. Scene scope requires at least one earlier view."},
+            })
             # Old policies may already contain the experimental routing field.
             fn["parameters"]["properties"].pop("intervention", None)
             if "required" in fn["parameters"]:

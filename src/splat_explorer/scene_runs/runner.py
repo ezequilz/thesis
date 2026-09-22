@@ -393,6 +393,13 @@ class SceneRunExecutor:
                 )
 
                 pose = rig.state_description()
+                if params.get("pipeline") == "extended":
+                    pose += (
+                        f" | recorded view steps: 0..{step}. For joint repair select relevant "
+                        "earlier view_steps in report_artifact; current view is always included. "
+                        "Explore overlapping viewpoints before local repair, or diverse coverage "
+                        "before repair_scope=scene."
+                    )
                 if coverage is not None:
                     pose += f" | viewed-area coverage {coverage:.0%}"
                 if motion_note:

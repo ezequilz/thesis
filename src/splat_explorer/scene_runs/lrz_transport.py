@@ -438,6 +438,8 @@ class LrzSceneRunTransport:
             "--include", "extended/artifixer.log",
             "--include", "extended/anchor.png",
             "--include", "extended/targets/***",
+            "--include", "extended/references/***",
+            "--include", "extended/validation/***",
             "--include", REGENERATED_NAME,
             "--include", RENDERED_NAME,
             "--include", DEPTH_NAME,

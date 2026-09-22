@@ -13,7 +13,7 @@ from splat_explorer.scene_runs.models import SceneRunConfig
 from splat_explorer.scene_runs_ext.config import (
     configure_policy, edit_prompt, proposal, validate_options, validate_repair_resolution,
 )
-from splat_explorer.scene_runs_ext.bundle import camera_bundle, transforms
+from splat_explorer.scene_runs_ext.bundle import camera_bundle, transforms, repair_camera, selected_views
 from splat_explorer.scene_runs_ext.pipeline import repair
 from splat_explorer.web.scene_run_studio import SceneRunStudio, SceneRunValidationError
 
@@ -102,8 +102,9 @@ class Renderer:
 def propagate(root,runtime,stop):
     out=root/"pred"
     out.mkdir()
-    count=len(json.loads((root/"bundle.json").read_text())["transforms"]["frames"])
-    for i in range(count): Image.new("RGB",(32,32),(100,110,120)).save(out/f"{i:05d}.png")
+    cameras=json.loads((root/"bundle.json").read_text())["transforms"]
+    count=len(cameras["frames"])
+    for i in range(count): Image.new("RGB",(cameras["w"],cameras["h"]),(100,110,120)).save(out/f"{i:05d}.png")
     return out
 
 
@@ -121,13 +122,69 @@ def test_repair_fits_every_propagated_view_and_commits_only_clone(tmp_path):
         options={"frames":9,"fit_iterations":3},runtime={},proposal={"intervention":"appearance"},
         should_stop=lambda:False,on_progress=lambda p:phases.append(p["phase"]),
         renderer_factory=Renderer,propagator=propagate,fitter=fitter)
-    assert phases==["bundle_render","artifixer_propagate","multiview_fit"]
+    assert phases==["bundle_render","artifixer_propagate","multiview_fit","native_validation"]
     np.testing.assert_allclose(s.colors,.4)
     np.testing.assert_allclose(candidate.colors,.8)
     assert metrics["generated_frames"]==9
     assert metrics["anchor_role"] == "generation_reference_only"
-    assert metrics["fitting_resolution"] == [32,32]
+    assert metrics["fitting_resolution"] == [64,64]
+    assert metrics["exploration_resolution"] == [32,32]
     assert len(list((tmp_path/"extended/targets").glob("*.png")))==9
+    assert len(list((tmp_path/"extended/validation").glob("*.png")))==4
+
+
+def test_native_repair_resolution_preserves_frustum_and_uses_explicit_budget():
+    c = Camera(np.zeros(3), np.eye(3), width=640, height=480, fov_deg=75)
+    native = repair_camera(c, (1448,1086))
+    assert (native.width,native.height) == (1408,1056)
+    assert native.fov_deg == c.fov_deg
+    np.testing.assert_allclose(native.intrinsics[:2] / 2.2, c.intrinsics[:2], rtol=1e-6)
+    limited = repair_camera(c, (1448,1086), max_pixels=640*480)
+    assert (limited.width,limited.height) == (640,480)
+    with pytest.raises(ValueError, match="aspect ratio"):
+        repair_camera(c, (1448,1024))
+    with pytest.raises(ValueError, match="pixel budget"):
+        repair_camera(c, (1448,1086), max_pixels=1)
+
+
+def test_selected_views_are_fitted_jointly_with_calibrated_references(tmp_path):
+    Image.new("RGB",(64,64)).save(tmp_path/"anchor.png")
+    Image.new("RGB",(96,96)).save(tmp_path/"earlier.png")
+    c = camera()
+    other = Camera(np.array([1,0,0],np.float32), c.rotation, width=32,height=32)
+    def fitter(candidate, views, targets, **kwargs):
+        assert len(views) == len(targets) == 18
+        assert all(v.width == 64 and v.height == 64 for v in views)
+        np.testing.assert_allclose(views[9].position, other.position)
+        assert kwargs["iterations"] == 2000
+        return {}
+    _, metrics = repair(scene(),c,tmp_path/"anchor.png",tmp_path,
+        options={"frames":9},runtime={},proposal={"repair_scope":"scene"},
+        selected_views=[{"step":0,"camera":other,"reference_path":tmp_path/"earlier.png"}],
+        should_stop=lambda:False,on_progress=lambda _:None,
+        renderer_factory=Renderer,propagator=propagate,fitter=fitter)
+    manifest=json.loads((tmp_path/"extended/bundle.json").read_text())
+    assert [s["start"] for s in manifest["segments"]] == [0,9]
+    assert [r["frame_index"] for r in manifest["references"]] == [0,9]
+    assert metrics["selected_steps"] == [0] and metrics["reference_views"] == 2
+
+
+def test_agent_view_selection_only_resolves_completed_recorded_cameras(tmp_path):
+    from splat_explorer.repair_lrz import camera_to_dict
+    request = tmp_path/"repair-00003"
+    observation = tmp_path/"render-00001"
+    observation.mkdir()
+    body = {"step":1,"operation":"render","camera":camera_to_dict(camera())}
+    (observation/"request.json").write_text(json.dumps(body))
+    (observation/"response.json").write_text(json.dumps({"status":"ok"}))
+    views = selected_views(request,{"view_steps":[1,1,3],"repair_scope":"scene"},3)
+    assert len(views) == 1 and views[0]["step"] == 1
+    assert "reference_path" not in views[0]
+    for steps in ([2],[4],[-1],[True],["../scene"]):
+        with pytest.raises(ValueError):
+            selected_views(request,{"view_steps":steps},3)
+    with pytest.raises(ValueError,match="explore"):
+        selected_views(request,{"repair_scope":"scene"},3)
 
 
 @pytest.mark.parametrize("failure",["missing_frame","fit_error","stop"])
