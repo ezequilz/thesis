@@ -25,63 +25,102 @@
   .pill.ok { color:var(--ok); border-color:var(--ok); }
   .pill.busy { color:var(--warn); border-color:var(--warn); }
   .pill.err { color:var(--err); border-color:var(--err); }
-  main { max-width:1500px; margin:auto; padding:16px; display:grid;
-    grid-template-columns:minmax(300px,390px) minmax(0,1fr); gap:14px; }
-  .column { display:flex; flex-direction:column; gap:14px; min-width:0; }
+  main { max-width:1440px; margin:auto; padding:16px 16px 28px; display:grid;
+    grid-template-columns:minmax(300px,340px) minmax(0,1fr); gap:16px; align-items:start; }
+  .column { display:flex; flex-direction:column; gap:12px; min-width:0; }
   .card { background:var(--panel); border:1px solid var(--border); border-radius:10px;
     padding:14px 16px; min-width:0; }
-  .card h2 { margin:0 0 12px; color:var(--dim); font-size:12px;
+  .card h2 { margin:0; color:var(--dim); font-size:11px; font-weight:650;
     text-transform:uppercase; letter-spacing:.06em; }
-  form { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .card-head { display:flex; align-items:center; justify-content:space-between;
+    gap:8px 12px; margin-bottom:12px; flex-wrap:wrap; }
+  .setup-row { display:flex; align-items:center; gap:4px; min-width:0; }
+  .setup-status { max-width:148px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    color:var(--dim); font-size:12px; }
+  .setup-status.ok { color:var(--ok); }
+  .setup-status.warn { color:var(--warn); }
+  .setup-status.err { color:var(--err); }
+  form { display:grid; grid-template-columns:1fr 1fr; gap:8px 10px; }
   label { display:flex; flex-direction:column; gap:3px; color:var(--dim); font-size:11px; }
   label.wide, .actions { grid-column:1/-1; }
-  input, select { width:100%; padding:7px 8px; border:1px solid var(--border);
-    border-radius:6px; background:var(--panel2); color:var(--text); font:13px inherit; }
+  input, select, button { font-family:inherit; }
+  input, select { width:100%; padding:6px 8px; border:1px solid var(--border);
+    border-radius:6px; background:var(--panel2); color:var(--text); font-size:13px; }
+  input[readonly] { color:var(--dim); }
   input:focus, select:focus { outline:1px solid var(--accent); }
-  .locked { flex-direction:row; align-items:center; font-size:12px; }
+  .locked { flex-direction:row; align-items:center; gap:6px; font-size:12px; }
   .locked input { width:auto; accent-color:var(--accent); }
-  button { border:0; border-radius:6px; padding:8px 15px; cursor:pointer;
-    background:var(--accent); color:#091525; font-weight:650; }
-  button.stop { background:var(--err); color:#fff; }
-  button:disabled { opacity:.45; cursor:default; }
+  button { border:1px solid transparent; border-radius:6px; padding:7px 12px; cursor:pointer;
+    background:var(--panel2); color:var(--text); font-weight:600; font-size:13px; }
+  #start { background:var(--accent); color:#091525; }
+  button.ghost { background:transparent; color:var(--dim); border-color:var(--border);
+    padding:3px 8px; font-size:12px; font-weight:550; }
+  button.ghost:hover:not(:disabled) { color:var(--text); border-color:#3d4c63; }
+  button.ghost.loaded { border-color:transparent; color:var(--dim); opacity:.45;
+    font-weight:500; padding-left:4px; padding-right:4px; }
+  button.ghost.loaded:hover:not(:disabled) { opacity:.8; color:var(--text); }
+  button.stop { background:transparent; color:var(--err); border-color:rgba(239,106,106,.4); }
+  button.stop:hover:not(:disabled) { border-color:var(--err); }
+  button:disabled { opacity:.4; cursor:default; }
   .actions { display:flex; align-items:center; gap:10px; margin-top:2px; }
-  #message { color:var(--warn); font-size:12px; min-height:18px; }
-  .summary { display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:8px; }
-  .metric { padding:10px 12px; background:var(--panel2); border-radius:7px; min-width:0; }
-  .metric .key { color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.05em; }
-  .metric .value { margin-top:3px; font:600 13px var(--mono); overflow-wrap:anywhere; }
-  .run-list { display:flex; flex-direction:column; gap:6px; max-height:390px; overflow:auto; }
-  .run-row { display:grid; grid-template-columns:1fr auto; gap:3px 10px; padding:9px 10px;
-    border:1px solid var(--border); border-radius:7px; cursor:pointer; }
-  .run-row:hover, .run-row.selected { background:var(--panel2); }
-  .run-row.selected { border-color:var(--accent); }
-  .run-id { font:12px var(--mono); overflow:hidden; text-overflow:ellipsis; }
-  .status { font-size:11px; font-weight:700; color:var(--dim); }
+  #message { color:var(--warn); font-size:12px; min-height:16px; }
+  .list-label { margin:0 0 6px; color:var(--dim); font-size:11px; font-weight:650;
+    text-transform:uppercase; letter-spacing:.06em; }
+  .list-label.later { margin-top:14px; }
+  .run-list { display:flex; flex-direction:column; gap:2px; max-height:320px; overflow:auto; }
+  .run-row { display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:8px 8px; border:1px solid transparent; border-radius:8px; cursor:pointer; }
+  .run-row:hover { background:var(--panel2); }
+  .run-row.selected { background:var(--panel2); border-color:#3a4d66; }
+  .run-main { min-width:0; display:flex; flex-direction:column; gap:1px; }
+  .run-scene { font-size:13px; font-weight:600; }
+  .run-id { font:11px var(--mono); color:var(--dim); overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  .run-side { display:flex; flex-direction:column; align-items:flex-end; gap:2px; flex:none; }
+  .when { color:var(--dim); font-size:11px; }
+  .status { font-size:11px; font-weight:650; color:var(--dim); text-transform:lowercase; }
   .status.running,.status.completed { color:var(--ok); }
   .status.queued,.status.waiting_gpu,.status.starting,.status.stopping { color:var(--warn); }
   .status.error,.status.gpu_expired { color:var(--err); }
-  .sub { grid-column:1/-1; color:var(--dim); font-size:11px; }
-  .empty { color:var(--dim); text-align:center; padding:24px 8px; }
-  .detail-head { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-  .detail-head h2 { margin:0; }
+  .empty { color:var(--dim); padding:8px 4px; }
+  .empty-state { min-height:240px; display:flex; align-items:center; justify-content:center;
+    color:var(--dim); }
+  .detail-head { display:flex; gap:12px; align-items:flex-start; flex-wrap:wrap; }
+  .detail-head h2 { margin:0; color:var(--text); font:600 13px var(--mono);
+    text-transform:none; letter-spacing:0; overflow-wrap:anywhere; }
+  .detail-id { display:flex; flex-direction:column; gap:3px; min-width:0; }
   .detail-head .right { margin-left:auto; display:flex; align-items:center; gap:8px; }
   a.btn { display:inline-block; border:1px solid var(--border); border-radius:6px;
-    padding:8px 15px; background:var(--panel2); color:var(--text); font-weight:650; }
-  a.btn:hover { border-color:var(--accent); }
+    padding:6px 10px; background:transparent; color:var(--text); font-size:12px; font-weight:600; }
+  a.btn:hover { border-color:#3d4c63; }
+  .summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin-top:14px; }
+  .metric { padding:8px 10px; background:var(--panel2); border-radius:7px; min-width:0; }
+  .metric .key { color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.05em; }
+  .metric .value { margin-top:3px; font:600 13px var(--mono); overflow-wrap:anywhere; }
+  .metric .value.running,.metric .value.completed { color:var(--ok); }
+  .metric .value.queued,.metric .value.waiting_gpu,.metric .value.starting,
+  .metric .value.stopping { color:var(--warn); }
+  .metric .value.error,.metric .value.gpu_expired { color:var(--err); }
   .kv { display:grid; grid-template-columns:150px minmax(0,1fr); gap:5px 12px;
     margin-top:13px; font-size:12.5px; }
   .kv .k { color:var(--dim); }
   .kv .v { font-family:var(--mono); overflow-wrap:anywhere; }
-  .error { margin-top:12px; padding:10px; border-left:3px solid var(--err);
+  .section-label { margin:16px 0 0; color:var(--dim); font-size:11px; font-weight:650;
+    text-transform:uppercase; letter-spacing:.06em; }
+  .run-error { margin-top:12px; padding:10px; border-left:3px solid var(--err);
     background:rgba(239,106,106,.08); color:#ffb3b3; white-space:pre-wrap; }
-  .artifacts { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr));
-    gap:9px; margin-top:12px; }
+  .artifacts { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
+    gap:10px; margin-top:8px; }
   .artifact { min-width:0; padding:8px; border:1px solid var(--border);
-    border-radius:7px; background:var(--panel2); overflow:hidden; }
+    border-radius:8px; background:var(--panel2); overflow:hidden; }
   .artifact img { display:block; width:100%; aspect-ratio:4/3; object-fit:contain;
-    background:#080a0d; border-radius:4px; margin-bottom:6px; }
-  .artifact a { display:block; font:11px var(--mono); overflow-wrap:anywhere; }
-  details { margin-top:13px; border:1px solid var(--border); border-radius:7px; }
+    background:#080a0d; border-radius:4px; }
+  .artifact a.cap { display:block; margin-top:6px; font:11px var(--mono); color:var(--dim);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .artifact a.cap:hover { color:var(--accent); }
+  .files { display:flex; flex-direction:column; gap:4px; margin-top:8px; }
+  .files a { font:12px var(--mono); overflow-wrap:anywhere; }
+  details { margin-top:14px; border:1px solid var(--border); border-radius:8px; }
   summary { padding:8px 10px; color:var(--dim); cursor:pointer; font-size:12px; }
   pre { margin:0; padding:10px; border-top:1px solid var(--border); overflow:auto;
     max-height:420px; color:var(--text); font:11.5px/1.5 var(--mono); }
@@ -114,12 +153,14 @@
 <main>
   <section class="column">
     <div class="card">
-      <h2>Image anchor → ArtiFixer → multiview fit</h2>
-      <p>The agent explores and selects an intervention. Each repair propagates one edited anchor, fits the generated views, then reloads the scene. No quality acceptance gate yet.</p>
-      <p><button type="button" id="load-artifixer">Reload GPU with ArtiFixer</button>
-      <button type="button" id="load-baseline">Reload baseline setup</button></p>
-      <p id="gpu-mode" aria-live="polite">Checking selected GPU setup…</p>
-      <p class="sub">Stop active runs before switching. First ArtiFixer setup installs its isolated environment and downloads weights. Both pipelines share one GPU.</p>
+      <div class="card-head">
+        <h2>Queue</h2>
+        <div class="setup-row">
+          <span id="gpu-mode" class="setup-status" aria-live="polite">GPU …</span>
+          <button type="button" id="load-artifixer" class="ghost">ArtiFixer</button>
+          <button type="button" id="load-baseline" class="ghost">Baseline</button>
+        </div>
+      </div>
       <form id="run-form">
         <label class="wide">Scene<select id="scene" name="scene_id"></select></label>
         <label>Duration (hours)<input id="duration" type="number" min="0.01" max="168" step="0.25" value="1"></label>
@@ -158,22 +199,14 @@
       </form>
     </div>
     <div class="card">
-      <h2>Current and queued</h2>
+      <div class="list-label">Active</div>
       <div id="active-list" class="run-list"><div class="empty">No queued runs.</div></div>
-    </div>
-    <div class="card">
-      <h2>History</h2>
+      <div class="list-label later">History</div>
       <div id="history" class="run-list"><div class="empty">No runs yet.</div></div>
     </div>
   </section>
   <section class="column">
-    <div class="summary">
-      <div class="metric"><div class="key">status</div><div id="m-status" class="value">–</div></div>
-      <div class="metric"><div class="key">step / phase</div><div id="m-step" class="value">–</div></div>
-      <div class="metric"><div class="key">repairs</div><div id="m-repairs" class="value">–</div></div>
-      <div class="metric"><div class="key">L1 before → after</div><div id="m-l1" class="value">–</div></div>
-    </div>
-    <div id="detail" class="card"><div class="empty">Select a run to inspect it.</div></div>
+    <div id="detail" class="card"><div class="empty-state">Select a run</div></div>
   </section>
 </main>
 <aside id="capture-pip" title="This live WebGL client answers scene-run render requests while the page is open.">
@@ -222,11 +255,18 @@ function fmtDuration(seconds) {
 }
 function runRow(run) {
   const id = runId(run), status = statusOf(run), b = bag(run);
-  const scene = run?.config?.scene_id || b.scene_id || "";
+  const scene = run?.config?.scene_id || b.scene_id || "scene";
   const when = firstValue(b, ["updated_at","created_at","started_at"]);
   return `<div class="run-row ${id === selectedId ? "selected" : ""}" data-id="${esc(id)}">
-    <span class="run-id">${esc(id || "(unknown id)")}</span><span class="status ${esc(status)}">${esc(status)}</span>
-    <span class="sub">${esc(scene)}${when ? ` · ${esc(fmtTime(when))}` : ""}</span></div>`;
+    <span class="run-main">
+      <span class="run-scene">${esc(scene)}</span>
+      <span class="run-id">${esc(id || "(unknown id)")}</span>
+    </span>
+    <span class="run-side">
+      <span class="status ${esc(status)}">${esc(String(status).replace(/_/g, " "))}</span>
+      <span class="when">${when ? esc(fmtTime(when)) : ""}</span>
+    </span>
+  </div>`;
 }
 function wireRows() {
   document.querySelectorAll(".run-row").forEach(row => row.onclick = () => {
@@ -284,6 +324,7 @@ function renderState() {
   if (!selectedId && runs.length) selectedId = runId(state.active_run) || runId(runs[0]);
   setDefaults(state?.defaults || {}, state?.scenes || []);
   layoutCapture();
+  paintSetup();
 }
 function deadlineRows(b) {
   const user = firstValue(b, ["requested_deadline","user_deadline","user_end","deadline"]);
@@ -322,13 +363,20 @@ function artifactEntries(value, id, key = "", seen = new Set()) {
   }
   return entries.filter((entry,index,all) => all.findIndex(other => other.url === entry.url) === index);
 }
+function cell(kind, key, value, extra = "") {
+  return `<div class="${kind}"><div class="${kind === "metric" ? "key" : "k"}">${esc(key)}</div><div class="${kind === "metric" ? "value" : "v"} ${extra}">${esc(value)}</div></div>`;
+}
+function fileName(path) {
+  const parts = String(path || "").split(/[\\/]/);
+  return parts[parts.length - 1] || path || "file";
+}
 function renderDetail() {
   if (!selectedId) {
-    $("detail").innerHTML = `<div class="empty">Select a run to inspect it.</div>`;
+    $("detail").innerHTML = `<div class="empty-state">Select a run</div>`;
     return;
   }
   if (!detail) {
-    $("detail").innerHTML = `<div class="empty">Loading ${esc(selectedId)}…</div>`;
+    $("detail").innerHTML = `<div class="empty-state">Loading ${esc(selectedId)}…</div>`;
     return;
   }
   const b = bag(detail), status = statusOf(detail), cfg = detail.config || detail.params || {};
@@ -338,10 +386,12 @@ function renderDetail() {
   const repairTime = firstValue(b, ["repair_elapsed_seconds","repair_seconds_total","last_repair_seconds"]);
   const l1Before = firstValue(b, ["l1_before","repair_l1_before"]);
   const l1After = firstValue(b, ["l1_after","repair_l1_after"]);
-  $("m-status").textContent = status;
-  $("m-step").textContent = [step == null ? null : `#${step}`, phase].filter(Boolean).join(" · ") || "–";
-  $("m-repairs").textContent = `${repairs ?? 0}${repairTime == null ? "" : ` · ${fmtDuration(repairTime)}`}`;
-  $("m-l1").textContent = l1Before == null && l1After == null ? "–" : `${l1Before ?? "–"} → ${l1After ?? "–"}`;
+  const metrics = [
+    ["Status", status, status],
+    ["Step / phase", [step == null ? null : `#${step}`, phase].filter(Boolean).join(" · ") || "–", ""],
+    ["Repairs", `${repairs ?? 0}${repairTime == null ? "" : ` · ${fmtDuration(repairTime)}`}`, ""],
+    ["L1 before → after", l1Before == null && l1After == null ? "–" : `${l1Before ?? "–"} → ${l1After ?? "–"}`, ""],
+  ];
   const rows = [
     ["scene", cfg.scene_id || firstValue(b, ["scene_id","scene"]) || "–"],
     ["VLM", [cfg.backend,cfg.model].filter(Boolean).join(" · ") || "–"],
@@ -355,20 +405,29 @@ function renderDetail() {
     ...deadlineRows(b),
   ];
   const artifacts = artifactEntries(detail, selectedId);
+  const images = artifacts.filter(item => item.image);
+  const files = artifacts.filter(item => !item.image);
   const error = firstValue(b, ["error","last_error","message"]);
   $("detail").innerHTML = `<div class="detail-head">
-    <h2>${esc(selectedId)}</h2><span class="status ${esc(status)}">${esc(status)}</span>
+    <div class="detail-id">
+      <h2>${esc(selectedId)}</h2>
+      <span class="status ${esc(status)}">${esc(String(status).replace(/_/g, " "))}</span>
+    </div>
     <div class="right">
       <a class="btn" id="open-viser" href="/${encodeURIComponent(selectedId)}/viser" target="_blank" rel="noopener"
-         title="Starts one dedicated review visor for this run (not the live capture visor).">Open visor ↗</a>
+         title="Starts one dedicated review visor for this run (not the live capture visor).">Open visor</a>
       <button id="stop" class="stop" ${ACTIVE.has(status) ? "" : "disabled"}>Request stop</button>
     </div>
   </div>
+  <div class="summary">${metrics.map(([k,v,cls]) => cell("metric", k, v, cls)).join("")}</div>
   <div class="kv">${rows.map(([k,v]) => `<span class="k">${esc(k)}</span><span class="v">${esc(v)}</span>`).join("")}</div>
-  ${error && (status === "error" || b.error || b.last_error) ? `<div class="error">${esc(error)}</div>` : ""}
-  <div class="artifacts">${artifacts.map(a => `<div class="artifact">
-    ${a.image ? `<a href="${esc(a.url)}" target="_blank"><img src="${esc(a.url)}" loading="lazy" alt="${esc(a.name)}"></a>` : ""}
-    <a href="${esc(a.url)}" target="_blank">${esc(a.path)} ↗</a></div>`).join("")}</div>
+  ${error && (status === "error" || b.error || b.last_error) ? `<div class="run-error">${esc(error)}</div>` : ""}
+  ${images.length ? `<div class="section-label">Frames</div><div class="artifacts">${images.map(a => `<div class="artifact">
+    <a href="${esc(a.url)}" target="_blank"><img src="${esc(a.url)}" loading="lazy" alt="${esc(fileName(a.path))}"></a>
+    <a class="cap" href="${esc(a.url)}" target="_blank" title="${esc(a.path)}">${esc(fileName(a.path))}</a>
+  </div>`).join("")}</div>` : ""}
+  ${files.length ? `<div class="section-label">Files</div><div class="files">${files.map(a =>
+    `<a href="${esc(a.url)}" target="_blank">${esc(a.path)}</a>`).join("")}</div>` : ""}
   ${artifacts.length ? "" : `<div class="empty">No images, logs, or PLY artifacts yet.</div>`}
   <details><summary>Raw run detail</summary><pre>${esc(JSON.stringify(detail,null,2))}</pre></details>`;
   $("stop").onclick = stopRun;
@@ -433,28 +492,58 @@ async function stopRun() {
 }
 tick();
 $("repair-type").addEventListener("change", syncRepairTime);
+let gpuSetup = null, setupTimer = null;
+function paintSetup() {
+  const setup = gpuSetup || {};
+  const ready = Boolean(setup.ok) && !setup.inflight;
+  const artifixerOn = ready && setup.detail?.setup_mode === "artifixer";
+  const baselineOn = ready && !artifixerOn;
+  const busy = Boolean(setup.inflight || state?.active);
+  const arti = $("load-artifixer"), base = $("load-baseline"), label = $("gpu-mode");
+  arti.disabled = base.disabled = busy;
+  arti.className = "ghost" + (artifixerOn ? " loaded" : "");
+  base.className = "ghost" + (baselineOn ? " loaded" : "");
+  arti.textContent = artifixerOn ? "ArtiFixer · loaded" : "ArtiFixer";
+  base.textContent = baselineOn ? "Baseline · loaded" : "Baseline";
+  arti.title = artifixerOn ? "ArtiFixer is already loaded" : "Load the ArtiFixer GPU setup";
+  base.title = baselineOn ? "Baseline is already loaded" : "Load the baseline GPU setup";
+  let text = "", cls = "setup-status";
+  if (!gpuSetup) text = "GPU …";
+  else if (setup.inflight) text = setup.message || "Loading…";
+  else if (setup.error) { text = setup.error; cls = "setup-status err"; }
+  else if (setup.needs_reload) { text = setup.message || "Reload needed"; cls = "setup-status warn"; }
+  else if (!ready) text = "No GPU setup";
+  label.hidden = !text;
+  label.textContent = text;
+  label.className = cls;
+  label.title = text;
+}
 async function gpuSetupState() {
+  clearTimeout(setupTimer);
   try {
     const snap = await fetchJson("/api/repair/gpu");
-    const setup = snap.setup || {};
-    $("gpu-mode").textContent = setup.inflight ? (setup.message || "Loading setup…") :
-      setup.error ? setup.error : setup.ok ? `GPU setup: ${setup.detail?.setup_mode || "baseline"}` : "Load GPU setup before queueing a run.";
-    $("load-artifixer").disabled = $("load-baseline").disabled = Boolean(setup.inflight || state?.active);
-  } catch (err) { $("gpu-mode").textContent = err.message; }
+    gpuSetup = snap.setup || {};
+  } catch (err) {
+    gpuSetup = {error: err.message};
+  }
+  paintSetup();
+  setupTimer = setTimeout(gpuSetupState, gpuSetup?.inflight ? 2000 : 10000);
 }
 async function reloadSetup(artifixer) {
   $("load-artifixer").disabled = $("load-baseline").disabled = true;
   try {
     const snap = await fetchJson("/api/repair/gpu/setup", {method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify({force:true, QWEN_required:false, ARTIFIXER_required:artifixer})});
-    $("gpu-mode").textContent = snap.message || "Reloading selected GPU setup…";
-  } catch (err) { $("gpu-mode").textContent = err.message; }
+    gpuSetup = {...(snap.setup || gpuSetup || {}), inflight: true, message: snap.message || "Loading…"};
+  } catch (err) {
+    gpuSetup = {...(gpuSetup || {}), error: err.message, inflight: false};
+  }
+  paintSetup();
   await gpuSetupState();
 }
 $("load-artifixer").onclick = () => reloadSetup(true);
 $("load-baseline").onclick = () => reloadSetup(false);
 gpuSetupState();
-setInterval(gpuSetupState, 10000);
 </script>
 </body>
 </html>
