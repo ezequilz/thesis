@@ -4191,6 +4191,9 @@ def apply_gpu_setup(*, workspace: str = "/workspace", qwen_required: bool | None
     site = str(python_dir)
     if site not in sys.path:
         sys.path.insert(0, site)
+    from .scene_runs_ext.setup import use_public_pypi
+    use_public_pypi(os.environ)
+    logger.info("pip index %s (ignoring pypi.ngc.nvidia.com)", os.environ["PIP_INDEX_URL"])
     existing = os.environ.get("PYTHONPATH") or ""
     os.environ["PYTHONPATH"] = site + (os.pathsep + existing if existing else "")
     os.environ["PATH"] = str(python_dir / "bin") + os.pathsep + os.environ.get("PATH", "")

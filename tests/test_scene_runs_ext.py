@@ -128,3 +128,149 @@ def test_failed_candidate_never_mutates_source(tmp_path,failure):
             proposal={},should_stop=lambda:stopped[0],on_progress=lambda _:None,
             renderer_factory=Renderer,propagator=generator,fitter=fitter)
     np.testing.assert_allclose(s.colors,.4)
+
+
+def _venv_python(tmp_path):
+    python = tmp_path / "artifixer-venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"")
+    return python
+
+
+def test_public_pypi_replaces_unresolvable_ngc_index():
+    import os
+    from splat_explorer.scene_runs_ext.setup import PUBLIC_PYPI, use_public_pypi
+    env = use_public_pypi({
+        "PIP_INDEX_URL": "https://pypi.ngc.nvidia.com",
+        "PIP_EXTRA_INDEX_URL": "https://pypi.ngc.nvidia.com",
+        "PIP_CONFIG_FILE": "/etc/pip.conf",
+        "PIP_TRUSTED_HOST": "pypi.ngc.nvidia.com",
+        "PATH": "/usr/bin",
+    })
+    assert env["PIP_INDEX_URL"] == PUBLIC_PYPI
+    assert env["PIP_EXTRA_INDEX_URL"] == PUBLIC_PYPI
+    assert env["PIP_CONFIG_FILE"] == os.devnull
+    assert "ngc.nvidia.com" not in " ".join(env.values())
+    assert env["PATH"] == "/usr/bin"
+
+
+def test_existing_venv_without_pip_is_seeded_by_ensurepip(tmp_path, monkeypatch):
+    from splat_explorer.scene_runs_ext import setup
+    python = _venv_python(tmp_path)
+    checks = {"n": 0}
+    commands = []
+
+    def imports(py, module, env):
+        assert module == "pip" and str(py) == str(python)
+        checks["n"] += 1
+        return checks["n"] > 1
+
+    def fake_run(args, **kwargs):
+        commands.append([str(a) for a in args])
+        return SimpleNamespace(returncode=0)
+
+    def refuse(args, **kwargs):
+        raise AssertionError(args)
+
+    monkeypatch.setattr(setup, "_imports", imports)
+    monkeypatch.setattr(setup.subprocess, "run", fake_run)
+    got = setup.ensure_venv(tmp_path / "artifixer-venv", {}, refuse)
+    assert got == python
+    assert commands == [[str(python), "-m", "ensurepip", "--upgrade"]]
+
+
+def test_missing_ensurepip_bootstraps_with_get_pip(tmp_path, monkeypatch):
+    from splat_explorer.scene_runs_ext import setup
+    python = _venv_python(tmp_path)
+    ready = {"pip": False}
+    commands = []
+
+    def imports(py, module, env):
+        return ready["pip"] and str(py) == str(python)
+
+    class Body:
+        def read(self):
+            return b"# get-pip\n"
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            return False
+
+    def run(args, **kwargs):
+        commands.append([str(a) for a in args])
+        ready["pip"] = True
+
+    monkeypatch.setattr(setup, "_imports", imports)
+    monkeypatch.setattr(setup.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1))
+    monkeypatch.setattr(setup.urllib.request, "urlopen", lambda url, timeout=0: Body())
+    env = {"TMPDIR": str(tmp_path)}
+    assert setup.ensure_venv(tmp_path / "artifixer-venv", env, run) == python
+    assert commands == [[str(python), str(tmp_path / "get-pip.py")]]
+    assert (tmp_path / "get-pip.py").read_bytes() == b"# get-pip\n"
+
+
+def test_container_pip_seeds_venv_when_get_pip_is_unreachable(tmp_path, monkeypatch):
+    from splat_explorer.scene_runs_ext import setup
+    python = _venv_python(tmp_path)
+    state = {"venv": False}
+    commands = []
+
+    def imports(py, module, env):
+        if str(py) == str(python):
+            return state["venv"]
+        return True
+
+    def fake_run(args, **kwargs):
+        if kwargs.get("check"):
+            return SimpleNamespace(returncode=0, stdout=str(tmp_path / "site") + "\n")
+        return SimpleNamespace(returncode=1, stdout="")
+
+    def run(args, **kwargs):
+        commands.append([str(a) for a in args])
+        if "--target" in commands[-1]:
+            state["venv"] = True
+
+    def urlopen(*args, **kwargs):
+        raise OSError("offline")
+
+    monkeypatch.setattr(setup, "_imports", imports)
+    monkeypatch.setattr(setup.subprocess, "run", fake_run)
+    monkeypatch.setattr(setup.urllib.request, "urlopen", urlopen)
+    assert setup.ensure_venv(tmp_path / "artifixer-venv", {"TMPDIR": str(tmp_path)}, run) == python
+    assert "--target" in commands[-1] and commands[-1][-1] == "pip"
+
+
+def test_venv_creation_falls_back_when_ensurepip_cannot_create_it(tmp_path, monkeypatch):
+    from splat_explorer.scene_runs_ext import setup
+    envdir = tmp_path / "artifixer-venv"
+    commands = []
+
+    def fake_run(args, **kwargs):
+        commands.append([str(a) for a in args])
+        return SimpleNamespace(returncode=1)
+
+    def run(args, **kwargs):
+        commands.append([str(a) for a in args])
+        python = envdir / "bin" / "python"
+        python.parent.mkdir(parents=True, exist_ok=True)
+        python.write_bytes(b"")
+
+    monkeypatch.setattr(setup.subprocess, "run", fake_run)
+    monkeypatch.setattr(setup, "_imports", lambda *a, **k: True)
+    assert setup.ensure_venv(envdir, {}, run) == envdir / "bin" / "python"
+    assert commands[0][1:3] == ["-m", "venv"]
+    assert "--clear" in commands[1] and "--without-pip" in commands[1]
+
+
+def test_bootstrap_failure_reports_missing_pip(tmp_path, monkeypatch):
+    from splat_explorer.scene_runs_ext import setup
+    _venv_python(tmp_path)
+
+    def urlopen(*args, **kwargs):
+        raise OSError("offline")
+
+    monkeypatch.setattr(setup, "_imports", lambda *a, **k: False)
+    monkeypatch.setattr(setup.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stdout=""))
+    monkeypatch.setattr(setup.urllib.request, "urlopen", urlopen)
+    with pytest.raises(RuntimeError, match="no pip module"):
+        setup.ensure_venv(tmp_path / "artifixer-venv", {"TMPDIR": str(tmp_path)}, lambda *a, **k: None)

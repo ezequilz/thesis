@@ -9,8 +9,10 @@
 
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
+# python3-venv supplies ensurepip. Without it, `python -m venv` leaves an
+# interpreter that cannot run `python -m pip` (the ArtiFixer GPU setup venv).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 python3-pip git \
+    python3.11 python3-pip python3-venv python3.11-venv git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
