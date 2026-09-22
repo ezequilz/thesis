@@ -137,6 +137,49 @@ def _venv_python(tmp_path):
     return python
 
 
+def test_artifixer_pip_install_is_isolated_from_ngc():
+    from splat_explorer.scene_runs_ext.setup import PUBLIC_PYPI, PYTORCH_CU128, pip_install_command
+    cmd = pip_install_command("/workspace/artifixer-venv/bin/python", "--upgrade", "pip")
+    assert cmd[:6] == [
+        "/workspace/artifixer-venv/bin/python", "-m", "pip",
+        "--isolated", "--disable-pip-version-check", "install",
+    ]
+    assert "--index-url" in cmd and PUBLIC_PYPI in cmd
+    assert "pypi.ngc.nvidia.com" not in " ".join(cmd)
+    torch = pip_install_command(
+        "python", "torch==2.11.0", "torchvision",
+        index=PYTORCH_CU128, extra_index=PUBLIC_PYPI,
+    )
+    assert "--isolated" in torch
+    assert PYTORCH_CU128 in torch
+    assert PUBLIC_PYPI in torch
+
+
+def test_fused_ssim_is_built_against_the_venv_torch():
+    from splat_explorer.scene_runs_ext.setup import (
+        pip_install_command, split_torch_extension_requirements,
+    )
+    text = (
+        "torchmetrics\n"
+        "setuptools <72.1.0\n"
+        "# Fused-ssim\n"
+        "git+https://github.com/rahul-goel/fused-ssim@1272e21a282342e89537159e4bad508b19b34157\n"
+        "opencv-python<4.12.0 # because of our numpy<2.0 requirement\n"
+    )
+    filtered, extensions = split_torch_extension_requirements(text)
+    assert "fused-ssim" not in filtered
+    assert "torchmetrics" in filtered and "setuptools <72.1.0" in filtered
+    assert "opencv-python<4.12.0" in filtered
+    assert extensions == [
+        "git+https://github.com/rahul-goel/fused-ssim@1272e21a282342e89537159e4bad508b19b34157",
+    ]
+    cmd = pip_install_command("python", "--no-build-isolation", extensions[0])
+    assert "--no-build-isolation" in cmd
+    assert "--isolated" in cmd
+    assert cmd.index("--isolated") < cmd.index("install")
+    assert extensions[0] in cmd
+
+
 def test_public_pypi_replaces_unresolvable_ngc_index():
     import os
     from splat_explorer.scene_runs_ext.setup import PUBLIC_PYPI, use_public_pypi
@@ -205,7 +248,9 @@ def test_missing_ensurepip_bootstraps_with_get_pip(tmp_path, monkeypatch):
     monkeypatch.setattr(setup.urllib.request, "urlopen", lambda url, timeout=0: Body())
     env = {"TMPDIR": str(tmp_path)}
     assert setup.ensure_venv(tmp_path / "artifixer-venv", env, run) == python
-    assert commands == [[str(python), str(tmp_path / "get-pip.py")]]
+    assert commands == [[
+        str(python), str(tmp_path / "get-pip.py"), "--index-url", setup.PUBLIC_PYPI,
+    ]]
     assert (tmp_path / "get-pip.py").read_bytes() == b"# get-pip\n"
 
 

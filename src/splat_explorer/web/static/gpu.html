@@ -222,9 +222,9 @@
       <input type="checkbox" id="in-qwen-required"> QWEN_required
     </label>
     <label class="chk" title="Prepare the separate ArtiFixer environment and weights for extended scene runs. First setup downloads models; baseline packages stay unchanged.">
-      <input type="checkbox" id="in-artifixer-required"> ArtiFixer mode
+      <input type="checkbox" id="in-artifixer-required"> ArtiFixer
     </label>
-    <button id="btn-setup" title="Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh. Qwen-Image-Edit is installed only when QWEN_required is checked.">Load GPU setup</button>
+    <button id="btn-setup" title="Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh. Tick ArtiFixer first to install the isolated environment /scene-runs-ext needs. Qwen-Image-Edit is installed only when QWEN_required is checked.">Load GPU setup</button>
     <span id="probe-meta" class="hint">At most one remote probe per 10 min while this tab is visible. Reloads reuse cache; availability is a separate one-shot sinfo after the probe finishes.</span>
   </div>
 </div>
@@ -1074,6 +1074,8 @@ function renderChrome() {
     if (!artiBox.dataset.touched) artiBox.checked = snap?.setup?.detail?.setup_mode === "artifixer";
     artiBox.disabled = probeBusy || setupBusy || !canSetup;
   }
+  const wantArti = Boolean($("in-artifixer-required")?.checked);
+  const haveArti = snap?.setup?.detail?.setup_mode === "artifixer";
   $("btn-setup").disabled = probeBusy || setupBusy || !canSetup;
   $("btn-setup").classList.toggle("overwrite-confirm", Boolean(needsOverwrite && !setupBusy));
   if (snap?.setup?.inflight) {
@@ -1081,17 +1083,31 @@ function renderChrome() {
       ? `Loading GPU setup… ${fmtElapsed(snap.setup.elapsed_s)}`
       : "Loading GPU setup…";
   } else if (needsOverwrite) {
-    $("btn-setup").textContent = "Load GPU setup (clear leftover)";
+    $("btn-setup").textContent = wantArti
+      ? "Load GPU setup (ArtiFixer, clear leftover)"
+      : "Load GPU setup (clear leftover)";
+  } else if (snap?.setup?.ok && wantArti !== haveArti) {
+    $("btn-setup").textContent = wantArti
+      ? "Load GPU setup (ArtiFixer)"
+      : "Load GPU setup (baseline)";
   } else if (snap?.gpu_target?.needs_reload) {
-    $("btn-setup").textContent = "Load GPU setup (new GPU)";
+    $("btn-setup").textContent = wantArti
+      ? "Load GPU setup (ArtiFixer, new GPU)"
+      : "Load GPU setup (new GPU)";
+  } else if (wantArti) {
+    $("btn-setup").textContent = snap?.setup?.ok
+      ? "Reload GPU setup · ArtiFixer"
+      : "Load GPU setup · ArtiFixer";
   } else {
     $("btn-setup").textContent = snap?.setup?.ok ? "Reload GPU setup" : "Load GPU setup";
   }
   $("btn-setup").title = needsOverwrite
     ? (setupNeedsOverwrite() || "Clears leftover processes on THIS reserved GPU, then loads splat-explorer.")
-    : (snap?.gpu_target?.needs_reload
+    : (wantArti
+      ? "Installs the isolated ArtiFixer environment and weights for /scene-runs-ext. Baseline packages on /workspace/python stay unchanged. First setup downloads models from public PyPI."
+      : (snap?.gpu_target?.needs_reload
       ? (snap.gpu_target.reload_reason || "This allocation is a different GPU type than the last setup. Reload so gsplat matches the card.")
-      : "Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh. /repair also does this on the first CUDA run.");
+      : "Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh. /repair also does this on the first CUDA run."));
   $("btn-hist").disabled = probeBusy || setupBusy || !session;
   const canOcc = session && Boolean(snap?.connection?.job_id || snap?.slurm?.job_id);
   if ($("btn-occ-reload")) {

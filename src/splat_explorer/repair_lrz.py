@@ -3670,8 +3670,19 @@ def srun_setup_command(cfg: dict, *, qwen_required: bool | None = None) -> str:
 
     needed = resolve_qwen_required(qwen_required)
     flag = "true" if needed else "false"
+    # NGC pytorch images point pip at pypi.ngc.nvidia.com, which LRZ cannot
+    # resolve. extra-index-url is additive, so the setup shell replaces the
+    # image config before Python (and ArtiFixer) runs pip.
     inner = (
         _remote_pythonpath_exports(cfg)
+        + "unset PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST PIP_FIND_LINKS; "
+        + "printf '%s\\n' '[global]' 'index-url = https://pypi.org/simple' "
+        + "'extra-index-url = https://pypi.org/simple' "
+        + "> /workspace/python/pip-public.conf; "
+        + "export PIP_CONFIG_FILE=/workspace/python/pip-public.conf; "
+        + "export PIP_INDEX_URL=https://pypi.org/simple; "
+        + "export PIP_EXTRA_INDEX_URL=https://pypi.org/simple; "
+        + "export PIP_DISABLE_PIP_VERSION_CHECK=1; "
         + f"export QWEN_required={flag}; "
         + f"python -m splat_explorer.repair_lrz --setup --qwen-required {flag}"
         + (" --artifixer-required" if cfg.get("artifixer_required") else "")
@@ -4165,11 +4176,11 @@ def install_qwen_image_edit_packages(
             ", ".join(missing_image_edit),
         )
         import sys
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install", "--upgrade", "--no-deps",
-            "--target", site,
+        from .scene_runs_ext.setup import pip_install_command
+        subprocess.check_call(pip_install_command(
+            sys.executable, "--upgrade", "--no-deps", "--target", site,
             *missing_image_edit,
-        ])
+        ))
         import importlib
         importlib.invalidate_caches()
     return {
@@ -4191,8 +4202,9 @@ def apply_gpu_setup(*, workspace: str = "/workspace", qwen_required: bool | None
     site = str(python_dir)
     if site not in sys.path:
         sys.path.insert(0, site)
-    from .scene_runs_ext.setup import use_public_pypi
+    from .scene_runs_ext.setup import pip_install_command, use_public_pypi, write_public_pip_config
     use_public_pypi(os.environ)
+    os.environ["PIP_CONFIG_FILE"] = str(write_public_pip_config(python_dir))
     logger.info("pip index %s (ignoring pypi.ngc.nvidia.com)", os.environ["PIP_INDEX_URL"])
     existing = os.environ.get("PYTHONPATH") or ""
     os.environ["PYTHONPATH"] = site + (os.pathsep + existing if existing else "")
@@ -4217,7 +4229,7 @@ def apply_gpu_setup(*, workspace: str = "/workspace", qwen_required: bool | None
     installed = False
     if need_gsplat:
         installed = True
-        cmd = [sys.executable, "-m", "pip", "install", "--target", site]
+        cmd = pip_install_command(sys.executable, "--target", site)
         if prev_arch and prev_arch != arch:
             logger.info("gsplat was built for sm_%s, rebuilding for sm_%s", prev_arch, arch)
             cmd += ["--upgrade", "--force-reinstall", "gsplat>=1.4", "ninja"]

@@ -6,6 +6,7 @@
 #                          cloned to $CLIRELAY_DIR on first run)
 #   2. splat-explorer      image build + viser debug viewer at :8080
 #                          + episode dashboard at :8090
+#                          + extended scene runs at :8090/scene-runs-ext
 #                          + scene-run manager (always restarted)
 #
 # Usage:
@@ -198,7 +199,7 @@ fi
 echo "    Installing host scene-run manager extras [$HOST_EXTRAS] into .venv"
 .venv/bin/pip install -e ".[$HOST_EXTRAS]"
 
-echo "==> [3/4] (Re)starting viser viewer (:8080) + episode dashboard (:8090) + scene-run manager"
+echo "==> [3/4] (Re)starting viser viewer (:8080) + dashboards (:8090, /scene-runs-ext) + scene-run manager"
 stop_host_dashboard
 stop_scene_run_manager
 # Drop leftover episode-repair PLY pointers. Dashboard boot then prefers a
@@ -250,7 +251,10 @@ if [ "$HOST_DASHBOARD" = 1 ] && [ "$DASH_FREE" = 1 ]; then
   for _ in $(seq 1 40); do
     if curl -sf -o /dev/null "http://127.0.0.1:8090" \
       && curl -sf -o /dev/null "http://127.0.0.1:8090/repair" \
-      && curl -sf -o /dev/null "http://127.0.0.1:8090/repair/gpu"; then
+      && curl -sf -o /dev/null "http://127.0.0.1:8090/repair/gpu" \
+      && curl -sf -o /dev/null "http://127.0.0.1:8090/scene-runs" \
+      && curl -sf -o /dev/null "http://127.0.0.1:8090/scene-runs-ext" \
+      && curl -sf -o /dev/null "http://127.0.0.1:8090/api/scene-runs-ext/state"; then
       echo "  up"
       DASH_UP=1
       listen_pid=$(lsof -ti "tcp:8090" -sTCP:LISTEN | head -1 || true)
@@ -280,6 +284,25 @@ if [ "$HOST_DASHBOARD" = 1 ] && [ "$DASH_FREE" = 1 ]; then
   echo ""
 elif [ "$HOST_DASHBOARD" != 1 ] && [ "$DASH_FREE" = 1 ]; then
   docker compose up -d dashboard
+  printf "    Waiting for dashboard pages"
+  DASH_UP=0
+  for _ in $(seq 1 40); do
+    if curl -sf -o /dev/null "http://127.0.0.1:8090/scene-runs" \
+      && curl -sf -o /dev/null "http://127.0.0.1:8090/scene-runs-ext" \
+      && curl -sf -o /dev/null "http://127.0.0.1:8090/api/scene-runs-ext/state"; then
+      echo "  up"
+      DASH_UP=1
+      break
+    fi
+    printf "."
+    sleep 0.5
+  done
+  if [ "$DASH_UP" != 1 ]; then
+    echo "  ERROR"
+    echo "    Dashboard did not serve /scene-runs-ext."
+    docker compose logs --tail 40 dashboard || true
+    exit 1
+  fi
 fi
 
 start_scene_run_manager
@@ -307,6 +330,7 @@ fi
 echo "  Repair review  : http://localhost:8090/repair"
 echo "  GPU / LRZ      : http://localhost:8090/repair/gpu  (reserve 8h/24h, probe, jobs)"
 echo "  Scene runs     : http://localhost:8090/scene-runs  (automated VLM → Qwen → GSFix3D)"
+echo "  Extended runs  : http://localhost:8090/scene-runs-ext  (ArtiFixer multiview; restarted with this script)"
 echo "  Spectator (HD) : http://localhost:8090/spectator  (viewing only)"
 echo "  CLI episode    : export CLIRELAY_API_KEY=sk-... && \\"
 echo "                   splat-explorer --config configs/cli_relay.yaml explore"

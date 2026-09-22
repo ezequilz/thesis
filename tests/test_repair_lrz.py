@@ -333,6 +333,22 @@ def test_srun_setup_starts_named_container():
     assert "--qwen-required true" in with_qwen
     assert "/workspace/python" in cmd
     assert "--cpus-per-task=1" in cmd
+    assert "PIP_CONFIG_FILE=/workspace/python/pip-public.conf" in cmd
+    assert "https://pypi.org/simple" in cmd
+    assert "pypi.ngc.nvidia.com" not in cmd
+    assert "--artifixer-required" not in cmd
+    with_artifixer = srun_setup_command(
+        {
+            "job_id": "5777731",
+            "cpus": 4,
+            "workspace": "/dss/ws",
+            "container": "/dss/ws/containers/pytorch.sqsh",
+            "container_name": "splat-repair",
+            "artifixer_required": True,
+        },
+    )
+    assert "--artifixer-required" in with_artifixer
+    assert "https://pypi.org/simple" in with_artifixer
 
 
 def test_patch_gsplat_nvcc_single_thread(tmp_path):
