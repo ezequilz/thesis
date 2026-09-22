@@ -48,6 +48,19 @@
     border-radius:6px; background:var(--panel2); color:var(--text); font-size:13px; }
   input[readonly] { color:var(--dim); }
   input:focus, select:focus { outline:1px solid var(--accent); }
+  .stepper { display:flex; align-items:stretch; min-width:0; }
+  .stepper input { flex:1; min-width:0; width:auto;
+    border-top-right-radius:0; border-bottom-right-radius:0; }
+  .stepper input::-webkit-outer-spin-button,
+  .stepper input::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+  .stepper input[type=number] { -moz-appearance:textfield; appearance:textfield; }
+  .nudge { display:flex; flex-direction:column; flex:none; }
+  .nudge button { width:16px; flex:1; padding:0; margin:0; border:1px solid var(--border);
+    border-left:0; border-radius:0; background:transparent; color:var(--dim);
+    font-size:8px; font-weight:500; line-height:1; }
+  .nudge button:first-child { border-radius:0 6px 0 0; }
+  .nudge button:last-child { border-top:0; border-radius:0 0 6px 0; }
+  .nudge button:hover:not(:disabled) { color:var(--text); background:rgba(255,255,255,.04); }
   .locked { flex-direction:row; align-items:center; gap:6px; font-size:12px; }
   .locked input { width:auto; accent-color:var(--accent); }
   button { border:1px solid transparent; border-radius:6px; padding:7px 12px; cursor:pointer;
@@ -163,7 +176,7 @@
       </div>
       <form id="run-form">
         <label class="wide">Scene<select id="scene" name="scene_id"></select></label>
-        <label>Duration (hours)<input id="duration" type="number" min="0.01" max="168" step="0.25" value="1"></label>
+        <label>Duration (hours)<span class="stepper"><input id="duration" type="number" min="0.01" max="168" step="0.25" value="1"><span class="nudge"><button type="button" data-step="1" aria-label="Increase duration">▴</button><button type="button" data-step="-1" aria-label="Decrease duration">▾</button></span></span></label>
         <label>VLM backend<input id="backend" name="backend" value="cli_relay" readonly></label>
         <label>Width<input id="width" name="width" type="number" min="64" max="3840" value="960"></label>
         <label>Height<input id="height" name="height" type="number" min="64" max="2160" value="720"></label>
@@ -187,7 +200,7 @@
         <label>Propagation frames<input id="ext-frames" type="number" min="9" max="81" step="4" value="25"></label>
         <label>Trajectory span / depth<input id="ext-span" type="number" min="0.005" max="0.15" step="0.005" value="0.04"></label>
         <label>Multiview fit iterations<input id="ext-iters" type="number" min="1" max="2000" value="200"></label>
-        <label>Scene units → metres<input id="ext-scale" type="number" min="0.0001" max="10000" step="0.1" value="1"></label>
+        <label>Scene units → metres<span class="stepper"><input id="ext-scale" type="number" min="0.0001" max="10000" step="0.1" value="1"><span class="nudge"><button type="button" data-step="1" aria-label="Increase scene scale">▴</button><button type="button" data-step="-1" aria-label="Decrease scene scale">▾</button></span></span></label>
         <label id="repair-time-wrap" style="display:none">Repair Time (seconds)<input id="repair-seconds" name="repair_seconds" type="number" min="1" max="43200" value="180"></label>
         <label class="wide locked" title="Scene runs always render and send the exploration map.">
           <input id="send-map" type="checkbox" checked disabled> Send exploration map (locked)
@@ -273,6 +286,42 @@ function wireRows() {
     selectedId = row.dataset.id; detail = null; refreshDetail().then(render);
   });
 }
+function stepPlaces(input) {
+  return Math.max(0, ...[input.min, input.max, input.step].map(raw => {
+    const text = String(raw ?? "");
+    const dot = text.indexOf(".");
+    return dot < 0 ? 0 : text.length - dot - 1;
+  }));
+}
+function snapInput(input) {
+  const step = Number(input.step);
+  if (!Number.isFinite(step) || step <= 0) return;
+  const min = Number(input.min);
+  const max = Number(input.max);
+  const origin = Number.isFinite(min) ? min : 0;
+  let value = Number(input.value);
+  if (!Number.isFinite(value)) value = origin;
+  let snapped = origin + Math.round((value - origin) / step) * step;
+  if (Number.isFinite(min) && snapped < min - step * 1e-6) snapped = min;
+  if (Number.isFinite(max) && snapped > max + step * 1e-6) {
+    snapped = origin + Math.floor((max - origin) / step + 1e-8) * step;
+  }
+  input.value = snapped.toFixed(stepPlaces(input));
+  const wrap = input.closest(".stepper");
+  if (!wrap) return;
+  const current = Number(input.value);
+  wrap.querySelector('[data-step="1"]').disabled = Number.isFinite(max) && current >= max - step / 2;
+  wrap.querySelector('[data-step="-1"]').disabled = Number.isFinite(min) && current <= min + step / 2;
+}
+function bumpInput(input, direction) {
+  const step = Number(input.step) || 1;
+  const current = Number(input.value);
+  input.value = String((Number.isFinite(current) ? current : 0) + direction * step);
+  snapInput(input);
+}
+function snapSteppers() {
+  document.querySelectorAll(".stepper input").forEach(snapInput);
+}
 function setDefaults(defaults, scenes) {
   if (!first) return;
   first = false;
@@ -281,6 +330,7 @@ function setDefaults(defaults, scenes) {
   if (!scenes?.length) $("scene").innerHTML = `<option value="${esc(defaults.scene_id)}">${esc(defaults.scene_id)}</option>`;
   $("scene").value = defaults.scene_id;
   $("duration").value = Number(defaults.duration_seconds || 3600) / 3600;
+  snapSteppers();
   for (const [id,key] of [["backend","backend"],["model","model"],["width","width"],["height","height"],
     ["image-edit","image_edit_backend"],["repair-backend","repair_backend"],
     ["repair-type","repair_type"],["repair-trigger","repair_trigger"],["repair-seconds","repair_seconds"]]) {
@@ -458,6 +508,7 @@ async function tick() {
 }
 $("run-form").onsubmit = async event => {
   event.preventDefault();
+  snapSteppers();
   $("start").disabled = true; $("message").textContent = "Writing queued run…";
   const body = {
     scene_id:$("scene").value, duration_seconds:Math.round(Number($("duration").value) * 3600),
@@ -544,6 +595,20 @@ async function reloadSetup(artifixer) {
 $("load-artifixer").onclick = () => reloadSetup(true);
 $("load-baseline").onclick = () => reloadSetup(false);
 gpuSetupState();
+document.querySelectorAll(".stepper input").forEach(input => {
+  input.addEventListener("change", () => snapInput(input));
+  input.addEventListener("blur", () => snapInput(input));
+});
+document.querySelectorAll(".nudge button").forEach(button => {
+  button.addEventListener("click", () => {
+    bumpInput(button.closest(".stepper").querySelector("input"), Number(button.dataset.step));
+  });
+});
+$("run-form").addEventListener("keydown", event => {
+  if (event.key === "Enter") snapSteppers();
+}, true);
+$("start").addEventListener("click", snapSteppers, true);
+snapSteppers();
 </script>
 </body>
 </html>
