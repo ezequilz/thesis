@@ -235,6 +235,13 @@ class LrzSceneRunTransport:
                 "with QWEN_required=false. Turn QWEN_required on and click "
                 "Reload GPU setup."
             )
+        if isinstance(config, dict):
+            wants_extended = config.get("pipeline") == "extended"
+            mode = marker.get("setup_mode", "baseline")
+            if wants_extended and (mode != "artifixer" or not marker.get("artifixer_ready")):
+                raise RuntimeError("Reload GPU setup with ArtiFixer enabled on /scene-runs-ext or /repair/gpu first")
+            if not wants_extended and mode != "baseline":
+                raise RuntimeError("Reload GPU setup with ArtiFixer disabled before starting a baseline run")
         return {"allocation": row, "setup": marker}
 
     def _image_backend(self, config: dict[str, Any] | None = None) -> str:
@@ -294,6 +301,7 @@ class LrzSceneRunTransport:
             "protocol": 1,
             "run_id": self.run_id,
             "scene_run": dict(config),
+            "extended_runtime": dict(self.app_cfg.get("scene_runs_ext") or {}),
             "image_edit": image_edit,
             "image_edit_prompt": config.get("image_edit_prompt"),
             "QWEN_required": qwen,
@@ -424,6 +432,12 @@ class LrzSceneRunTransport:
         request_remote = f"{remote}:{self.remote_dir}/requests/{request_id}/"
         repair_lrz._mux_run([
             "rsync", "-az", "-e", ssh_e,
+            "--include", "extended/",
+            "--include", "extended/bundle.json",
+            "--include", "extended/inference.json",
+            "--include", "extended/artifixer.log",
+            "--include", "extended/anchor.png",
+            "--include", "extended/targets/***",
             "--include", REGENERATED_NAME,
             "--include", RENDERED_NAME,
             "--include", DEPTH_NAME,
@@ -545,6 +559,7 @@ class LrzSceneRunTransport:
         deadline: float,
         should_stop: Callable[[], bool],
         prompt: str | None = None,
+        proposal: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self._started:
             raise RuntimeError("LRZ scene-run worker has not been started")
@@ -586,6 +601,8 @@ class LrzSceneRunTransport:
             repair=repair_cfg,
             operation="repair",
         )
+        if proposal is not None:
+            body["proposal"] = dict(proposal)
         if image_edit_result is not None:
             body["skip_image_edit"] = True
             body["image_model"] = image_edit_result.get("model")
@@ -658,6 +675,17 @@ class LrzSceneRunTransport:
         """Best-effort final checkpoint pull; the worker owns its deadline."""
         if not self._started:
             return
+        # Release the GPU worker before the manager releases its shared lease.
+        # The next setup/run must not overlap an idle worker retaining tensors.
+        self.stop()
+        until = time.monotonic() + 30.0
+        while time.monotonic() < until:
+            worker = self._remote_json(WORKER_NAME) or {}
+            if worker.get("status") in {"stopped", "error"}:
+                break
+            time.sleep(self.poll_seconds)
+        else:
+            raise RuntimeError("GPU worker has not exited yet; wait before reloading setup")
         try:
             self.pull_checkpoint()
         except Exception:

@@ -348,15 +348,29 @@ class RepairStudio:
         force: bool = True,
         overwrite: bool = False,
         qwen_required: bool | None = None,
+        artifixer_required: bool = False,
     ) -> dict:
         from ..image_edit import resolve_qwen_required
         from ..repair_lrz import request_lrz_setup
 
         self._require_gpu_available("reloading GPU setup")
         needed = resolve_qwen_required(qwen_required, cfg=self.app.cfg)
-        result = request_lrz_setup(
-            force=force, overwrite=overwrite, qwen_required=needed,
-        )
+        from ..scene_runs.store import SceneRunStore
+        if not isinstance(artifixer_required, bool):
+            raise ValueError("ARTIFIXER_required must be a boolean")
+        if artifixer_required and needed:
+            raise ValueError("ArtiFixer mode uses CliRelay; disable QWEN_required")
+        lease = SceneRunStore(Path(self.app.cfg.output.dir) / "scene-runs").acquire_setup_lease()
+        if lease is None:
+            raise RuntimeError("GPU is owned by a scene-run or another setup; stop it before reloading")
+        try:
+            result = request_lrz_setup(
+                force=force, overwrite=overwrite, qwen_required=needed,
+                artifixer_required=artifixer_required, setup_lease=lease,
+            )
+        except BaseException:
+            lease.release()
+            raise
         snap = self.gpu_snapshot()
         snap["ok"] = True
         snap["setup"] = result

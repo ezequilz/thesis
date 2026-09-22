@@ -221,6 +221,9 @@
     <label class="chk" title="Off by default. Scene-runs edit images through CliRelay. Turn this on before Load / Reload GPU setup only when a run uses Qwen-Image-Edit.">
       <input type="checkbox" id="in-qwen-required"> QWEN_required
     </label>
+    <label class="chk" title="Prepare the separate ArtiFixer environment and weights for extended scene runs. First setup downloads models; baseline packages stay unchanged.">
+      <input type="checkbox" id="in-artifixer-required"> ArtiFixer mode
+    </label>
     <button id="btn-setup" title="Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh. Qwen-Image-Edit is installed only when QWEN_required is checked.">Load GPU setup</button>
     <span id="probe-meta" class="hint">At most one remote probe per 10 min while this tab is visible. Reloads reuse cache; availability is a separate one-shot sinfo after the probe finishes.</span>
   </div>
@@ -884,7 +887,7 @@ function setupLabel() {
     const g = s.detail?.gpu || t.gpu_name || "";
     const arch = s.detail?.cuda_arch || t.cuda_arch ? ` sm ${s.detail?.cuda_arch || t.cuda_arch}` : "";
     const family = t.family ? ` · ${t.family}` : "";
-    return g ? `ready · ${g}${arch}${family}` : (s.message || "ready");
+    return `${s.detail?.setup_mode === "artifixer" ? "ArtiFixer" : "Baseline"} · ` + (g ? `ready · ${g}${arch}${family}` : (s.message || "ready"));
   }
   if (s.error) return s.error;
   if (snap?.slurm?.state === "R") return "not loaded — click Load GPU setup";
@@ -1065,6 +1068,11 @@ function renderChrome() {
   if (qwenBox) {
     if (!qwenBox.dataset.touched) qwenBox.checked = Boolean(snap?.image_edit?.QWEN_required);
     qwenBox.disabled = probeBusy || setupBusy || !canSetup;
+  }
+  const artiBox = $("in-artifixer-required");
+  if (artiBox) {
+    if (!artiBox.dataset.touched) artiBox.checked = snap?.setup?.detail?.setup_mode === "artifixer";
+    artiBox.disabled = probeBusy || setupBusy || !canSetup;
   }
   $("btn-setup").disabled = probeBusy || setupBusy || !canSetup;
   $("btn-setup").classList.toggle("overwrite-confirm", Boolean(needsOverwrite && !setupBusy));
@@ -1271,6 +1279,13 @@ $("in-qwen-required")?.addEventListener("change", () => {
   $("in-qwen-required").dataset.touched = "1";
 });
 
+$("in-artifixer-required")?.addEventListener("change", () => {
+  $("in-artifixer-required").dataset.touched = "1";
+  if ($("in-artifixer-required").checked) {
+    $("in-qwen-required").checked = false;
+    $("in-qwen-required").dataset.touched = "1";
+  }
+});
 $("btn-setup").onclick = async () => {
   const reason = setupNeedsOverwrite();
   const qwenRequired = Boolean($("in-qwen-required")?.checked);
@@ -1280,6 +1295,7 @@ $("btn-setup").onclick = async () => {
       force: true,
       overwrite: false,
       QWEN_required: qwenRequired,
+      ARTIFIXER_required: Boolean($("in-artifixer-required")?.checked),
     });
     setNote("info", snap.message || (reason
       ? "Clearing leftover occupant on this reserved GPU, then loading splat-explorer…"

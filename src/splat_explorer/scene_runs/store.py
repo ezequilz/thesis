@@ -390,6 +390,14 @@ class SceneRunStore:
         # Require a real run and keep arbitrary caller metadata from replacing
         # the identity fields used for stale detection and safe release.
         self.get_run(run_id)
+        return self._acquire_gpu_lease(run_id, metadata=metadata)
+
+    def acquire_setup_lease(self):
+        """Use the same atomic lock as both scene-run pipelines during setup."""
+        self._ensure_root()
+        return self._acquire_gpu_lease("gpu-setup", metadata={"kind": "setup"})
+
+    def _acquire_gpu_lease(self, run_id, *, metadata=None):
         lease_path = self.gpu_lease_path
         token = uuid.uuid4().hex
         owner = dict(metadata or {})

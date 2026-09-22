@@ -103,6 +103,9 @@ def _image_edit_prompt(
     """Return the static image-edit instruction used for every repaired view."""
     from .gpu_worker import DEFAULT_PROMPT
 
+    if (_params or {}).get("pipeline") == "extended" and _action is not None:
+        from ..scene_runs_ext.config import edit_prompt
+        return edit_prompt(_action)
     return DEFAULT_PROMPT
 
 
@@ -275,6 +278,9 @@ class SceneRunExecutor:
                 yaw_deg=run_cfg.camera.start_yaw_deg,
             )
             policy = make_policy(run_cfg.agent)
+            if params.get("pipeline") == "extended":
+                from ..scene_runs_ext.config import configure_policy
+                configure_policy(policy)
             exploration = self._exploration_map(spawn, rig, run_cfg)
             pose_history: list[dict[str, Any]] = []
             motion_note: str | None = None
@@ -430,6 +436,10 @@ class SceneRunExecutor:
                     )
                     prompt = _image_edit_prompt(action, params)
                     record["image_edit_prompt"] = prompt
+                    extra = {}
+                    if params.get("pipeline") == "extended":
+                        from ..scene_runs_ext.config import proposal
+                        extra["proposal"] = proposal(action)
                     result = gpu.repair(
                         step=step,
                         camera=camera,
@@ -438,6 +448,7 @@ class SceneRunExecutor:
                         deadline=effective_deadline,
                         should_stop=self._stop_requested,
                         prompt=prompt,
+                        **extra,
                     )
                     record["repair"] = _jsonable(result)
                     if str(result.get("status") or "") != "ok":

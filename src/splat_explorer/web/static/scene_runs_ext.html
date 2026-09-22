@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>splat-explorer · scene runs</title>
+<title>splat-explorer · extended scene runs</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root {
@@ -101,12 +101,12 @@
 </head>
 <body>
 <header>
-  <h1>splat-explorer <span>· scene runs</span></h1>
+  <h1>splat-explorer <span>· extended scene runs</span></h1>
   <span id="manager-pill" class="pill">manager: …</span>
   <span id="run-pill" class="pill">no active run</span>
   <span class="spacer"></span>
   <a href="/">episode dashboard</a>
-  <a href="/scene-runs-ext">extended pipeline</a>
+  <a href="/scene-runs">baseline pipeline</a>
   <a href="/repair">repair review</a>
   <a href="/repair/gpu">GPU / LRZ</a>
   <a href="/spectator" target="_blank">spectator (HD) ↗</a>
@@ -114,7 +114,12 @@
 <main>
   <section class="column">
     <div class="card">
-      <h2>Create isolated run</h2>
+      <h2>Image anchor → ArtiFixer → multiview fit</h2>
+      <p>The agent explores and selects an intervention. Each repair propagates one edited anchor, fits the generated views, then reloads the scene. No quality acceptance gate yet.</p>
+      <p><button type="button" id="load-artifixer">Reload GPU with ArtiFixer</button>
+      <button type="button" id="load-baseline">Reload baseline setup</button></p>
+      <p id="gpu-mode" aria-live="polite">Checking selected GPU setup…</p>
+      <p class="sub">Stop active runs before switching. First ArtiFixer setup installs its isolated environment and downloads weights. Both pipelines share one GPU.</p>
       <form id="run-form">
         <label class="wide">Scene<select id="scene" name="scene_id"></select></label>
         <label>Duration (hours)<input id="duration" type="number" min="0.01" max="168" step="0.25" value="1"></label>
@@ -128,8 +133,8 @@
           <option value="gpt-image-2">gpt-image-2 (CliRelay)</option>
           <option value="qwen-image-edit">qwen-image-edit (GPU backup)</option>
         </select></label>
-        <label>3D repair<input id="repair-backend" name="repair_backend" value="gsfix-gsplat" readonly></label>
-        <label>Repair type<select id="repair-type" name="repair_type">
+        <label>3D repair<input id="repair-backend" name="repair_backend" value="artifixer-gsplat" readonly></label>
+        <label style="display:none">Repair type<select id="repair-type" name="repair_type">
           <option value="original">original GSFix3D</option>
           <option value="looped">looped</option>
         </select></label>
@@ -138,6 +143,10 @@
           <option value="every_artifact">every artifact</option>
           <option value="every_step">every step after first artifact</option>
         </select></label>
+        <label>Propagation frames<input id="ext-frames" type="number" min="9" max="81" step="4" value="25"></label>
+        <label>Trajectory span / depth<input id="ext-span" type="number" min="0.005" max="0.15" step="0.005" value="0.04"></label>
+        <label>Multiview fit iterations<input id="ext-iters" type="number" min="1" max="2000" value="200"></label>
+        <label>Scene units → metres<input id="ext-scale" type="number" min="0.0001" max="10000" step="0.1" value="1"></label>
         <label id="repair-time-wrap" style="display:none">Repair Time (seconds)<input id="repair-seconds" name="repair_seconds" type="number" min="1" max="43200" value="180"></label>
         <label class="wide locked" title="Scene runs always render and send the exploration map.">
           <input id="send-map" type="checkbox" checked disabled> Send exploration map (locked)
@@ -373,13 +382,13 @@ async function fetchJson(url, options) {
 }
 async function refreshDetail() {
   if (!selectedId) return;
-  try { detail = await fetchJson(`/api/scene-runs/${encodeURIComponent(selectedId)}`); }
+  try { detail = await fetchJson(`/api/scene-runs-ext/${encodeURIComponent(selectedId)}`); }
   catch (error) { detail = {id:selectedId,status:"error",error:error.message}; }
 }
 async function tick() {
   clearTimeout(timer);
   try {
-    state = await fetchJson("/api/scene-runs/state");
+    state = await fetchJson("/api/scene-runs-ext/state");
     renderState();
     await refreshDetail();
     render();
@@ -396,11 +405,12 @@ $("run-form").onsubmit = async event => {
     backend:$("backend").value, model:$("model").value, width:Number($("width").value),
     height:Number($("height").value), send_map:true, image_edit_backend:$("image-edit").value,
     repair_backend:$("repair-backend").value, repair_type:$("repair-type").value,
+    extended:{frames:Number($("ext-frames").value), span_fraction:Number($("ext-span").value), fit_iterations:Number($("ext-iters").value), camera_scale:Number($("ext-scale").value)},
     repair_trigger:$("repair-trigger").value,
     repair_seconds:Number($("repair-seconds").value),
   };
   try {
-    const result = await fetchJson("/api/scene-runs/start", {
+    const result = await fetchJson("/api/scene-runs-ext/start", {
       method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
     });
     selectedId = runId(result.run); detail = result.run;
@@ -413,7 +423,7 @@ async function stopRun() {
   if (!selectedId) return;
   $("stop").disabled = true; $("message").textContent = `Requesting stop for ${selectedId}…`;
   try {
-    const result = await fetchJson("/api/scene-runs/stop", {
+    const result = await fetchJson("/api/scene-runs-ext/stop", {
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify({id:selectedId}),
     });
@@ -423,6 +433,28 @@ async function stopRun() {
 }
 tick();
 $("repair-type").addEventListener("change", syncRepairTime);
+async function gpuSetupState() {
+  try {
+    const snap = await fetchJson("/api/repair/gpu");
+    const setup = snap.setup || {};
+    $("gpu-mode").textContent = setup.inflight ? (setup.message || "Loading setup…") :
+      setup.error ? setup.error : setup.ok ? `GPU setup: ${setup.detail?.setup_mode || "baseline"}` : "Load GPU setup before queueing a run.";
+    $("load-artifixer").disabled = $("load-baseline").disabled = Boolean(setup.inflight || state?.active);
+  } catch (err) { $("gpu-mode").textContent = err.message; }
+}
+async function reloadSetup(artifixer) {
+  $("load-artifixer").disabled = $("load-baseline").disabled = true;
+  try {
+    const snap = await fetchJson("/api/repair/gpu/setup", {method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({force:true, QWEN_required:false, ARTIFIXER_required:artifixer})});
+    $("gpu-mode").textContent = snap.message || "Reloading selected GPU setup…";
+  } catch (err) { $("gpu-mode").textContent = err.message; }
+  await gpuSetupState();
+}
+$("load-artifixer").onclick = () => reloadSetup(true);
+$("load-baseline").onclick = () => reloadSetup(false);
+gpuSetupState();
+setInterval(gpuSetupState, 10000);
 </script>
 </body>
 </html>

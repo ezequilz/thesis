@@ -66,8 +66,17 @@ class SceneRunConfig:
     repair_trigger: RepairTrigger = RepairTrigger.REGENERATE_YES
     repair_type: RepairType = RepairType.ORIGINAL
     repair_seconds: int = 180
+    pipeline: str = "baseline"
+    extended: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.pipeline not in {"baseline", "extended"}:
+            raise ValueError("pipeline must be baseline or extended")
+        if self.pipeline == "extended":
+            from ..scene_runs_ext.config import validate_options
+            object.__setattr__(self, "extended", validate_options(self.extended))
+            if self.width % 16 or self.height % 16:
+                raise ValueError("Extended width and height must be multiples of 16")
         for name in ("scene_id", "backend", "image_edit_backend", "repair_backend"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
@@ -117,6 +126,9 @@ class SceneRunConfig:
         data = asdict(self)
         data["repair_trigger"] = self.repair_trigger.value
         data["repair_type"] = self.repair_type.value
+        if self.pipeline == "baseline":
+            data.pop("pipeline")
+            data.pop("extended")
         return data
 
 

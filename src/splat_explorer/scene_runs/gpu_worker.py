@@ -343,6 +343,9 @@ class SceneRunGpuWorker:
         if not source.is_file():
             raise FileNotFoundError(f"scene-run source PLY missing: {source}")
         self.scene = self.scene_loader(source)
+        if (self.config.get("scene_run") or {}).get("pipeline") == "extended":
+            from ..scene_runs_ext.pipeline import validate_runtime
+            validate_runtime(self.config.get("extended_runtime"))
 
     def _editor(self):
         if self.image_editor is None:
@@ -487,6 +490,34 @@ class SceneRunGpuWorker:
             regenerated = np.asarray(
                 Image.open(request_dir / REGENERATED_NAME).convert("RGB"), dtype=np.uint8,
             )
+            if (self.config.get("scene_run") or {}).get("pipeline") == "extended":
+                from ..scene_runs_ext.pipeline import repair as extended_repair
+                self.renderer = None
+                gc.collect()
+                ext_deadline = min(float(request.get("deadline_unix") or float("inf")),
+                                   self.overall_deadline or float("inf"))
+                def ext_progress(body):
+                    self._phase = str(body.get("phase") or "extended")
+                    self._heartbeat()
+                    atomic_write_json(request_dir / METRICS_NAME, body)
+                candidate, metrics = extended_repair(
+                    self.scene, camera, regenerated_path, request_dir,
+                    options=(self.config.get("scene_run") or {}).get("extended"),
+                    runtime=self.config.get("extended_runtime"),
+                    proposal=request.get("proposal") or {"intervention": "structure"},
+                    should_stop=lambda: self._request_stop(request_dir, ext_deadline),
+                    on_progress=ext_progress,
+                )
+                metrics.update(image_edit=edit_payload, request_id=request_id, step=request.get("step"))
+                # Only complete candidates reach disk and the explorer.
+                pending = self.run_dir / "scene_candidate.ply"
+                self.scene_saver(candidate, pending)
+                pending.replace(self.run_dir / CHECKPOINT_NAME)
+                self.scene = candidate
+                atomic_write_json(request_dir / METRICS_NAME, metrics)
+                response.update(status="ok", regenerated=REGENERATED_NAME,
+                                checkpoint=CHECKPOINT_NAME, metrics=metrics)
+                return response
             repair_params = dict(self.config.get("repair") or {})
             repair_params.update(dict(request.get("repair") or {}))
             scene_run = self.config.get("scene_run") or {}

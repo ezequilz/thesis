@@ -101,8 +101,9 @@ def _positive_int(value: Any, name: str, *, minimum: int, maximum: int) -> int:
 class SceneRunStudio:
     """Thin, lazy bridge between the web server and ``SceneRunStore``."""
 
-    def __init__(self, app: Any, store: Any | None = None):
+    def __init__(self, app: Any, store: Any | None = None, *, pipeline: str = "baseline"):
         self.app = app
+        self.pipeline = pipeline
         self.cfg = app.cfg
         self.root = Path(_cfg_get(self.cfg, "output.dir", "outputs")) / "scene-runs"
         self._store = store
@@ -167,6 +168,10 @@ class SceneRunStudio:
         defaults["model"] = str(
             _cfg_get(self.cfg, "agent.model", "") or defaults["model"]
         )
+        if self.pipeline == "extended":
+            from ..scene_runs_ext.config import DEFAULTS
+            defaults.update(pipeline="extended", extended=dict(DEFAULTS),
+                            width=640, height=480, repair_backend="artifixer-gsplat")
         return defaults
 
     def validate_config(self, body: Mapping[str, Any] | None) -> dict:
@@ -209,7 +214,8 @@ class SceneRunStudio:
             )
         except ValueError as exc:
             raise SceneRunValidationError(str(exc)) from exc
-        if clean["repair_backend"] != "gsfix-gsplat":
+        expected_backend = "artifixer-gsplat" if self.pipeline == "extended" else "gsfix-gsplat"
+        if clean["repair_backend"] != expected_backend:
             raise SceneRunValidationError(
                 "The first automated scene-run release supports gsfix-gsplat only."
             )
@@ -235,11 +241,23 @@ class SceneRunStudio:
         # Maps are part of the isolated scene-run protocol and cannot be
         # disabled by a crafted browser request.
         clean["send_map"] = True
+        if self.pipeline == "extended":
+            from ..scene_runs_ext.config import validate_options
+            from ..image_edit import is_qwen_backend
+            try:
+                clean["extended"] = validate_options(clean.get("extended"))
+            except ValueError as exc:
+                raise SceneRunValidationError(str(exc)) from exc
+            if clean["width"] % 16 or clean["height"] % 16:
+                raise SceneRunValidationError("Extended width and height must be multiples of 16")
+            if is_qwen_backend(clean["image_edit_backend"]):
+                raise SceneRunValidationError("Extended runs currently use CliRelay image editing; choose a GPT image model")
+            clean["pipeline"] = "extended"
         return clean
 
     def list_runs(self) -> list[dict]:
         runs = _jsonable(self.store.list_runs())
-        return runs if isinstance(runs, list) else []
+        return [run for run in runs if (run.get("config") or {}).get("pipeline", "baseline") == self.pipeline] if isinstance(runs, list) else []
 
     def detail(self, run_id: str) -> dict | None:
         try:

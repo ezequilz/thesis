@@ -185,6 +185,7 @@ class DashboardApp:
 
         self.repair = RepairStudio(self)
         self.scene_runs = SceneRunStudio(self)
+        self.scene_runs_ext = SceneRunStudio(self, pipeline="extended")
         threading.Thread(target=self._load_scene, daemon=True).start()
 
     # --- scene ----------------------------------------------------------------
@@ -771,6 +772,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(200, (STATIC_DIR / "repair.html").read_bytes(), "text/html; charset=utf-8")
         elif path in ("/repair/gpu", "/gpu", "/gpu.html"):
             self._send(200, (STATIC_DIR / "gpu.html").read_bytes(), "text/html; charset=utf-8")
+        elif path in ("/scene-runs-ext", "/scene-runs-ext.html"):
+            self._send(200, (STATIC_DIR / "scene_runs_ext.html").read_bytes(), "text/html; charset=utf-8")
         elif path in ("/scene-runs", "/scene-runs.html"):
             self._send(200, (STATIC_DIR / "scene_runs.html").read_bytes(), "text/html; charset=utf-8")
         elif self._serve_scene_run_viser_page(path):
@@ -823,7 +826,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return True
 
     def _serve_scene_runs_get(self, path: str) -> None:
-        studio = self.app.scene_runs
+        extended = path == "/api/scene-runs-ext" or path.startswith("/api/scene-runs-ext/")
+        studio = self.app.scene_runs_ext if extended else self.app.scene_runs
+        if extended:
+            path = path.replace("/api/scene-runs-ext", "/api/scene-runs", 1)
         try:
             if path == "/api/scene-runs/state":
                 self._send_json(studio.state())
@@ -1108,6 +1114,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     force=bool(body.get("force", True)),
                     overwrite=bool(body.get("overwrite", False)),
                     qwen_required=qwen_required,
+                    artifixer_required=body.get("ARTIFIXER_required", False),
                 )
             except Exception as exc:
                 from ..repair_lrz import SetupNeedsOverwrite
@@ -1207,7 +1214,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 {"ok": False, "message": "Request body must be a JSON object."}, 400,
             )
             return
-        studio = self.app.scene_runs
+        extended = path.startswith("/api/scene-runs-ext/")
+        studio = self.app.scene_runs_ext if extended else self.app.scene_runs
+        if extended:
+            path = path.replace("/api/scene-runs-ext", "/api/scene-runs", 1)
         try:
             if path == "/api/scene-runs/start":
                 run = studio.create(body)
