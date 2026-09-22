@@ -1234,6 +1234,9 @@ _SETUP = {
     "message": "",
     "error": None,
     "detail": None,
+    "log_id": "",
+    "log_tail": "",
+    "log_remote": False,
 }
 _SESSION = {
     "lock": threading.Lock(),
@@ -3053,6 +3056,9 @@ def reset_setup_cache() -> None:
         _SETUP["message"] = ""
         _SETUP["error"] = None
         _SETUP["detail"] = None
+        _SETUP["log_id"] = ""
+        _SETUP["log_tail"] = ""
+        _SETUP["log_remote"] = False
 
 
 def _resolve_after_job(cfg: dict, after: bool | str | None) -> str | None:
@@ -3486,6 +3492,7 @@ def lrz_dashboard_snapshot(
         "ngc": (cached or {}).get("ngc"),
         "workspace_ok": (cached or {}).get("workspace_ok"),
         "setup": setup,
+        "setup_logs": list_setup_logs(),
         "gpu_target": gpu_target,
         "gpu": gpus if show_gpu else None,
         "gpu_node": (
@@ -3739,6 +3746,8 @@ def lrz_setup_status(cfg: dict | None = None, *, probe_setup: dict | None = None
             "error": _SETUP.get("error"),
             "detail": _SETUP.get("detail"),
             "at": _SETUP.get("at") or None,
+            "log_id": str(_SETUP.get("log_id") or ""),
+            "log_tail": str(_SETUP.get("log_tail") or ""),
         }
     started = float(_SETUP.get("at") or 0)
     if body["inflight"] and started:
@@ -4344,6 +4353,231 @@ def request_occupancy_probe() -> dict[str, Any]:
     return probe_gpu_occupancy(cfg)
 
 
+_SETUP_LOG_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$")
+SETUP_LOG_TAIL_CHARS = 12000
+SETUP_LOG_READ_MAX = 1_500_000
+
+
+def setup_log_root() -> Path:
+    """Local copies of GPU setup stdout. One file per Load GPU setup click."""
+    return Path.cwd() / "outputs" / "lrz-setup-logs"
+
+
+def _setup_log_paths(log_id: str) -> tuple[Path, Path]:
+    if not _SETUP_LOG_ID.fullmatch(log_id or ""):
+        raise ValueError("Unknown setup log.")
+    root = setup_log_root().resolve()
+    log_path = (root / f"{log_id}.log").resolve()
+    meta_path = (root / f"{log_id}.json").resolve()
+    if log_path.parent != root or meta_path.parent != root:
+        raise ValueError("Unknown setup log.")
+    return log_path, meta_path
+
+
+def setup_log_tail(text: str, limit: int = SETUP_LOG_TAIL_CHARS) -> str:
+    """Last part of a setup log, starting on a line boundary when possible."""
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    cut = text[-limit:]
+    newline = cut.find("\n")
+    if 0 <= newline < 400:
+        cut = cut[newline + 1:]
+    return cut
+
+
+def _patch_setup_meta(log_id: str, **updates: Any) -> None:
+    _log_path, meta_path = _setup_log_paths(log_id)
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        meta = {"id": log_id}
+    if not isinstance(meta, dict):
+        meta = {"id": log_id}
+    meta.update(updates)
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = meta_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(meta, indent=2) + "\n")
+    tmp.replace(meta_path)
+
+
+def begin_setup_log(cfg: dict) -> str:
+    """Open a new local log before the GPU srun starts. Older files stay."""
+    root = setup_log_root()
+    root.mkdir(parents=True, exist_ok=True)
+    job = re.sub(r"[^0-9A-Za-z_-]", "", str(cfg.get("job_id") or "unknown")) or "unknown"
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    log_id = f"{stamp}-job{job}"
+    n = 2
+    while (root / f"{log_id}.json").exists():
+        log_id = f"{stamp}-job{job}-{n}"
+        n += 1
+    mode = "artifixer" if cfg.get("artifixer_required") else "baseline"
+    log_path, meta_path = _setup_log_paths(log_id)
+    log_path.write_text("")
+    meta = {
+        "id": log_id,
+        "job_id": str(cfg.get("job_id") or ""),
+        "started_at": time.time(),
+        "ended_at": None,
+        "ok": None,
+        "mode": mode,
+        "qwen_required": bool(cfg.get("qwen_required")),
+        "message": "Loading GPU setup…",
+        "error": None,
+        "bytes": 0,
+        "remote": f"{cfg.get('workspace') or ''}/logs/setup-{cfg.get('job_id')}.log",
+    }
+    meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+    with _SETUP["lock"]:
+        _SETUP["log_id"] = log_id
+        _SETUP["log_tail"] = ""
+        _SETUP["log_remote"] = False
+    return log_id
+
+
+def pull_remote_setup_log(cfg: dict, dest: Path) -> bool:
+    """Copy the in-progress DSS log onto ``dest``. A missing remote file is not an error."""
+    _marker, remote_log = _remote_setup_paths(cfg)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    remote = f"{cfg['user']}@{cfg['host']}:{remote_log}"
+    result = _mux_run(
+        ["rsync", "-az", "--timeout=25", "-e", rsync_ssh_cmd(cfg), remote, str(dest)],
+        check=False,
+    )
+    return result.returncode == 0 and dest.is_file()
+
+
+def refresh_setup_log_from_remote(cfg: dict) -> bool:
+    """Pull the GPU log into the open local file and publish a live tail."""
+    with _SETUP["lock"]:
+        log_id = str(_SETUP.get("log_id") or "")
+        remote = bool(_SETUP.get("log_remote"))
+    if not log_id or not remote:
+        return False
+    try:
+        log_path, _meta_path = _setup_log_paths(log_id)
+    except ValueError:
+        return False
+    copied = False
+    try:
+        copied = pull_remote_setup_log(cfg, log_path)
+    except Exception:
+        logger.warning("setup log copy failed", exc_info=True)
+    text = log_path.read_text(errors="replace") if log_path.is_file() else ""
+    with _SETUP["lock"]:
+        if str(_SETUP.get("log_id") or "") == log_id:
+            _SETUP["log_tail"] = setup_log_tail(text)
+    try:
+        _patch_setup_meta(log_id, bytes=log_path.stat().st_size if log_path.is_file() else 0)
+    except OSError:
+        logger.warning("setup log metadata update failed", exc_info=True)
+    return copied and bool(text.strip())
+
+
+def finalize_setup_log(
+    *,
+    ok: bool,
+    message: str,
+    error: str | None = None,
+    cfg: dict | None = None,
+) -> None:
+    """Finish the open local log. Pulls the GPU file once more when this run started srun."""
+    with _SETUP["lock"]:
+        log_id = str(_SETUP.get("log_id") or "")
+    if not log_id:
+        return
+    if cfg is not None:
+        try:
+            refresh_setup_log_from_remote(cfg)
+        except Exception:
+            logger.warning("final setup log copy failed", exc_info=True)
+    try:
+        log_path, _meta_path = _setup_log_paths(log_id)
+    except ValueError:
+        return
+    existing = log_path.read_text(errors="replace") if log_path.is_file() else ""
+    if not existing.strip():
+        note = (error or message or "").strip()
+        if note:
+            log_path.write_text(note + "\n")
+            existing = note + "\n"
+    tail = setup_log_tail(existing)
+    with _SETUP["lock"]:
+        if str(_SETUP.get("log_id") or "") == log_id:
+            _SETUP["log_tail"] = tail
+    short_error = None
+    if error:
+        lines = [ln.strip() for ln in str(error).splitlines() if ln.strip()]
+        short_error = (lines[-1] if lines else str(error))[:240]
+    try:
+        _patch_setup_meta(
+            log_id,
+            ok=bool(ok),
+            ended_at=time.time(),
+            message=str(message)[:240],
+            error=short_error,
+            bytes=log_path.stat().st_size if log_path.is_file() else 0,
+        )
+    except OSError:
+        logger.warning("could not finalize setup log %s", log_id, exc_info=True)
+
+
+def list_setup_logs(limit: int = 40) -> list[dict[str, Any]]:
+    """Newest local setup logs, metadata only."""
+    root = setup_log_root()
+    if not root.is_dir():
+        return []
+    rows: list[dict[str, Any]] = []
+    for meta_path in root.glob("*.json"):
+        if meta_path.name.endswith(".tmp"):
+            continue
+        try:
+            body = json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(body, dict) or not body.get("id"):
+            continue
+        error = body.get("error")
+        rows.append({
+            "id": body.get("id"),
+            "job_id": body.get("job_id") or "",
+            "started_at": body.get("started_at"),
+            "ended_at": body.get("ended_at"),
+            "ok": body.get("ok"),
+            "mode": body.get("mode") or "",
+            "qwen_required": bool(body.get("qwen_required")),
+            "message": str(body.get("message") or "")[:240],
+            "error": str(error)[:240] if error else None,
+            "bytes": int(body.get("bytes") or 0),
+        })
+    rows.sort(
+        key=lambda row: (float(row.get("started_at") or 0), str(row.get("id") or "")),
+        reverse=True,
+    )
+    return rows[:limit]
+
+
+def read_setup_log(log_id: str) -> dict[str, Any]:
+    """Full text of one local setup log. Rejects ids that leave the log directory."""
+    log_path, meta_path = _setup_log_paths(log_id)
+    if not meta_path.is_file() and not log_path.is_file():
+        raise ValueError("Unknown setup log.")
+    meta: dict[str, Any] = {}
+    if meta_path.is_file():
+        try:
+            loaded = json.loads(meta_path.read_text())
+            if isinstance(loaded, dict):
+                meta = loaded
+        except (OSError, json.JSONDecodeError):
+            meta = {"id": log_id}
+    text = log_path.read_text(errors="replace") if log_path.is_file() else ""
+    truncated = len(text) > SETUP_LOG_READ_MAX
+    if truncated:
+        text = text[-SETUP_LOG_READ_MAX:]
+    return {"ok": True, "id": log_id, "meta": meta, "text": text, "truncated": truncated}
+
+
 def _remote_setup_paths(cfg: dict) -> tuple[str, str]:
     job = str(cfg["job_id"])
     logs = f"{cfg['workspace']}/logs"
@@ -4370,6 +4604,9 @@ def launch_detached_setup(cfg: dict, *, qwen_required: bool | None = None) -> st
         if "SETUP_PID" in line:
             pid = line.strip().split()[-1]
     logger.info("detached GPU setup pid %s job %s", pid, cfg.get("job_id"))
+    with _SETUP["lock"]:
+        if _SETUP.get("log_id"):
+            _SETUP["log_remote"] = True
     return pid
 
 
@@ -4401,6 +4638,7 @@ def poll_detached_setup(cfg: dict, *, timeout: float = SETUP_TIMEOUT_S) -> dict[
         text = (result.stdout or "") + "\n" + (result.stderr or "")
         stripped = text.lstrip()
         if stripped.startswith("MARKER"):
+            refresh_setup_log_from_remote(cfg)
             payload = text.split("MARKER", 1)[-1].strip()
             try:
                 loaded = json.loads(payload)
@@ -4410,11 +4648,13 @@ def poll_detached_setup(cfg: dict, *, timeout: float = SETUP_TIMEOUT_S) -> dict[
                 return loaded
             raise RuntimeError(payload[-1800:] or "Setup marker was not OK.")
         if stripped.startswith("FAILED"):
+            refresh_setup_log_from_remote(cfg)
             rest = text.split("FAILED", 1)[-1]
             detail = parse_setup_ok_output(rest)
             if detail and detail.get("ok"):
                 return detail
             raise RuntimeError(rest[-2500:] or "GPU setup srun failed.")
+        refresh_setup_log_from_remote(cfg)
         rest = text.split("RUNNING", 1)[-1] if "RUNNING" in text else text
         msg = _setup_message_from_log(rest)
         mins, secs = divmod(elapsed, 60)
@@ -4716,6 +4956,7 @@ def request_lrz_setup(
             else " Qwen-Image-Edit stays off the GPU (QWEN_required=false)."
         )
         _SETUP["qwen_required"] = qwen_needed
+        _SETUP["log_remote"] = False
         _SETUP["message"] = (
             (
                 "Clearing leftover occupant on this reserved GPU, then loading splat-explorer…"
@@ -4725,6 +4966,11 @@ def request_lrz_setup(
             + qwen_note
             + (" Preparing ArtiFixer (first setup downloads weights and installs an isolated environment)." if artifixer_required else " Baseline mode.")
         )
+    cfg["qwen_required"] = qwen_needed
+    try:
+        begin_setup_log(cfg)
+    except OSError:
+        logger.warning("could not open local GPU setup log", exc_info=True)
     threading.Thread(
         target=_run_setup_thread,
         args=(cfg, overwrite, qwen_needed, setup_lease),
@@ -4744,12 +4990,14 @@ def _run_setup_thread(
         detail = setup_lrz_gpu(cfg, overwrite=overwrite, qwen_required=qwen_required)
         gpu = detail.get("gpu") or "CUDA"
         extra = " (installed gsplat onto DSS)" if detail.get("installed") else ""
+        message = f"GPU setup ready on {gpu}{extra}."
+        finalize_setup_log(ok=True, message=message, cfg=cfg)
         with _SETUP["lock"]:
             _SETUP["ok"] = True
             _SETUP["detail"] = detail
             _SETUP["error"] = None
             _SETUP["job_id"] = str(cfg.get("job_id") or detail.get("job_id") or "")
-            _SETUP["message"] = f"GPU setup ready on {gpu}{extra}."
+            _SETUP["message"] = message
             _SETUP["at"] = time.time()
             _SETUP["inflight"] = False
         try:
@@ -4758,10 +5006,12 @@ def _run_setup_thread(
             logger.warning("post-setup GPU probe failed", exc_info=True)
     except Exception as exc:
         logger.warning("LRZ GPU setup failed: %s", exc)
+        message = f"GPU setup failed: {exc}"
+        finalize_setup_log(ok=False, message=message, error=str(exc), cfg=cfg)
         with _SETUP["lock"]:
             _SETUP["ok"] = False
             _SETUP["error"] = str(exc)
-            _SETUP["message"] = f"GPU setup failed: {exc}"
+            _SETUP["message"] = message
             _SETUP["at"] = time.time()
             _SETUP["inflight"] = False
     finally:

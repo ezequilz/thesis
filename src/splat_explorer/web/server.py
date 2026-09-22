@@ -29,6 +29,7 @@ Endpoints:
   POST /api/repair/gpu/use      point configs/lrz.local.yaml at {job_id}
   POST /api/repair/gpu/cancel   scancel {job_id}; running ST=R requires {confirm: true}
   POST /api/repair/gpu/setup    load PyTorch/Pyxis container + gsplat onto the current job
+  GET  /api/repair/gpu/setup-log  one local GPU setup log (?id=) copied while that load ran
   POST /api/repair/gpu/occupancy  nvidia-smi occupancy only (not the 10 min squeue probe)
   POST /api/repair/gpu/widen    one scontrol to both A100 partitions
   POST /api/repair/gpu/review   one sinfo snapshot
@@ -906,6 +907,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             query = parse_qs(urlsplit(self.path).query)
             episode = (query.get("episode") or [None])[0]
             self._send_json(studio.snapshot(episode or None))
+            return
+        if path == "/api/repair/gpu/setup-log":
+            query = parse_qs(urlsplit(self.path).query)
+            log_id = (query.get("id") or [""])[0]
+            try:
+                from ..repair_lrz import read_setup_log
+                self._send_json(read_setup_log(log_id))
+            except ValueError as exc:
+                self._send_json({"ok": False, "message": str(exc)}, 404)
             return
         if path == "/api/repair/gpu":
             query = parse_qs(urlsplit(self.path).query)

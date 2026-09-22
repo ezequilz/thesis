@@ -169,6 +169,15 @@
   .err-banner { border: 1px solid rgba(239,106,106,.45); color: var(--err); background: rgba(239,106,106,.06); }
   td.foreign { color: var(--err); }
   td.mine-user { color: var(--ok); }
+  .setup-log {
+    margin: 0 0 12px; max-height: 320px; overflow: auto;
+    background: #0d1117; border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; font: 11.5px/1.45 var(--mono);
+    white-space: pre-wrap; word-break: break-word; color: var(--text);
+  }
+  .setup-log.err { border-color: rgba(239,106,106,.45); }
+  #setup-logs tr.on td { background: rgba(90,162,255,.08); }
+  #setup-logs td.msg { color: var(--dim); font-family: inherit; max-width: 280px; }
   @media (max-width: 1100px) {
     .pipeline { grid-template-columns: 1fr 1fr; }
     .grid { grid-template-columns: 1fr; }
@@ -231,6 +240,10 @@
 <div id="note"></div>
 
 <div id="main">
+  <div class="card" id="setup-log-card" style="margin-bottom:12px">
+    <h2>GPU setup logs <span class="sub">copied locally while Load GPU setup runs · outputs/lrz-setup-logs</span></h2>
+    <div id="setup-logs"><div class="empty">No setup logs yet.</div></div>
+  </div>
   <div class="card" id="avail-card" style="margin-bottom:12px">
     <h2>GPU availability <span class="sub">sinfo + scontrol show node · not looped</span></h2>
     <div id="avail"><div class="empty">Open the SSH session. Availability loads once, or click Refresh availability.</div></div>
@@ -312,6 +325,9 @@ let cancelArmed = null;
 let cancelArmedTimer = null;
 let loadProbeTimer = null;
 let occupancyBusy = false;
+let setupLogPin = null;
+const setupLogCache = new Map();
+const setupLogLoading = new Set();
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -1117,8 +1133,96 @@ function renderChrome() {
   syncAutoInterval();
 }
 
+function fmtUnix(ts) {
+  const n = Number(ts);
+  if (!n) return "–";
+  const d = new Date(n * 1000);
+  return Number.isNaN(d.getTime()) ? "–" : d.toLocaleString();
+}
+
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function setupLogResult(row) {
+  if (!row) return "–";
+  if (row.ok === true) return "ready";
+  if (row.ok === false) return "failed";
+  return "running";
+}
+
+async function loadSetupLog(id) {
+  if (!id || setupLogLoading.has(id) || setupLogCache.has(id)) return;
+  setupLogLoading.add(id);
+  try {
+    const r = await fetch("/api/repair/gpu/setup-log?id=" + encodeURIComponent(id));
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.message || "Could not read setup log");
+    setupLogCache.set(id, data.text || "");
+  } catch (err) {
+    setupLogCache.set(id, "Could not read this log: " + err.message);
+  } finally {
+    setupLogLoading.delete(id);
+    renderSetupLogs();
+  }
+}
+
+function renderSetupLogs() {
+  const box = $("setup-logs");
+  if (!box) return;
+  const logs = snap?.setup_logs || [];
+  const liveId = snap?.setup?.log_id || "";
+  const inflight = Boolean(snap?.setup?.inflight);
+  if (inflight && liveId) setupLogCache.delete(liveId);
+  const id = setupLogPin || liveId || (logs[0] && logs[0].id) || "";
+  const liveView = Boolean(inflight && id && id === liveId);
+  const row = logs.find(item => item.id === id);
+  const failed = row ? row.ok === false : Boolean(snap?.setup?.error);
+  let text = "";
+  if (!id) text = "";
+  else if (liveView) text = snap?.setup?.log_tail || snap?.setup?.message || "";
+  else if (setupLogCache.has(id)) text = setupLogCache.get(id);
+  else {
+    text = id === liveId ? (snap?.setup?.log_tail || snap?.setup?.error || "Loading full log…") : "Loading full log…";
+    loadSetupLog(id);
+  }
+  const prev = $("setup-log-view");
+  const prevScroll = prev ? prev.scrollTop : 0;
+  const stick = !prev || (prev.scrollHeight - prev.scrollTop - prev.clientHeight < 48);
+  const head = !id ? "" : `
+    <div class="empty" style="padding-top:0">
+      ${liveView ? "Live · " : ""}${esc(row?.mode || (snap?.setup?.detail?.setup_mode || ""))}
+      ${row?.job_id ? " · job " + esc(row.job_id) : ""}
+      ${liveView ? " · copying from the GPU" : " · outputs/lrz-setup-logs/" + esc(id) + ".log"}
+      ${row && row.ok === false && row.error ? " · " + esc(row.error) : ""}
+    </div>
+    <pre id="setup-log-view" class="setup-log${failed && !liveView ? " err" : ""}">${esc(text || (liveView ? "Waiting for the first lines from the GPU…" : "(empty log)"))}</pre>`;
+  const table = logs.length ? `<table>
+    <thead><tr><th>when</th><th>job</th><th>mode</th><th>result</th><th>size</th><th></th></tr></thead>
+    <tbody>${logs.map(item => {
+      const on = item.id === id;
+      const cls = item.ok === true ? "state-ok" : item.ok === false ? "state-err" : "state-dim";
+      return `<tr class="${on ? "on" : ""}" data-setup-log="${esc(item.id)}">
+        <td>${esc(fmtUnix(item.started_at))}</td>
+        <td>${esc(item.job_id || "–")}</td>
+        <td>${esc(item.mode || "–")}${item.qwen_required ? " · qwen" : ""}</td>
+        <td class="${cls}">${esc(setupLogResult(item))}</td>
+        <td>${esc(fmtBytes(item.bytes))}</td>
+        <td><button type="button" class="ghost tiny" data-setup-log="${esc(item.id)}">${on && liveView ? "Live" : "Open"}</button></td>
+      </tr>`;
+    }).join("")}</tbody>
+  </table>` : `<div class="empty">No setup logs yet. Load GPU setup keeps each run’s GPU output in outputs/lrz-setup-logs.</div>`;
+  box.innerHTML = head + table;
+  const view = $("setup-log-view");
+  if (view) view.scrollTop = stick ? view.scrollHeight : prevScroll;
+}
+
 function render() {
   renderChrome();
+  renderSetupLogs();
   renderPipeline();
   renderGpu();
   renderOccupancy();
@@ -1302,10 +1406,19 @@ $("in-artifixer-required")?.addEventListener("change", () => {
     $("in-qwen-required").dataset.touched = "1";
   }
 });
+$("setup-logs").addEventListener("click", (ev) => {
+  const el = ev.target.closest("[data-setup-log]");
+  if (!el) return;
+  const id = el.getAttribute("data-setup-log");
+  if (!id) return;
+  setupLogPin = (snap?.setup?.inflight && id === snap?.setup?.log_id) ? null : id;
+  renderSetupLogs();
+});
 $("btn-setup").onclick = async () => {
   const reason = setupNeedsOverwrite();
   const qwenRequired = Boolean($("in-qwen-required")?.checked);
   $("btn-setup").disabled = true;
+  setupLogPin = null;
   try {
     snap = await postJson("/api/repair/gpu/setup", {
       force: true,

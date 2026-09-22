@@ -1676,7 +1676,7 @@ def test_physical_wipe_indices_never_guess_gpu0_on_a_full_node():
     assert physical_indices_for_wipe(remapped) == [1]
 
 
-def test_request_setup_auto_starts_when_alphafold_leftover(monkeypatch):
+def test_request_setup_auto_starts_when_alphafold_leftover(monkeypatch, tmp_path):
     from splat_explorer.repair_lrz import (
         _PROBE,
         _SETUP,
@@ -1688,6 +1688,9 @@ def test_request_setup_auto_starts_when_alphafold_leftover(monkeypatch):
 
     reset_setup_cache()
     reset_gpu_probe_cache()
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz.setup_log_root", lambda: tmp_path / "setup-logs",
+    )
     occ = parse_gpu_occupancy_text(
         "GPUENV\nCUDA_VISIBLE_DEVICES=0\nSLURM_JOB_GPUS=0\nUSER=go73kaf2\n"
         "GPUDEVS\n0\nGPUCSV\n"
@@ -1728,7 +1731,7 @@ def test_request_setup_auto_starts_when_alphafold_leftover(monkeypatch):
         reset_setup_cache()
 
 
-def test_request_setup_probes_occupancy_when_cache_empty(monkeypatch):
+def test_request_setup_probes_occupancy_when_cache_empty(monkeypatch, tmp_path):
     from splat_explorer.repair_lrz import (
         _SETUP,
         parse_gpu_occupancy_text,
@@ -1739,6 +1742,9 @@ def test_request_setup_probes_occupancy_when_cache_empty(monkeypatch):
 
     reset_setup_cache()
     reset_gpu_probe_cache()
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz.setup_log_root", lambda: tmp_path / "setup-logs",
+    )
     occ = parse_gpu_occupancy_text(
         "GPUENV\nCUDA_VISIBLE_DEVICES=0\nSLURM_JOB_GPUS=\nUSER=go73kaf2\n"
         "GPUDEVS\n0\n1\n2\n3\n4\n5\n6\n7\nGPUCSV\n"
@@ -1769,6 +1775,61 @@ def test_request_setup_probes_occupancy_when_cache_empty(monkeypatch):
     finally:
         with _SETUP["lock"]:
             _SETUP["inflight"] = False
+        reset_setup_cache()
+
+
+def test_setup_log_keeps_each_gpu_load(tmp_path, monkeypatch):
+    from splat_explorer.repair_lrz import (
+        _SETUP,
+        begin_setup_log,
+        finalize_setup_log,
+        list_setup_logs,
+        read_setup_log,
+        refresh_setup_log_from_remote,
+        reset_setup_cache,
+    )
+
+    reset_setup_cache()
+    monkeypatch.setattr("splat_explorer.repair_lrz.setup_log_root", lambda: tmp_path)
+    cfg = {
+        "user": "go73kaf2", "host": "login.ai.lrz.de", "job_id": "5786047",
+        "workspace": "/dss/ws", "artifixer_required": True, "qwen_required": False,
+    }
+    gpu_text = (
+        "ARTIFIXER_SETUP pip install fused-ssim\n"
+        "ModuleNotFoundError: No module named 'torch'\n"
+        "SETUP_EXIT:1\n"
+    )
+
+    def fake_pull(cfg, dest):
+        dest.write_text(gpu_text)
+        return True
+
+    monkeypatch.setattr("splat_explorer.repair_lrz.pull_remote_setup_log", fake_pull)
+    try:
+        first = begin_setup_log(cfg)
+        with _SETUP["lock"]:
+            _SETUP["log_remote"] = True
+        assert refresh_setup_log_from_remote(cfg) is True
+        finalize_setup_log(
+            ok=False, message="GPU setup failed", error="SETUP_EXIT:1\n" + gpu_text, cfg=cfg,
+        )
+        saved = (tmp_path / f"{first}.log").read_text()
+        assert saved == gpu_text
+        second = begin_setup_log({**cfg, "artifixer_required": False})
+        finalize_setup_log(ok=False, message="SSH session is down", error="open the LRZ SSH session first")
+        rows = list_setup_logs()
+        assert [row["id"] for row in rows] == [second, first]
+        assert rows[1]["mode"] == "artifixer" and rows[1]["ok"] is False
+        assert rows[0]["mode"] == "baseline"
+        loaded = read_setup_log(first)
+        assert "fused-ssim" in loaded["text"]
+        assert (tmp_path / f"{second}.log").read_text().startswith("open the LRZ SSH session")
+        with pytest.raises(ValueError, match="Unknown setup log"):
+            read_setup_log("../secret")
+        with pytest.raises(ValueError, match="Unknown setup log"):
+            read_setup_log("missing-log")
+    finally:
         reset_setup_cache()
 
 
