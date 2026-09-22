@@ -119,6 +119,20 @@ def test_invalid_start_form_is_rejected(tmp_path: Path, field: str, value):
         studio.validate_config({field: value})
 
 
+def test_scene_run_image_edit_defaults_to_gpt_and_keeps_qwen(tmp_path: Path):
+    _fake_app, studio, _store = _app(tmp_path)
+    default = studio.validate_config({})
+    assert default["image_edit_backend"] == "gpt-image-2.5-sunburst"
+    flare = studio.validate_config({"image_edit_backend": "gpt-image-2.5-flare"})
+    assert flare["image_edit_backend"] == "gpt-image-2.5-flare"
+    legacy = studio.validate_config({"image_edit_backend": "gpt-image-2"})
+    assert legacy["image_edit_backend"] == "gpt-image-2"
+    qwen = studio.validate_config({"image_edit_backend": "qwen"})
+    assert qwen["image_edit_backend"] == "qwen-image-edit"
+    with pytest.raises(SceneRunValidationError):
+        studio.validate_config({"image_edit_backend": "midjourney"})
+
+
 def test_state_recognizes_nested_store_status_and_manager(tmp_path: Path):
     _fake_app, studio, _store = _app(tmp_path)
     state = studio.state()

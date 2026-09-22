@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any, Mapping
 
 from splat_explorer.agent.actions import Action, wants_regenerate
+from splat_explorer.image_edit import SCENE_RUN_GPT_IMAGE_MODEL, canonical_image_edit_choice
 
 
 class RepairTrigger(str, Enum):
@@ -60,7 +61,7 @@ class SceneRunConfig:
     height: int = 720
     duration_seconds: int = 3600
     send_map: bool = True
-    image_edit_backend: str = "qwen-image-edit"
+    image_edit_backend: str = SCENE_RUN_GPT_IMAGE_MODEL
     repair_backend: str = "gsfix-gsplat"
     repair_trigger: RepairTrigger = RepairTrigger.REGENERATE_YES
     repair_type: RepairType = RepairType.ORIGINAL
@@ -71,6 +72,11 @@ class SceneRunConfig:
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must be a non-empty string")
+        try:
+            image_backend = canonical_image_edit_choice(self.image_edit_backend)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        object.__setattr__(self, "image_edit_backend", image_backend)
         if not isinstance(self.model, str):
             raise ValueError("model must be a string")
         for name in ("width", "height", "duration_seconds", "repair_seconds"):

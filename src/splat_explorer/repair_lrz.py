@@ -3665,8 +3665,16 @@ def srun_worker_command(cfg: dict, job_id: str, *, mem_flag: str | None = None) 
     return container_srun_prefix(cfg, mem_flag=mem_flag) + f"bash -lc {shlex.quote(inner)}"
 
 
-def srun_setup_command(cfg: dict) -> str:
-    inner = _remote_pythonpath_exports(cfg) + "python -m splat_explorer.repair_lrz --setup"
+def srun_setup_command(cfg: dict, *, qwen_required: bool | None = None) -> str:
+    from .image_edit import resolve_qwen_required
+
+    needed = resolve_qwen_required(qwen_required)
+    flag = "true" if needed else "false"
+    inner = (
+        _remote_pythonpath_exports(cfg)
+        + f"export QWEN_required={flag}; "
+        + f"python -m splat_explorer.repair_lrz --setup --qwen-required {flag}"
+    )
     setup_cfg = dict(cfg)
     setup_cfg["cpus"] = 1  # nvcc thread pool tracks CPU count; 1 keeps host RAM down
     return container_srun_prefix(setup_cfg) + f"bash -lc {shlex.quote(inner)}"
@@ -4053,7 +4061,124 @@ def compile_gsplat_cuda_extension(*, site: str | None = None) -> dict[str, Any]:
     return {"ok": True, "so": str(so), "reused": False, "out_of_process": True}
 
 
-def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
+QWEN_IMAGE_EDIT_REQUIREMENTS = {
+    "numpy": "numpy==1.26.4",
+    "ninja": "ninja>=1.11",
+    "diffusers": "diffusers>=0.36.0,<0.37",
+    "transformers": "transformers>=4.51.3,<5",
+    "torchvision": "torchvision==0.29.0",
+    "accelerate": "accelerate>=1.2.0",
+    "safetensors": "safetensors>=0.4.5",
+    "huggingface_hub": "huggingface-hub==0.36.0",
+    "tokenizers": "tokenizers==0.22.2",
+    "regex": "regex>=2024.11.6",
+}
+
+
+def _qwen_packages_ready(python_dir: Path) -> bool:
+    requirements = QWEN_IMAGE_EDIT_REQUIREMENTS
+    return all(
+        (python_dir / package).is_dir()
+        and (
+            package != "tokenizers"
+            or any(python_dir.glob("tokenizers-0.22.2.dist-info"))
+        )
+        and (
+            package != "huggingface_hub"
+            or any(python_dir.glob("huggingface_hub-0.36.0.dist-info"))
+        )
+        and (
+            package != "numpy"
+            or any(python_dir.glob("numpy-1.26.4.dist-info"))
+        )
+        and (
+            package != "torchvision"
+            or any(python_dir.glob("torchvision-0.29.0.dist-info"))
+        )
+        for package in requirements
+    )
+
+
+def install_qwen_image_edit_packages(
+    python_dir: Path,
+    site: str,
+    *,
+    required: bool,
+) -> dict[str, Any]:
+    """Install Qwen-Image-Edit deps onto DSS only when ``QWEN_required`` is true.
+
+    When it is false this returns without pip, so GPU setup does not spend
+    time on diffusers/transformers. ``ready`` still reports packages left by
+    an earlier Qwen setup.
+    """
+    python_dir = Path(python_dir)
+    if not required:
+        logger.info(
+            "Skipping Qwen-Image-Edit install (QWEN_required=false); "
+            "CliRelay edits images off this GPU."
+        )
+        return {
+            "ready": _qwen_packages_ready(python_dir),
+            "installed": False,
+            "required": False,
+        }
+
+    for metadata_dir in python_dir.glob("tokenizers-*.dist-info"):
+        if metadata_dir.name != "tokenizers-0.22.2.dist-info":
+            shutil.rmtree(metadata_dir, ignore_errors=True)
+    for metadata_dir in python_dir.glob("huggingface_hub-*.dist-info"):
+        if metadata_dir.name != "huggingface_hub-0.36.0.dist-info":
+            shutil.rmtree(metadata_dir, ignore_errors=True)
+    for metadata_dir in python_dir.glob("numpy-*.dist-info"):
+        if metadata_dir.name != "numpy-1.26.4.dist-info":
+            shutil.rmtree(metadata_dir, ignore_errors=True)
+    for metadata_dir in python_dir.glob("torchvision-*.dist-info"):
+        if metadata_dir.name != "torchvision-0.29.0.dist-info":
+            shutil.rmtree(metadata_dir, ignore_errors=True)
+    missing_image_edit = [
+        requirement
+        for package, requirement in QWEN_IMAGE_EDIT_REQUIREMENTS.items()
+        if not (python_dir / package).is_dir()
+        or (
+            package == "tokenizers"
+            and not any(python_dir.glob("tokenizers-0.22.2.dist-info"))
+        )
+        or (
+            package == "huggingface_hub"
+            and not any(python_dir.glob("huggingface_hub-0.36.0.dist-info"))
+        )
+        or (
+            package == "numpy"
+            and not any(python_dir.glob("numpy-1.26.4.dist-info"))
+        )
+        or (
+            package == "torchvision"
+            and not any(python_dir.glob("torchvision-0.29.0.dist-info"))
+        )
+    ]
+    installed = False
+    if missing_image_edit:
+        installed = True
+        logger.info(
+            "Installing scene-run Qwen dependencies onto DSS: %s",
+            ", ".join(missing_image_edit),
+        )
+        import sys
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", "--upgrade", "--no-deps",
+            "--target", site,
+            *missing_image_edit,
+        ])
+        import importlib
+        importlib.invalidate_caches()
+    return {
+        "ready": _qwen_packages_ready(python_dir),
+        "installed": installed,
+        "required": True,
+    }
+
+
+def apply_gpu_setup(*, workspace: str = "/workspace", qwen_required: bool | None = None) -> dict[str, Any]:
     """Inside the Pyxis container: verify torch/CUDA and install gsplat onto DSS."""
     import sys
 
@@ -4107,68 +4232,12 @@ def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
     gsplat_ver = _gsplat_version_from_site(python_dir)
     arch_file.write_text(arch + "\n")
 
-    # The persistent scene-run worker performs self-hosted image edit in the
-    # same Pyxis allocation. Install code dependencies onto DSS once; model
-    # weights remain an explicit, separately cached download.
-    image_edit_requirements = {
-        "numpy": "numpy==1.26.4",
-        "ninja": "ninja>=1.11",
-        "diffusers": "diffusers>=0.36.0,<0.37",
-        "transformers": "transformers>=4.51.3,<5",
-        "torchvision": "torchvision==0.29.0",
-        "accelerate": "accelerate>=1.2.0",
-        "safetensors": "safetensors>=0.4.5",
-        "huggingface_hub": "huggingface-hub==0.36.0",
-        "tokenizers": "tokenizers==0.22.2",
-        "regex": "regex>=2024.11.6",
-    }
-    for metadata_dir in python_dir.glob("tokenizers-*.dist-info"):
-        if metadata_dir.name != "tokenizers-0.22.2.dist-info":
-            shutil.rmtree(metadata_dir, ignore_errors=True)
-    for metadata_dir in python_dir.glob("huggingface_hub-*.dist-info"):
-        if metadata_dir.name != "huggingface_hub-0.36.0.dist-info":
-            shutil.rmtree(metadata_dir, ignore_errors=True)
-    for metadata_dir in python_dir.glob("numpy-*.dist-info"):
-        if metadata_dir.name != "numpy-1.26.4.dist-info":
-            shutil.rmtree(metadata_dir, ignore_errors=True)
-    for metadata_dir in python_dir.glob("torchvision-*.dist-info"):
-        if metadata_dir.name != "torchvision-0.29.0.dist-info":
-            shutil.rmtree(metadata_dir, ignore_errors=True)
-    missing_image_edit = [
-        requirement
-        for package, requirement in image_edit_requirements.items()
-        if not (python_dir / package).is_dir()
-        or (
-            package == "tokenizers"
-            and not any(python_dir.glob("tokenizers-0.22.2.dist-info"))
-        )
-        or (
-            package == "huggingface_hub"
-            and not any(python_dir.glob("huggingface_hub-0.36.0.dist-info"))
-        )
-        or (
-            package == "numpy"
-            and not any(python_dir.glob("numpy-1.26.4.dist-info"))
-        )
-        or (
-            package == "torchvision"
-            and not any(python_dir.glob("torchvision-0.29.0.dist-info"))
-        )
-    ]
-    image_edit_installed = False
-    if missing_image_edit:
-        image_edit_installed = True
-        logger.info(
-            "Installing scene-run Qwen dependencies onto DSS: %s",
-            ", ".join(missing_image_edit),
-        )
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install", "--upgrade", "--no-deps",
-            "--target", site,
-            *missing_image_edit,
-        ])
-        import importlib
-        importlib.invalidate_caches()
+    from .image_edit import resolve_qwen_required
+
+    qwen_needed = resolve_qwen_required(qwen_required)
+    qwen_stats = install_qwen_image_edit_packages(
+        python_dir, site, required=qwen_needed,
+    )
 
     ext_dir = python_dir / "torch_extensions"
     tmp_dir = root / "tmp"
@@ -4191,10 +4260,9 @@ def apply_gpu_setup(*, workspace: str = "/workspace") -> dict[str, Any]:
         "cuda": cuda_ver,
         "gsplat": str(gsplat_ver or "?"),
         "installed": installed,
-        "image_edit_ready": all(
-            (python_dir / package).is_dir() for package in image_edit_requirements
-        ),
-        "image_edit_installed": image_edit_installed,
+        "QWEN_required": bool(qwen_stats["required"]),
+        "image_edit_ready": bool(qwen_stats["ready"]),
+        "image_edit_installed": bool(qwen_stats["installed"]),
         "python": site,
         "cuda_arch": arch,
         "compute_cap": f"{int(cap[0])}.{int(cap[1])}",
@@ -4259,10 +4327,10 @@ def _remote_setup_paths(cfg: dict) -> tuple[str, str]:
     return f"{logs}/setup-{job}.json", f"{logs}/setup-{job}.log"
 
 
-def launch_detached_setup(cfg: dict) -> str:
+def launch_detached_setup(cfg: dict, *, qwen_required: bool | None = None) -> str:
     """Start srun setup on the login node so the SSH mux is not held for 30 min."""
     marker, log = _remote_setup_paths(cfg)
-    srun = srun_setup_command(cfg)
+    srun = srun_setup_command(cfg, qwen_required=qwen_required)
     inner = f"{srun} >{shlex.quote(log)} 2>&1; echo SETUP_EXIT:$? >>{shlex.quote(log)}"
     remote = (
         f"mkdir -p {shlex.quote(str(Path(log).parent))} && "
@@ -4426,7 +4494,12 @@ def ensure_lrz_gpu_ready(cfg: dict | None = None) -> dict[str, Any]:
     return wait_for_lrz_setup(cfg)
 
 
-def setup_lrz_gpu(cfg: dict | None = None, *, overwrite: bool = False) -> dict[str, Any]:
+def setup_lrz_gpu(
+    cfg: dict | None = None,
+    *,
+    overwrite: bool = False,
+    qwen_required: bool | None = None,
+) -> dict[str, Any]:
     """Rsync code, start named Pyxis container, verify torch/gsplat.
 
     Foreign leftovers on THIS reserved GPU are cleared automatically. Our own
@@ -4446,10 +4519,18 @@ def setup_lrz_gpu(cfg: dict | None = None, *, overwrite: bool = False) -> dict[s
         )
     probe_job(cfg)
     with _gpu_exclusive("setup", timeout=8.0):
-        return _setup_lrz_gpu_locked(cfg, overwrite=overwrite)
+        return _setup_lrz_gpu_locked(cfg, overwrite=overwrite, qwen_required=qwen_required)
 
 
-def _setup_lrz_gpu_locked(cfg: dict, *, overwrite: bool = False) -> dict[str, Any]:
+def _setup_lrz_gpu_locked(
+    cfg: dict,
+    *,
+    overwrite: bool = False,
+    qwen_required: bool | None = None,
+) -> dict[str, Any]:
+    from .image_edit import resolve_qwen_required
+
+    qwen_needed = resolve_qwen_required(qwen_required)
     _set_setup_message("Checking who is using the allocated GPU…")
     occ = None
     try:
@@ -4471,18 +4552,30 @@ def _setup_lrz_gpu_locked(cfg: dict, *, overwrite: bool = False) -> dict[str, An
             marker = read_remote_setup_marker(cfg)
         except RuntimeError:
             marker = {"ok": False}
-        if marker.get("ok"):
+        qwen_missing = (
+            bool(marker.get("ok"))
+            and qwen_needed
+            and marker.get("image_edit_ready") is not True
+        )
+        if marker.get("ok") and not qwen_missing:
             marker = dict(marker)
             marker["reused"] = True
+            marker["QWEN_required"] = qwen_needed
             return marker
-        connected = pick_connected_gpu((occ or {}).get("gpus") if occ else None)
-        return {
-            "ok": True,
-            "reused": True,
-            "job_id": str(cfg.get("job_id") or ""),
-            "gpu": (connected or {}).get("name") or "CUDA",
-            "compute_cap": (connected or {}).get("compute_cap"),
-        }
+        if qwen_missing:
+            _set_setup_message(
+                "GPU container is up. Installing Qwen-Image-Edit "
+                "(QWEN_required=true)…"
+            )
+        else:
+            connected = pick_connected_gpu((occ or {}).get("gpus") if occ else None)
+            return {
+                "ok": True,
+                "reused": True,
+                "job_id": str(cfg.get("job_id") or ""),
+                "gpu": (connected or {}).get("name") or "CUDA",
+                "compute_cap": (connected or {}).get("compute_cap"),
+            }
     if foreign:
         _set_setup_message(
             "Clearing leftover process(es) on THIS reserved GPU only, then loading splat-explorer…"
@@ -4515,15 +4608,26 @@ def _setup_lrz_gpu_locked(cfg: dict, *, overwrite: bool = False) -> dict[str, An
     _set_setup_message(". ".join(bits))
     sync_code_to_dss(cfg)
     name = container_name_for_job(cfg)
+    qwen_note = (
+        " Including Qwen-Image-Edit (QWEN_required=true)."
+        if qwen_needed
+        else " Skipping Qwen-Image-Edit (QWEN_required=false)."
+    )
     _set_setup_message(
         f"Starting Pyxis container {name} from pytorch.sqsh on this allocation "
-        "(first extract/compile on a new A100/H100 node can take 10–20 min)…"
+        "(first extract/compile on a new A100/H100 node can take 10–20 min)."
+        + qwen_note
     )
-    launch_detached_setup(cfg)
+    launch_detached_setup(cfg, qwen_required=qwen_needed)
     return poll_detached_setup(cfg)
 
 
-def request_lrz_setup(*, force: bool = True, overwrite: bool = False) -> dict[str, Any]:
+def request_lrz_setup(
+    *,
+    force: bool = True,
+    overwrite: bool = False,
+    qwen_required: bool | None = None,
+) -> dict[str, Any]:
     """Start GPU setup in a background thread. Safe to click once per allocation."""
     cfg = load_lrz_config()
     if not lrz_session_alive(cfg):
@@ -4547,6 +4651,19 @@ def request_lrz_setup(*, force: bool = True, overwrite: bool = False) -> dict[st
         raise RuntimeError(
             "A CUDA repair is using this GPU. Stop it on /repair before reloading setup."
         )
+    from .image_edit import resolve_qwen_required
+    import splat_explorer.image_edit as image_edit
+
+    app_cfg = None
+    if qwen_required is None:
+        try:
+            from .config import load_config
+
+            app_cfg = load_config()
+        except Exception:
+            logger.debug("could not read image_edit config for QWEN_required", exc_info=True)
+    qwen_needed = resolve_qwen_required(qwen_required, cfg=app_cfg)
+    image_edit.QWEN_required = qwen_needed
     reason = occupancy_reason_for_setup(overwrite=overwrite, refresh_if_missing=True)
     with _SETUP["lock"]:
         if _SETUP["inflight"]:
@@ -4559,20 +4676,36 @@ def request_lrz_setup(*, force: bool = True, overwrite: bool = False) -> dict[st
         _SETUP["detail"] = None
         _SETUP["job_id"] = job
         _SETUP["at"] = time.time()
+        qwen_note = (
+            " Including Qwen-Image-Edit (QWEN_required=true)."
+            if qwen_needed
+            else " Qwen-Image-Edit stays off the GPU (QWEN_required=false)."
+        )
+        _SETUP["qwen_required"] = qwen_needed
         _SETUP["message"] = (
-            "Clearing leftover occupant on this reserved GPU, then loading splat-explorer…"
-            if reason
-            else "Uploading code to DSS, then starting the PyTorch container…"
+            (
+                "Clearing leftover occupant on this reserved GPU, then loading splat-explorer…"
+                if reason
+                else "Uploading code to DSS, then starting the PyTorch container…"
+            )
+            + qwen_note
         )
     threading.Thread(
-        target=_run_setup_thread, args=(cfg, overwrite), daemon=True, name="lrz-gpu-setup",
+        target=_run_setup_thread,
+        args=(cfg, overwrite, qwen_needed),
+        daemon=True,
+        name="lrz-gpu-setup",
     ).start()
     return lrz_setup_status(cfg)
 
 
-def _run_setup_thread(cfg: dict, overwrite: bool = False) -> None:
+def _run_setup_thread(
+    cfg: dict,
+    overwrite: bool = False,
+    qwen_required: bool | None = None,
+) -> None:
     try:
-        detail = setup_lrz_gpu(cfg, overwrite=overwrite)
+        detail = setup_lrz_gpu(cfg, overwrite=overwrite, qwen_required=qwen_required)
         gpu = detail.get("gpu") or "CUDA"
         extra = " (installed gsplat onto DSS)" if detail.get("installed") else ""
         with _SETUP["lock"]:
@@ -5187,6 +5320,12 @@ def main(argv: list[str] | None = None) -> None:
         help="Inside the Pyxis container: verify torch/CUDA and install gsplat onto DSS",
     )
     parser.add_argument(
+        "--qwen-required",
+        choices=("true", "false"),
+        default=None,
+        help="Install Qwen-Image-Edit during --setup. Default follows QWEN_required.",
+    )
+    parser.add_argument(
         "--write-gsplat-ninja", action="store_true",
         help="Emit gsplat CUDA build.ninja then exit (no nvcc; used by --setup)",
     )
@@ -5206,7 +5345,8 @@ def main(argv: list[str] | None = None) -> None:
         print("COMPILE_OK " + json.dumps(stats), flush=True)
         return
     if args.setup:
-        stats = apply_gpu_setup()
+        qwen_flag = None if args.qwen_required is None else args.qwen_required == "true"
+        stats = apply_gpu_setup(qwen_required=qwen_flag)
         logger.info("gpu setup done: %s", stats)
         return
     os.environ["TORCH_CUDA_ARCH_LIST"] = os.environ.get("LRZ_CUDA_ARCH") or "8.0"

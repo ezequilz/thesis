@@ -24,8 +24,9 @@ class GptImageEditBackend:
         self.timeout_s = timeout_s
 
     @classmethod
-    def from_config(cls, cfg=None, client=None) -> "GptImageEditBackend":
-        from .agent.regenerate import IMAGE_MODEL, REQUEST_TIMEOUT_S
+    def from_config(cls, cfg=None, client=None, model: str | None = None) -> "GptImageEditBackend":
+        from .agent.regenerate import REQUEST_TIMEOUT_S
+        from .image_edit import resolve_gpt_image_model
 
         if client is None:
             client = _cli_relay_client(cfg)
@@ -34,7 +35,8 @@ class GptImageEditBackend:
             timeout_s = float(timeout)
         except (TypeError, ValueError):
             timeout_s = REQUEST_TIMEOUT_S
-        return cls(client=client, model=IMAGE_MODEL, timeout_s=timeout_s)
+        chosen = model or resolve_gpt_image_model(cfg=cfg)
+        return cls(client=client, model=chosen, timeout_s=timeout_s)
 
     def edit(self, image_path: Path, prompt: str) -> ImageEditResult:
         from .agent.regenerate import REQUEST_TIMEOUT_S, ask_regenerate, extract_images

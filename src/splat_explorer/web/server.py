@@ -1097,10 +1097,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(snap)
             return
         elif path == "/api/repair/gpu/setup":
+            if "QWEN_required" in body:
+                qwen_required = body.get("QWEN_required")
+            elif "qwen_required" in body:
+                qwen_required = body.get("qwen_required")
+            else:
+                qwen_required = None
             try:
                 snap = studio.gpu_load_setup(
                     force=bool(body.get("force", True)),
                     overwrite=bool(body.get("overwrite", False)),
+                    qwen_required=qwen_required,
                 )
             except Exception as exc:
                 from ..repair_lrz import SetupNeedsOverwrite

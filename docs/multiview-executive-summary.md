@@ -1,5 +1,7 @@
 # From single-view repair to consistent 3D scene refinement
 
+> Updated scope: the next research phase includes original photographs and calibrated poses. See [the ArtiFixer research proposal](artifixer-research-proposal.md) for the revised contribution, matched-input comparison and experimental plan. Asset-only recommendations below remain a secondary track.
+
 Executive review and proposed research plan · 22 September 2026
 
 **Refined recommendation:** see the [method comparison and first-experiment design](/Users/juliuskleinle/Desktop/thesis-1/docs/multiview-method-selection.md). It prioritizes specialist trajectory restoration (ArtiFixer, with ArtifactWorld and FixAnything comparators), separates dense generation from diverse fitting views, and adds oracle-target and intersecting-path tests. Its experiment sequence and calibrated acceptance guidance supersede the illustrative sequence/settings below.

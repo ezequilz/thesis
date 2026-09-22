@@ -38,7 +38,8 @@ checkpoint used by both the GPU worker and the local viser/VLM harness.
 5. Stop at the earlier of the user deadline and LRZ reservation deadline.
 
 The default path is Venetian Balcony, 960×720, RGB plus bird's-eye map,
-one hour, Qwen-Image-Edit-2511, `regenerate_yes`, and the original GSFix3D
+one hour, CliRelay `gpt-image-2.5-sunburst` (flare and `gpt-image-2` are
+selectable; Qwen-Image-Edit-2511 stays the GPU backup), `regenerate_yes`, and the original GSFix3D
 CUDA refine from [refine_gs.py](https://github.com/GSFix3D/GSFix3D/blob/main/scripts/gsfix3d/refine_gs.py):
 20 photometric iterations per repaired view (0.8 L1 + 0.2 SSIM, densify every
 5 steps). Repeated triggered views incrementally update `scene_repaired.ply`.
@@ -57,5 +58,9 @@ touch outputs/scene-runs/<run-id>/STOP
 
 All phases and failures are persisted in `status.json` and `events.jsonl`.
 If the GPU allocation expires, the latest complete PLY remains reviewable.
-Model weights are never downloaded implicitly; preload Qwen into the remote
-Hugging Face cache or explicitly enable the one-time download in configuration.
+GPU setup skips Qwen-Image-Edit unless `QWEN_required` is true (GPU page
+checkbox, repair-page Qwen image backend, `QWEN_required` / `QWEN_REQUIRED`
+env, or `image_edit.QWEN_required`). A Qwen scene-run refuses to start until
+Reload GPU setup has installed those packages. Model weights are never
+downloaded implicitly; preload Qwen into the remote Hugging Face cache or
+explicitly enable the one-time download in configuration.

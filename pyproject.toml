@@ -27,7 +27,9 @@ apple = [
 ]
 # VLM API access (openai client is also used for the CliRelay backend)
 vlm = ["openai>=1.40"]
-# Self-hosted Qwen-Image-Edit-2511 (RGB repair). Needs CUDA torch from [gpu].
+# Self-hosted Qwen-Image-Edit-2511 (RGB repair backup). Needs CUDA torch from [gpu].
+# GPU setup installs this only when QWEN_required is true. Scene-runs default to
+# CliRelay gpt-image-2.5 and do not need these packages.
 # Diffusers >=0.36 ships QwenImageEditPlusPipeline (the 2511 model-card class).
 image-edit = [
     "diffusers>=0.36.0",

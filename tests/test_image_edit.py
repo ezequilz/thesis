@@ -14,14 +14,18 @@ from PIL import Image
 from splat_explorer.image_edit import (
     BACKEND_GPT,
     BACKEND_QWEN,
+    GPT_IMAGE_FLARE,
+    SCENE_RUN_GPT_IMAGE_MODEL,
     apply_image_edit_overrides,
     image_edit_shares_photometric_gpu,
     list_image_edit_backends,
     make_image_edit_backend,
     overlay_image_edit_cfg,
     photometric_cuda_device,
+    resolve_gpt_image_model,
     resolve_image_edit_backend,
     resolve_image_edit_device,
+    resolve_qwen_required,
 )
 from splat_explorer.image_edit_gpt import GptImageEditBackend
 from splat_explorer.image_edit_qwen import (
@@ -148,6 +152,28 @@ def test_make_backend_gpt_with_injected_client():
     assert isinstance(backend, GptImageEditBackend)
     assert backend.client is client
     assert backend.name == BACKEND_GPT
+    sunburst = make_image_edit_backend("gpt-image-2.5", client=client)
+    assert sunburst.model == SCENE_RUN_GPT_IMAGE_MODEL
+    flare = make_image_edit_backend("gpt-image-2.5-flare", client=client)
+    assert flare.model == GPT_IMAGE_FLARE
+    assert resolve_gpt_image_model("gpt-image-2") == BACKEND_GPT
+    assert resolve_image_edit_backend("gpt-image-2.5-sunburst") == BACKEND_GPT
+
+
+def test_qwen_required_defaults_off(monkeypatch):
+    monkeypatch.delenv("QWEN_required", raising=False)
+    monkeypatch.delenv("QWEN_REQUIRED", raising=False)
+    monkeypatch.delenv("SPLAT_QWEN_REQUIRED", raising=False)
+    import splat_explorer.image_edit as image_edit
+
+    image_edit.QWEN_required = False
+    assert resolve_qwen_required() is False
+    assert resolve_qwen_required(cfg={"image_edit": {"backend": "gpt-image-2"}}) is False
+    assert resolve_qwen_required(cfg={"image_edit": {"backend": "qwen"}}) is True
+    assert resolve_qwen_required(False, cfg={"image_edit": {"backend": "qwen"}}) is False
+    monkeypatch.setenv("QWEN_required", "true")
+    assert resolve_qwen_required() is True
+    assert resolve_qwen_required(False) is False
 
 
 def test_qwen_edit_contract_and_resident_pipeline(tmp_path: Path):
@@ -295,7 +321,8 @@ def test_list_backends_reports_shared_device():
     assert catalog["device"] == catalog["photometric_device"] == "cuda:0"
     assert catalog["same_gpu_as_photometric"] is True
     ids = [b["id"] for b in catalog["backends"]]
-    assert ids == [BACKEND_GPT, BACKEND_QWEN]
+    assert ids == [SCENE_RUN_GPT_IMAGE_MODEL, GPT_IMAGE_FLARE, BACKEND_GPT, BACKEND_QWEN]
+    assert catalog["QWEN_required"] is True
     assert "lrz-hgx-a100-80x4" in catalog["lrz_partitions"]
     assert "lrz-dgx-a100-80x8" in catalog["lrz_partitions"]
     assert "lrz-hgx-h100-94x4" in catalog["lrz_partitions"]

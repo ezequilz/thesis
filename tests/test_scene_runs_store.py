@@ -35,7 +35,7 @@ def test_config_defaults_and_validation():
         "height": 720,
         "duration_seconds": 3600,
         "send_map": True,
-        "image_edit_backend": "qwen-image-edit",
+        "image_edit_backend": "gpt-image-2.5-sunburst",
         "repair_backend": "gsfix-gsplat",
         "repair_trigger": "regenerate_yes",
         "repair_type": "original",

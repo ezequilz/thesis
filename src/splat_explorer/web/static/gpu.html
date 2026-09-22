@@ -218,7 +218,10 @@
   <div class="row">
     <button id="btn-widen" class="ghost">Widen selected partitions</button>
     <button id="btn-review" class="ghost">Refresh availability</button>
-    <button id="btn-setup" title="Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh. Foreign leftovers on this reserved GPU are cleared automatically; your own repair process is not killed.">Load GPU setup</button>
+    <label class="chk" title="Off by default. Scene-runs edit images through CliRelay. Turn this on before Load / Reload GPU setup only when a run uses Qwen-Image-Edit.">
+      <input type="checkbox" id="in-qwen-required"> QWEN_required
+    </label>
+    <button id="btn-setup" title="Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh. Qwen-Image-Edit is installed only when QWEN_required is checked.">Load GPU setup</button>
     <span id="probe-meta" class="hint">At most one remote probe per 10 min while this tab is visible. Reloads reuse cache; availability is a separate one-shot sinfo after the probe finishes.</span>
   </div>
 </div>
@@ -517,8 +520,10 @@ function imageEditGpuNote() {
     text = ie.same_gpu_as_photometric
       ? `Qwen-Image-Edit-2511 shares this GPU with photometric repair (${device}). ~40GB bf16 resident; photometric stays under 3% VRAM. Dedicated card: image_edit.device or SPLAT_IMAGE_EDIT_DEVICE.`
       : `Qwen-Image-Edit-2511 on ${device}; photometric stays on ${photo}.`;
+  } else if (ie.QWEN_required) {
+    text = `QWEN_required is on. Load / Reload GPU setup installs Qwen-Image-Edit on this allocation. Current RGB model is ${selected}.`;
   } else {
-    text = `RGB repair is ${selected} (CliRelay). Set image_edit.backend to qwen-image-edit to run Qwen on this GPU (A100 80GB / H100 94GB).`;
+    text = `RGB repair is ${selected} (CliRelay). GPU setup skips Qwen-Image-Edit while QWEN_required is off.`;
   }
   return `<div class="gpu-sub">${esc(text)}</div>`;
 }
@@ -1056,6 +1061,11 @@ function renderChrome() {
   $("btn-review").disabled = setupBusy || probeBusy || !session;
   const canSetup = session && (snap?.slurm?.state === "R" || hasRunningJob());
   const needsOverwrite = Boolean(setupNeedsOverwrite());
+  const qwenBox = $("in-qwen-required");
+  if (qwenBox) {
+    if (!qwenBox.dataset.touched) qwenBox.checked = Boolean(snap?.image_edit?.QWEN_required);
+    qwenBox.disabled = probeBusy || setupBusy || !canSetup;
+  }
   $("btn-setup").disabled = probeBusy || setupBusy || !canSetup;
   $("btn-setup").classList.toggle("overwrite-confirm", Boolean(needsOverwrite && !setupBusy));
   if (snap?.setup?.inflight) {
@@ -1257,11 +1267,20 @@ $("btn-refresh").onclick = async () => {
   }
 };
 
+$("in-qwen-required")?.addEventListener("change", () => {
+  $("in-qwen-required").dataset.touched = "1";
+});
+
 $("btn-setup").onclick = async () => {
   const reason = setupNeedsOverwrite();
+  const qwenRequired = Boolean($("in-qwen-required")?.checked);
   $("btn-setup").disabled = true;
   try {
-    snap = await postJson("/api/repair/gpu/setup", { force: true, overwrite: false });
+    snap = await postJson("/api/repair/gpu/setup", {
+      force: true,
+      overwrite: false,
+      QWEN_required: qwenRequired,
+    });
     setNote("info", snap.message || (reason
       ? "Clearing leftover occupant on this reserved GPU, then loading splat-explorer…"
       : "Loading GPU setup on the current job…"));

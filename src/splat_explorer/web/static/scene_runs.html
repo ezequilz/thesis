@@ -122,8 +122,10 @@
         <label>Height<input id="height" name="height" type="number" min="64" max="2160" value="720"></label>
         <label class="wide">VLM model<input id="model" name="model" value="gpt-5.6-luna"></label>
         <label>Image edit<select id="image-edit" name="image_edit_backend">
-          <option value="qwen-image-edit">qwen-image-edit</option>
-          <option value="gpt-image-2" disabled>gpt-image-2 (debug dashboard only for now)</option>
+          <option value="gpt-image-2.5-sunburst">gpt-image-2.5 sunburst (CliRelay)</option>
+          <option value="gpt-image-2.5-flare">gpt-image-2.5 flare (CliRelay)</option>
+          <option value="gpt-image-2">gpt-image-2 (CliRelay)</option>
+          <option value="qwen-image-edit">qwen-image-edit (GPU backup)</option>
         </select></label>
         <label>3D repair<input id="repair-backend" name="repair_backend" value="gsfix-gsplat" readonly></label>
         <label>Repair type<select id="repair-type" name="repair_type">

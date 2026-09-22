@@ -317,6 +317,20 @@ def test_srun_setup_starts_named_container():
     assert "--container-image=/dss/ws/containers/pytorch.sqsh" in cmd
     assert "--container-name=splat-repair-5777731" in cmd
     assert "repair_lrz --setup" in cmd
+    assert "QWEN_required=false" in cmd
+    assert "--qwen-required false" in cmd
+    with_qwen = srun_setup_command(
+        {
+            "job_id": "5777731",
+            "cpus": 4,
+            "workspace": "/dss/ws",
+            "container": "/dss/ws/containers/pytorch.sqsh",
+            "container_name": "splat-repair",
+        },
+        qwen_required=True,
+    )
+    assert "QWEN_required=true" in with_qwen
+    assert "--qwen-required true" in with_qwen
     assert "/workspace/python" in cmd
     assert "--cpus-per-task=1" in cmd
 
@@ -1762,7 +1776,10 @@ def test_setup_continues_after_wipe_if_vram_still_busy(monkeypatch):
     monkeypatch.setattr("splat_explorer.repair_lrz.probe_gpu_occupancy", lambda cfg=None: busy)
     monkeypatch.setattr("splat_explorer.repair_lrz.wipe_allocated_gpu", lambda *a, **k: "WIPE_DONE")
     monkeypatch.setattr("splat_explorer.repair_lrz.sync_code_to_dss", lambda cfg: None)
-    monkeypatch.setattr("splat_explorer.repair_lrz.launch_detached_setup", lambda cfg: "99")
+    monkeypatch.setattr(
+        "splat_explorer.repair_lrz.launch_detached_setup",
+        lambda cfg, qwen_required=None: "99",
+    )
     monkeypatch.setattr(
         "splat_explorer.repair_lrz.poll_detached_setup",
         lambda cfg, timeout=None: {"ok": True, "gpu": "NVIDIA A100-SXM4-80GB"},
@@ -2220,11 +2237,21 @@ def test_scene_run_protocol_and_srun_commands():
     original = transport._worker_config({"repair_type": "original"})
     assert original["repair"]["max_chunks"] == 1
     assert original["repair"]["upstream_gsfix3d"] is True
-    assert original["image_edit_subprocess"] is True
+    assert original["QWEN_required"] is False
+    assert original["image_edit_subprocess"] is False
+    assert original["image_edit"]["model"] == "gpt-image-2.5-sunburst"
     looped = transport._worker_config({"repair_type": "looped"})
     assert looped["repair"]["max_chunks"] == 0
     assert looped["repair"]["repair_type"] == "looped"
-    assert looped["image_edit_subprocess"] is True
+    assert looped["image_edit_subprocess"] is False
+    qwen = transport._worker_config({
+        "repair_type": "original",
+        "image_edit_backend": "qwen-image-edit",
+    })
+    assert qwen["QWEN_required"] is True
+    assert qwen["image_edit_subprocess"] is True
+    assert qwen["image_edit"]["backend"] == "qwen-image-edit"
+    assert qwen["image_edit"]["download"] is True
     launch = scene_worker_launch_command(
         cfg, "run-abc", overall_deadline=2_000_000_000,
     )
@@ -2325,6 +2352,89 @@ def test_scene_gpu_worker_keeps_scene_and_qwen_backend_resident(tmp_path):
     assert calls == {"load": 1, "editor": 1, "edit": 2, "repair": 2}
     assert scene.value == 2
     assert (run_dir / CHECKPOINT_NAME).read_bytes() == b"scene-2"
+
+
+def test_worker_skips_gpu_image_edit_when_clirelay_already_wrote_png(tmp_path):
+    import io
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from splat_explorer.scene_runs.gpu_worker import (
+        REGENERATED_NAME,
+        REQUEST_NAME,
+        SceneRunGpuWorker,
+        atomic_write_json,
+    )
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "scene.ply").write_bytes(b"ply")
+    image = Image.new("RGB", (8, 6), (20, 30, 40))
+    png = io.BytesIO()
+    image.save(png, format="PNG")
+    png_bytes = png.getvalue()
+    calls = {"edit": 0, "repair": 0}
+
+    class Editor:
+        def edit(self, _path, _prompt):
+            calls["edit"] += 1
+            raise AssertionError("Qwen should stay unloaded for CliRelay edits")
+
+    class Repair:
+        def apply_until(self, _value, _camera, _rendered, repaired, **kwargs):
+            calls["repair"] += 1
+            assert repaired.shape == (6, 8, 3)
+            stats = {"backend": "gsfix-gsplat", "n_iters": 20}
+            kwargs["on_checkpoint"](stats)
+            return stats
+
+    worker = SceneRunGpuWorker(
+        run_dir,
+        scene_loader=lambda _path: SimpleNamespace(value=0),
+        scene_saver=lambda _value, path: Path(path).write_bytes(b"scene"),
+        image_edit_factory=lambda _config: Editor(),
+        repair_factory=lambda _params: Repair(),
+    )
+    worker.config = {"QWEN_required": False, "image_edit": {"model": "gpt-image-2.5-sunburst"}}
+    worker._load_scene_once()
+    camera = CameraRig(np.array([0.0, 0.0, -1.0]), up_axis="+y").camera(8, 6, 75.0)
+    from splat_explorer.repair_lrz import camera_to_dict
+
+    request_dir = run_dir / "requests" / "step-00000"
+    request_dir.mkdir(parents=True)
+    (request_dir / "rendered.png").write_bytes(png_bytes)
+    (request_dir / REGENERATED_NAME).write_bytes(png_bytes)
+    atomic_write_json(
+        request_dir / REQUEST_NAME,
+        {
+            "request_id": request_dir.name,
+            "step": 0,
+            "skip_image_edit": True,
+            "image_model": "gpt-image-2.5-sunburst",
+            "camera": camera_to_dict(camera),
+            "repair_seconds": 180,
+        },
+    )
+    response = worker.process_request(request_dir)
+    assert response["status"] == "ok"
+    assert calls == {"edit": 0, "repair": 1}
+    assert response["metrics"]["image_edit"]["external"] is True
+    assert response["metrics"]["image_edit"]["model"] == "gpt-image-2.5-sunburst"
+
+
+def test_gpu_setup_omits_qwen_packages_when_not_required(tmp_path, monkeypatch):
+    from splat_explorer.repair_lrz import install_qwen_image_edit_packages
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("pip must not run when QWEN_required is false")
+
+    monkeypatch.setattr("splat_explorer.repair_lrz.subprocess.check_call", boom)
+    marker = tmp_path / "diffusers"
+    marker.mkdir()
+    skipped = install_qwen_image_edit_packages(tmp_path, str(tmp_path), required=False)
+    assert skipped == {"ready": False, "installed": False, "required": False}
+    assert marker.is_dir()
 
 
 

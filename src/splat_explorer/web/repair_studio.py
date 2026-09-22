@@ -342,11 +342,21 @@ class RepairStudio:
         snap["cancel"] = result
         return snap
 
-    def gpu_load_setup(self, *, force: bool = True, overwrite: bool = False) -> dict:
+    def gpu_load_setup(
+        self,
+        *,
+        force: bool = True,
+        overwrite: bool = False,
+        qwen_required: bool | None = None,
+    ) -> dict:
+        from ..image_edit import resolve_qwen_required
         from ..repair_lrz import request_lrz_setup
 
         self._require_gpu_available("reloading GPU setup")
-        result = request_lrz_setup(force=force, overwrite=overwrite)
+        needed = resolve_qwen_required(qwen_required, cfg=self.app.cfg)
+        result = request_lrz_setup(
+            force=force, overwrite=overwrite, qwen_required=needed,
+        )
         snap = self.gpu_snapshot()
         snap["ok"] = True
         snap["setup"] = result

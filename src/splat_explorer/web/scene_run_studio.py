@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote
 
+from ..image_edit import SCENE_RUN_GPT_IMAGE_MODEL
+
 
 SCENE_RUN_DEFAULTS = {
     "scene_id": "venetian-balcony",
@@ -25,7 +27,7 @@ SCENE_RUN_DEFAULTS = {
     "height": 720,
     "duration_seconds": 3600,
     "send_map": True,
-    "image_edit_backend": "qwen-image-edit",
+    "image_edit_backend": SCENE_RUN_GPT_IMAGE_MODEL,
     "repair_backend": "gsfix-gsplat",
     "repair_trigger": "regenerate_yes",
     "repair_type": "original",
@@ -199,11 +201,14 @@ class SceneRunStudio:
             )
         if not clean["model"]:
             raise SceneRunValidationError("model is required for CliRelay.")
-        if clean["image_edit_backend"] != "qwen-image-edit":
-            raise SceneRunValidationError(
-                "The first automated scene-run release supports qwen-image-edit; "
-                "gpt-image-2 remains available in the episode repair debugger."
+        from ..image_edit import canonical_image_edit_choice
+
+        try:
+            clean["image_edit_backend"] = canonical_image_edit_choice(
+                clean["image_edit_backend"],
             )
+        except ValueError as exc:
+            raise SceneRunValidationError(str(exc)) from exc
         if clean["repair_backend"] != "gsfix-gsplat":
             raise SceneRunValidationError(
                 "The first automated scene-run release supports gsfix-gsplat only."

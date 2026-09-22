@@ -100,7 +100,7 @@ def _triggered(mode: str, action: Action) -> bool:
 def _image_edit_prompt(
     _action: Action | None = None, _params: dict[str, Any] | None = None,
 ) -> str:
-    """Return the static Qwen instruction used for every repaired view."""
+    """Return the static image-edit instruction used for every repaired view."""
     from .gpu_worker import DEFAULT_PROMPT
 
     return DEFAULT_PROMPT

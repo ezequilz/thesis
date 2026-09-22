@@ -22,6 +22,7 @@ from .gpu_worker import (
     RESPONSE_NAME,
     STOP_NAME,
     WORKER_NAME,
+    atomic_write_bytes,
     atomic_write_json,
 )
 from .models import parse_slurm_duration, parse_slurm_end
@@ -196,7 +197,7 @@ class LrzSceneRunTransport:
             return None
         return body if isinstance(body, dict) else None
 
-    def validate(self) -> dict[str, Any]:
+    def validate(self, config: dict[str, Any] | None = None) -> dict[str, Any]:
         """Validate one selected running allocation and its setup marker."""
         self._require_session()
         job_id = str(self.cfg.get("job_id") or "").strip()
@@ -224,22 +225,55 @@ class LrzSceneRunTransport:
         )
         if not matches:
             raise RuntimeError(reason or "LRZ GPU setup marker is missing")
-        if marker.get("image_edit_ready") is not True:
+        if (
+            isinstance(config, dict)
+            and self._qwen_required(config)
+            and marker.get("image_edit_ready") is not True
+        ):
             raise RuntimeError(
-                "LRZ setup predates scene-run Qwen dependencies; reload GPU setup once."
+                "This scene-run uses Qwen-Image-Edit, but GPU setup was loaded "
+                "with QWEN_required=false. Turn QWEN_required on and click "
+                "Reload GPU setup."
             )
         return {"allocation": row, "setup": marker}
 
+    def _image_backend(self, config: dict[str, Any] | None = None) -> str:
+        from ..image_edit import SCENE_RUN_GPT_IMAGE_MODEL, canonical_image_edit_choice
+
+        body = config if isinstance(config, dict) else self._run_config
+        raw = body.get("image_edit_backend") or SCENE_RUN_GPT_IMAGE_MODEL
+        return canonical_image_edit_choice(str(raw))
+
+    def _qwen_required(self, config: dict[str, Any] | None = None) -> bool:
+        from ..image_edit import is_qwen_backend, resolve_qwen_required
+
+        body = config if isinstance(config, dict) else self._run_config
+        backend = self._image_backend(body)
+        explicit = body.get("QWEN_required", body.get("qwen_required"))
+        if explicit is None:
+            explicit = True if is_qwen_backend(backend) else False
+        return resolve_qwen_required(explicit, backend=backend)
+
     def _worker_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        from ..image_edit import BACKEND_QWEN, concrete_gpt_image_model, is_qwen_backend
+
         image_edit: dict[str, Any] = {}
         try:
             image_edit = dict(self.app_cfg.get("image_edit") or {})
         except (AttributeError, TypeError, ValueError):
             pass
-        image_edit["backend"] = "qwen-image-edit"
-        # Starting a Qwen scene-run explicitly authorizes the one-time model
-        # fetch. Subsequent runs reuse the DSS-backed Hugging Face cache.
-        image_edit["download"] = True
+        choice = self._image_backend(config)
+        qwen = is_qwen_backend(choice)
+        if qwen:
+            image_edit["backend"] = BACKEND_QWEN
+            # Starting a Qwen scene-run explicitly authorizes the one-time model
+            # fetch. Subsequent runs reuse the DSS-backed Hugging Face cache.
+            image_edit["download"] = True
+        else:
+            image_edit["backend"] = "gpt-image-2"
+            image_edit["model"] = concrete_gpt_image_model(choice) or choice
+            image_edit["download"] = False
+        image_edit["QWEN_required"] = qwen
         repair = dict(config.get("repair") or {})
         repair_type = str(
             repair.get("repair_type")
@@ -262,9 +296,11 @@ class LrzSceneRunTransport:
             "scene_run": dict(config),
             "image_edit": image_edit,
             "image_edit_prompt": config.get("image_edit_prompt"),
+            "QWEN_required": qwen,
             # LRZ steps commonly have 62 GiB host memory. Process exit is the
             # only reliable way to reclaim Qwen loading buffers before GSFix.
-            "image_edit_subprocess": True,
+            # CliRelay edits never enter this process.
+            "image_edit_subprocess": qwen,
             "repair": repair,
         }
 
@@ -320,7 +356,7 @@ class LrzSceneRunTransport:
         deadline: float,
     ) -> dict[str, Any]:
         self._progress("gpu_validate", "Validating reserved LRZ GPU")
-        validated = self.validate()
+        validated = self.validate(config)
         allocation_deadline = allocation_deadline_unix(validated["allocation"])
         effective = float(deadline)
         if allocation_deadline is not None:
@@ -521,6 +557,20 @@ class LrzSceneRunTransport:
         destination = local_dir / RENDERED_NAME
         if source.resolve() != destination.resolve():
             shutil.copy2(source, destination)
+        prompt_text = str(
+            prompt or self._run_config.get("image_edit_prompt") or ""
+        )
+        image_edit_result = None
+        if not self._qwen_required(self._run_config):
+            self._progress(
+                "image_edit",
+                f"CliRelay image edit for step {step}",
+            )
+            image_edit_result = self._edit_with_clirelay(
+                destination,
+                local_dir / REGENERATED_NAME,
+                prompt_text,
+            )
         request_deadline = min(
             float(deadline),
             self._effective_deadline if self._effective_deadline is not None else float(deadline),
@@ -532,13 +582,14 @@ class LrzSceneRunTransport:
             camera=camera,
             repair_seconds=repair_seconds,
             deadline=request_deadline,
-            prompt=(
-                prompt
-                or self._run_config.get("image_edit_prompt")
-            ),
+            prompt=prompt_text or None,
             repair=repair_cfg,
             operation="repair",
         )
+        if image_edit_result is not None:
+            body["skip_image_edit"] = True
+            body["image_model"] = image_edit_result.get("model")
+            body["image_edit_result"] = image_edit_result
         atomic_write_json(local_dir / REQUEST_NAME, body)
         self._progress("request_upload", f"Uploading GPU repair request for step {step}")
         self._push_request(request_id, local_dir)
@@ -566,6 +617,30 @@ class LrzSceneRunTransport:
             except json.JSONDecodeError:
                 pass
         return response
+
+    def _edit_with_clirelay(
+        self,
+        image_path: Path,
+        output_path: Path,
+        prompt: str,
+    ) -> dict[str, Any]:
+        """Run gpt-image-2 / 2.5 on the machine that can reach CliRelay."""
+        from ..image_edit import make_image_edit_backend
+
+        backend = self._image_backend(self._run_config)
+        editor = make_image_edit_backend(backend, cfg=self.app_cfg)
+        result = editor.edit(Path(image_path), prompt)
+        images = list(getattr(result, "images", None) or [])
+        error = getattr(result, "error", None)
+        if error or not images:
+            raise RuntimeError(error or f"{backend} image edit returned no PNG")
+        atomic_write_bytes(output_path, images[0])
+        payload = dict(getattr(result, "payload", None) or {})
+        payload["external"] = True
+        payload["backend"] = getattr(editor, "name", backend)
+        payload["model"] = getattr(editor, "model", backend)
+        payload["prompt"] = prompt
+        return payload
 
     def stop(self) -> None:
         """Request graceful checkpoint/exit through the DSS STOP marker."""

@@ -269,6 +269,8 @@
   </label>
   <label>RGB repair
     <select id="in-image-edit" title="Backend for Add view / regenerate=yes RGB repair. gpt-image-2 uses CliRelay. Qwen-Image-Edit-2511 runs on the connected CUDA GPU (same card as photometric by default).">
+      <option value="gpt-image-2.5-sunburst">gpt-image-2.5 sunburst (CliRelay)</option>
+      <option value="gpt-image-2.5-flare">gpt-image-2.5 flare (CliRelay)</option>
       <option value="gpt-image-2">gpt-image-2 (CliRelay)</option>
       <option value="qwen-image-edit">Qwen-Image-Edit-2511 (GPU)</option>
     </select>
@@ -1324,11 +1326,22 @@ window.addEventListener("resize", () => { lastVisorLayoutKey = ""; layoutVisor()
 
 refreshEpisodes().then(() => tick());
 
+function setupQwenRequired() {
+  const selected = String($("in-image-edit")?.value || "").toLowerCase();
+  if (selected.includes("qwen")) return true;
+  if (selected.includes("gpt-image") || selected.includes("clirelay") || selected === "gpt") return false;
+  return Boolean(snapshot?.image_edit?.QWEN_required);
+}
+
 $("btn-gpu-setup")?.addEventListener("click", async () => {
   const btn = $("btn-gpu-setup");
   if (!btn) return;
+  const qwenRequired = setupQwenRequired();
   btn.disabled = true;
-  const data = await post("/api/repair/gpu/setup", { force: true });
+  btn.title = qwenRequired
+    ? "Loading GPU setup with Qwen-Image-Edit (QWEN_required=true)."
+    : "Loading GPU setup without Qwen-Image-Edit (QWEN_required=false). Image edit uses CliRelay.";
+  const data = await post("/api/repair/gpu/setup", { force: true, QWEN_required: qwenRequired });
   if (snapshot?.backends?.lrz) {
     snapshot.backends.lrz.setup = data.setup || { inflight: true, message: data.message };
   }

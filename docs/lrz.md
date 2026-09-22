@@ -274,9 +274,12 @@ Do not request extra GPUs for Qwen. If the 80GB card OOMs, set
 `image_edit.offload: sequential` or allocate a **second** one-GPU job and
 point Qwen at it with `image_edit.device` / `SPLAT_IMAGE_EDIT_DEVICE`
 (never `torch.cuda.set_device`, which would steal photometric's current
-device). Scene-runs isolate each Qwen edit in a short-lived subprocess so
-the 64G host-RAM cgroup is free before GSFix; weights reload from the DSS
-Hugging Face cache. First fetch is ~20GB (`image_edit.download: true` or
+device). Scene-runs default to CliRelay `gpt-image-2.5-sunburst` and do not
+load Qwen. Set `QWEN_required=true` (GPU page checkbox, or the env var) and
+click **Reload GPU setup** before a `qwen-image-edit` scene-run. That path
+still isolates each Qwen edit in a short-lived subprocess so the 64G host-RAM
+cgroup is free before GSFix; weights reload from the DSS Hugging Face cache.
+First fetch is ~20GB (`image_edit.download: true` or
 `SPLAT_IMAGE_EDIT_DOWNLOAD=1`).
 
 ## Scripts

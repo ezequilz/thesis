@@ -298,6 +298,8 @@
       <label title="RGB repair backend for regenerate=yes views. gpt-image-2 uses CliRelay. Qwen-Image-Edit-2511 runs on the connected CUDA GPU (same card as photometric by default).">
         RGB repair
         <select id="in-image-edit">
+          <option value="gpt-image-2.5-sunburst">gpt-image-2.5 sunburst (CliRelay)</option>
+          <option value="gpt-image-2.5-flare">gpt-image-2.5 flare (CliRelay)</option>
           <option value="gpt-image-2">gpt-image-2 (CliRelay)</option>
           <option value="qwen-image-edit">Qwen-Image-Edit-2511 (GPU)</option>
         </select>
@@ -373,7 +375,7 @@ function imageEditCaption(step) {
     || state?.defaults?.image_edit_backend
     || "gpt-image-2";
   if (String(id).toLowerCase().includes("qwen")) return "Qwen-Image-Edit-2511";
-  return "gpt-image-2";
+  return id || "gpt-image-2";
 }
 
 async function poll() {

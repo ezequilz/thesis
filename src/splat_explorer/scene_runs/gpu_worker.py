@@ -3,6 +3,8 @@
 The worker is intentionally transport-agnostic: DSS directories are the
 protocol, and the login-node process only copies files and writes STOP markers.
 CUDA, Qwen, and gsplat imports stay lazy so protocol tests run without a GPU.
+CliRelay image edits happen off this GPU; Qwen loads only when QWEN_required
+is true.
 """
 
 from __future__ import annotations
@@ -167,10 +169,42 @@ def _default_scene_saver(scene, path: Path) -> None:
     save_ply(scene, path)
 
 
-def _default_image_edit_factory(config: dict[str, Any]):
-    from ..image_edit_qwen import QwenImageEditBackend
+def qwen_required_for_worker(config: dict[str, Any] | None) -> bool:
+    """True when this worker must run Qwen-Image-Edit on the GPU."""
+    from ..image_edit import resolve_qwen_required
 
-    return QwenImageEditBackend.from_config(config)
+    body = config if isinstance(config, dict) else {}
+    image_edit = body.get("image_edit") if isinstance(body.get("image_edit"), dict) else {}
+    scene_run = body.get("scene_run") if isinstance(body.get("scene_run"), dict) else {}
+    explicit = body.get("QWEN_required", body.get("qwen_required"))
+    if explicit is None and isinstance(image_edit, dict):
+        explicit = image_edit.get("QWEN_required", image_edit.get("qwen_required"))
+    backend = (
+        image_edit.get("backend")
+        or image_edit.get("model")
+        or scene_run.get("image_edit_backend")
+        or body.get("image_edit_backend")
+    )
+    return resolve_qwen_required(explicit, cfg=body, backend=None if explicit is not None else backend)
+
+
+def _default_image_edit_factory(config: dict[str, Any]):
+    """Qwen when QWEN_required, otherwise the CliRelay GPT image backend."""
+    if qwen_required_for_worker(config):
+        from ..image_edit_qwen import QwenImageEditBackend
+
+        return QwenImageEditBackend.from_config(config)
+    from ..image_edit import make_image_edit_backend
+
+    image_edit = config.get("image_edit") if isinstance(config.get("image_edit"), dict) else {}
+    scene_run = config.get("scene_run") if isinstance(config.get("scene_run"), dict) else {}
+    name = (
+        image_edit.get("model")
+        or scene_run.get("image_edit_backend")
+        or image_edit.get("backend")
+        or config.get("image_edit_backend")
+    )
+    return make_image_edit_backend(name, cfg=config)
 
 
 def normalize_repair_type(value: Any) -> str:
@@ -199,7 +233,7 @@ def _default_repair_factory(params: dict[str, Any]):
 
 
 def run_image_edit_once(request_dir: Path, config_path: Path) -> dict[str, Any]:
-    """Run Qwen once in a disposable process and persist its result."""
+    """Run one image edit in a disposable process and persist its result."""
     request_dir = Path(request_dir)
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     request = json.loads((request_dir / REQUEST_NAME).read_text(encoding="utf-8"))
@@ -215,7 +249,7 @@ def run_image_edit_once(request_dir: Path, config_path: Path) -> dict[str, Any]:
     error = getattr(edit, "error", None)
     result = {
         "status": "error" if error or not images else "ok",
-        "error": error or (None if images else "Qwen image edit returned no PNG"),
+        "error": error or (None if images else "image edit returned no PNG"),
         "payload": _jsonable(getattr(edit, "payload", {}) or {}),
         "prompt": prompt,
     }
@@ -331,7 +365,7 @@ class SceneRunGpuWorker:
             atomic_write_json(request_dir / METRICS_NAME, stats)
 
     def process_request(self, request_dir: Path) -> dict[str, Any]:
-        """Run Qwen then GSFix3D for one complete request directory."""
+        """Run image edit (unless CliRelay already did) then GSFix3D."""
         request_dir = Path(request_dir)
         request = json.loads((request_dir / REQUEST_NAME).read_text(encoding="utf-8"))
         request_id = str(request.get("request_id") or request_dir.name)
@@ -377,7 +411,24 @@ class SceneRunGpuWorker:
                 or self.config.get("image_edit_prompt")
                 or DEFAULT_PROMPT
             )
-            if self.config.get("image_edit_subprocess", False):
+            regenerated_path = request_dir / REGENERATED_NAME
+            external = bool(request.get("skip_image_edit")) or (
+                regenerated_path.is_file()
+                and not qwen_required_for_worker(self.config)
+            )
+            if external:
+                if not regenerated_path.is_file():
+                    raise FileNotFoundError(
+                        f"{REGENERATED_NAME} missing for external CliRelay image edit"
+                    )
+                supplied = request.get("image_edit_result")
+                edit_payload = _jsonable(supplied if isinstance(supplied, dict) else {})
+                edit_payload["external"] = True
+                edit_payload.setdefault(
+                    "model", request.get("image_model") or request.get("image_edit_backend"),
+                )
+                edit_payload["prompt"] = prompt
+            elif self.config.get("image_edit_subprocess", False):
                 config_path = self.run_dir / "worker_config.json"
                 timeout = None
                 if self.overall_deadline is not None:
@@ -410,12 +461,13 @@ class SceneRunGpuWorker:
                 images = list(getattr(edit, "images", None) or [])
                 edit_error = getattr(edit, "error", None)
                 if edit_error or not images:
-                    raise RuntimeError(edit_error or "Qwen image edit returned no PNG")
+                    raise RuntimeError(edit_error or "image edit returned no PNG")
                 atomic_write_bytes(request_dir / REGENERATED_NAME, images[0])
                 edit_payload = _jsonable(getattr(edit, "payload", {}) or {})
                 edit_payload["prompt"] = prompt
             if (
-                not self.config.get("image_edit_subprocess", False)
+                not external
+                and not self.config.get("image_edit_subprocess", False)
                 and self.config.get("release_image_editor_before_repair", False)
             ):
                 # The common 64 GiB LRZ step cannot retain Qwen's host-side

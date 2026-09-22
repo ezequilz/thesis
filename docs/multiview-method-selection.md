@@ -1,5 +1,7 @@
 # Method selection: the strongest next experiment
 
+> Updated scope: the next research phase includes original photographs and calibrated poses. See [the ArtiFixer research proposal](artifixer-research-proposal.md) for the revised contribution, matched-input comparison and experimental plan. Asset-only recommendations below remain a secondary track.
+
 Research update · 22 September 2026 · supplements and refines the [executive plan](/Users/juliuskleinle/Desktop/thesis-1/docs/multiview-executive-summary.md)
 
 ## Recommendation

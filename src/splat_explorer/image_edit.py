@@ -1,10 +1,13 @@
 """RGB image-edit backends for regenerate=yes views.
 
 Photometric 3DGS repair (`repair.py` / `repair_gsfix3d.py`) consumes a
-repaired PNG. That PNG used to come only from gpt-image-2 via CliRelay
-(`agent.regenerate`). This module is the swap point: the same
-RGB-in / instruction-in / PNG-out contract, either CliRelay or a
+repaired PNG. That PNG comes from CliRelay ``/v1/images/edits``
+(gpt-image-2, or gpt-image-2.5 sunburst/flare) or, as a backup, a
 self-hosted Qwen-Image-Edit-2511 pipeline on the connected GPU.
+
+``QWEN_required`` defaults to false. GPU setup then skips the Qwen
+package install; set it true (env, config, or the GPU loader buttons)
+only when a run actually edits with Qwen.
 
 The VLM agent is unchanged. It still flags views; the local Regenerator
 queue sends those frames here one by one.
@@ -24,16 +27,31 @@ PHOTOMETRIC_CUDA_DEVICE = "cuda:0"
 
 BACKEND_GPT = "gpt-image-2"
 BACKEND_QWEN = "qwen-image-edit"
+# Scene-runs default. Sunburst is the GPT Image 2.5 edit model aimed at
+# precise edits; flare is the faster 2.5 variant. gpt-image-2 stays available.
+SCENE_RUN_GPT_IMAGE_MODEL = "gpt-image-2.5-sunburst"
+GPT_IMAGE_FLARE = "gpt-image-2.5-flare"
 
-_GPT_ALIASES = {
-    "gpt-image-2",
-    "gpt",
-    "gptimage2",
-    "gpt-image",
-    "clirelay",
-    "cli_relay",
-    "openai",
+# False: GPU setup does not install or load Qwen-Image-Edit.
+# Assign this, or set env QWEN_required / image_edit.QWEN_required, anywhere
+# the GPU loader can see it.
+QWEN_required = False
+
+_GPT_MODEL_ALIASES = {
+    "gpt-image-2.5": SCENE_RUN_GPT_IMAGE_MODEL,
+    "gpt-image-2.5-sunburst": SCENE_RUN_GPT_IMAGE_MODEL,
+    "sunburst": SCENE_RUN_GPT_IMAGE_MODEL,
+    "gpt-image-2.5-flare": GPT_IMAGE_FLARE,
+    "flare": GPT_IMAGE_FLARE,
+    "gpt-image-2": BACKEND_GPT,
+    "gpt": BACKEND_GPT,
+    "gptimage2": BACKEND_GPT,
+    "gpt-image": BACKEND_GPT,
+    "clirelay": BACKEND_GPT,
+    "cli-relay": BACKEND_GPT,
+    "openai": BACKEND_GPT,
 }
+_GPT_ALIASES = set(_GPT_MODEL_ALIASES)
 _QWEN_ALIASES = {
     "qwen-image-edit",
     "qwen",
@@ -86,6 +104,104 @@ def is_gpt_backend(name: str | None) -> bool:
     return _normalize_backend_name(name) == BACKEND_GPT
 
 
+def concrete_gpt_image_model(name: str | None) -> str | None:
+    """Map a GPT image alias onto the CliRelay ``images.edit`` model id."""
+    if name is None:
+        return None
+    key = str(name).strip()
+    if not key:
+        return None
+    low = key.lower().replace("_", "-")
+    if low in _GPT_MODEL_ALIASES:
+        return _GPT_MODEL_ALIASES[low]
+    compact = low.replace("-", "")
+    for alias, model in _GPT_MODEL_ALIASES.items():
+        if compact == alias.replace("-", ""):
+            return model
+    if low.startswith("gpt-image-"):
+        return low
+    return None
+
+
+def canonical_image_edit_choice(name: str | None) -> str:
+    """Scene-run selection: a concrete GPT model id, or ``qwen-image-edit``."""
+    model = concrete_gpt_image_model(name)
+    if model:
+        return model
+    key = str(name or "").strip()
+    if not key:
+        raise ValueError("image_edit_backend is required")
+    try:
+        if is_qwen_backend(key):
+            return BACKEND_QWEN
+    except ValueError:
+        pass
+    known = ", ".join((
+        SCENE_RUN_GPT_IMAGE_MODEL, GPT_IMAGE_FLARE, BACKEND_GPT, BACKEND_QWEN,
+    ))
+    raise ValueError(f"Unknown image-edit backend {name!r}. Choose one of: {known}")
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "required"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"QWEN_required must be true or false, not {value!r}")
+
+
+def resolve_qwen_required(
+    value: Any = None,
+    *,
+    cfg=None,
+    backend: str | None = None,
+) -> bool:
+    """Whether GPU setup should install and load Qwen-Image-Edit.
+
+    An explicit ``value`` wins, then ``QWEN_required`` / ``QWEN_REQUIRED`` /
+    ``SPLAT_QWEN_REQUIRED``, then ``image_edit.QWEN_required``, then the
+    selected image-edit backend, then the module flag ``QWEN_required``.
+    The default is false so CliRelay image edits stay off the GPU.
+    """
+    if value is not None:
+        return _as_bool(value)
+    for env_name in ("QWEN_required", "QWEN_REQUIRED", "SPLAT_QWEN_REQUIRED"):
+        raw = os.environ.get(env_name)
+        if raw is not None and str(raw).strip() != "":
+            return _as_bool(raw)
+    for key in ("QWEN_required", "qwen_required"):
+        configured = _cfg_get(cfg, "image_edit", key)
+        if configured is None:
+            configured = _cfg_get(cfg, key)
+        if configured is not None and configured != "":
+            return _as_bool(configured)
+    name = backend if backend not in (None, "") else _cfg_get(cfg, "image_edit", "backend")
+    if name not in (None, ""):
+        if concrete_gpt_image_model(str(name)):
+            return False
+        return is_qwen_backend(str(name))
+    return bool(QWEN_required)
+
+
+def resolve_gpt_image_model(name: str | None = None, cfg=None) -> str:
+    """CliRelay image model. Scene-runs pass a 2.5 id; episodes stay on gpt-image-2."""
+    for raw in (
+        name,
+        _cfg_get(cfg, "image_edit", "model"),
+        _cfg_get(cfg, "image_edit", "backend"),
+        _cfg_get(cfg, "agent", "image_edit_backend"),
+    ):
+        model = concrete_gpt_image_model(None if raw in (None, "") else str(raw))
+        if model:
+            return model
+    return BACKEND_GPT
+
+
 def _normalize_backend_name(name: str | None) -> str:
     key = str(name or "").strip().lower().replace("_", "-")
     compact = key.replace("-", "")
@@ -93,9 +209,11 @@ def _normalize_backend_name(name: str | None) -> str:
         return BACKEND_GPT
     if key in _QWEN_ALIASES or compact in {a.replace("-", "") for a in _QWEN_ALIASES}:
         return BACKEND_QWEN
-    if key in _GPT_ALIASES or compact in {a.replace("-", "") for a in _GPT_ALIASES}:
+    if concrete_gpt_image_model(key):
         return BACKEND_GPT
-    known = ", ".join((BACKEND_GPT, BACKEND_QWEN))
+    known = ", ".join((
+        SCENE_RUN_GPT_IMAGE_MODEL, GPT_IMAGE_FLARE, BACKEND_GPT, BACKEND_QWEN,
+    ))
     raise ValueError(f"Unknown image-edit backend {name!r}. Choose one of: {known}")
 
 
@@ -122,11 +240,12 @@ def _env_first(names: tuple[str, ...]) -> str:
 
 
 def resolve_image_edit_backend(name: str | None = None, cfg=None) -> str:
-    """Pick gpt-image-2 or qwen-image-edit.
+    """Pick the GPT family or qwen-image-edit.
 
-    Order: explicit ``name``, ``SPLAT_IMAGE_EDIT_BACKEND`` /
-    ``IMAGE_EDIT_BACKEND``, ``image_edit.backend``,
-    ``agent.image_edit_backend``, default gpt-image-2.
+    GPT Image 2.5 ids collapse to the gpt-image-2 family here; the concrete
+    model id is :func:`resolve_gpt_image_model`. Order: explicit ``name``,
+    ``SPLAT_IMAGE_EDIT_BACKEND`` / ``IMAGE_EDIT_BACKEND``,
+    ``image_edit.backend``, ``agent.image_edit_backend``, default gpt-image-2.
     """
     if name not in (None, ""):
         return _normalize_backend_name(name)
@@ -176,8 +295,9 @@ def image_edit_shares_photometric_gpu(cfg=None, device: int | str | None = None)
 
 
 def overlay_image_edit_cfg(cfg=None, *, backend: str | None = None,
-                           device: int | str | None = None):
-    """Shallow copy of ``cfg`` with image_edit.backend / device overridden."""
+                           device: int | str | None = None,
+                           model: str | None = None):
+    """Shallow copy of ``cfg`` with image_edit.backend / device / model overridden."""
     from .config import Config
 
     if isinstance(cfg, dict):
@@ -188,6 +308,12 @@ def overlay_image_edit_cfg(cfg=None, *, backend: str | None = None,
         image_edit = {}
     if backend not in (None, ""):
         image_edit["backend"] = _normalize_backend_name(backend)
+    if model not in (None, ""):
+        image_edit["model"] = concrete_gpt_image_model(str(model)) or str(model)
+    elif backend not in (None, ""):
+        chosen = concrete_gpt_image_model(str(backend))
+        if chosen:
+            image_edit["model"] = chosen
     if device is not None and device != "":
         image_edit["device"] = device
     if image_edit:
@@ -233,20 +359,42 @@ def list_image_edit_backends(cfg=None) -> dict[str, Any]:
             "Needs a connected NVIDIA GPU (same card as photometric when "
             "feasible). " + qwen_detail
         )
+    qwen_on = resolve_qwen_required(cfg=cfg)
+    model = None if selected == BACKEND_QWEN else resolve_gpt_image_model(cfg=cfg)
     return {
         "selected": selected,
+        "model": model,
+        "QWEN_required": qwen_on,
         "device": device,
         "photometric_device": photo,
         "same_gpu_as_photometric": device == photo,
         "lrz_partitions": list(LRZ_QWEN_PARTITIONS),
         "backends": [
             {
+                "id": SCENE_RUN_GPT_IMAGE_MODEL,
+                "label": "gpt-image-2.5 sunburst (CliRelay)",
+                "available": True,
+                "detail": (
+                    "GPT Image 2.5 sunburst via CliRelay /v1/images/edits. "
+                    "Scene-run default. Precise edits; no local GPU."
+                ),
+            },
+            {
+                "id": GPT_IMAGE_FLARE,
+                "label": "gpt-image-2.5 flare (CliRelay)",
+                "available": True,
+                "detail": (
+                    "GPT Image 2.5 flare via CliRelay /v1/images/edits. "
+                    "Faster 2.5 variant; no local GPU."
+                ),
+            },
+            {
                 "id": BACKEND_GPT,
                 "label": "gpt-image-2 (CliRelay)",
                 "available": True,
                 "detail": (
                     "Paid OpenAI-compatible /v1/images/edits through CliRelay. "
-                    "Default; no local GPU."
+                    "No local GPU."
                 ),
             },
             {
@@ -273,4 +421,5 @@ def make_image_edit_backend(
         return QwenImageEditBackend.from_config(cfg)
     from .image_edit_gpt import GptImageEditBackend
 
-    return GptImageEditBackend.from_config(cfg, client=client)
+    model = concrete_gpt_image_model(name) if name not in (None, "") else None
+    return GptImageEditBackend.from_config(cfg, client=client, model=model)

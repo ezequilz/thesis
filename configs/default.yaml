@@ -184,8 +184,11 @@ agent:
 
 # RGB image-edit for regenerate=yes views (not the VLM, not photometric 3DGS).
 # Swap with --image-edit-backend / SPLAT_IMAGE_EDIT_BACKEND / IMAGE_EDIT_BACKEND.
-# gpt-image-2: CliRelay /v1/images/edits (default).
+# gpt-image-2: CliRelay /v1/images/edits (episode debugger default).
+# Scene-runs default to gpt-image-2.5-sunburst (flare and gpt-image-2 remain selectable).
 # qwen-image-edit: Qwen-Image-Edit-2511 on the connected CUDA GPU.
+# QWEN_required defaults to false: GPU setup does not install Qwen unless this
+# is true, the env QWEN_required is true, or a scene-run selects qwen-image-edit.
 image_edit:
   backend: gpt-image-2
   # CUDA index after CUDA_VISIBLE_DEVICES remap. 0 = same GPU as photometric
