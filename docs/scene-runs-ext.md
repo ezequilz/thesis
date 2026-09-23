@@ -6,22 +6,25 @@ remain trainable. There is no image-score acceptance gate or new geometry bound.
 
 ## Nested artifact inspection
 
-The outer agent retains the normal artifact-hunting task. A triggered
-`report_artifact` starts a separate local collection loop for the same object.
-The report is the first accepted view. The inner agent then uses `move`, `rotate`,
-`view_depth`, `capture_repair_view`, and `cancel_local_repair`; waypoint jumps and
-`move_toward` are unavailable and rejected at runtime. Maps are withheld inside
-this loop. Captures require translation from every previously accepted pose.
-The agent judges overlap and continued object visibility; this is not a geometric
-visibility guarantee. Collection cancels after its turn budget or excess travel.
-The original task and tools return after collection or cancellation.
+The outer agent uses `tasks/artifact_hunt_3.py` and its original tool schemas
+unchanged. A triggered `report_artifact` starts a separate object-coverage prompt;
+the report supplies the first view. The inner agent uses normal `move`,
+`move_toward`, and `rotate` navigation to walk around the same stationary object,
+keep it framed, and capture four additional complementary views. The prompt aims
+for visibly different perspectives (roughly 15–30 degrees where feasible),
+not the micro-trajectories ArtiFixer generates later. Rotation without translation
+does not count as parallax. There is no special small movement cap or local radius.
+Normal navigation limits and collision handling still apply. Waypoint jumps are
+unavailable inside the inner loop. The original task and tools return afterward.
 
-Defaults are five views, 30 inner turns, movement capped at 2.5% of initial median
-visible depth (also capped by the normal movement limit), and five degrees per
-rotation. Tune `extended.local_view_count` (5–9), `local_max_turns`,
-`local_step_fraction`, and `local_rotation_degrees` independently of exploration.
-`extended.repair_limit=1` completes a research run after one successful repair;
-zero retains deadline-driven exploration.
+Defaults are five views and 30 inner turns. Tune `extended.local_view_count` (5–9)
+and `local_max_turns`. The old `local_step_fraction` and `local_rotation_degrees`
+settings are ignored when reading saved configurations so they cannot silently
+restore micro-step behavior. A new capture must be translated by at least 10% of
+initial median visible depth from previously accepted cameras; the agent judges
+same-object visibility and overlap. This baseline check does not prove coverage.
+`extended.repair_limit=1` ends a research run after one successful repair; zero
+retains deadline-driven exploration.
 
 The harness supplies accepted step IDs to the worker, which resolves them against
 completed GPU render requests. All selected views are rendered from the same
@@ -34,11 +37,21 @@ These remain synthetic references, not captured photographs or guaranteed
 multiview-consistent geometry. The lower-level bundle API still supports explicit
 `view_steps` and scene scope for controlled experiments.
 
-Each selected view gets a calibrated translated trajectory. ArtiFixer generates
-these as separate sequences with shared references, avoiding false camera motion
-across cuts between viewpoints. All generated frames are then fitted **jointly**
-with a shared optimizer. The edited references condition generation only; they
-are not extra, potentially conflicting supervision at the same target cameras.
+The GPT-edited observations are the intended corrected views. First, a cloned
+splat is jointly fitted to these images at their exact recorded cameras. ArtiFixer
+then receives RGB and actual opacity rendered from that initialized splat, plus
+the edited references. Each camera gets a separate small translated trajectory;
+the broader agent-selected camera coverage and these local trajectories serve
+different purposes.
+
+Final joint fitting uses generated nearby views while preserving the original
+GPT edits as direct targets at each known reference camera, including the loop's
+identical closing camera. At those poses the edit replaces the generated target,
+so conflicting images are not fitted at the same camera. Original conditioning
+renders/opacity are retained as `inputs-original/` and `opacity-original.npy`.
+Before/after validation still compares against the untouched incoming scene.
+This is synthetic supervision, not a guarantee that the invented details are
+physically correct or that the fixed-topology splat can reconstruct them.
 
 ## Native reconstruction resolution
 
@@ -58,7 +71,8 @@ High resolution and many selected views increase GPU memory and runtime.
 
 Defaults: 25 frames per selected view, trajectory radius 4% of central median
 depth, four inference steps, and 1,000 fitting updates per selected view. Thus
-two selected views receive 50 targets and 2,000 joint updates; adding coverage
+two selected views receive 2,000 initialization updates followed by 50 targets
+and 2,000 refinement updates; adding coverage
 does not dilute the per-view fitting budget. Loss remains
 `0.8 L1 + 0.2 (1 - SSIM)`. This continuation budget is not an upstream paper
 hyperparameter.
@@ -158,5 +172,14 @@ toward the reference appearance, but produces unstable blurry structure rather
 than a usable repair. This rules out reference count alone as a sufficient fix
 for this crop; neither result was fitted into or published as the repaired scene.
 Prepared inputs, edited references, and experiment scripts are under
-`outputs/artifixer-local-railing/`. The live nested-loop launch awaits explicit
-approval for restarting the idle manager and uploading full-frame views.
+`outputs/artifixer-local-railing/`. A subsequent user-run live test exposed overly
+small inner-loop movements, motivating the object-coverage revision below.
+
+## Object-coverage revision validation
+
+Local regression checks cover unchanged outer v3 tools, normal inner movement,
+large rotations, waypoint rejection, and migration away from old micro-step
+settings. Pipeline tests verify that edited images initialize the cloned splat,
+ArtiFixer receives renders of that initialized candidate, and the known edited
+views remain direct targets even when generated frames disagree. This revision
+has not yet been visually validated in a new live GPU run.

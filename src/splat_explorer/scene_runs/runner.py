@@ -439,8 +439,7 @@ class SceneRunExecutor:
                             float(run_cfg.agent.max_move_distance),
                             views=controls.get("local_view_count",5),
                             max_turns=controls.get("local_max_turns",30),
-                            step_fraction=controls.get("local_step_fraction",.025),
-                            rotation_degrees=controls.get("local_rotation_degrees",5.))
+                            rotation_degrees=float(run_cfg.agent.max_rotate_degrees))
                         trigger = False
                         self._event("local_collection", step=step, state="started", views=[step])
                     else:

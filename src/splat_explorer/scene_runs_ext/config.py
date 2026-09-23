@@ -5,7 +5,7 @@ import math
 DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 1000,
             "inference_steps": 4, "seed": 42, "camera_scale": 1.0,
             "max_repair_pixels": 0, "local_view_count": 5, "local_max_turns": 30,
-            "local_step_fraction": .025, "local_rotation_degrees": 5., "repair_limit": 0}
+            "repair_limit": 0}
 # 4:3, 3× the 640×480 VLM default, and a multiple of 16 for the GPU rasterizer.
 REPAIR_WIDTH = 1920
 REPAIR_HEIGHT = 1440
@@ -22,7 +22,10 @@ UPSTREAM_REVISION = "a392c4dfe17459ef9952407accdb9fcdcdddba98"
 def validate_options(value=None):
     if value is not None and not isinstance(value, dict):
         raise ValueError("extended must be an object")
-    unknown = set(value or {}) - set(DEFAULTS)
+    # Ignore controls from the superseded micro-step collector in saved runs.
+    value = {k:v for k,v in (value or {}).items()
+             if k not in {"local_step_fraction", "local_rotation_degrees"}}
+    unknown = set(value) - set(DEFAULTS)
     if unknown:
         raise ValueError(f"Unknown extended options: {', '.join(sorted(unknown))}")
     result = {**DEFAULTS, **(value or {})}
@@ -35,8 +38,7 @@ def validate_options(value=None):
             raise ValueError(f"{key} must be an integer between {lower} and {upper}")
     if (result["frames"] - 1) % 4:
         raise ValueError("frames must be 1 + 4*n (e.g. 25)")
-    for key, lower, upper in [("span_fraction", .005, .15), ("camera_scale", .0001, 10000),
-                              ("local_step_fraction", .001, .05), ("local_rotation_degrees", 1., 10.)]:
+    for key, lower, upper in [("span_fraction", .005, .15), ("camera_scale", .0001, 10000)]:
         n = result[key]
         if isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n) or not lower <= n <= upper:
             raise ValueError(f"{key} must be between {lower} and {upper}")
@@ -84,29 +86,17 @@ def edit_prompt(action):
             "Repair fuzzy or inconsistent structure and appearance while preserving the scene's layout and objects. "
             "Keep the exact camera viewpoint, perspective, framing and image dimensions. "
             "Preserve unaffected content. Do not add objects or change lighting. "
-            f"Region: {p['image_region']}. Observed defect: {p['description']}")
+            f"Observed defect: {p['description']}. "
+            f"The target was initially identified at {p['image_region']} in the discovery view. "
+            "In this different view, locate that same physical object; its screen position may "
+            "have changed. Repair that object rather than treating the initial region as a fixed pixel mask.")
 
 
 def configure_policy(policy):
-    """Extend this policy instance, leaving baseline/global tool schemas intact."""
-    import copy
-    if not hasattr(policy, "_tools"):
-        return
-    policy._tools = copy.deepcopy(policy._tools)
-    for tool in policy._tools:
-        fn = tool["function"]
-        if fn["name"] == "report_artifact":
-            fn["description"] = (
-                "Report a visible reconstruction artifact. regenerate=yes starts a separate "
-                "local inspection loop to collect five adjacent views of this SAME object before "
-                "repair. The outer loop should search for artifacts normally; it does not need "
-                "to preselect views. Describe one concrete defect and its image region."
-            )
-            for key in ("repair_scope", "view_steps"):
-                fn["parameters"]["properties"].pop(key, None)
-            # Old policies may already contain the experimental routing field.
-            fn["parameters"]["properties"].pop("intervention", None)
-            if "required" in fn["parameters"]:
-                fn["parameters"]["required"] = [
-                    key for key in fn["parameters"]["required"] if key != "intervention"
-                ]
+    """Use the original v3 artifact hunter unchanged for the outer loop."""
+    from ..tasks import artifact_hunt_3
+    from ..agent.actions import filter_tools
+    if hasattr(policy, "_task"):
+        policy._task = artifact_hunt_3
+    if hasattr(policy, "_tools"):
+        policy._tools = filter_tools(artifact_hunt_3.HIDDEN_TOOLS)

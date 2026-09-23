@@ -112,21 +112,26 @@ def test_repair_fits_every_propagated_view_and_commits_only_clone(tmp_path):
     s=scene(); Image.new("RGB",(64,64)).save(tmp_path/"anchor.png")
     phases=[]
     def fitter(candidate,views,targets,**kw):
-        assert len(views)==len(targets)==9
+        assert len(views)==len(targets)
         assert "intervention" not in kw
-        # The independently edited black anchor must never become a fit target.
-        assert all(np.array_equal(t[0,0], [100,110,120]) for t in targets)
+        if len(views) == 1:
+            assert np.array_equal(targets[0][0,0], [0,0,0])
+        else:
+            assert len(views) == 9
+            assert np.array_equal(targets[0][0,0], [0,0,0])
+            assert np.array_equal(targets[-1][0,0], [0,0,0])
+            assert all(np.array_equal(t[0,0], [100,110,120]) for t in targets[1:-1])
         candidate.colors[:]=.8
         return {"n_iters":3}
     candidate, metrics=repair(s,camera(),tmp_path/"anchor.png",tmp_path,
         options={"frames":9,"fit_iterations":3},runtime={},proposal={"intervention":"appearance"},
         should_stop=lambda:False,on_progress=lambda p:phases.append(p["phase"]),
         renderer_factory=Renderer,propagator=propagate,fitter=fitter)
-    assert phases==["bundle_render","artifixer_propagate","multiview_fit","native_validation"]
+    assert phases==["bundle_render","edited_view_fit","artifixer_propagate","multiview_fit","native_validation"]
     np.testing.assert_allclose(s.colors,.4)
     np.testing.assert_allclose(candidate.colors,.8)
     assert metrics["generated_frames"]==9
-    assert metrics["anchor_role"] == "generation_reference_only"
+    assert metrics["anchor_role"] == "initialization_and_direct_reconstruction_target"
     assert metrics["fitting_resolution"] == [64,64]
     assert metrics["exploration_resolution"] == [32,32]
     assert len(list((tmp_path/"extended/targets").glob("*.png")))==9
@@ -153,9 +158,10 @@ def test_selected_views_are_fitted_jointly_with_calibrated_references(tmp_path):
     c = camera()
     other = Camera(np.array([1,0,0],np.float32), c.rotation, width=32,height=32)
     def fitter(candidate, views, targets, **kwargs):
-        assert len(views) == len(targets) == 18
+        assert len(views) == len(targets)
+        assert len(views) in (2,18)
         assert all(v.width == 64 and v.height == 64 for v in views)
-        np.testing.assert_allclose(views[9].position, other.position)
+        np.testing.assert_allclose(views[1 if len(views)==2 else 9].position, other.position)
         assert kwargs["iterations"] == 2000
         return {}
     _, metrics = repair(scene(),c,tmp_path/"anchor.png",tmp_path,
@@ -198,7 +204,9 @@ def test_failed_candidate_never_mutates_source(tmp_path,failure):
         return out
     def fitter(candidate,*args,**kw):
         candidate.colors[:]=0
-        raise RuntimeError("fit failed")
+        if failure == "fit_error":
+            raise RuntimeError("fit failed")
+        return {}
     with pytest.raises((RuntimeError,InterruptedError)):
         repair(s,camera(),tmp_path/"anchor.png",tmp_path,options={"frames":9},runtime={},
             proposal={},should_stop=lambda:stopped[0],on_progress=lambda _:None,
@@ -458,3 +466,35 @@ def test_coordinated_views_share_anchor_and_render_before_edits(tmp_path):
     assert edits[0][0]==current
     assert all(e[2][0]==request/'regenerated.png' for e in edits[1:])
     assert len(selected_views(request,{'view_steps':[0,1,2,3]},4))==4
+
+
+def test_artifixer_receives_scene_fitted_to_edits_and_keeps_edits_as_targets(tmp_path):
+    Image.new('RGB',(32,32),(210,210,210)).save(tmp_path/'anchor.png')
+    source=scene()
+    calls=[]
+    class ColoredRenderer(Renderer):
+        def __init__(self, value): self.value=value
+        def render(self,c):
+            rgb,alpha,depth=super().render(c)
+            rgb[:]=round(float(self.value.colors[0,0])*255)
+            return rgb,alpha,depth
+    def fit(candidate, cameras, targets, **kwargs):
+        calls.append(len(cameras))
+        if len(cameras)==1:
+            assert int(targets[0][0,0,0])==210
+            candidate.colors[:]=210/255
+        else:
+            assert calls==[1,9]
+            assert int(targets[0][0,0,0])==210
+            assert int(targets[8][0,0,0])==210
+            assert int(targets[1][0,0,0])==100
+        return {}
+    def generate(root,runtime,stop):
+        assert int(np.array(Image.open(root/'inputs/00000.png'))[0,0,0])==210
+        assert int(np.array(Image.open(root/'inputs-original/00000.png'))[0,0,0])==102
+        np.testing.assert_allclose(source.colors,.4)
+        return propagate(root,runtime,stop)
+    repair(source,camera(),tmp_path/'anchor.png',tmp_path,options={'frames':9,'fit_iterations':1},
+           runtime={},proposal={},should_stop=lambda:False,on_progress=lambda _:None,
+           renderer_factory=ColoredRenderer,propagator=generate,fitter=fit)
+    assert calls==[1,9]

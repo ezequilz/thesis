@@ -175,6 +175,40 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
                 "upstream_adapter_revision": UPSTREAM_REVISION}
     (root / "bundle.json").write_text(json.dumps(manifest, indent=2))
     render_seconds = time.monotonic()-started
+    # Establish the edited observations in 3D before propagating nearby views.
+    # Otherwise the opaque corrupted splat dominates ArtiFixer's RGB condition.
+    candidate = scene.copy()
+    anchor_cameras, anchor_targets = [], []
+    for reference in references:
+        anchor_cameras.append(cameras[reference["frame_index"]])
+        with Image.open(root / reference["path"]) as image:
+            anchor_targets.append(np.array(image.convert("RGB")))
+    on_progress({"phase": "edited_view_fit"})
+    anchor_metrics = fitter(candidate, anchor_cameras, anchor_targets,
+        iterations=options["fit_iterations"] * len(anchor_cameras),
+        should_stop=should_stop,
+        on_progress=lambda p: on_progress({**p, "phase": "edited_view_fit"}))
+    check()
+    _release_cuda()
+    # Preserve the original renders as diagnostics; propagation sees the scene
+    # initialized from the intended corrected views, with its actual opacity.
+    inputs.rename(root / "inputs-original")
+    inputs.mkdir()
+    renderer = renderer_factory(candidate)
+    alphas = []
+    for i, view in enumerate(cameras):
+        check()
+        rgb, alpha, _ = renderer.render(view)
+        Image.fromarray(rgb).save(inputs / f"{i:05d}.png")
+        alphas.append(alpha)
+    del renderer
+    _release_cuda()
+    (root / "opacity.npy").rename(root / "opacity-original.npy")
+    np.save(root / "opacity.npy", np.stack(alphas).astype(np.float32))
+    manifest["conditioning_scene"] = "jointly fitted to edited reference views"
+    manifest["anchor_role"] = "initialization_and_direct_reconstruction_target"
+    (root / "bundle.json").write_text(json.dumps(manifest, indent=2))
+    initialization_seconds = time.monotonic()-started-render_seconds
     on_progress({"phase": "artifixer_propagate"})
     predicted = propagator(root, runtime, should_stop)
     check()
@@ -190,10 +224,18 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
                 raise RuntimeError("ArtiFixer output dimensions do not match calibrated cameras")
             targets.append(np.asarray(image.convert("RGB")))
         shutil.copy2(path, preview / path.name)
-    propagate_seconds = time.monotonic()-started-render_seconds
-    # The edited anchor conditions generation only. Fit the coherent generated
-    # sequence, not an additional independently edited target at the same pose.
-    candidate = scene.copy()
+    propagate_seconds = time.monotonic()-started-render_seconds-initialization_seconds
+    # At known edited cameras the edited observation is authoritative. Replace
+    # the generated target (including the loop's identical closing pose), rather
+    # than training on two contradictory images at the same camera.
+    edited_indices = []
+    for reference, target in zip(references, anchor_targets):
+        start = reference["frame_index"]
+        segment = next(segment for segment in segments if segment["start"] == start)
+        for i in (start, start + segment["count"] - 1):
+            targets[i] = target
+            Image.fromarray(target).save(preview / f"{i:05d}.png")
+            edited_indices.append(i)
     on_progress({"phase": "multiview_fit"})
     metrics = fitter(candidate, cameras, targets,
                      iterations=options["fit_iterations"] * len(segments),
@@ -210,8 +252,10 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     metrics.update(pipeline="extended", backend="artifixer-gsplat", proposal=proposal,
                    render_seconds=render_seconds, propagation_seconds=propagate_seconds,
                    total_seconds=time.monotonic()-started, generated_frames=len(cameras),
-                   baseline="artifixer-selected-views-native-v2",
-                   anchor_role="generation_reference_only",
+                   baseline="edited-view-initialized-artifixer-v3",
+                   anchor_role="initialization_and_direct_reconstruction_target",
+                   edited_view_fit=anchor_metrics, initialization_seconds=initialization_seconds,
+                   edited_target_indices=edited_indices,
                    selected_steps=[v["step"] for v in seeds[1:]],
                    repair_scope=proposal.get("repair_scope", "local"),
                    generation_segments=len(segments), reference_views=len(references),
