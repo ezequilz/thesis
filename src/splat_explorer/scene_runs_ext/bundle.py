@@ -93,6 +93,31 @@ def camera_bundle(anchor, depth, *, frames=25, span_fraction=.04):
     return result
 
 
+def continuous_camera_bundle(views, depth, *, frames=25, span_fraction=.04):
+    """One smooth sequence from the edited anchor through selected poses.
+
+    Recorded views are camera waypoints, not additional image observations.
+    A single-view request retains the original small translated loop.
+    """
+    if len(views) == 1:
+        return camera_bundle(views[0], depth, frames=frames, span_fraction=span_fraction), [0]
+    from scipy.spatial.transform import Rotation, Slerp
+    first = views[0]
+    result = [first]
+    waypoint_indices = [0]
+    for index, (a, b) in enumerate(zip(views, [*views[1:], first])):
+        slerp = Slerp([0., 1.], Rotation.from_matrix(np.stack([a.rotation, b.rotation])))
+        fractions = np.linspace(0., 1., frames)[1:]
+        rotations = slerp(fractions).as_matrix()
+        for fraction, rotation in zip(fractions, rotations):
+            result.append(replace(first, position=((1-fraction)*a.position + fraction*b.position).astype(np.float32),
+                                  rotation=rotation.astype(np.float32)))
+        result[-1] = b  # Preserve recorded poses exactly, including roll.
+        if index < len(views)-1:
+            waypoint_indices.append(len(result)-1)
+    return result, waypoint_indices
+
+
 def transforms(cameras):
     """Official ArtiFixer camera helper consumes OpenCV c2w and pixel intrinsics."""
     c = cameras[0]

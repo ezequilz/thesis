@@ -637,43 +637,12 @@ class LrzSceneRunTransport:
 
     def _edit_coordinated_views(self, request_dir, proposal, step, rendered_path, prompt,
                                 *, deadline, should_stop):
-        """Edit one object from collected views, sharing the first repaired anchor."""
-        from dataclasses import replace
-        from PIL import Image
-        from ..scene_runs_ext.bundle import selected_views
-        views = selected_views(request_dir, proposal, step)
-        with Image.open(rendered_path) as image:
-            width, height = image.size
-        sources = []
-        def check():
-            if should_stop() or time.time() >= deadline:
-                raise InterruptedError("Stopped during coordinated reference collection")
-        # Render every view from this scene version before making any edits.
-        for view in views:
-            check()
-            camera = view['camera']
-            if camera.width*height != camera.height*width:
-                raise ValueError("Selected view aspect ratio differs from repair image")
-            rgb, _ = self.render(step=view['step'], camera=replace(camera,width=width,height=height),
-                                 deadline=deadline, should_stop=should_stop, purpose=f"bundle-{step:05d}")
-            path = request_dir / f"reference-render-{view['step']:05d}.png"
-            Image.fromarray(rgb).save(path)
-            sources.append(path)
-        check()
-        anchor = request_dir / REGENERATED_NAME
-        roles = (" IMAGE 1 is the only target to output. Other images show the SAME physical "
-                 "artifact from neighboring cameras. Preserve IMAGE 1's exact viewpoint and framing. ")
-        self._progress('image_edit', 'Repairing shared anchor with neighboring view context')
-        result = self._edit_with_clirelay(rendered_path, anchor, prompt+roles, references=sources[:4])
-        for index, view in enumerate(views):
-            check()
-            context = [anchor, rendered_path] + [p for j,p in enumerate(sources) if j != index][:2]
-            self._progress('reference_collection', f"Repairing same object at view {view['step']}")
-            self._edit_with_clirelay(sources[index], request_dir / f"reference-{view['step']:05d}.png",
-                prompt+roles+" IMAGE 2 is the shared repaired anchor: retain the SAME physical "
-                "structure, object count, spacing and appearance, projected into IMAGE 1's camera. "
-                "Do not copy the anchor viewpoint or redesign other parts of the scene.", references=context)
-        return result
+        """One API call with only the selected anchor image; poses stay local."""
+        if should_stop() or time.time() >= deadline:
+            raise InterruptedError("Stopped before starter image repair")
+        self._progress('image_edit', 'Repairing the selected starter image')
+        return self._edit_with_clirelay(
+            rendered_path, request_dir / REGENERATED_NAME, prompt)
 
     def _edit_with_clirelay(
         self,

@@ -147,7 +147,7 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
                                     '--checkpoint', 'unused', '--model-id', 'test'])
     artifixer_bridge.main()
     assert len(seen) == 2
-    assert parsed[parsed.index('--local_attn_size') + 1] == '-1'
+    assert parsed[parsed.index('--local_attn_size') + 1] == '21'
     assert '--replace_if_exists' in parsed
     metadata = json.loads((tmp_path/'inference.json').read_text())
     assert metadata['starter_frames'] == [0,9]

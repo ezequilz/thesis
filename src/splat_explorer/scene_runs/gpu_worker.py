@@ -285,6 +285,7 @@ class SceneRunGpuWorker:
         self.repair_factory = repair_factory
         self.clock = clock
         self.scene = None
+        self.extended_scale_ceiling = None
         self.renderer = None
         self.image_editor = None
         self._stop = threading.Event()
@@ -345,6 +346,11 @@ class SceneRunGpuWorker:
         self.scene = self.scene_loader(source)
         if (self.config.get("scene_run") or {}).get("pipeline") == "extended":
             from ..scene_runs_ext.pipeline import validate_runtime
+            from ..scene_runs_ext.fitting import initial_scale_ceiling
+            # A restart may load a repaired checkpoint. Always derive the bound
+            # from the immutable run input, not from already-grown Gaussians.
+            original = self.scene if source == self.run_dir / SCENE_NAME else self.scene_loader(self.run_dir / SCENE_NAME)
+            self.extended_scale_ceiling = initial_scale_ceiling(original)
             validate_runtime(self.config.get("extended_runtime"))
 
     def _editor(self):
@@ -510,6 +516,7 @@ class SceneRunGpuWorker:
                     should_stop=lambda: self._request_stop(request_dir, ext_deadline),
                     on_progress=ext_progress,
                     selected_views=views,
+                    scale_ceiling=self.extended_scale_ceiling,
                 )
                 metrics.update(image_edit=edit_payload, request_id=request_id, step=request.get("step"))
                 # Only complete candidates reach disk and the explorer.

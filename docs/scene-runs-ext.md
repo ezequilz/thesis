@@ -20,7 +20,7 @@ After movement, the agent receives a numbered contact sheet and only the
 `select_repair_views` tool. Each tile retains the full exploration-frame
 resolution: ten 640×480 views produce a 1920×2112 overview, sent with high image
 detail. The agent selects exactly five distinct tile numbers. The first becomes
-the reconstruction anchor and the other four become references; neither the
+the reconstruction anchor and the other four supply camera waypoints; neither the
 original discovery view nor the last camera view is automatically included.
 Tile numbers are resolved to recorded camera poses by the harness. Invalid
 selections are retried up to three times, then collection is cancelled.
@@ -34,49 +34,48 @@ and `local_rotation_degrees` settings remain ignored.
 `extended.repair_limit=1` ends a research run after one successful repair; zero
 retains deadline-driven exploration.
 
-The harness supplies accepted step IDs to the worker, which resolves them against
-completed GPU render requests. All selected views are rendered from the same
-scene version before editing. The current anchor is edited using up to four raw
-neighboring views; subsequent edits receive that shared repaired anchor, the raw
-anchor, and up to two other views. This respects the relay's five-image request
-limit. Each request explicitly identifies its target camera and shared physical
-object. Changed output aspect ratios fail instead of assigning false calibration.
-These remain synthetic references, not captured photographs or guaranteed
-multiview-consistent geometry. The lower-level bundle API still supports explicit
-`view_steps` and scene scope for controlled experiments.
+The harness resolves selected step IDs against recorded camera poses. GPT-image
+receives **one image in one call per repair**: the selected anchor. No neighboring
+images are uploaded, and no additional GPT edits are requested. The other views
+supply poses only. Changed output aspect ratios fail rather than assigning false
+calibration. The lower-level API retains explicit `view_steps` and scene scope.
 
-The GPT-edited observations are the intended corrected views. A cloned splat is
-jointly fitted to these images to initialize reconstruction, but that approximate
-fit no longer supplies RGB or opacity to ArtiFixer. Each camera gets a separate
-translated trajectory seeded directly by its own calibrated GPT edit.
+One continuous trajectory interpolates position linearly and orientation with
+SLERP through the selected cameras, starting at the edited anchor and returning
+to it. Each leg has `frames - 1` intervals. With five cameras and the default 25,
+this yields 121 frames, including the starter and the generated closing frame.
+Single-camera experiments retain the original small translated loop. Camera
+conditioning is supplied by the harness, not predicted by ArtiFixer.
 
 The `gpt-starter-kv-v1` adapter encodes the edit as the first causal VAE latent,
 keeps it clean, and performs a timestep-zero transformer pass to populate the
-temporal KV cache **before generating subsequent frames**. Later frames start
-from noise, with zero rendered RGB/opacity, calibrated camera conditioning and
-all edited references. Opacity one at the starter means that image is observed;
-it is not measured scene opacity. The starter is not copied across camera poses.
-Each trajectory resets caches. The short sequence retains its full history;
-generated blocks refresh their cache from clean output. Exporting the exact first
-RGB image removes VAE roundtrip loss, rather than being the mechanism that seeds
-generation. Every trajectory requires an edited reference at its starting pose.
+KV cache **before generating subsequent frames**. Later frames start from noise,
+with zero rendered RGB/opacity, calibrated cameras and the same single edited
+reference. No intermediate or closing GPT frames are inserted. A rolling
+21-latent-frame cache retains the first frame as a one-frame attention sink;
+generated blocks refresh their cached context from clean output. The cache is
+reset between repairs, not between camera waypoints. Exporting the exact first
+RGB image only removes VAE roundtrip loss; it does not substitute for conditioning.
 
-This is a custom single-GPU inference adaptation of the pinned upstream KV
-pipeline, not an upstream image-to-video flag or a guarantee of geometric
-consistency. It removes scene-appearance conditioning deliberately. Sparse or
-inconsistent references can therefore hallucinate or drift. The scene still
-provides camera-trajectory depth and reconstruction initialization. Saved
-`inputs/` and opacity arrays remain diagnostic renders, **not generation inputs**;
-`inference.json` records the actual conditioning mode and starter frame indices.
+This is a custom single-GPU inference adaptation of the pinned upstream model,
+not an upstream image-to-video flag or a guarantee of multiview consistency.
+Removing scene-appearance conditioning can permit hallucination or drift. The
+scene supplies trajectory depth for single-camera loops, validation renders and
+initial Gaussian parameters. Saved `inputs/` and opacity arrays are diagnostic
+renders, **not generation inputs**. `inference.json` records actual conditioning.
 
-Final joint fitting uses generated nearby views while preserving the original
-GPT edits as direct targets at each known reference camera, including the loop's
-identical closing camera. At those poses the edit replaces the generated target,
-so conflicting images are not fitted at the same camera. Original conditioning
-renders/opacity are retained as `inputs-original/` and `opacity-original.npy`.
-Before/after validation still compares against the untouched incoming scene.
-This is synthetic supervision, not a guarantee that the invented details are
-physically correct or that the fixed-topology splat can reconstruct them.
+Reconstruction runs **once, after generation**. The old preliminary fit to sparse
+GPT edits is removed. The starter receives half of fitting updates and generated
+views share the other half, independent of frame count. The generated closing
+frame remains visible in `targets/` but is excluded from fitting because its pose
+is identical to the starter; fitting both could create contradictory supervision.
+The scale ceiling remains twice the original run asset's maximum scale. It is
+computed from immutable `scene.ply`, including after worker restart, and does not
+increase with repaired checkpoints. This is not a new lower scale threshold.
+Metrics separate edited/generated target error and report Gaussian scale and
+axis-ratio statistics. There is still no automatic image-quality acceptance gate,
+densification or pruning. These changes address feedback and supervision
+imbalance; they do not establish that all geometric artifacts are solved.
 
 ## Native reconstruction resolution
 
@@ -85,8 +84,7 @@ the **largest exact-aspect multiple-of-16 resolution no larger than the returned
 edited anchor**, rather than the exploration resolution or requested edit size.
 For a 1448×1086 returned image this is 1408×1056. Camera pose and FOV stay fixed;
 pixel intrinsics are recomputed. There is no crop, stretch or implicit upsampling
-of the current edited anchor. Previously edited references may be resampled to
-match the current bundle. Aspect-ratio changes are rejected because the original
+of the current edited anchor. Aspect-ratio changes are rejected because the original
 camera would no longer be calibrated to that image.
 
 `extended.max_repair_pixels=0` (default) selects this native-aligned resolution.
@@ -94,13 +92,12 @@ An explicit positive pixel budget allows a smaller exact-aspect resolution when
 GPU memory requires it. There is no silent fallback to exploration resolution.
 High resolution and many selected views increase GPU memory and runtime.
 
-Defaults: 25 frames per selected view, trajectory radius 4% of central median
-depth, four inference steps, and 1,000 fitting updates per selected view. Thus
-two selected views receive 2,000 initialization updates followed by 50 targets
-and 2,000 refinement updates; adding coverage
-does not dilute the per-view fitting budget. Loss remains
-`0.8 L1 + 0.2 (1 - SSIM)`. This continuation budget is not an upstream paper
-hyperparameter.
+Defaults: 25 samples per trajectory leg, four inference steps, and 1,000 fitting
+updates per selected camera (5,000 total for five cameras). The 4% depth-relative
+radius controls the single-camera fallback loop and held-out diagnostics;
+multicamera trajectory coverage comes from the selected camera positions.
+Loss remains `0.8 L1 + 0.2 (1 - SSIM)`. This continuation budget and 50/50 source
+sampling are adaptation choices, not paper hyperparameters.
 
 ## Diagnostics and transaction safety
 
@@ -204,11 +201,10 @@ small inner-loop movements, motivating the object-coverage revision below.
 
 Local regression checks cover unchanged outer v3 tools, normal inner movement,
 large rotations, waypoint rejection, and migration away from old micro-step
-settings. Pipeline tests verify that edited images initialize the cloned splat
-and remain direct targets even when generated frames disagree. Starter-inference
-CPU tests verify clean-context ordering, camera/opacity alignment, dependence of
-future output on the starter, and cache isolation between trajectories. These
-tensor tests require PyTorch; lightweight bundle tests do not. The starter
-adaptation has not yet been visually validated in a live GPU run. Final fitting
-still uses the existing target sampling and fixed topology; those separate
-limitations remain.
+settings. Pipeline tests verify one-image/one-call editing, a continuous calibrated
+trajectory, generation before the sole fitting stage, and no intermediate or
+closing edit replacement. CPU tests verify source-balanced sampling, scale-ceiling
+stability across checkpoint reloads, starter temporal-cache ordering and camera
+alignment. Tensor tests require PyTorch. The single-starter adaptation has not yet
+been visually validated on a live GPU run; the earlier GPU results above describe
+historical versions, not this change.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -291,6 +292,12 @@ def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_pat
     executor.execute(created.run_id)
     run_dir = store.run_path(created.run_id)
 
+    records = [json.loads(line) for line in (run_dir / "actions.jsonl").read_text().splitlines()]
+    entry = next(r for r in records if r["step"] == 1)
+    returned = next(r for r in records if r["step"] == 22)["motion"]
+    assert returned["kind"] == "local_return"
+    for key in ("position", "yaw_deg", "pitch_deg"):
+        assert returned[key] == entry[key]
     assert seen == [(32, 32, 3)] * 22 + [(128,96,3)]
     assert Image.open(run_dir / "step_00000.png").size == (32, 32)
     assert Image.open(run_dir / "step_00001_repair.png").size == (64, 64)

@@ -211,7 +211,35 @@ def test_vertical_translation_then_pitch_tracks_target(up_axis, direction, sign)
     assert loop.steps == [2]
     ray = target - rig.position
     np.testing.assert_allclose(rig.view_direction(), ray / np.linalg.norm(ray), atol=1e-8)
-    missing = 'lower' if sign > 0 else 'higher'
-    recorded = 'higher' if sign > 0 else 'lower'
-    assert f'Still need a {missing} vantage' in loop.context()
-    assert f'Still need a {recorded} vantage' not in loop.context()
+    assert 'Still need' not in loop.context()
+    assert 'Height changes are optional' in loop.system_prompt()
+
+
+@pytest.mark.parametrize('exit_kind', ['ready', 'invalid_selection', 'turn_limit'])
+def test_return_restores_entry_pose_without_changing_repair_views(exit_kind):
+    policy, rig, loop = make_loop(candidates=5)
+    # Capture a nontrivial entry pose, including height and pitch.
+    rig.position[:] = [2., 3., 4.]
+    rig.yaw_deg, rig.pitch_deg = 37., -12.
+    loop = LocalRepairLoop(policy, Action('report_artifact'), 0, rig, None, 2,
+                           candidates=5, max_turns=10)
+    collect(loop, rig)
+    positions = [r.position.copy() for r in loop.rigs]
+    if exit_kind == 'ready':
+        _, state = loop.handle(Action('select_repair_views', {'views':[1,2,3,4,5]}), 11, rig)
+        assert state == 'ready'
+    elif exit_kind == 'invalid_selection':
+        for _ in range(3):
+            _, state = loop.handle(Action('select_repair_views', {'views':[]}), 11, rig)
+        assert state == 'cancelled'
+    else:
+        loop.selecting = False
+        _, state = loop.handle(Action('move', {'direction':'right', 'distance':1}), 11, rig)
+        assert state == 'cancelled'
+    loop.restore_camera(rig)
+    np.testing.assert_array_equal(rig.position, [2.,3.,4.])
+    assert (rig.yaw_deg, rig.pitch_deg) == (37., -12.)
+    for r, position in zip(loop.rigs, positions):
+        np.testing.assert_array_equal(r.position, position)
+    rig.position[0] += 1
+    assert loop.entry_rig.position[0] == 2  # restored position is not aliased

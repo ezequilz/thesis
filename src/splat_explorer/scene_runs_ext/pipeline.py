@@ -13,8 +13,8 @@ from dataclasses import replace
 import numpy as np
 from PIL import Image
 from .config import RUNTIME_DEFAULTS, UPSTREAM_REVISION, validate_options
-from .bundle import camera_bundle, transforms, repair_camera
-from .fitting import BACKGROUND, fit_views
+from .bundle import camera_bundle, continuous_camera_bundle, transforms, repair_camera
+from .fitting import BACKGROUND, fit_views, initial_scale_ceiling
 from .starter_inference import starter_reference
 
 
@@ -97,9 +97,10 @@ def propagate(root, runtime, should_stop):
 
 def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposal,
            should_stop, on_progress, renderer_factory=BundleRenderer,
-           propagator=propagate, fitter=fit_views, selected_views=None):
+           propagator=propagate, fitter=fit_views, selected_views=None, scale_ceiling=None):
     """Return a fully fitted clone; never mutate the incumbent on failure/stop."""
     options = validate_options(options)
+    scale_ceiling = initial_scale_ceiling(scene) if scale_ceiling is None else scale_ceiling
     exploration_resolution = [camera.width, camera.height]
     with Image.open(anchor_path) as image:
         native_resolution = list(image.size)
@@ -113,7 +114,8 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     check()
     on_progress({"phase": "bundle_render"})
     renderer = renderer_factory(scene)
-    cameras, segments, validation_cameras = [], [], []
+    validation_cameras, views = [], []
+    anchor_depth = None
     references = [{"path": "anchor.png", "frame_index": 0, "kind": "edited_render"}]
     seeds = [{"camera": camera, "step": None}] + list(selected_views or [])
     reference_dir = root / "references"
@@ -125,12 +127,13 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
         if view.width * camera.height != view.height * camera.width:
             raise ValueError("Selected views must share the repaired image aspect ratio")
         view = replace(view, width=camera.width, height=camera.height)
+        if not np.allclose(view.intrinsics, camera.intrinsics):
+            raise ValueError("Selected views must share the anchor camera intrinsics")
         check()
         _, _, depth = renderer.render(view)
-        start = len(cameras)
-        cameras.extend(camera_bundle(view, depth, frames=options["frames"],
-                                     span_fraction=options["span_fraction"]))
-        segments.append({"start": start, "count": options["frames"], "step": seed.get("step")})
+        views.append(view)
+        if anchor_depth is None:
+            anchor_depth = depth
         held_out = camera_bundle(view, depth, frames=9,
                                  span_fraction=2 * options["span_fraction"])[2]
         for diagnostic_view in (view, held_out):
@@ -138,14 +141,9 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
             rgb, _, _ = renderer.render(diagnostic_view)
             Image.fromarray(rgb).save(validation_dir / f"before-{len(validation_cameras):03d}.png")
             validation_cameras.append(diagnostic_view)
-        if seed.get("reference_path"):
-            with Image.open(seed["reference_path"]) as image:
-                if image.width * camera.height != image.height * camera.width:
-                    raise ValueError("Selected edited reference aspect ratio changed")
-                path = f"references/{len(references):05d}.png"
-                image.convert("RGB").resize((camera.width, camera.height), Image.Resampling.LANCZOS).save(root / path)
-            references.append({"path": path, "frame_index": start,
-                               "kind": "edited_render", "step": seed.get("step")})
+    cameras, waypoint_indices = continuous_camera_bundle(
+        views, anchor_depth, frames=options["frames"], span_fraction=options["span_fraction"])
+    segments = [{"start": 0, "count": len(cameras)}]
     inputs = root / "inputs"
     inputs.mkdir(exist_ok=True)
     alphas = []
@@ -168,6 +166,8 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
         digest.update(np.ascontiguousarray(value).tobytes())
     manifest = {"protocol": 2, "transforms": transforms(cameras), "options": options,
                 "segments": segments, "references": references,
+                "selected_camera_indices": waypoint_indices,
+                "conditioning_policy": "one edited starter; camera-only waypoints",
                 "validation_transforms": transforms(validation_cameras),
                 "native_reference_resolution": native_resolution,
                 "exploration_resolution": exploration_resolution,
@@ -180,40 +180,19 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     manifest["scene_rgb_conditioning"] = False
     (root / "bundle.json").write_text(json.dumps(manifest, indent=2))
     render_seconds = time.monotonic()-started
-    # Initialize the reconstruction from edits. These renders are diagnostics;
-    # generation starts directly from the GPT image, not this approximate fit.
+    # GPT images seed inference directly. Do not deform sparse geometry first:
+    # generate the complete supervision set, then reconstruct exactly once.
     candidate = scene.copy()
-    anchor_cameras, anchor_targets = [], []
+    anchor_targets = []
     for reference in references:
-        anchor_cameras.append(cameras[reference["frame_index"]])
         with Image.open(root / reference["path"]) as image:
             anchor_targets.append(np.array(image.convert("RGB")))
-    on_progress({"phase": "edited_view_fit"})
-    anchor_metrics = fitter(candidate, anchor_cameras, anchor_targets,
-        iterations=options["fit_iterations"] * len(anchor_cameras),
-        should_stop=should_stop,
-        on_progress=lambda p: on_progress({**p, "phase": "edited_view_fit"}))
-    check()
-    _release_cuda()
-    # Preserve the original renders as diagnostics; propagation sees the scene
-    # initialized from the intended corrected views, with its actual opacity.
-    inputs.rename(root / "inputs-original")
-    inputs.mkdir()
-    renderer = renderer_factory(candidate)
-    alphas = []
-    for i, view in enumerate(cameras):
-        check()
-        rgb, alpha, _ = renderer.render(view)
-        Image.fromarray(rgb).save(inputs / f"{i:05d}.png")
-        alphas.append(alpha)
-    del renderer
-    _release_cuda()
-    (root / "opacity.npy").rename(root / "opacity-original.npy")
-    np.save(root / "opacity.npy", np.stack(alphas).astype(np.float32))
     manifest["conditioning_scene"] = "diagnostic only; RGB and opacity not supplied to generation"
     manifest["anchor_role"] = "clean_temporal_starter_and_direct_reconstruction_target"
+    manifest["fitting_stages"] = 1
+    manifest["scale_ceiling"] = scale_ceiling
+    manifest["target_sampling"] = "balanced-edited-generated"
     (root / "bundle.json").write_text(json.dumps(manifest, indent=2))
-    initialization_seconds = time.monotonic()-started-render_seconds
     on_progress({"phase": "artifixer_propagate"})
     predicted = propagator(root, runtime, should_stop)
     check()
@@ -229,22 +208,23 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
                 raise RuntimeError("ArtiFixer output dimensions do not match calibrated cameras")
             targets.append(np.asarray(image.convert("RGB")))
         shutil.copy2(path, preview / path.name)
-    propagate_seconds = time.monotonic()-started-render_seconds-initialization_seconds
-    # At known edited cameras the edited observation is authoritative. Replace
-    # the generated target (including the loop's identical closing pose), rather
-    # than training on two contradictory images at the same camera.
+    propagate_seconds = time.monotonic()-started-render_seconds
+    # Only frame zero is an edited observation. Do not insert edits at later
+    # waypoints or at loop closure; all later images are model predictions.
     edited_indices = []
     for reference, target in zip(references, anchor_targets):
         start = reference["frame_index"]
-        segment = next(segment for segment in segments if segment["start"] == start)
-        for i in (start, start + segment["count"] - 1):
-            targets[i] = target
-            Image.fromarray(target).save(preview / f"{i:05d}.png")
-            edited_indices.append(i)
+        targets[start] = target
+        Image.fromarray(target).save(preview / f"{start:05d}.png")
+        edited_indices.append(start)
     on_progress({"phase": "multiview_fit"})
-    metrics = fitter(candidate, cameras, targets,
-                     iterations=options["fit_iterations"] * len(segments),
-                     should_stop=should_stop, on_progress=on_progress)
+    closure_l1 = float(np.mean(np.abs(targets[-1].astype(np.float32) - targets[0].astype(np.float32))) / 255)
+    # The generated closing frame is a consistency diagnostic, not a second
+    # conflicting training target at the exact edited camera.
+    metrics = fitter(candidate, cameras[:-1], targets[:-1],
+                     iterations=options["fit_iterations"] * len(seeds),
+                     should_stop=should_stop, on_progress=on_progress,
+                     scale_ceiling=scale_ceiling, edited_indices=edited_indices)
     check()
     on_progress({"phase": "native_validation"})
     renderer = renderer_factory(candidate)
@@ -257,10 +237,12 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     metrics.update(pipeline="extended", backend="artifixer-gsplat", proposal=proposal,
                    render_seconds=render_seconds, propagation_seconds=propagate_seconds,
                    total_seconds=time.monotonic()-started, generated_frames=len(cameras),
-                   baseline="gpt-starter-artifixer-v4",
+                   baseline="single-starter-single-fit-artifixer-v5",
                    conditioning_mode="gpt-starter-kv-v1", scene_rgb_conditioning=False,
                    anchor_role="clean_temporal_starter_and_direct_reconstruction_target",
-                   edited_view_fit=anchor_metrics, initialization_seconds=initialization_seconds,
+                   fitting_stages=1, scale_ceiling=scale_ceiling,
+                   loop_closure_excluded_from_fit=True,
+                   generated_loop_closure_l1=closure_l1,
                    edited_target_indices=edited_indices,
                    selected_steps=[v["step"] for v in seeds[1:]],
                    repair_scope=proposal.get("repair_scope", "local"),

@@ -433,6 +433,7 @@ class SceneRunExecutor:
                 repair_rig = rig
                 repair_observation = observation
                 selected_steps = None
+                completed_local_loop = None
                 if params.get("pipeline") == "extended":
                     if local_loop is not None:
                         action, collection_state = local_loop.handle(action, step, rig)
@@ -444,6 +445,7 @@ class SceneRunExecutor:
                         self._event("local_collection", step=step, state=collection_state,
                                     views=list(local_loop.steps), note=local_loop.note)
                         if collection_state != "collecting":
+                            completed_local_loop = local_loop
                             local_loop = None
                         is_artifact = action.name == "report_artifact"
                     elif is_artifact:
@@ -587,6 +589,17 @@ class SceneRunExecutor:
                     # Scene-runs are deadline controlled; the production v3
                     # prompt hides done, but alternate prompts cannot end early.
                     outcome = {"kind": "done", "ignored": True}
+                if completed_local_loop is not None:
+                    # Keep this step's rendered pose and repair anchor intact above;
+                    # restore exploration only after logging its pre-action pose.
+                    completed_local_loop.restore_camera(rig)
+                    outcome = {
+                        "kind": "local_return",
+                        "position": rig.position.tolist(),
+                        "yaw_deg": rig.yaw_deg,
+                        "pitch_deg": rig.pitch_deg,
+                    }
+                    self._event("local_camera_restored", step=step, **outcome)
                 motion_note = _motion_note(outcome)
                 if outcome is not None:
                     record["motion"] = _jsonable(outcome)

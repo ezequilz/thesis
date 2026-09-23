@@ -59,11 +59,12 @@ def generate_from_starter(self, condition, rendered_opacity, neighbors_condition
     device = self.vae.device
     temporal = self.vae.config.scale_factor_temporal
     tokens = (height // ph) * (width // pw)
-    # These short, independent trajectories retain the starter for their full
-    # duration. Reject sliding windows rather than silently evicting the seed.
-    if self.local_attn_size not in (-1, 0) and self.local_attn_size < total:
-        raise ValueError('Starter trajectory exceeds the configured attention window')
-    self._initialize_kv_cache(batch, tokens, total)
+    # Long single-starter paths retain frame zero as an attention sink while
+    # rolling the remaining context, as supported by the upstream cache.
+    window = self.local_attn_size
+    if window != -1 and (window < self.frames_per_block + 1 or self.sink_size != 1):
+        raise ValueError('Starter rolling cache requires sink_size=1 and space for a generated block')
+    self._initialize_kv_cache(batch, tokens, total if window == -1 else min(total, window))
     self._initialize_crossattn_cache('crossattn_cache')
     self._initialize_crossattn_cache('neighbor_crossattn_cache')
     output = torch.zeros_like(condition, device=device)

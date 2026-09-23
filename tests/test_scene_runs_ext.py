@@ -114,20 +114,18 @@ def test_repair_fits_every_propagated_view_and_commits_only_clone(tmp_path):
     def fitter(candidate,views,targets,**kw):
         assert len(views)==len(targets)
         assert "intervention" not in kw
-        if len(views) == 1:
-            assert np.array_equal(targets[0][0,0], [0,0,0])
-        else:
-            assert len(views) == 9
-            assert np.array_equal(targets[0][0,0], [0,0,0])
-            assert np.array_equal(targets[-1][0,0], [0,0,0])
-            assert all(np.array_equal(t[0,0], [100,110,120]) for t in targets[1:-1])
+        assert len(views) == 8
+        assert np.array_equal(targets[0][0,0], [0,0,0])
+        assert all(np.array_equal(t[0,0], [100,110,120]) for t in targets[1:])
+        assert kw['edited_indices'] == [0]
+        assert kw['scale_ceiling'] == 2.
         candidate.colors[:]=.8
         return {"n_iters":3}
     candidate, metrics=repair(s,camera(),tmp_path/"anchor.png",tmp_path,
         options={"frames":9,"fit_iterations":3},runtime={},proposal={"intervention":"appearance"},
         should_stop=lambda:False,on_progress=lambda p:phases.append(p["phase"]),
         renderer_factory=Renderer,propagator=propagate,fitter=fitter)
-    assert phases==["bundle_render","edited_view_fit","artifixer_propagate","multiview_fit","native_validation"]
+    assert phases==["bundle_render","artifixer_propagate","multiview_fit","native_validation"]
     np.testing.assert_allclose(s.colors,.4)
     np.testing.assert_allclose(candidate.colors,.8)
     assert metrics["generated_frames"]==9
@@ -161,9 +159,9 @@ def test_selected_views_are_fitted_jointly_with_calibrated_references(tmp_path):
     other = Camera(np.array([1,0,0],np.float32), c.rotation, width=32,height=32)
     def fitter(candidate, views, targets, **kwargs):
         assert len(views) == len(targets)
-        assert len(views) in (2,18)
+        assert len(views) == 16
         assert all(v.width == 64 and v.height == 64 for v in views)
-        np.testing.assert_allclose(views[1 if len(views)==2 else 9].position, other.position)
+        np.testing.assert_allclose(views[8].position, other.position)
         assert kwargs["iterations"] == 2000
         return {}
     _, metrics = repair(scene(),c,tmp_path/"anchor.png",tmp_path,
@@ -172,9 +170,10 @@ def test_selected_views_are_fitted_jointly_with_calibrated_references(tmp_path):
         should_stop=lambda:False,on_progress=lambda _:None,
         renderer_factory=Renderer,propagator=propagate,fitter=fitter)
     manifest=json.loads((tmp_path/"extended/bundle.json").read_text())
-    assert [s["start"] for s in manifest["segments"]] == [0,9]
-    assert [r["frame_index"] for r in manifest["references"]] == [0,9]
-    assert metrics["selected_steps"] == [0] and metrics["reference_views"] == 2
+    assert manifest["segments"] == [{"start":0,"count":17}]
+    assert manifest["selected_camera_indices"] == [0,8]
+    assert [r["frame_index"] for r in manifest["references"]] == [0]
+    assert metrics["selected_steps"] == [0] and metrics["reference_views"] == 1
 
 
 def test_agent_view_selection_only_resolves_completed_recorded_cameras(tmp_path):
@@ -441,36 +440,31 @@ def test_joint_optimizer_updates_geometry_and_opacity(monkeypatch):
     assert s.num_gaussians == before.num_gaussians
 
 
-def test_coordinated_views_share_anchor_and_render_before_edits(tmp_path):
+def test_single_starter_sends_one_image_in_one_gpt_call(tmp_path):
     from splat_explorer.scene_runs.lrz_transport import LrzSceneRunTransport
-    from splat_explorer.repair_lrz import camera_to_dict
-    for step in range(4):
-        observed=tmp_path/f'render-{step:05d}';observed.mkdir()
-        (observed/'request.json').write_text(json.dumps({'step':step,'operation':'render','camera':camera_to_dict(camera())}))
-        (observed/'response.json').write_text(json.dumps({'status':'ok'}))
-    request=tmp_path/'repair-00004';request.mkdir()
-    current=request/'rendered.png';Image.new('RGB',(64,64)).save(current)
-    transport=object.__new__(LrzSceneRunTransport);transport._progress=lambda *a:None
-    renders=[];edits=[]
+    request = tmp_path/'repair-00004'; request.mkdir()
+    current = request/'rendered.png'; Image.new('RGB',(64,64)).save(current)
+    transport = object.__new__(LrzSceneRunTransport)
+    transport._progress = lambda *a: None
+    calls = []
     def render(**kw):
-        assert not edits
-        renders.append(kw)
-        return np.zeros((64,64,3),np.uint8),None
-    def edit(source,destination,prompt,references=None):
-        assert len(renders)==4 and len(references)<=4
-        assert all(p.exists() for p in references)
-        edits.append((source,destination,references))
+        pytest.fail('Camera-only waypoints must not trigger reference renders')
+    def edit(source, destination, prompt, references=None):
+        assert references is None
+        assert source == current
+        calls.append(source)
         Image.open(source).save(destination)
         return {'model':'test'}
-    transport.render=render;transport._edit_with_clirelay=edit
-    transport._edit_coordinated_views(request,{'view_steps':[0,1,2,3]},4,current,'Repair railing',deadline=float('inf'),should_stop=lambda:False)
-    assert len(edits)==5
-    assert edits[0][0]==current
-    assert all(e[2][0]==request/'regenerated.png' for e in edits[1:])
-    assert len(selected_views(request,{'view_steps':[0,1,2,3]},4))==4
+    transport.render = render
+    transport._edit_with_clirelay = edit
+    transport._edit_coordinated_views(request, {'view_steps':[0,1,2,3]}, 4,
+        current, 'Repair railing', deadline=float('inf'), should_stop=lambda:False)
+    assert calls == [current]
+    assert (request/'regenerated.png').exists()
+    assert not list(request.glob('reference*'))
 
 
-def test_initialized_scene_is_diagnostic_and_edits_remain_direct_targets(tmp_path):
+def test_generation_precedes_the_only_fit_and_only_starter_is_direct_target(tmp_path):
     Image.new('RGB',(32,32),(210,210,210)).save(tmp_path/'anchor.png')
     source=scene()
     calls=[]
@@ -482,27 +476,23 @@ def test_initialized_scene_is_diagnostic_and_edits_remain_direct_targets(tmp_pat
             return rgb,alpha,depth
     def fit(candidate, cameras, targets, **kwargs):
         calls.append(len(cameras))
-        if len(cameras)==1:
-            assert int(targets[0][0,0,0])==210
-            candidate.colors[:]=210/255
-        else:
-            assert calls==[1,9]
-            assert int(targets[0][0,0,0])==210
-            assert int(targets[8][0,0,0])==210
-            assert int(targets[1][0,0,0])==100
+        assert calls == [8]
+        assert int(targets[0][0,0,0]) == 210
+        assert all(int(t[0,0,0]) == 100 for t in targets[1:])
+        assert kwargs['edited_indices'] == [0]
         return {}
     def generate(root,runtime,stop):
         manifest = json.loads((root/'bundle.json').read_text())
         assert manifest['conditioning_mode'] == 'gpt-starter-kv-v1'
         assert manifest['scene_rgb_conditioning'] is False
-        assert int(np.array(Image.open(root/'inputs/00000.png'))[0,0,0])==210
-        assert int(np.array(Image.open(root/'inputs-original/00000.png'))[0,0,0])==102
+        assert calls == []
+        assert int(np.array(Image.open(root/'inputs/00000.png'))[0,0,0])==102
         np.testing.assert_allclose(source.colors,.4)
         return propagate(root,runtime,stop)
     repair(source,camera(),tmp_path/'anchor.png',tmp_path,options={'frames':9,'fit_iterations':1},
            runtime={},proposal={},should_stop=lambda:False,on_progress=lambda _:None,
            renderer_factory=ColoredRenderer,propagator=generate,fitter=fit)
-    assert calls==[1,9]
+    assert calls==[8]
 
 
 def test_selection_can_include_last_move_when_anchor_is_an_earlier_tile(tmp_path):
@@ -516,3 +506,18 @@ def test_selection_can_include_last_move_when_anchor_is_an_earlier_tile(tmp_path
     chosen = proposal(Action('report_artifact', {'anchor_step':2, 'view_steps':[10]}))
     views = selected_views(request, chosen, 10)
     assert [v['step'] for v in views] == [10]
+
+
+def test_single_trajectory_smoothly_visits_recorded_cameras_without_resets():
+    from splat_explorer.scene_runs_ext.bundle import continuous_camera_bundle
+    from scipy.spatial.transform import Rotation
+    from dataclasses import replace
+    c = camera()
+    other = replace(c, position=np.array([1.,.2,0.]), rotation=Rotation.from_euler('y',30,degrees=True).as_matrix())
+    poses, indices = continuous_camera_bundle([c,other], np.ones((32,32)), frames=9)
+    assert len(poses) == 17 and indices == [0,8]
+    assert poses[0] is c and poses[8] is other and poses[-1] is c
+    for a,b in zip(poses,poses[1:]):
+        assert np.linalg.norm(a.position-b.position) < .13
+        assert np.degrees(Rotation.from_matrix(a.rotation.T@b.rotation).magnitude()) < 4
+        np.testing.assert_allclose(b.rotation.T@b.rotation, np.eye(3), atol=1e-6)

@@ -74,6 +74,8 @@ def _motion_note(outcome: dict | None) -> str | None:
     if outcome.get("error"):
         return f"previous {outcome['kind']} FAILED: {outcome['error']}"
     kind = outcome.get("kind")
+    if kind == "local_return":
+        return "local view collection finished; camera restored to its pre-local position, yaw and pitch"
     if kind == "rotate":
         parts = []
         if "yaw_degrees" in outcome:

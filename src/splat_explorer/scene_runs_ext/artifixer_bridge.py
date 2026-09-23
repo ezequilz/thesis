@@ -82,7 +82,7 @@ def main():
         "--num_inference_steps", str(options["inference_steps"]),
         "--save_frame_outputs_only", "--max_neighbors_per_encode", "1",
         "--attention_backend", "native", "--sink_size", "1",
-        "--local_attn_size", "-1", "--replace_if_exists",
+        "--local_attn_size", "21", "--replace_if_exists",
     ])
     cameras = manifest["transforms"]
     count = len(cameras["frames"])

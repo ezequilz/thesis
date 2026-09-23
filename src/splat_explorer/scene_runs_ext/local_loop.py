@@ -27,6 +27,7 @@ class LocalRepairLoop:
         self.pending_move = False
         self.pending_rotation = False
         self.needs_rotation = False
+        self.entry_rig = copy.deepcopy(rig)
         self.previous_rig = copy.deepcopy(rig)
         self.origin = rig.position.copy()
         self.up = rig.up.copy()
@@ -56,8 +57,8 @@ class LocalRepairLoop:
                 'NOT a single current camera view. Choose exactly FIVE distinct tile numbers '
                 'using select_repair_views. Prefer complementary perspectives of the SAME '
                 'target, useful parallax, clear visibility and overlapping content. Avoid '
-                'duplicates, occluded views and unrelated objects. Include higher and lower '
-                'vantages when visible and useful, not only a horizontal row. The first selected tile '
+                'duplicates, occluded views and unrelated objects. Prioritize well-framed lateral '
+                'perspectives; height variation is optional. The first selected tile '
                 'will be the reconstruction anchor. Use the printed tile numbers, not step IDs. '
                 'Target: ' + target)
         return (
@@ -70,15 +71,10 @@ class LocalRepairLoop:
             'pitch_degrees is ABSOLUTE: positive looks up, negative down, 0 is level. '
             'For a centered target, strafe right then yaw LEFT; strafe left then yaw RIGHT; '
             'move up then pitch down. Use the observed target position to correct framing. '
-            'Actively vary camera HEIGHT as well as lateral position: include at least one '
-            'view above and one below the starting height when clearance allows. Use '
-            'move(direction="up", distance=...) to raise the camera in 3D and '
-            'move(direction="down", distance=...) to lower it along the scene vertical axis. '
-            'These are real translations; changing pitch only tilts at the same height. '
-            'After raising the camera, rotate toward a more downward absolute pitch; after '
-            'lowering it, toward a more upward pitch. Inspect RGB to choose the actual angle. '
-            'Try small height steps comparable to your lateral steps, avoid floor/ceiling '
-            'obstacles, and combine elevated/lowered views with the lateral arc. '
+            'Prioritize lateral translation followed by yaw rotation to keep the target framed. '
+            'Height changes are optional when they improve visibility: move up/down translates '
+            'along the scene vertical axis; pitch alone does not change height. After moving '
+            'up, pitch down toward the target; after moving down, pitch up. '
             'Start with small lateral steps (roughly 10-20% of target distance) and turns '
             'around 5-15 degrees, adapting to the RGB and collision feedback. Sweep a shallow '
             'arc across both sides, keeping target scale and substantial image overlap. '
@@ -164,16 +160,17 @@ class LocalRepairLoop:
                 f'{i + 1}: {r.state_description()}, height={heights[i]:+.3f}'
                 for i, r in enumerate(self.rigs)
             ) + '. '
-        if not self.selecting:
-            if not any(h >= self.min_baseline for h in heights):
-                height_note += 'Still need a higher vantage: use move up if clear. '
-            if not any(h <= -self.min_baseline for h in heights):
-                height_note += 'Still need a lower vantage: use move down if clear. '
         return (f'INNER LOOP: {len(self.steps)}/{self.candidates} movement views recorded. '
                 + ('Select five numbered tiles. ' if self.selecting else
                    'NEXT: rotate to re-center the target. ' if self.needs_rotation else
                    'NEXT: translate sideways around the target. ')
                 + height_note + self.note)
+
+    def restore_camera(self, rig):
+        """Resume exploration from the exact pose that entered local collection."""
+        rig.position = self.entry_rig.position.copy()
+        rig.yaw_deg = self.entry_rig.yaw_deg
+        rig.pitch_deg = self.entry_rig.pitch_deg
 
     def restore(self):
         if self.saved_tools is not None:
