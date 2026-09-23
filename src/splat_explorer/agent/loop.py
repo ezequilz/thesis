@@ -74,6 +74,13 @@ def _motion_note(outcome: dict | None) -> str | None:
     if outcome.get("error"):
         return f"previous {outcome['kind']} FAILED: {outcome['error']}"
     kind = outcome.get("kind")
+    if kind == "rotate":
+        parts = []
+        if "yaw_degrees" in outcome:
+            parts.append(f"yaw changed by {outcome['yaw_degrees']} degrees (positive = right)")
+        if "pitch_degrees" in outcome:
+            parts.append(f"absolute pitch set to {outcome['pitch_degrees']} degrees (positive = up)")
+        return "previous rotate: " + (", ".join(parts) or "no angle supplied; heading unchanged")
     if kind == "move":
         note = f"previous move {outcome['direction']} travelled {outcome['travelled']} of {outcome['requested']} units"
         if outcome.get("blocked"):

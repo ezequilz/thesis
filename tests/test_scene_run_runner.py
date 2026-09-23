@@ -232,9 +232,11 @@ def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_pat
                     "severity": "high",
                     "regenerate": "no",
                 })
-            if step < 11:
-                return Action("move", {"direction":"right", "distance":1})
-            if step == 11:
+            if step < 21:
+                if step % 2:
+                    return Action("move", {"direction":"right", "distance":1})
+                return Action("rotate", {"yaw_degrees":-10})
+            if step == 21:
                 return Action("select_repair_views", {"views":[2,4,6,8,10]})
             store.request_stop(created.run_id)
             return Action("rotate", {"yaw_degrees": 15})
@@ -289,20 +291,20 @@ def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_pat
     executor.execute(created.run_id)
     run_dir = store.run_path(created.run_id)
 
-    assert seen == [(32, 32, 3)] * 12 + [(320,96,3)]
+    assert seen == [(32, 32, 3)] * 22 + [(128,96,3)]
     assert Image.open(run_dir / "step_00000.png").size == (32, 32)
     assert Image.open(run_dir / "step_00001_repair.png").size == (64, 64)
-    assert Image.open(run_dir / "step_00012_repair.png").size == (64, 64)
+    assert Image.open(run_dir / "step_00022_repair.png").size == (64, 64)
     assert not (run_dir / "step_00000_repair.png").exists()
-    assert repairs[0]["proposal"]["view_steps"] == [6,8,10,12]
+    assert repairs[0]["proposal"]["view_steps"] == [10,14,18,22]
     assert [Path(item["rendered_path"]).name for item in repairs] == [
-        "step_00012_repair.png",
+        "step_00022_repair.png",
     ]
     assert all(item["camera"].width == 32 and item["camera"].height == 32 for item in repairs)
 
 
     # Tile 2 is the result of the second movement, not the final camera.
-    assert np.linalg.norm(repairs[0]["camera"].position - np.array([0.,1.,0.])) == pytest.approx(2.)
+    assert np.linalg.norm(repairs[0]["camera"].position - np.array([0.,1.,0.])) == pytest.approx(2 * np.cos(np.radians(5)))
 
 def test_report_artifact_saves_repair_frame_without_calling_the_image_model(tmp_path, monkeypatch):
     now = datetime(2026, 9, 15, 18, 44, tzinfo=timezone.utc)
