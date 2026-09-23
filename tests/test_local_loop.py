@@ -29,7 +29,10 @@ def test_movement_only_then_numbered_selection_restores_outer_policy():
     policy, rig, loop = make_loop()
     assert {t['function']['name'] for t in policy._tools} == {'move','move_toward','rotate'}
     image = collect(loop, rig)
-    assert image.shape == (384, 192, 3)  # full resolution tiles plus labels
+    assert image.shape == (192, 192, 3)  # full-resolution tiles, numbers inside
+    tile = image[0:48, 64:128]
+    assert tile.max() == 255 and (tile == 0).any()  # white ink on a dark backing
+    assert tile[0, 50, 0] == 1  # no full-width bar; the view fills the tile
     assert loop.steps == list(range(1,11))
     assert policy._tools[0]['function']['name'] == 'select_repair_views'
     action, state = loop.handle(Action('select_repair_views', {'views':[2,4,6,8,9]}), 10, rig)

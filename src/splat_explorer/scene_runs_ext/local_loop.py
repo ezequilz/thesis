@@ -6,9 +6,10 @@ import math
 from types import SimpleNamespace
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 from ..agent.actions import Action
+from ..rendering.annotate import _draw_label
 
 
 class LocalRepairLoop:
@@ -85,18 +86,17 @@ class LocalRepairLoop:
 
     def _contact_sheet(self):
         # Keep every source pixel; do not shrink the overview to VLM frame size.
+        # Tile numbers sit inside each view, same dark backing as the bird's-eye title.
         height, width = self.frames[0].shape[:2]
-        label_height = 48
         columns = min(3, len(self.frames))
-        sheet = Image.new('RGB', (columns * width,
-                         math.ceil(len(self.frames) / columns) * (height + label_height)), '#151922')
+        rows = math.ceil(len(self.frames) / columns)
+        sheet = Image.new('RGB', (columns * width, rows * height))
         draw = ImageDraw.Draw(sheet)
-        font = ImageFont.load_default(size=28)
         for index, frame in enumerate(self.frames):
             x = (index % columns) * width
-            y = (index // columns) * (height + label_height)
-            draw.text((x + 12, y + 8), f'VIEW {index + 1}', fill='white', font=font)
-            sheet.paste(Image.fromarray(frame), (x, y + label_height))
+            y = (index // columns) * height
+            sheet.paste(Image.fromarray(frame), (x, y))
+            _draw_label(draw, (x + 8, y + 6), str(index + 1))
         return np.asarray(sheet)
 
     def context(self):
