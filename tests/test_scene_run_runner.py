@@ -189,7 +189,8 @@ def test_repair_reload_keeps_policy_and_pose_state(tmp_path, monkeypatch):
     assert not (store.run_path(created.run_id) / "step_00000_repair.png").exists()
 
 
-def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_path, monkeypatch):
+@pytest.mark.parametrize("repair_trigger", ["every_step", "regenerate_yes", "every_artifact"])
+def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_path, monkeypatch, repair_trigger):
     now = datetime(2026, 9, 15, 18, 43, tzinfo=timezone.utc)
     store = SceneRunStore(tmp_path / "scene-runs", clock=lambda: now)
     created = store.create_run({
@@ -200,7 +201,7 @@ def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_pat
         "repair_width": 64,
         "repair_height": 64,
         "duration_seconds": 30,
-        "repair_trigger": "every_step",
+        "repair_trigger": repair_trigger,
         "repair_backend": "artifixer-gsplat",
     }, now=now)
     cfg = _run_cfg(tmp_path)
@@ -209,9 +210,21 @@ def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_pat
 
     class Policy:
         last_debug = {"backend": "fake"}
+        _task = None
+        _tools = []
 
         def decide(self, rgb, _pose, step, **_kwargs):
+            from splat_explorer.tasks import artifact_hunt_3
             seen.append(rgb.shape)
+            if step <= 1:
+                assert self._task is artifact_hunt_3
+                assert 'jump_to_waypoint' in [t['function']['name'] for t in self._tools]
+            else:
+                assert self._task is not artifact_hunt_3
+                assert 'jump_to_waypoint' not in [t['function']['name'] for t in self._tools]
+            if step == 0:
+                return Action("rotate", {"yaw_degrees": 15})
+            step -= 1
             if step == 0:
                 return Action("report_artifact", {
                     "description": "floater",
@@ -219,8 +232,10 @@ def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_pat
                     "severity": "high",
                     "regenerate": "no",
                 })
-            if step < 9:
-                return Action("move", {"direction":"right", "distance":1}) if step % 2 else Action("capture_repair_view")
+            if step < 11:
+                return Action("move", {"direction":"right", "distance":1})
+            if step == 11:
+                return Action("select_repair_views", {"views":[2,4,6,8,10]})
             store.request_stop(created.run_id)
             return Action("rotate", {"yaw_degrees": 15})
 
@@ -274,17 +289,20 @@ def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_pat
     executor.execute(created.run_id)
     run_dir = store.run_path(created.run_id)
 
-    assert seen == [(32, 32, 3)] * 9
+    assert seen == [(32, 32, 3)] * 12 + [(320,96,3)]
     assert Image.open(run_dir / "step_00000.png").size == (32, 32)
-    assert Image.open(run_dir / "step_00000_repair.png").size == (64, 64)
-    assert Image.open(run_dir / "step_00008_repair.png").size == (64, 64)
-    assert not (run_dir / "step_00001_repair.png").exists()
-    assert repairs[0]["proposal"]["view_steps"] == [0,2,4,6]
+    assert Image.open(run_dir / "step_00001_repair.png").size == (64, 64)
+    assert Image.open(run_dir / "step_00012_repair.png").size == (64, 64)
+    assert not (run_dir / "step_00000_repair.png").exists()
+    assert repairs[0]["proposal"]["view_steps"] == [6,8,10,12]
     assert [Path(item["rendered_path"]).name for item in repairs] == [
-        "step_00008_repair.png",
+        "step_00012_repair.png",
     ]
     assert all(item["camera"].width == 32 and item["camera"].height == 32 for item in repairs)
 
+
+    # Tile 2 is the result of the second movement, not the final camera.
+    assert np.linalg.norm(repairs[0]["camera"].position - np.array([0.,1.,0.])) == pytest.approx(2.)
 
 def test_report_artifact_saves_repair_frame_without_calling_the_image_model(tmp_path, monkeypatch):
     now = datetime(2026, 9, 15, 18, 44, tzinfo=timezone.utc)

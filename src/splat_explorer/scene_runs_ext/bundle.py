@@ -39,9 +39,9 @@ def selected_views(request_dir, proposal, current_step):
         raise ValueError("Invalid selected view_steps")
     result = []
     for step in dict.fromkeys(steps):
-        if step == current_step:
+        if step == proposal.get("anchor_step", current_step):
             continue
-        if current_step is None or step >= current_step:
+        if current_step is None or step > current_step:
             raise ValueError(f"Selected step {step} is not an earlier observed view")
         root = Path(request_dir).parent
         observed = root / f"render-{step:05d}" / "request.json"

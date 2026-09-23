@@ -1,94 +1,143 @@
-"""Inner inspection loop for five complementary observations of one artifact."""
+"""Move around one artifact, then select five views from a numbered contact sheet."""
 from __future__ import annotations
+
 import copy
+import math
 from types import SimpleNamespace
+
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
 from ..agent.actions import Action
 
 
 class LocalRepairLoop:
-    def __init__(self, policy, artifact, step, rig, depth, max_move, *, views=5, max_turns=30, rotation_degrees=90.):
+    def __init__(self, policy, artifact, step, rig, depth, max_move, *,
+                 views=5, max_turns=30, rotation_degrees=90., candidates=10):
         self.policy, self.artifact = policy, artifact
-        self.steps = [step]
-        self.positions = [rig.position.copy()]
-        self.origin = rig.position.copy()
-        valid = np.asarray(depth) if depth is not None else np.array([])
-        valid = valid[np.isfinite(valid) & (valid > 0)]
-        self.move_limit = max_move
-        self.min_baseline = max(float(np.median(valid))*.1 if valid.size else max_move*.1, 1e-5)
-        self.move_limit = max(self.move_limit, 1e-5)
-        self.views, self.max_turns, self.turns = views, max_turns, 0
-        self.rotation_limit = rotation_degrees
+        self.steps = []
+        self.frames = []
+        self.rigs = []
+        self.move_limit, self.rotation_limit = max_move, rotation_degrees
+        self.candidates = candidates
+        self.max_turns = max_turns
+        self.turns = 0
+        self.selection_attempts = 0
+        self.pending_move = False
+        self.selecting = False
+        self.sheet = None
+        self.anchor_rig = None
+        self.anchor_frame = None
         self.note = ''
         self.saved_tools = getattr(policy, '_tools', None)
         self.saved_task = getattr(policy, '_task', None)
         if self.saved_tools is not None:
             policy._tools = [copy.deepcopy(t) for t in self.saved_tools
-                             if t['function']['name'] in ('move','move_toward','rotate','view_depth')]
-            for name, desc in [('capture_repair_view','Accept this view only if the SAME damaged object remains clearly visible with useful overlap.'),
-                               ('cancel_local_repair','Abandon collection if the same object cannot be observed reliably.')]:
-                policy._tools.append({'type':'function','function':{'name':name,'description':desc,
-                    'parameters':{'type':'object','properties':{},'additionalProperties':False}}})
-        if self.saved_task is not None:
-            policy._task = SimpleNamespace(system_prompt=lambda *args: (
-                f'Your task is to acquire {self.views} complementary views of ONE damaged object '
-                'or sub-scene, to reconstruct it from repaired images. You are the photographer: '
-                'move the CAMERA around the stationary object. Do not rotate or change the object. '
-                'The first view has already been accepted. Plan the remaining views to expose '
-                'different sides, occlusions and depth relationships while retaining recognizable '
-                'overlap of the same physical region. Aim for substantially different viewing '
-                'angles (roughly 15–30 degrees apart where space permits), not tiny nearby frames. '
-                'ArtiFixer will generate the small local camera trajectories later; do not duplicate '
-                'that work. Use normal move and move_toward navigation to walk sideways/around the '
-                'object, and rotate generously to keep looking at it. In-place rotation alone does '
-                'not create parallax. Several navigation actions before capturing are encouraged. '
-                'Inspect each fresh RGB image; use view_depth when useful. Call capture_repair_view '
-                'only when this is a meaningfully different perspective of the SAME target. '
-                'Avoid nearly identical views, unrelated objects, and viewpoints where the target '
-                'is hidden. No waypoint jumps. If you lose the target, navigate back and reacquire '
-                'it; cancel only when useful coverage is inaccessible. These accepted images will '
-                'be edited by GPT-image and treated as the intended corrected reconstruction views. '
-                'Target defect: ' + str(artifact.args.get('description','')) + '. Initial image region: '
-                + str(artifact.args.get('image_region','current view')) +
-                '. That image region identifies the object initially; its screen position will change.'
-            ))
+                             if t['function']['name'] in ('move', 'move_toward', 'rotate')]
+        if hasattr(policy, '_task'):
+            policy._task = SimpleNamespace(system_prompt=self.system_prompt,
+                observation_label="Image 1 - RGB view from your current pose:", image_detail="auto")
+
+    def system_prompt(self, *args):
+        target = (str(self.artifact.args.get('description', '')) + '. Initial region: '
+                  + str(self.artifact.args.get('image_region', 'current view')))
+        if self.selecting:
+            return (
+                'The supplied image is a numbered tiled overview of your recent camera moves, '
+                'NOT a single current camera view. Choose exactly FIVE distinct tile numbers '
+                'using select_repair_views. Prefer complementary perspectives of the SAME '
+                'target, useful parallax, clear visibility and overlapping content. Avoid '
+                'duplicates, occluded views and unrelated objects. The first selected tile '
+                'will be the reconstruction anchor. Use the printed tile numbers, not step IDs. '
+                'Target: ' + target)
+        return (
+            f'Move the camera around the same stationary object for {self.candidates} turns. '
+            'Use move, move_toward and rotate with normal navigation distances and angles. '
+            'Translate sideways or around the object to create parallax; rotate to keep it '
+            'framed. Rotation alone does not create parallax. Each resulting view is recorded '
+            'automatically. Do not report artifacts or capture views. No maps or waypoint jumps. '
+            'After these moves you will receive a numbered overview and choose five views '
+            'for reconstruction. Call exactly one movement tool per turn. Target: ' + target)
+
+    def observe(self, observation, step, rig):
+        """Record the result of the previous movement, not the pre-movement frame."""
+        if self.pending_move:
+            self.steps.append(step)
+            self.frames.append(np.asarray(observation).copy())
+            self.rigs.append(copy.deepcopy(rig))
+            self.pending_move = False
+        if len(self.steps) >= self.candidates and not self.selecting:
+            self.selecting = True
+            self.sheet = self._contact_sheet()
+            if hasattr(self.policy, "_task"):
+                self.policy._task.observation_label = "Numbered overview of recent movement views (select five tiles):"
+                self.policy._task.image_detail = "high"
+            if self.saved_tools is not None:
+                self.policy._tools = [{'type': 'function', 'function': {
+                    'name': 'select_repair_views',
+                    'description': 'Select exactly five numbered tiles; first is the anchor.',
+                    'parameters': {'type': 'object', 'properties': {
+                        'views': {'type': 'array', 'items': {'type': 'integer', 'minimum': 1,
+                                  'maximum': len(self.steps)}, 'minItems': 5, 'maxItems': 5,
+                                  'uniqueItems': True}}, 'required': ['views'],
+                                  'additionalProperties': False}}}]
+        return self.sheet if self.selecting else observation
+
+    def _contact_sheet(self):
+        # Keep every source pixel; do not shrink the overview to VLM frame size.
+        height, width = self.frames[0].shape[:2]
+        label_height = 48
+        columns = min(3, len(self.frames))
+        sheet = Image.new('RGB', (columns * width,
+                         math.ceil(len(self.frames) / columns) * (height + label_height)), '#151922')
+        draw = ImageDraw.Draw(sheet)
+        font = ImageFont.load_default(size=28)
+        for index, frame in enumerate(self.frames):
+            x = (index % columns) * width
+            y = (index // columns) * (height + label_height)
+            draw.text((x + 12, y + 8), f'VIEW {index + 1}', fill='white', font=font)
+            sheet.paste(Image.fromarray(frame), (x, y + label_height))
+        return np.asarray(sheet)
 
     def context(self):
-        return (f'OBJECT COVERAGE: {len(self.steps)}/{self.views} accepted views; '
-                f'steps {self.steps}. Move at most {self.move_limit:.5g} scene units; '
-                f'Collect broad object-relative parallax, not micro-steps. Minimum new baseline '
-                f'{self.min_baseline:.5g}. Accepted offsets from first camera: '
-                f'{[np.round(p-self.origin,3).tolist() for p in self.positions]}. {self.note}')
+        return (f'INNER LOOP: {len(self.steps)}/{self.candidates} movement views recorded. '
+                + ('Select five numbered tiles. ' if self.selecting else 'Keep the target framed. ')
+                + self.note)
 
     def restore(self):
-        if self.saved_tools is not None: self.policy._tools = self.saved_tools
-        if self.saved_task is not None: self.policy._task = self.saved_task
+        if self.saved_tools is not None:
+            self.policy._tools = self.saved_tools
+        if hasattr(self.policy, '_task'):
+            self.policy._task = self.saved_task
 
     def handle(self, action, step, rig):
-        """Return (safe action, state). Only a completed collection can repair."""
+        if self.selecting:
+            self.selection_attempts += 1
+            numbers = action.args.get('views', [])
+            valid = (action.name == 'select_repair_views' and isinstance(numbers, list)
+                     and len(numbers) == 5
+                     and all(type(n) is int and 1 <= n <= len(self.steps) for n in numbers)
+                     and len(set(numbers)) == 5)
+            if valid:
+                indices = [n - 1 for n in numbers]
+                self.anchor_rig = self.rigs[indices[0]]
+                self.anchor_frame = self.frames[indices[0]]
+                self.selected_steps = [self.steps[i] for i in indices]
+                self.restore()
+                return Action('report_artifact', {**self.artifact.args, 'regenerate': 'yes',
+                    'repair_scope': 'local', 'anchor_step': self.selected_steps[0],
+                    'view_steps': self.selected_steps[1:]}), 'ready'
+            self.note = 'Invalid selection. Choose exactly five distinct numbered tiles from the overview.'
+            if self.selection_attempts >= 3:
+                self.restore()
+                return Action('cancel_local_repair'), 'cancelled'
+            return Action('select_repair_views', action.args), 'collecting'
         self.turns += 1
-        if action.name == 'cancel_local_repair' or self.turns > self.max_turns:
+        if self.turns > max(self.max_turns, self.candidates):
             self.restore()
             return Action('cancel_local_repair'), 'cancelled'
-        if action.name == 'capture_repair_view':
-            distance = min(np.linalg.norm(rig.position-p) for p in self.positions)
-            if distance < self.min_baseline:
-                self.note = 'View rejected: move farther around the same object before capturing; insufficient parallax baseline.'
-                return action, 'collecting'
-            self.steps.append(step); self.positions.append(rig.position.copy()); self.note = ''
-            if len(self.steps) == self.views:
-                self.restore()
-                args = {**self.artifact.args, 'regenerate':'yes', 'repair_scope':'local',
-                        'view_steps':self.steps[:-1]}
-                return Action('report_artifact',args), 'ready'
-            return action, 'collecting'
-        if action.name in ('move','move_toward'):
+        if action.name in ('move', 'move_toward', 'rotate'):
+            self.pending_move = True
             return action.clamped(self.move_limit, self.rotation_limit), 'collecting'
-        if action.name == 'rotate':
-            safe = action.clamped(self.move_limit, self.rotation_limit)
-            if safe.args.get('pitch_degrees') is not None:
-                safe.args['pitch_degrees'] = float(np.clip(safe.args['pitch_degrees'],rig.pitch_deg-self.rotation_limit,rig.pitch_deg+self.rotation_limit))
-            return safe, 'collecting'
-        if action.name == 'view_depth': return action, 'collecting'
-        self.note = f'{action.name} is unavailable during local collection.'
-        return Action('view_depth'), 'collecting'
+        self.note = 'Only move, move_toward and rotate are available during movement collection.'
+        return Action('local_noop'), 'collecting'

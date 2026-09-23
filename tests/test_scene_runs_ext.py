@@ -498,3 +498,16 @@ def test_artifixer_receives_scene_fitted_to_edits_and_keeps_edits_as_targets(tmp
            runtime={},proposal={},should_stop=lambda:False,on_progress=lambda _:None,
            renderer_factory=ColoredRenderer,propagator=generate,fitter=fit)
     assert calls==[1,9]
+
+
+def test_selection_can_include_last_move_when_anchor_is_an_earlier_tile(tmp_path):
+    from splat_explorer.repair_lrz import camera_to_dict
+    request = tmp_path / 'repair-00010'
+    observation = tmp_path / 'render-00010'
+    observation.mkdir()
+    (observation / 'request.json').write_text(json.dumps({
+        'step':10, 'operation':'render', 'camera':camera_to_dict(camera())}))
+    (observation / 'response.json').write_text(json.dumps({'status':'ok'}))
+    chosen = proposal(Action('report_artifact', {'anchor_step':2, 'view_steps':[10]}))
+    views = selected_views(request, chosen, 10)
+    assert [v['step'] for v in views] == [10]

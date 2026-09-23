@@ -393,6 +393,13 @@ class SceneRunExecutor:
                     map_frame=map_name,
                 )
 
+                decision_image = observation
+                selection_frame = None
+                if local_loop is not None:
+                    decision_image = local_loop.observe(observation, step, rig)
+                    if local_loop.selecting:
+                        selection_frame = f"step_{step:05d}_selection.png"
+                        Image.fromarray(decision_image).save(self._run_dir / selection_frame)
                 pose = rig.state_description()
                 if local_loop is not None:
                     pose += " | " + local_loop.context()
@@ -403,12 +410,12 @@ class SceneRunExecutor:
                 depth_image = depth_to_image(depth) if depth is not None else None
                 collecting_views = local_loop is not None
                 action = policy.decide(
-                    observation,
+                    decision_image,
                     pose,
                     step,
-                    depth_image=depth_image if send_depth_once else None,
-                    map_image=map_image if local_loop is None else None,
-                    coverage_image=coverage_image if send_coverage_once else None,
+                    depth_image=depth_image if send_depth_once and not collecting_views else None,
+                    map_image=map_image if not collecting_views else None,
+                    coverage_image=coverage_image if send_coverage_once and not collecting_views else None,
                 )
                 _require_vlm_response(policy)
                 action = action.clamped(
@@ -423,21 +430,28 @@ class SceneRunExecutor:
                     action,
                     every_step_armed,
                 )
+                repair_rig = rig
+                repair_observation = observation
+                selected_steps = None
                 if params.get("pipeline") == "extended":
                     if local_loop is not None:
                         action, collection_state = local_loop.handle(action, step, rig)
                         trigger = collection_state == "ready"
+                        if trigger:
+                            repair_rig = local_loop.anchor_rig
+                            repair_observation = local_loop.anchor_frame
+                            selected_steps = local_loop.selected_steps
                         self._event("local_collection", step=step, state=collection_state,
                                     views=list(local_loop.steps), note=local_loop.note)
                         if collection_state != "collecting":
                             local_loop = None
-                        is_artifact = trigger
-                    elif trigger and is_artifact:
+                        is_artifact = action.name == "report_artifact"
+                    elif is_artifact:
                         from ..scene_runs_ext.local_loop import LocalRepairLoop
                         controls = params.get("extended") or {}
                         local_loop = LocalRepairLoop(policy, action, step, rig, depth,
                             float(run_cfg.agent.max_move_distance),
-                            views=controls.get("local_view_count",5),
+                            candidates=controls.get("local_candidate_count",10),
                             max_turns=controls.get("local_max_turns",30),
                             rotation_degrees=float(run_cfg.agent.max_rotate_degrees))
                         trigger = False
@@ -452,13 +466,16 @@ class SceneRunExecutor:
                 if repair_size is not None and (is_artifact or trigger) and not self._stop_requested():
                     repair_frame = self._save_repair_frame(
                         step=step,
-                        rig=rig,
+                        rig=repair_rig,
                         fov_deg=float(run_cfg.renderer.fov_deg),
                         size=repair_size,
                         renderer=renderer,
                         gpu_render=gpu_render if callable(gpu_render) else None,
                         deadline=effective_deadline,
                     )
+                if trigger and repair_frame is None and selected_steps is not None:
+                    repair_frame = self._run_dir / f"step_{step:05d}_repair.png"
+                    Image.fromarray(repair_observation).save(repair_frame)
                 record: dict[str, Any] = {
                     "step": step,
                     "pose": rig.state_description(),
@@ -467,6 +484,8 @@ class SceneRunExecutor:
                     "pitch_deg": rig.pitch_deg,
                     "action": {"name": action.name, "args": action.args},
                     "frame": frame_path.name,
+                    "selection_frame": selection_frame,
+                    "selected_view_steps": selected_steps,
                     "map_frame": map_name,
                     "map_sent": map_image is not None and not collecting_views,
                     "coverage_frame": coverage_name,
@@ -499,7 +518,7 @@ class SceneRunExecutor:
                         extra["proposal"] = proposal(action)
                     result = gpu.repair(
                         step=step,
-                        camera=camera,
+                        camera=repair_rig.camera(camera.width, camera.height, camera.fov_deg),
                         rendered_path=repair_frame or frame_path,
                         repair_seconds=float(params.get("repair_seconds") or 180),
                         deadline=effective_deadline,

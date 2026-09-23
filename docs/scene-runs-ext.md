@@ -7,22 +7,30 @@ remain trainable. There is no image-score acceptance gate or new geometry bound.
 ## Nested artifact inspection
 
 The outer agent uses `tasks/artifact_hunt_3.py` and its original tool schemas
-unchanged. A triggered `report_artifact` starts a separate object-coverage prompt;
-the report supplies the first view. The inner agent uses normal `move`,
-`move_toward`, and `rotate` navigation to walk around the same stationary object,
-keep it framed, and capture four additional complementary views. The prompt aims
-for visibly different perspectives (roughly 15–30 degrees where feasible),
-not the micro-trajectories ArtiFixer generates later. Rotation without translation
-does not count as parallax. There is no special small movement cap or local radius.
-Normal navigation limits and collision handling still apply. Waypoint jumps are
-unavailable inside the inner loop. The original task and tools return afterward.
+unchanged. Every `report_artifact` starts the inner loop regardless of
+`regenerate` or the baseline repair-trigger setting.
 
-Defaults are five views and 30 inner turns. Tune `extended.local_view_count` (5–9)
-and `local_max_turns`. The old `local_step_fraction` and `local_rotation_degrees`
-settings are ignored when reading saved configurations so they cannot silently
-restore micro-step behavior. A new capture must be translated by at least 10% of
-initial median visible depth from previously accepted cameras; the agent judges
-same-object visibility and overlap. This baseline check does not prove coverage.
+The inner agent can only `move`, `move_toward`, and `rotate`, with normal
+navigation limits and collision handling. It moves around the same stationary
+object for ten turns, keeping it framed while creating parallax. Views after
+each movement are recorded automatically. There are no capture, report, map,
+or waypoint actions in this phase, and no map images are sent to the agent.
+
+After movement, the agent receives a numbered contact sheet and only the
+`select_repair_views` tool. Each tile retains the full exploration-frame
+resolution: ten 640×480 views produce a 1920×2112 overview, sent with high image
+detail. The agent selects exactly five distinct tile numbers. The first becomes
+the reconstruction anchor and the other four become references; neither the
+original discovery view nor the last camera view is automatically included.
+Tile numbers are resolved to recorded camera poses by the harness. Invalid
+selections are retried up to three times, then collection is cancelled.
+The original task and tools return after selection or cancellation.
+
+Tune `extended.local_candidate_count` from 5 to 10 (default 10). Reconstruction
+always uses five selected views; `local_view_count` is retained only for saved
+configuration compatibility. `local_max_turns` bounds movement-phase attempts
+(with enough turns allowed for the candidate count). Old `local_step_fraction`
+and `local_rotation_degrees` settings remain ignored.
 `extended.repair_limit=1` ends a research run after one successful repair; zero
 retains deadline-driven exploration.
 

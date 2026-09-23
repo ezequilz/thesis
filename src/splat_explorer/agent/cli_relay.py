@@ -247,7 +247,8 @@ class CliRelayPolicy:
             with_map=map_image is not None,
             with_coverage=coverage_image is not None,
         )
-        images = [("Image 1 - RGB view from your current pose:", _png_data_url(observation))]
+        images = [(getattr(self._task, "observation_label",
+                           "Image 1 - RGB view from your current pose:"), _png_data_url(observation))]
         n = 2
         if depth_image is not None:
             images.append((
@@ -322,7 +323,10 @@ class CliRelayPolicy:
         content: list[dict] = [{"type": "text", "text": prompt}]
         for label, url in images:
             content.append({"type": "text", "text": label})
-            content.append({"type": "image_url", "image_url": {"url": url}})
+            image_url = {"url": url}
+            if getattr(self._task, "image_detail", None) == "high":
+                image_url["detail"] = "high"
+            content.append({"type": "image_url", "image_url": image_url})
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -345,7 +349,9 @@ class CliRelayPolicy:
             if history
             else "This is your first step; no actions taken yet."
         )
-        attached = ["your current RGB view"]
+        attached = ["a numbered overview of recent movement views"
+                    if getattr(self._task, "image_detail", None) == "high"
+                    else "your current RGB view"]
         if with_depth:
             attached.append("its depth map")
         if with_map:

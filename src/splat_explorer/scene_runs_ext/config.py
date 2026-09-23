@@ -5,7 +5,7 @@ import math
 DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 1000,
             "inference_steps": 4, "seed": 42, "camera_scale": 1.0,
             "max_repair_pixels": 0, "local_view_count": 5, "local_max_turns": 30,
-            "repair_limit": 0}
+            "repair_limit": 0, "local_candidate_count": 10}
 # 4:3, 3× the 640×480 VLM default, and a multiple of 16 for the GPU rasterizer.
 REPAIR_WIDTH = 1920
 REPAIR_HEIGHT = 1440
@@ -32,7 +32,7 @@ def validate_options(value=None):
     for key, lower, upper in [("frames", 9, 81), ("fit_iterations", 1, 2000),
                               ("inference_steps", 1, 50), ("seed", 0, 2**31-1),
                               ("max_repair_pixels", 0, 16777216), ("local_view_count", 5, 9),
-                              ("local_max_turns", 5, 100), ("repair_limit", 0, 100)]:
+                              ("local_candidate_count", 5, 10), ("local_max_turns", 5, 100), ("repair_limit", 0, 100)]:
         n = result[key]
         if isinstance(n, bool) or not isinstance(n, int) or not lower <= n <= upper:
             raise ValueError(f"{key} must be an integer between {lower} and {upper}")
@@ -74,7 +74,11 @@ def proposal(action):
     if (not isinstance(steps, list) or len(steps) > 8
             or any(isinstance(s, bool) or not isinstance(s, int) or s < 0 for s in steps)):
         raise ValueError("view_steps must contain at most eight observed nonnegative step IDs")
+    anchor = args.get("anchor_step")
+    if anchor is not None and (type(anchor) is not int or anchor < 0):
+        raise ValueError("anchor_step must be an observed nonnegative step ID")
     return {
+            **({"anchor_step": anchor} if anchor is not None else {}),
             "description": str(args.get("description") or "Improve visible rendering artifacts")[:2000],
             "image_region": str(args.get("image_region") or "current view")[:300],
             "repair_scope": scope, "view_steps": list(dict.fromkeys(steps))}
