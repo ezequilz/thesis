@@ -45,12 +45,29 @@ These remain synthetic references, not captured photographs or guaranteed
 multiview-consistent geometry. The lower-level bundle API still supports explicit
 `view_steps` and scene scope for controlled experiments.
 
-The GPT-edited observations are the intended corrected views. First, a cloned
-splat is jointly fitted to these images at their exact recorded cameras. ArtiFixer
-then receives RGB and actual opacity rendered from that initialized splat, plus
-the edited references. Each camera gets a separate small translated trajectory;
-the broader agent-selected camera coverage and these local trajectories serve
-different purposes.
+The GPT-edited observations are the intended corrected views. A cloned splat is
+jointly fitted to these images to initialize reconstruction, but that approximate
+fit no longer supplies RGB or opacity to ArtiFixer. Each camera gets a separate
+translated trajectory seeded directly by its own calibrated GPT edit.
+
+The `gpt-starter-kv-v1` adapter encodes the edit as the first causal VAE latent,
+keeps it clean, and performs a timestep-zero transformer pass to populate the
+temporal KV cache **before generating subsequent frames**. Later frames start
+from noise, with zero rendered RGB/opacity, calibrated camera conditioning and
+all edited references. Opacity one at the starter means that image is observed;
+it is not measured scene opacity. The starter is not copied across camera poses.
+Each trajectory resets caches. The short sequence retains its full history;
+generated blocks refresh their cache from clean output. Exporting the exact first
+RGB image removes VAE roundtrip loss, rather than being the mechanism that seeds
+generation. Every trajectory requires an edited reference at its starting pose.
+
+This is a custom single-GPU inference adaptation of the pinned upstream KV
+pipeline, not an upstream image-to-video flag or a guarantee of geometric
+consistency. It removes scene-appearance conditioning deliberately. Sparse or
+inconsistent references can therefore hallucinate or drift. The scene still
+provides camera-trajectory depth and reconstruction initialization. Saved
+`inputs/` and opacity arrays remain diagnostic renders, **not generation inputs**;
+`inference.json` records the actual conditioning mode and starter frame indices.
 
 Final joint fitting uses generated nearby views while preserving the original
 GPT edits as direct targets at each known reference camera, including the loop's
@@ -187,7 +204,11 @@ small inner-loop movements, motivating the object-coverage revision below.
 
 Local regression checks cover unchanged outer v3 tools, normal inner movement,
 large rotations, waypoint rejection, and migration away from old micro-step
-settings. Pipeline tests verify that edited images initialize the cloned splat,
-ArtiFixer receives renders of that initialized candidate, and the known edited
-views remain direct targets even when generated frames disagree. This revision
-has not yet been visually validated in a new live GPU run.
+settings. Pipeline tests verify that edited images initialize the cloned splat
+and remain direct targets even when generated frames disagree. Starter-inference
+CPU tests verify clean-context ordering, camera/opacity alignment, dependence of
+future output on the starter, and cache isolation between trajectories. These
+tensor tests require PyTorch; lightweight bundle tests do not. The starter
+adaptation has not yet been visually validated in a live GPU run. Final fitting
+still uses the existing target sampling and fixed topology; those separate
+limitations remain.

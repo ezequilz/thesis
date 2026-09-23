@@ -9,6 +9,11 @@ import json
 from pathlib import Path
 import sys
 
+try:
+    from .starter_inference import install_starter_inference, starter_reference, starter_inputs
+except ImportError:  # Executed directly by the GPU worker.
+    from starter_inference import install_starter_inference, starter_reference, starter_inputs
+
 
 def crop_camera_conditioning(compute, cameras, indices, neighbors, *, box, source_size, scale):
     """Compute original full-frame rays, then crop without recentering the lens.
@@ -76,29 +81,32 @@ def main():
         "--save_dir", str(root / "artifixer-output"),
         "--num_inference_steps", str(options["inference_steps"]),
         "--save_frame_outputs_only", "--max_neighbors_per_encode", "1",
-        "--attention_backend", "native",
+        "--attention_backend", "native", "--sink_size", "1",
+        "--local_attn_size", "-1", "--replace_if_exists",
     ])
     cameras = manifest["transforms"]
     count = len(cameras["frames"])
     def rgb(path):
         return torch.from_numpy(np.array(Image.open(path).convert("RGB"))).permute(2,0,1).float()/255
-    # Edited reference stays distinct from the corrupted RGB/alpha conditions.
+    # Each sequence starts from its own calibrated GPT edit.
     references = manifest.get("references", [{"path": "anchor.png", "frame_index": 0}])
     reference = torch.stack([rgb(root / r["path"]) for r in references])
     neighbors = [r["frame_index"] for r in references]
     segments = manifest.get("segments", [{"start": 0, "count": count}])
-    opacity = np.load(root / "opacity.npy", allow_pickle=False, mmap_mode="r")
+    starters = [starter_reference(manifest, segment) for segment in segments]
     device = torch.device("cuda:0")
     with torch.inference_mode():
         pipe = get_eval_pipe(opts, device)
         load_transformer_checkpoint(pipe.transformer, opts)
         pipe.transformer.eval()
-        for segment in segments:
+        install_starter_inference(pipe)
+        for segment, starter in zip(segments, starters):
             indices = list(range(segment["start"], segment["start"] + segment["count"]))
-            renders = torch.stack([rgb(root / "inputs" / f"{i:05d}.png") for i in indices])
+            seed = rgb(root / starter["path"])
+            renders, opacity = starter_inputs(seed, len(indices))
             item = {"scene_id": "bundle", "rgb_rendered": renders,
                     "rgb_neighbors": reference,
-                    "opacity": torch.from_numpy(np.array(opacity[indices])),
+                    "opacity": opacity,
                     "encoded_prompt": load_encoded_prompt([])[0],
                     "frame_indices": torch.tensor(indices),
                     "valid_frames_mask": torch.ones(len(indices), dtype=torch.bool)}
@@ -116,12 +124,20 @@ def main():
                 pipe.clear_inference_caches()
             process_item(pipe, item, opts, root / "artifixer-output", 0, device,
                          pipe.vae.config.scale_factor_temporal)
+            # Preserve exact RGB in exports (the causal context already used
+            # its clean encoded latent; this only removes VAE roundtrip loss).
+            import shutil
+            shutil.copy2(root / starter["path"], root / "artifixer-output/bundle/frames/batch_0000/pred" / f"{indices[0]:05d}.png")
             del item, renders
     (root / "inference.json").write_text(json.dumps({
         "checkpoint": str(args.checkpoint), "model_id": args.model_id,
         "frames": count, "text_conditioning": "disabled (official zero embedding)",
         "segments": len(segments), "reference_views": len(references),
         "reference": "image-edited anchor; synthetic, not a captured photograph",
+        "conditioning_mode": "gpt-starter-kv-v1",
+        "starter_frames": [s["start"] for s in segments],
+        "scene_rgb_conditioning": False,
+        "starter_context": "clean first latent cached at timestep zero before generation",
     }, indent=2))
 
 

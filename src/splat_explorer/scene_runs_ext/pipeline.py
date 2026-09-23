@@ -15,6 +15,7 @@ from PIL import Image
 from .config import RUNTIME_DEFAULTS, UPSTREAM_REVISION, validate_options
 from .bundle import camera_bundle, transforms, repair_camera
 from .fitting import BACKGROUND, fit_views
+from .starter_inference import starter_reference
 
 
 def validate_runtime(runtime):
@@ -173,10 +174,14 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
                 "proposal": proposal, "parent_scene_sha256": digest.hexdigest(),
                 "reference_kind": "edited_render", "camera_convention": "OpenCV c2w",
                 "upstream_adapter_revision": UPSTREAM_REVISION}
+    for segment in segments:
+        starter_reference(manifest, segment)
+    manifest["conditioning_mode"] = "gpt-starter-kv-v1"
+    manifest["scene_rgb_conditioning"] = False
     (root / "bundle.json").write_text(json.dumps(manifest, indent=2))
     render_seconds = time.monotonic()-started
-    # Establish the edited observations in 3D before propagating nearby views.
-    # Otherwise the opaque corrupted splat dominates ArtiFixer's RGB condition.
+    # Initialize the reconstruction from edits. These renders are diagnostics;
+    # generation starts directly from the GPT image, not this approximate fit.
     candidate = scene.copy()
     anchor_cameras, anchor_targets = [], []
     for reference in references:
@@ -205,8 +210,8 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     _release_cuda()
     (root / "opacity.npy").rename(root / "opacity-original.npy")
     np.save(root / "opacity.npy", np.stack(alphas).astype(np.float32))
-    manifest["conditioning_scene"] = "jointly fitted to edited reference views"
-    manifest["anchor_role"] = "initialization_and_direct_reconstruction_target"
+    manifest["conditioning_scene"] = "diagnostic only; RGB and opacity not supplied to generation"
+    manifest["anchor_role"] = "clean_temporal_starter_and_direct_reconstruction_target"
     (root / "bundle.json").write_text(json.dumps(manifest, indent=2))
     initialization_seconds = time.monotonic()-started-render_seconds
     on_progress({"phase": "artifixer_propagate"})
@@ -252,8 +257,9 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     metrics.update(pipeline="extended", backend="artifixer-gsplat", proposal=proposal,
                    render_seconds=render_seconds, propagation_seconds=propagate_seconds,
                    total_seconds=time.monotonic()-started, generated_frames=len(cameras),
-                   baseline="edited-view-initialized-artifixer-v3",
-                   anchor_role="initialization_and_direct_reconstruction_target",
+                   baseline="gpt-starter-artifixer-v4",
+                   conditioning_mode="gpt-starter-kv-v1", scene_rgb_conditioning=False,
+                   anchor_role="clean_temporal_starter_and_direct_reconstruction_target",
                    edited_view_fit=anchor_metrics, initialization_seconds=initialization_seconds,
                    edited_target_indices=edited_indices,
                    selected_steps=[v["step"] for v in seeds[1:]],

@@ -131,7 +131,9 @@ def test_repair_fits_every_propagated_view_and_commits_only_clone(tmp_path):
     np.testing.assert_allclose(s.colors,.4)
     np.testing.assert_allclose(candidate.colors,.8)
     assert metrics["generated_frames"]==9
-    assert metrics["anchor_role"] == "initialization_and_direct_reconstruction_target"
+    assert metrics["anchor_role"] == "clean_temporal_starter_and_direct_reconstruction_target"
+    assert metrics["conditioning_mode"] == "gpt-starter-kv-v1"
+    assert metrics["scene_rgb_conditioning"] is False
     assert metrics["fitting_resolution"] == [64,64]
     assert metrics["exploration_resolution"] == [32,32]
     assert len(list((tmp_path/"extended/targets").glob("*.png")))==9
@@ -468,7 +470,7 @@ def test_coordinated_views_share_anchor_and_render_before_edits(tmp_path):
     assert len(selected_views(request,{'view_steps':[0,1,2,3]},4))==4
 
 
-def test_artifixer_receives_scene_fitted_to_edits_and_keeps_edits_as_targets(tmp_path):
+def test_initialized_scene_is_diagnostic_and_edits_remain_direct_targets(tmp_path):
     Image.new('RGB',(32,32),(210,210,210)).save(tmp_path/'anchor.png')
     source=scene()
     calls=[]
@@ -490,6 +492,9 @@ def test_artifixer_receives_scene_fitted_to_edits_and_keeps_edits_as_targets(tmp
             assert int(targets[1][0,0,0])==100
         return {}
     def generate(root,runtime,stop):
+        manifest = json.loads((root/'bundle.json').read_text())
+        assert manifest['conditioning_mode'] == 'gpt-starter-kv-v1'
+        assert manifest['scene_rgb_conditioning'] is False
         assert int(np.array(Image.open(root/'inputs/00000.png'))[0,0,0])==210
         assert int(np.array(Image.open(root/'inputs-original/00000.png'))[0,0,0])==102
         np.testing.assert_allclose(source.colors,.4)
