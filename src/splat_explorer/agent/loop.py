@@ -76,6 +76,12 @@ def _motion_note(outcome: dict | None) -> str | None:
     kind = outcome.get("kind")
     if kind == "local_return":
         return "local view collection finished; camera restored to its pre-local position, yaw and pitch"
+    if kind == "rotate_around":
+        return (f"previous rotate_around: baseline={outcome['baseline']:.3f}, "
+                f"arc travel={outcome['travelled']:.3f}, radius={outcome['radius']:.3f}, "
+                f"completed={outcome['completed_fraction']:.0%}, blocked={outcome['blocked']}; "
+                f"aimed at Gaussian {outcome['gaussian_index']} center {outcome['pivot']}. "
+                "Inspect visibility and re-pick the same target for the next orbit.")
     if kind == "rotate":
         parts = []
         if "yaw_degrees" in outcome:
@@ -495,8 +501,10 @@ def run_episode(
                             depth = _ensure_depth(renderer, camera, depth)
                             render_s += time.perf_counter() - t_depth
                             record["timing"]["render_s"] = round(render_s, 3)
+                        from ..repair import scene_from_renderer
                         ctx = MotionContext(
                             world=nav, camera=camera, depth=depth,
+                            scene=scene_from_renderer(renderer) if action.name == "rotate_around" else None,
                             waypoints=getattr(spawn, "waypoints", None),
                             pose_history=pose_history,
                         )

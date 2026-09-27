@@ -755,6 +755,7 @@ class MotionContext:
     depth: np.ndarray | None = None
     waypoints: list[Waypoint] | None = None
     pose_history: list[dict] | None = None
+    scene: GaussianScene | None = None
 
 
 def resolve_move_toward(

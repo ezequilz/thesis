@@ -66,6 +66,9 @@ class CameraRig:
             return self._apply_move(action, ctx)
         if action.name == "move_toward":
             return self._apply_move_toward(action, ctx)
+        if action.name == "rotate_around":
+            from .orbit import apply_orbit
+            return apply_orbit(self, action, ctx)
         if action.name == "rotate":
             outcome = {"kind": "rotate"}
             yaw = action.args.get("yaw_degrees")

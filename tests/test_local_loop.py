@@ -30,7 +30,7 @@ def collect(loop, rig):
 
 def test_movement_only_then_numbered_selection_restores_outer_policy():
     policy, rig, loop = make_loop()
-    assert {t['function']['name'] for t in policy._tools} == {'move','move_toward','rotate'}
+    assert {t['function']['name'] for t in policy._tools} == {'move','move_toward','rotate','rotate_around'}
     image = collect(loop, rig)
     assert image.shape == (192, 192, 3)  # full-resolution tiles, numbers inside
     tile = image[0:48, 64:128]

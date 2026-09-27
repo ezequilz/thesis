@@ -24,6 +24,7 @@ class LocalRepairLoop:
         self.max_turns = max_turns
         self.turns = 0
         self.selection_attempts = 0
+        self.pending_orbit = False
         self.pending_move = False
         self.pending_rotation = False
         self.needs_rotation = False
@@ -43,7 +44,7 @@ class LocalRepairLoop:
         self.saved_task = getattr(policy, '_task', None)
         if self.saved_tools is not None:
             policy._tools = [copy.deepcopy(t) for t in self.saved_tools
-                             if t['function']['name'] in ('move', 'move_toward', 'rotate')]
+                             if t['function']['name'] in ('move', 'move_toward', 'rotate', 'rotate_around')]
         if hasattr(policy, '_task'):
             policy._task = SimpleNamespace(system_prompt=self.system_prompt,
                 observation_label="Image 1 - RGB view from your current pose:", image_detail="auto")
@@ -63,7 +64,15 @@ class LocalRepairLoop:
                 'Target: ' + target)
         return (
             f'Collect {self.candidates} translated, re-aimed views of the same stationary target. '
-            'Each candidate requires TWO stages: translate, inspect the new RGB, then rotate '
+            'PREFER rotate_around: pick the same target in CURRENT RGB with normalized '
+            'pixel_x/y (0..1), use azimuth_pi +0.1 to +0.2 for right or negative for left. '
+            'This moves on an arc AND re-aims in one action; the resulting view is recorded. '
+            'Sweep both sides with overlapping content. elevation_pi is absolute: 0 is '
+            'level with the pivot, 0.25 is 45 degrees above, 0.4 is a 72-degree bird-eye '
+            'view; omit to keep elevation. Try raised views only if the target stays visible. '
+            'Re-pick an opaque point on the SAME target each time; faint floaters are passed '
+            'through by the pivot ray. Inspect RGB and collision feedback after each orbit. '
+            'Fallback move/rotate candidates require TWO stages: translate, inspect RGB, then rotate '
             'to re-center the SAME target. A translation alone is not recorded. '
             'move left/right strafes relative to CURRENT yaw without turning the camera; '
             'forward/back also preserves heading, and up/down changes height. '
@@ -90,6 +99,19 @@ class LocalRepairLoop:
     def observe(self, observation, step, rig):
         """Record the result of the previous movement, not the pre-movement frame."""
         self.current_height = float(np.dot(rig.position - self.origin, self.up))
+        if self.pending_orbit:
+            travelled = np.linalg.norm(rig.position - self.previous_rig.position)
+            distinct = all(np.linalg.norm(rig.position - r.position) >= self.min_baseline
+                           for r in self.rigs)
+            if travelled >= self.min_baseline and distinct:
+                self.steps.append(step)
+                self.frames.append(np.asarray(observation).copy())
+                self.rigs.append(copy.deepcopy(rig))
+                self.needs_rotation = False
+                self.note = 'Orbit view recorded. Inspect visibility, then orbit to another vantage.'
+            else:
+                self.note = 'Orbit blocked, failed, negligible or repeated. Inspect feedback and choose another arc.'
+            self.pending_orbit = False
         if self.pending_move:
             travelled = np.linalg.norm(rig.position - self.previous_rig.position)
             self.needs_rotation = travelled >= self.min_baseline
@@ -163,7 +185,7 @@ class LocalRepairLoop:
         return (f'INNER LOOP: {len(self.steps)}/{self.candidates} movement views recorded. '
                 + ('Select five numbered tiles. ' if self.selecting else
                    'NEXT: rotate to re-center the target. ' if self.needs_rotation else
-                   'NEXT: translate sideways around the target. ')
+                   'NEXT: orbit around the target with rotate_around. ')
                 + height_note + self.note)
 
     def restore_camera(self, rig):
@@ -204,14 +226,15 @@ class LocalRepairLoop:
         if self.turns > max(self.max_turns, 2 * self.candidates):
             self.restore()
             return Action('cancel_local_repair'), 'cancelled'
-        if action.name in ('move', 'move_toward', 'rotate'):
-            if self.needs_rotation and action.name != 'rotate':
+        if action.name in ('move', 'move_toward', 'rotate', 'rotate_around'):
+            if self.needs_rotation and action.name not in ('rotate', 'rotate_around'):
                 self.note = 'Rotate to re-center the target before translating again.'
                 return Action('local_noop'), 'collecting'
             self.previous_rig = copy.deepcopy(rig)
-            self.pending_move = action.name != 'rotate'
+            self.pending_orbit = action.name == 'rotate_around'
+            self.pending_move = action.name in ('move', 'move_toward')
             self.pending_rotation = action.name == 'rotate' and self.needs_rotation
             self.note = ''
             return action.clamped(self.move_limit, self.rotation_limit), 'collecting'
-        self.note = 'Only move, move_toward and rotate are available during movement collection.'
+        self.note = 'Only move, move_toward, rotate and rotate_around are available during movement collection.'
         return Action('local_noop'), 'collecting'

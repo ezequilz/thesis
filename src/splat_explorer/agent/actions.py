@@ -222,6 +222,39 @@ ACTION_TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "rotate_around",
+            "description": (
+                "Orbit a target AND automatically aim at it, creating translational parallax. "
+                "Pick a point on the SAME target in CURRENT RGB using NORMALIZED pixel_x/y "
+                "0..1 (unlike move_toward's integer pixels). Cast through faint foreground "
+                "splats to substantial geometry; its Gaussian CENTER is the pivot. "
+                "Keep the camera-to-pivot distance fixed. azimuth_pi is RELATIVE horizontal "
+                "orbit in multiples of pi: +0.1 = 18 degrees toward camera-right around the "
+                "target, -0.1 = left, 0.5 = quarter-circle, 1 = half-circle. "
+                "elevation_pi is ABSOLUTE angle above the pivot's horizontal plane: "
+                "0 = level, 0.25 = 45 degrees above looking down, 0.4 = 72 degrees "
+                "(bird's-eye), 0.49 = near overhead; negative = below looking up. "
+                "Omit elevation_pi to preserve current elevation. azimuth_pi=0 with "
+                "elevation omitted means no movement. Prefer +/-0.1 to +/-0.2 for "
+                "overlapping repair views, inspect RGB, and re-pick the same target each call. "
+                "Collision may stop the arc early; check feedback. Large arcs may occlude the target."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pixel_x": {"type": "number", "minimum": 0, "maximum": 1},
+                    "pixel_y": {"type": "number", "minimum": 0, "maximum": 1},
+                    "azimuth_pi": {"type": "number", "minimum": -1, "maximum": 1},
+                    "elevation_pi": {"type": "number", "minimum": -0.49, "maximum": 0.49},
+                },
+                "required": ["pixel_x", "pixel_y", "azimuth_pi"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "move_toward",
             "description": (
                 "PRIMARY movement tool. Pick a pixel in the CURRENT RGB view and walk toward "

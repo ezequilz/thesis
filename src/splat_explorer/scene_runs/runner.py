@@ -579,6 +579,7 @@ class SceneRunExecutor:
                         action,
                         MotionContext(
                             world=nav,
+                            scene=scene,
                             camera=camera,
                             depth=depth,
                             waypoints=getattr(spawn, "waypoints", None) if local_loop is None else None,
