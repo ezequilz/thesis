@@ -6,6 +6,7 @@ This is a second ViserServer, not the capture visor on :8080. Opening
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import logging
 import threading
 import time
@@ -82,7 +83,7 @@ class SceneRunViser:
         self._error: str | None = None
         self._generation = 0
         self._view: dict | None = None
-        self._scenes: dict[tuple[str, str], Any] = {}
+        self._handles: dict[str, Any] = {}
         self._clients: dict[str, float] = {}
         self._watchdog_started = False
 
@@ -131,7 +132,7 @@ class SceneRunViser:
         self._status = "idle"
         self._error = None
         self._view = None
-        self._scenes.clear()
+        self._handles.clear()
         self._clients.clear()
         if server is None:
             return
@@ -231,6 +232,15 @@ class SceneRunViser:
                 snap.update(ok=False, message=self._error, error=self._error)
                 return snap
 
+            if self._run_id == run_id and requested in self._handles and self._status == "ready":
+                # Both payloads already live in the browser. Only send visibility.
+                atomic = getattr(self._server, "atomic", nullcontext)
+                with atomic():
+                    for name, handle in self._handles.items():
+                        handle.visible = name == requested
+                self._which = requested
+                return self._snapshot_locked(run_id, paths, showing=True)
+
             keep_camera = (
                 self._run_id == run_id
                 and self._view is not None
@@ -258,12 +268,11 @@ class SceneRunViser:
             self._status = "loading"
             self._error = None
             up_axis = self._up_axis(run_id)
-            ply = paths[requested]
             snap = self._snapshot_locked(run_id, paths, showing=True)
             snap["ok"] = True
             snap["message"] = f"Loading {missing}…"
 
-        args = (run_id, requested, ply, generation, keep_camera, up_axis)
+        args = (run_id, requested, paths, generation, keep_camera, up_axis)
         if self._background:
             threading.Thread(target=self._load, args=args, daemon=True).start()
         else:
@@ -409,7 +418,7 @@ class SceneRunViser:
         self,
         run_id: str,
         which: str,
-        path: Path,
+        paths: Mapping[str, Path | None],
         generation: int,
         keep_camera: bool,
         up_axis: str,
@@ -426,17 +435,19 @@ class SceneRunViser:
 
         loader = self._load_scene or load_scene
         try:
-            scene = self._scenes.get((run_id, which))
-            if scene is None:
-                min_opacity = float(_cfg_get(self.cfg, "scene.min_opacity", 0.0) or 0.0)
-                lod = int(_cfg_get(self.cfg, "scene.lod_level", 0) or 0)
-                scene = loader(path, min_opacity=min_opacity, lod_level=lod)
-                self._scenes = {
-                    key: value for key, value in self._scenes.items() if key[0] == run_id
-                }
-                self._scenes[(run_id, which)] = scene
+            min_opacity = float(_cfg_get(self.cfg, "scene.min_opacity", 0.0) or 0.0)
+            lod = int(_cfg_get(self.cfg, "scene.lod_level", 0) or 0)
+            scenes = {}
+            for name in (which, *(name for name in WHICH if name != which)):
+                path = paths[name]
+                if path is None:
+                    continue
+                with self._lock:
+                    if generation != self._generation or self._server is None:
+                        return
+                scenes[name] = loader(path, min_opacity=min_opacity, lod_level=lod)
         except Exception as exc:
-            logger.exception("Scene-run visor failed to load %s", path)
+            logger.exception("Scene-run visor failed to load %s", run_id)
             with self._lock:
                 if generation != self._generation:
                     return
@@ -451,7 +462,23 @@ class SceneRunViser:
                 return
             server = self._server
             saved = _snapshot_client_cameras(server) if keep_camera else []
-            _install_splats(server, scene, max_splats)
+            try:
+                atomic = getattr(server, "atomic", nullcontext)
+                with atomic():
+                    for name in self._handles:
+                        server.scene.remove_by_name(f"/review/{name}")
+                    self._handles.clear()
+                    for name, scene in scenes.items():
+                        self._handles[name] = _install_splats(
+                            server, scene, max_splats,
+                            name=f"/review/{name}", visible=name == which,
+                        )
+            except Exception as exc:
+                self._status = "error"
+                self._error = f"{type(exc).__name__}: {exc}"
+                logger.exception("Scene-run visor failed to install %s", run_id)
+                return
+            scene = scenes[which]
             view = _view_pose(scene, up_axis, fov_deg)
             self._view = view
             if saved:

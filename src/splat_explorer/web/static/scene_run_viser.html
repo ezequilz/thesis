@@ -57,7 +57,7 @@ const $ = id => document.getElementById(id);
 const title = $("title"), hint = $("hint"), flip = $("flip");
 const frame = $("frame"), overlay = $("overlay");
 const api = `/api/scene-runs/${encodeURIComponent(runId)}/viser`;
-let state = null, pending = false, timer = null, started = false;
+let state = null, pending = false, timer = null, started = false, closed = false, revision = 0;
 
 function plyLabel(which) {
   return which === "original" ? "scene_original.ply" : "scene_repaired.ply";
@@ -118,48 +118,61 @@ async function post(body) {
   });
 }
 async function refresh(start) {
+  const requestRevision = revision;
   if (start) {
     pending = true;
     state = await post({});
     started = Boolean(state?.viewer_url) || state?.status === "loading" || state?.status === "ready";
     pending = false;
   } else if (started) {
-    state = await post({heartbeat: true});
+    const next = await post({heartbeat: true});
+    if (requestRevision !== revision || closed) return;
+    state = next;
   } else {
     state = await fetchJson(api);
   }
+  if (closed) { stopVisor(); return; }
   render();
 }
 async function tick() {
   clearTimeout(timer);
+  if (closed) return;
   try {
-    await refresh(!started);
+    if (!pending) await refresh(!started);
   } catch (error) {
     state = {ok: false, message: error.message, status: "error"};
     render();
   }
   const wait = !started || state?.status === "loading" ? 1000 : 8000;
-  timer = setTimeout(tick, wait);
+  if (!closed) timer = setTimeout(tick, wait);
 }
 function stopVisor() {
+  closed = true;
+  clearTimeout(timer);
   const body = JSON.stringify({stop: true, client});
   try {
-    navigator.sendBeacon(api, new Blob([body], {type: "application/json"}));
-  } catch (_err) {
-    fetch(api, {method: "POST", headers: {"Content-Type": "application/json"},
-      body, keepalive: true}).catch(() => {});
-  }
+    if (navigator.sendBeacon(api, new Blob([body], {type: "application/json"}))) return;
+  } catch (_err) {}
+  fetch(api, {method: "POST", headers: {"Content-Type": "application/json"},
+    body, keepalive: true}).catch(() => {});
 }
 flip.onclick = async () => {
   if (flip.disabled) return;
+  clearTimeout(timer);
+  revision += 1;
   pending = true;
   flip.disabled = true;
   try { state = await post({toggle: true}); }
   catch (error) { state = {...(state || {}), ok: false, message: error.message, status: "error"}; }
   pending = false;
+  if (closed) { stopVisor(); return; }
   render();
+  timer = setTimeout(tick, state?.status === "loading" ? 1000 : 8000);
 };
 window.addEventListener("pagehide", stopVisor);
+window.addEventListener("pageshow", event => {
+  if (event.persisted) { closed = false; started = false; frame.removeAttribute("src"); tick(); }
+});
 tick();
 </script>
 </body>

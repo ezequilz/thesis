@@ -216,14 +216,18 @@ def _splat_index(scene: GaussianScene, max_splats: int) -> np.ndarray:
     return np.arange(n)
 
 
-def _install_splats(server, scene: GaussianScene, max_splats: int) -> None:
+def _install_splats(
+    server, scene: GaussianScene, max_splats: int,
+    *, name: str = "/splat", visible: bool = True,
+):
     try:
-        server.scene.remove_by_name("/splat")
+        server.scene.remove_by_name(name)
     except Exception:
         pass
     idx = _splat_index(scene, max_splats)
-    server.scene.add_gaussian_splats(
-        "/splat",
+    return server.scene.add_gaussian_splats(
+        name,
+        visible=visible,
         centers=scene.means[idx],
         rgbs=scene.colors[idx],
         opacities=scene.opacities[idx, None],

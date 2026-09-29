@@ -45,7 +45,7 @@ class _FakeSceneApi:
 
     def add_gaussian_splats(self, name, **_kwargs):
         self.splats.append(name)
-        return SimpleNamespace(name=name)
+        return SimpleNamespace(name=name, visible=_kwargs.get("visible", True))
 
 
 class _FakeGui:
@@ -145,16 +145,26 @@ def test_show_defaults_to_repaired_and_toggle_flips(tmp_path):
     assert first["which"] == "repaired"
     assert first["status"] == "ready"
     assert first["viewer_url"] == "http://localhost:8082"
-    assert loaded == [str(run_dir / "scene_repaired.ply")]
-    assert visor._server.scene.splats == ["/splat"]
+    assert loaded == [str(run_dir / "scene_repaired.ply"), str(run_dir / "scene_original.ply")]
+    assert visor._server.scene.splats == ["/review/repaired", "/review/original"]
+    handles = dict(visor._handles)
+    assert handles["repaired"].visible
+    assert not handles["original"].visible
 
     flipped = visor.show("run_20260915_200000", toggle=True)
     assert flipped["which"] == "original"
     assert flipped["status"] == "ready"
+    assert handles["original"].visible
+    assert not handles["repaired"].visible
     assert loaded[-1] == str(run_dir / "scene_original.ply")
 
     back = visor.show("run_20260915_200000", toggle=True)
     assert back["which"] == "repaired"
+    assert len(loaded) == 2
+    assert len(visor._server.scene.splats) == 2
+    assert visor._handles == handles
+    assert handles["repaired"].visible
+    assert not handles["original"].visible
     snap = visor.snapshot("run_20260915_200000")
     assert snap["which"] == "repaired"
     assert snap["original"] is True
@@ -244,4 +254,20 @@ def test_one_server_is_reused_then_stopped_when_released(tmp_path):
     visor.release(other_id, client="tab-b")
     assert visor._server is None
     assert created[0].stopped is True
+    assert visor._handles == {}
     assert visor.snapshot("run_20260915_200000")["status"] == "idle"
+
+
+def test_close_during_load_cannot_repopulate_stopped_session(tmp_path):
+    studio, _ = _studio(tmp_path)
+    loaded = []
+    def loader(path, **kwargs):
+        loaded.append(path)
+        visor.release("run_20260915_200000", client="tab-a")
+        return _tiny_scene()
+    visor = SceneRunViser(studio, background=False, server_factory=_FakeServer,
+                          load_scene=loader, idle_timeout=None)
+    visor.show("run_20260915_200000", client="tab-a")
+    assert visor._server is None
+    assert visor._handles == {}
+    assert len(loaded) == 1
