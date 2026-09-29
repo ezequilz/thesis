@@ -251,7 +251,7 @@
         <label title="Fit the repaired anchor into a private scene copy before rendering ArtiFixer inputs. Requires Scene RGB + opacity.">Anchor prefit<select id="ext-prefit" disabled><option value="none">Off (current comparison)</option><option value="gsfix3d">GSFix3D first (20 steps)</option></select></label>
         <p id="ext-prefit-status" class="settings-note wide">Repaired-image reference: always supplied throughout generation. Restart the dashboard after the active run to enable the new prefit option.</p>
         <label>Trajectory span / depth<input id="ext-span" type="number" min="0.005" max="0.15" step="0.005" value="0.04"></label>
-        <label><span id="ext-iters-label">Total fit iterations per repair</span><input id="ext-iters" type="number" min="1" step="1" value="1000"></label>
+        <label><span id="ext-iters-label">Total fit iterations per repair</span><input id="ext-iters" type="number" min="1" step="1" value="15000"></label>
         <label>Fitting safeguards<select id="ext-safeguards" disabled><option value="true">On (default)</option><option value="false">Off (previous behavior)</option></select></label>
         <p id="ext-safeguards-status" class="settings-note wide">On limits Gaussian stretching and uses one total fitting budget per repair. Off restores the global scale limit and multiplies iterations by selected views.</p>
         <label title="Scales camera translations for ArtiFixer. Use 1 unless scene scale has been calibrated.">Camera translation scale<input id="ext-scale" type="number" min="0.0001" max="10000" step="any" value="1" required></label>

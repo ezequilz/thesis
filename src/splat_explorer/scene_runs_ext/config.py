@@ -2,7 +2,7 @@
 from __future__ import annotations
 import math
 
-DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 1000,
+DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 15000,
             "fitting_safeguards": True,
             "source_conditioning": "rendered", "generated_cache": "last_denoising",
             "anchor_prefit": "none", "block_schedule": "periodic_starter",

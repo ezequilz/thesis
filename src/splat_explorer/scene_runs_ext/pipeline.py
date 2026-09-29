@@ -253,6 +253,7 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     }, indent=2))
     # Exact starters and periodic GPT refreshes are edited observations.
     edited_indices = []
+    generated_references = []
     for reference, target in zip(references, anchor_targets):
         start = reference["frame_index"]
         targets[start] = target
@@ -260,8 +261,25 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
         edited_indices.append(start)
     if options['block_schedule'] == 'periodic_starter':
         inference = json.loads((root / 'inference.json').read_text())
+        generated_references = inference.get('generated_references', [])
+        for reference in generated_references:
+            index = reference['frame_index']
+            if (type(index) is not int or not 0 <= index < len(cameras)
+                    or reference.get('kind') != 'edited_render'):
+                raise ValueError('Invalid calibrated periodic reference')
+            with Image.open(root / reference['path']) as image:
+                if image.size != (camera.width, camera.height):
+                    raise ValueError('Periodic reference dimensions do not match its camera')
+                target = image.convert('RGB')
+                targets[index] = np.array(target)
+                target.save(preview / f'{index:05d}.png')
         edited_indices.extend(record['frame_index'] for record in inference['periodic_refreshes']
                               if record['frame_index'] < len(cameras) - 1)
+        # Input references remain separate so replay cannot use future repairs
+        # before their causal generation boundary. Preserve the completed bank.
+        manifest['generated_references'] = generated_references
+        manifest['reference_views'] = len(references) + len(generated_references)
+        (root / 'bundle.json').write_text(json.dumps(manifest, indent=2))
     on_progress({"phase": "multiview_fit"})
     closure_l1 = float(np.mean(np.abs(targets[-1].astype(np.float32) - targets[0].astype(np.float32))) / 255)
     # The generated closing frame is a consistency diagnostic, not a second
@@ -297,7 +315,7 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
                    edited_target_indices=edited_indices,
                    selected_steps=[v["step"] for v in seeds[1:]],
                    repair_scope=proposal.get("repair_scope", "local"),
-                   generation_segments=len(segments), reference_views=len(references),
+                   generation_segments=len(segments), reference_views=len(references) + len(generated_references),
                    validation_views=len(validation_cameras),
                    validation_kind="matched native anchor and held-out cameras; visual review, no score gate",
                    native_reference_resolution=native_resolution,

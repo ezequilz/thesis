@@ -170,6 +170,9 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
             from splat_explorer.scene_runs_ext.periodic_refresh import PeriodicRefresh
             assert isinstance(pipe.starter_refresh, PeriodicRefresh)
             assert pipe.starter_rgb_count == 9
+            assert item['neighbor_w2cs'].flatten().tolist() == [0, 9]
+            assert pipe.starter_refresh.reference_w2cs.flatten().tolist() == list(range(index*9, index*9+9))
+            assert pipe.starter_refresh.reference_Ks.flatten().tolist() == list(range(index*9+100, index*9+109))
             # Mock a completed callback to exercise bridge export/diagnostics;
             # actual 20-frame scheduling and VAE behavior have CPU tensor tests.
             i = item['frame_indices'][-1].item()
@@ -184,7 +187,9 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
     checkpoints = ModuleType('model_eval.checkpoint_loading')
     checkpoints.load_transformer_checkpoint = lambda *a: None
     utils = ModuleType('model_training.data.utils')
-    utils.compute_camera_rays = lambda cameras, indices, neighbors, **kw: {}
+    utils.compute_camera_rays = lambda cameras, indices, neighbors, **kw: {
+        'neighbor_w2cs': torch.tensor(neighbors).reshape(-1, 1, 1),
+        'neighbor_Ks': (torch.tensor(neighbors) + 100).reshape(-1, 1, 1)}
     utils.load_encoded_prompt = lambda *a: [torch.zeros(1)]
     for name, module in [('model_eval.run_inference', inference),
                          ('model_eval.checkpoint_loading', checkpoints),
@@ -212,6 +217,9 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
     for i, expected in [(0,40),(9,220)]:
         assert Image.open(tmp_path/f'artifixer-output/bundle/frames/batch_0000/pred/{i:05d}.png').getpixel((0,0)) == ((expected,)*3 if schedule != "upstream" else (0,0,0))
     if schedule == 'periodic_starter':
+        assert metadata['initial_reference_views'] == 2 and metadata['reference_views'] == 4
+        assert [r['frame_index'] for r in metadata['generated_references']] == [8, 17]
+        assert all(r['kind'] == 'edited_render' for r in metadata['generated_references'])
         assert [r['frame_index'] for r in metadata['periodic_refreshes']] == [8, 17]
         for i in [8, 17]:
             assert Image.open(tmp_path/f'artifixer-output/bundle/frames/batch_0000/pred/{i:05d}.png').getpixel((0,0)) == (230,230,230)

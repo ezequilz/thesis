@@ -155,7 +155,7 @@ def test_repair_fits_every_propagated_view_and_commits_only_clone(tmp_path):
     np.testing.assert_allclose(candidate.colors,.8)
     assert metrics["generated_frames"]==9
     assert metrics["anchor_role"] == "clean_temporal_starter_and_direct_reconstruction_target"
-    assert metrics["conditioning_mode"] == "gpt-periodic-starter-kv-v1"
+    assert metrics["conditioning_mode"] == "gpt-periodic-reference-kv-v2"
     assert metrics["scene_rgb_conditioning"] is True
     assert metrics["fitting_resolution"] == [64,64]
     assert metrics["exploration_resolution"] == [32,32]
@@ -270,7 +270,7 @@ def test_selected_views_are_fitted_jointly_with_calibrated_references(tmp_path, 
         assert len(views) == 16
         assert all(v.width == 64 and v.height == 64 for v in views)
         np.testing.assert_allclose(views[8].position, other.position)
-        assert kwargs["iterations"] == (1000 if safeguards else 2000)
+        assert kwargs["iterations"] == (15000 if safeguards else 30000)
         assert kwargs["fitting_safeguards"] is safeguards
         return {}
     _, metrics = repair(scene(),c,tmp_path/"anchor.png",tmp_path,
@@ -532,7 +532,7 @@ def test_legacy_intervention_cannot_change_repair_prompt_or_routing():
     assert proposal(a) == proposal(b)
     assert "intervention" not in proposal(a)
     assert edit_prompt(a) == edit_prompt(b)
-    assert validate_options()["fit_iterations"] == 1000
+    assert validate_options()["fit_iterations"] == 15000
 
 
 def test_joint_optimizer_updates_geometry_and_opacity(monkeypatch):

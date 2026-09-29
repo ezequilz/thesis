@@ -118,7 +118,7 @@ def main():
             if options.get('block_schedule') == 'periodic_starter':
                 if source_conditioning != 'rendered':
                     raise ValueError('Periodic starter requires rendered source conditioning')
-                refresh = PeriodicRefresh(root, indices)
+                refresh = PeriodicRefresh(root, indices, initial_reference_indices=neighbors)
                 pipe.starter_refresh = refresh
                 pipe.starter_rgb_count = len(indices)
             seed = rgb(root / starter["path"])
@@ -139,13 +139,22 @@ def main():
                     "frame_indices": torch.tensor(indices),
                     "valid_frames_mask": torch.ones(len(indices), dtype=torch.bool)}
             region = manifest.get("local_region")
+            # Ask upstream for exact RGB neighbor cameras as well as its
+            # temporally averaged target cameras. Never label a repaired RGB
+            # with the averaged pose of its four-frame latent group.
+            conditioning_neighbors = neighbors + indices if refresh else neighbors
             if region:
-                item.update(crop_camera_conditioning(compute_camera_rays, cameras, indices, neighbors,
+                item.update(crop_camera_conditioning(compute_camera_rays, cameras, indices, conditioning_neighbors,
                             box=region["crop"], source_size=region["source_size"],
                             scale=options["camera_scale"]))
             else:
-                item.update(compute_camera_rays(cameras, indices, neighbors,
+                item.update(compute_camera_rays(cameras, indices, conditioning_neighbors,
                             scale=options["camera_scale"], image_shape=renders.shape[-2:], skip_vae_check=True))
+            if refresh:
+                refresh.reference_w2cs = item['neighbor_w2cs'][len(neighbors):].clone()
+                refresh.reference_Ks = item['neighbor_Ks'][len(neighbors):].clone()
+                item['neighbor_w2cs'] = item['neighbor_w2cs'][:len(neighbors)]
+                item['neighbor_Ks'] = item['neighbor_Ks'][:len(neighbors)]
             # Separate observed viewpoints need separate temporal sequences:
             # concatenating them makes a video cut look like physical motion.
             if hasattr(pipe, "clear_inference_caches"):
@@ -172,12 +181,18 @@ def main():
                     shutil.copy2(root / record['path'], destination)
                 refresh_records.extend(refresh.records)
             del item, renders
+    generated_references = [{key: record[key] for key in ('frame_index', 'path')}
+                            | {'kind': 'edited_render'} for record in refresh_records]
     (root / "inference.json").write_text(json.dumps({
         "checkpoint": str(args.checkpoint), "model_id": args.model_id,
         "frames": count, "text_conditioning": "disabled (official zero embedding)",
-        "segments": len(segments), "reference_views": len(references),
+        "segments": len(segments), "reference_views": len(references) + len(generated_references),
+        "initial_reference_views": len(references),
+        "generated_references": generated_references,
         "reference": "image-edited anchor; synthetic, not a captured photograph",
-        "reference_conditioning": "fixed edited references supplied to every transformer call; separate from temporal KV cache",
+        "reference_conditioning": ("initial edited references plus completed periodic repairs; independently encoded with exact RGB cameras; maximum 12 active views"
+                                   if options.get('block_schedule') == 'periodic_starter' else
+                                   "fixed edited references supplied to every transformer call; separate from temporal KV cache"),
         "anchor_prefit": options.get('anchor_prefit', 'none'),
         **policy,
         "starter_frames": [s["start"] for s in segments],
