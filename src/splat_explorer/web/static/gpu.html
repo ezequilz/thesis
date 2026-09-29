@@ -234,7 +234,7 @@
       <input type="checkbox" id="in-artifixer-required"> ArtiFixer
     </label>
     <label>ArtiFixer model
-      <select id="in-artifixer-model"><option value="14b">14B — highest quality (default)</option><option value="1.3b">1.3B — faster, lower memory</option></select>
+      <select id="in-artifixer-model"><option value="1.3b">1.3B — faster, lower memory (default)</option><option value="14b">14B — highest quality</option></select>
     </label>
     <button id="btn-setup" title="Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh. Tick ArtiFixer first to install the isolated environment /scene-runs-ext needs. Qwen-Image-Edit is installed only when QWEN_required is checked.">Load GPU setup</button>
     <span id="probe-meta" class="hint">At most one remote probe per 10 min while this tab is visible. Reloads reuse cache; availability is a separate one-shot sinfo after the probe finishes.</span>

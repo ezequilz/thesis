@@ -7,7 +7,7 @@ MODEL_VARIANTS = {
     "14b": "Wan-AI/Wan2.1-T2V-14B-Diffusers",
     "1.3b": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
 }
-DEFAULT_MODEL_VARIANT = "14b"
+DEFAULT_MODEL_VARIANT = "1.3b"
 
 DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 15000,
             "model_variant": DEFAULT_MODEL_VARIANT,
@@ -25,7 +25,7 @@ RUNTIME_DEFAULTS = {
     "repo": "/workspace/third_party/ArtiFixer",
     "python": "/workspace/artifixer-venv/bin/python",
     "hf_home": "/workspace/models/huggingface",
-    "checkpoint": "/workspace/models/artifixer/artifixer-14b.pt",
+    "checkpoint": f"/workspace/models/artifixer/artifixer-{DEFAULT_MODEL_VARIANT}.pt",
     "model_id": MODEL_VARIANTS[DEFAULT_MODEL_VARIANT],
 }
 UPSTREAM_REVISION = "a392c4dfe17459ef9952407accdb9fcdcdddba98"

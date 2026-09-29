@@ -349,7 +349,7 @@ class RepairStudio:
         overwrite: bool = False,
         qwen_required: bool | None = None,
         artifixer_required: bool = False,
-        artifixer_model: str = "14b",
+        artifixer_model: str = "1.3b",
     ) -> dict:
         from ..image_edit import resolve_qwen_required
         from ..repair_lrz import request_lrz_setup

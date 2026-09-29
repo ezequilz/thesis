@@ -1127,7 +1127,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     overwrite=bool(body.get("overwrite", False)),
                     qwen_required=qwen_required,
                     artifixer_required=body.get("ARTIFIXER_required", False),
-                    artifixer_model=body.get("artifixer_model", "14b"),
+                    artifixer_model=body.get("artifixer_model", "1.3b"),
                 )
             except Exception as exc:
                 from ..repair_lrz import SetupNeedsOverwrite

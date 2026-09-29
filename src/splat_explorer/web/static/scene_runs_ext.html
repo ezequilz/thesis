@@ -243,7 +243,7 @@
         <label title="Must keep the same aspect ratio as the VLM resolution. Multiples of 16.">Image repair height<input id="repair-height" name="repair_height" type="number" min="64" max="2880" value="720"></label>
 <p class="settings-note wide">Default: 960×720 at 4:3. Repair dimensions must match the VLM aspect ratio and be multiples of 16. The pixel budget also caps larger returned edits; it never crops the image.</p>
     <h3>Generation and reconstruction</h3>
-        <label>ArtiFixer model<select id="ext-model"><option value="14b">14B — highest quality (default)</option><option value="1.3b">1.3B — faster, lower memory</option></select></label>
+        <label>ArtiFixer model<select id="ext-model"><option value="1.3b">1.3B — faster, lower memory (default)</option><option value="14b">14B — highest quality</option></select></label>
         <p class="settings-note wide">Shared with the GPU dashboard. After changing models, click the ArtiFixer button to prepare the selected model before starting a run.</p>
         <label>Samples per camera leg<input id="ext-frames" type="number" min="9" max="81" step="4" value="25"></label>
         <label title="Caps the edited image, trajectory renders and ArtiFixer inputs while preserving aspect ratio. 691200 gives 960×720 for 4:3. Zero opts into native edited-image resolution.">ArtiFixer pixel budget<input id="ext-pixels" type="number" min="0" max="16777216" value="691200"></label>
@@ -422,7 +422,7 @@ function setDefaults(defaults, scenes) {
   if (!$("ext-prefit").disabled) $("ext-prefit-status").textContent = "Repaired-image reference: always supplied throughout generation. Prefit is experimental; inspect adjacent views before trusting it.";
   $("ext-safeguards").disabled = defaults.extended?.fitting_safeguards === undefined;
   if ($("ext-safeguards").disabled) $("ext-safeguards-status").textContent = "Restart the dashboard after the active run to enable fitting safeguards. New runs default to On once supported.";
-  $("ext-model").value = "14b";
+  $("ext-model").value = "1.3b";
   settingsDefaults = settingsValues();
   $("ext-model").value = ArtiFixerModel.get();
   updateSettingsSummary();
