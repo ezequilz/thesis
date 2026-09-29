@@ -6,6 +6,7 @@ by this bridge. The parent provides RGB, actual alpha and calibrated cameras.
 from __future__ import annotations
 import argparse
 import json
+import shutil
 from pathlib import Path
 import sys
 from unittest.mock import patch
@@ -147,6 +148,10 @@ def main():
     reference = torch.stack([rgb(root / r['path']) for r in all_references])
     neighbors = [r['frame_index'] for r in all_references]
     (root / 'prepared-references.json').write_text(json.dumps(all_references, indent=2))
+    jobs = []
+    for segment, starter, refresh in zip(segments, starters, refreshers):
+        sequences = refresh.sequences(starter) if refresh else [(segment, starter)]
+        jobs.extend((sequence, seed_reference, refresh) for sequence, seed_reference in sequences)
     device = torch.device("cuda:0")
     with torch.inference_mode():
         pipe = load_eval_pipe(opts, device)
@@ -159,11 +164,8 @@ def main():
             install_starter_inference(pipe, generated_cache=policy['generated_cache'])
         starter_diagnostics = []
         refresh_records = []
-        for segment, starter, refresh in zip(segments, starters, refreshers):
+        for segment, starter, refresh in jobs:
             indices = list(range(segment["start"], segment["start"] + segment["count"]))
-            if refresh:
-                pipe.starter_refresh = refresh
-                pipe.starter_rgb_count = len(indices)
             seed = rgb(root / starter["path"])
             renders, opacity = starter_inputs(seed, len(indices))
             if source_conditioning == 'rendered':
@@ -195,11 +197,14 @@ def main():
             # concatenating them makes a video cut look like physical motion.
             if hasattr(pipe, "clear_inference_caches"):
                 pipe.clear_inference_caches()
+            first_output = root / "artifixer-output/bundle/frames/batch_0000/pred" / f"{indices[0]:05d}.png"
+            if refresh and starter in refresh.prepared_references and first_output.is_file():
+                # Previous sequence's boundary, before the independent restart.
+                shutil.copy2(first_output, root / 'refresh' / f'{indices[0]:05d}' / 'before.png')
             process_item(pipe, item, opts, root / "artifixer-output", 0, device,
                          pipe.vae.config.scale_factor_temporal)
             # Record frame zero before any export replacement. Only the exact
             # adapter removes VAE roundtrip loss; upstream output stays intact.
-            import shutil
             first_output = root / "artifixer-output/bundle/frames/batch_0000/pred" / f"{indices[0]:05d}.png"
             prefix = 'starter-vae-roundtrip' if exact_starter else 'upstream-first-frame'
             roundtrip = root / f'{prefix}-{indices[0]:05d}.png'
@@ -208,16 +213,20 @@ def main():
                 ('vae_roundtrip' if exact_starter else 'generated_first_frame'): roundtrip.name,
                 ('vae_roundtrip_mae_0_1' if exact_starter else 'reference_mae_0_1'):
                     float((rgb(roundtrip) - seed).abs().mean())})
+            if refresh and starter in refresh.prepared_references:
+                refresh.record_restart(starter, roundtrip,
+                    starter_diagnostics[-1]['vae_roundtrip_mae_0_1'])
             if exact_starter:
                 shutil.copy2(root / starter["path"], first_output)
-            if refresh:
-                refresh.export_repairs(first_output.parent)
-                refresh_records.extend(refresh.records)
             del item, renders
+        for refresh in refreshers:
+            if refresh:
+                refresh.export_repairs(root / 'artifixer-output/bundle/frames/batch_0000/pred')
+                refresh_records.extend(refresh.records)
     (root / "inference.json").write_text(json.dumps({
         "checkpoint": str(args.checkpoint), "model_id": args.model_id,
         "frames": count, "text_conditioning": "disabled (official zero embedding)",
-        "segments": len(segments), "reference_views": len(references) + len(generated_references),
+        "segments": len(segments), "inference_sequences": len(jobs), "reference_views": len(references) + len(generated_references),
         "initial_reference_views": len(references),
         "generated_references": generated_references,
         "reference": "image-edited anchor; synthetic, not a captured photograph",
@@ -226,7 +235,7 @@ def main():
                                    "fixed edited references supplied to every transformer call; separate from temporal KV cache"),
         "anchor_prefit": options.get('anchor_prefit', 'none'),
         **policy,
-        "starter_frames": [s["start"] for s in segments],
+        "starter_frames": [s["start"] for s, _, _ in jobs],
         "scene_rgb_conditioning": source_conditioning == 'rendered',
         "source_conditioning": source_conditioning,
         "starter_diagnostics": starter_diagnostics,

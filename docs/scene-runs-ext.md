@@ -304,44 +304,43 @@ ArtiFixer's source RGB and opacity. Generated RGB is never sent as the repair
 input. The local transport services these requests through the same CliRelay
 backend/model as the initial edit; credentials stay off the GPU worker.
 
+The v4 schedule runs overlapping short sequences: `[0..20]`, `[20..40]`,
+`[40..60]`, etc. The prepared repair is the first image of the next sequence.
+Every sequence uses the same path as Exact starter: independently encode its
+first frame, set starter opacity to one, cache the clean first latent at timestep
+zero, and generate its continuation. Camera conditioning is recomputed relative
+to the new first camera; target and neighbor cameras use the same coordinate
+frame. Transformer caches are cleared between sequences and each sequence is
+encoded/decoded independently through the upstream VAE API. The latest repair
+therefore occupies the persistent attention sink, rather than leaving frame zero
+as the only persistent temporal anchor.
+
 The pinned upstream code uses seven latent frames per block and a temporal VAE
-scale of four. In the Exact starter adaptation, blocks after the starter cover
-28 RGB frames, not 21. The new schedule splits those blocks where necessary to
-finish a VAE group at each 20-image boundary, without dropping or duplicating
-camera positions. This is an inference adaptation, not the paper's trained
-block schedule.
+scale of four. Each short sequence follows the existing Exact starter block
+schedule and upstream padding/trimming. Overlapping boundary outputs are
+replaced by the next sequence's starter; all original global frame indices are
+preserved. This is an inference adaptation, not the paper's trained schedule.
+It removes v3's decode-prefix/edit-one-frame/re-encode-last-latent splice, which
+was not equivalent to independently inserting the first image. No standalone
+image latent is placed into a later four-frame temporal group.
 
-At a boundary, generation first runs normally using prior KV memory, rendered
-opacity, camera rays, and the complete prepared reference set. The VAE decodes the
-generated prefix without clearing inference caches. Its last RGB frame is
-replaced by the already prepared GPT repair and the prefix is re-encoded using upstream VAE
-normalization. Only its final temporal latent is replaced. Encoding in video
-context is deliberate: a later latent spans four RGB frames, so substituting a
-standalone first-image latent would not have equivalent temporal semantics.
-The corrected block is written back to KV memory at timestep zero, retaining
-actual rendered opacity and camera conditioning. Subsequent blocks use the
-chosen cache policy. Every planned repair is already in reference cross-attention,
-as described below. The repaired boundary becomes context for the next chunk;
-it is not merely swapped into exported images after generation.
+The exported repair is preserved exactly after calibrated resizing and included
+among direct edited fitting targets. Loop closure remains excluded from fitting.
+Independent sequences can still show seams, and degraded rendered source RGB
+still conditions continuation. Visual improvement requires a GPU comparison;
+CPU tests validate control flow and tensor/cache contracts, not image quality.
 
-The exported repair frame is preserved exactly (after calibrated resizing),
-as with the original starter, and is included among direct edited fitting
-targets. Loop closure remains excluded from fitting. The final latent's four
-RGB frames can change through the causal VAE round trip. Visual consistency
-and reduced drift still require a GPU comparison; CPU tests validate control
-flow and tensor/cache contracts, not image quality.
-
-`extended/refresh/XXXXX/` stores the rendered input, anchor, generated boundary
-before intervention, GPT output, resized fixed output, VAE round trip, and relay
-response. `inference.json` records actual refreshes; bundle/metrics record the
-interval and special clean-cache policy. Refresh failures abort the candidate
-instead of silently continuing with stale output. Parent cancellation/deadlines
-terminate the disposable inference process while it waits for the relay.
+`extended/refresh/XXXXX/` stores the previous sequence's generated boundary
+(`before.png`), GPT output, resized fixed output, actual standalone VAE roundtrip,
+and relay response. Inputs remain in `inputs/` and `anchor.png`.
+`inference.json` records restart indices, sequence count, encoding policy, and
+per-repair VAE roundtrip MAE. Failures abort the candidate. Parent cancellation
+and deadlines terminate the disposable process while it waits for the relay.
 
 
 ### Planned repairs as references from the beginning
 
-The `gpt-prepared-reference-kv-v3` adaptation prepares every scheduled GPT image
+The `gpt-periodic-exact-starter-v4` adaptation prepares every scheduled GPT image
 before loading the ArtiFixer pipeline or generating any target frame. For a
 121-image trajectory, the reference indices are `[0, 20, 40, 60, 80, 100]`
 from the first transformer call. All planned repairs across all segments are
@@ -349,9 +348,7 @@ prepared before the first segment starts. Only real, unpadded RGB frames are
 scheduled. Preparation failure aborts generation.
 
 The closing view reuses the initial repaired image without another GPT call.
-The bridge checks that the first and last camera poses are identical. It reuses
-the starter for a closing temporal refresh when that frame falls on a 20-frame
-boundary, and always copies the starter into the final exported frame, including
+The bridge checks that the first and last camera poses are identical. It copies the starter into the final exported frame, including
 loops that end between refresh boundaries. Closure adds no duplicate reference
 to attention and remains excluded from fitting. `inference.json` records this
 reuse in `loop_closures`; the exported closure image difference is therefore zero,
@@ -363,7 +360,7 @@ to bound VAE encoding batches. Cameras come from upstream's exact per-image
 neighbor poses, not temporally averaged target poses. Existing camera scaling,
 coordinate frames, intrinsics, and crop transforms apply equally to initial and
 prepared references. The reference set stays fixed, so reference cross-attention
-KV is initialized normally and reused throughout generation.
+KV is initialized normally and reused within each sequence.
 
 The former v2 rolling 12-view cap is removed: no prepared anchor is evicted or
 withheld until its trajectory position. This fulfills full reference availability
@@ -372,26 +369,16 @@ Reference attention memory grows with the number of prepared anchors; encoding
 one image at a time does not cap the final attention cache. GPU memory and image
 quality therefore still need validation for the chosen trajectory length.
 
-Temporal behavior at indices 20, 40, etc. remains unchanged: generate the block
-normally, decode its prefix without clearing caches, replace its final RGB with
-the prepared repair, re-encode in video context, replace its last latent, and
-refresh the corrected block's temporal KV at timestep zero. No GPT request is
-made at these boundaries. Original rendered opacity and camera conditioning
-remain intact. Earlier frames benefit from future anchor references without
-preloading future temporal latents.
-
-Each repair retains three roles: reference image from generation start, periodic
-temporal correction, and direct edited reconstruction target. The original
-method independently encodes real reference photographs and preserves them in
-reconstruction while using predictions for other viewpoints. Our GPT repairs
-remain labeled `edited_render`, not real photographs; their use and temporal
-replacement are inference adaptations.
+At indices 20, 40, etc., the prepared repair seeds a fresh sequence as described
+above. No GPT request is made at these boundaries. Original rendered RGB and
+opacity still condition generated continuation frames. Earlier frames retain
+access to future prepared references through neighbor attention.
 
 `prepared-references.json` records the complete bank before inference.
 `inference.json` and the completed `bundle.json` retain `generated_references`
 separately from initial `references` for provenance. Prepared entries record
 `available_from: generation_start`, independent encoding, and exact RGB camera
-provenance; `periodic_refreshes` records the temporal replacements actually made.
+provenance; `periodic_refreshes` records the independent restarts actually made.
 Fitting still occurs once after generation and reloads each fixed RGB directly;
 the existing loop-closure exclusion remains.
 
@@ -405,5 +392,5 @@ Reviewed upstream source at revision
 CPU regressions cover completion of all preparation before model loading, future
 references in the first segment, exact reference camera ordering, unpadded
 planning including nonzero segment offsets and more than 12 references, fixed
-reference conditioning, unchanged temporal replacement/cache behavior, metadata,
+reference conditioning, standalone starter resets, complete frame coverage, metadata,
 and direct fitting targets. GPU quality and memory validation remain outstanding.

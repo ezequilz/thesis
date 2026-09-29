@@ -7,7 +7,6 @@ import pytest
 from PIL import Image
 
 from splat_explorer.scene_runs_ext.config import validate_options
-from splat_explorer.scene_runs_ext.starter_inference import latent_chunks, install_starter_inference
 from splat_explorer.scene_runs_ext.periodic_refresh import PeriodicRefresh, service_refresh, loop_closure_reference
 
 
@@ -18,116 +17,42 @@ def test_periodic_policy_requires_scene_rgb_and_opacity():
         validate_options({'block_schedule': 'periodic_starter', 'source_conditioning': 'none'})
 
 
-def test_split_chunks_preserve_original_boundaries_and_cover_each_latent_once():
-    chunks = list(latent_chunks(21, 7, 5))
-    assert chunks == [(0, 1), (1, 6), (6, 8), (8, 11), (11, 15), (15, 16), (16, 21)]
-    assert [i for start, end in chunks for i in range(start, end)] == list(range(21))
-    assert [4 * (end - 1) for _, end in chunks if end > 1 and (end - 1) % 5 == 0] == [20, 40, 60, 80]
+@pytest.mark.parametrize('start,count', [(0, 21), (0, 25), (0, 121), (9, 45)])
+def test_periodic_sequences_restart_at_each_edit_and_cover_all_frames(start, count, tmp_path):
+    refresh = PeriodicRefresh(tmp_path, list(range(start, start + count)),
+                              closure_reference={'path': 'anchor.png'})
+    starter = {'frame_index': start, 'path': 'anchor.png'}
+    refresh.prepared_references = [{'frame_index': i, 'path': f'{i}.png'}
+        for i in range(start + 20, start + count - 1, 20)]
+    sequences = list(refresh.sequences(starter))
+    assert [s['start'] for s, _ in sequences] == [start, *range(start + 20, start + count - 1, 20)]
+    frames = []
+    for i, (sequence, reference) in enumerate(sequences):
+        assert sequence['start'] == reference['frame_index']
+        indices = list(range(sequence['start'], sequence['start'] + sequence['count']))
+        if i:
+            assert frames[-1] == indices[0]
+            indices = indices[1:]
+        frames.extend(indices)
+    assert frames == list(range(start, start + count))
 
 
-@pytest.mark.parametrize('cache_policy', ['clean', 'last_denoising'])
-def test_repaired_latent_drives_next_block_without_losing_opacity_or_history(cache_policy):
-    torch = pytest.importorskip('torch')
-    calls, refreshes = [], []
-    class Transformer:
-        patch_size = (1, 1, 1)
-        def __call__(self, **kw):
-            start = kw['frame_offset']
-            cache = kw['kv_cache']
-            value = kw['hidden_states']
-            calls.append((start, float(kw['timestep'][0]), value.clone()))
-            assert torch.all(kw['opacity'] == (1 if start == 0 else .6))
-            assert kw['camera_rays'][0, 0, 0] == start
-            if start:
-                assert cache[0] == 2
-            if start == 6:
-                assert cache[5] == 77, 'Following block must see corrected KV memory'
-            count = 2  # All planned references are present even at frame zero
-            assert kw['neighbor_hidden_states'].shape[2] == count
-            assert kw['neighbor_w2cs'].shape[1] == count
-            assert kw['neighbor_Ks'].shape[1] == count
-            ref_cache = kw['neighbor_crossattn_cache']
-            if 'count' in ref_cache:
-                assert ref_cache['count'] == count, 'The precomputed reference bank must remain fixed'
-            ref_cache['count'] = count
-            assert kw['neighbor_hidden_states'][0, 0, -1, 0, 0] == 88
-            assert kw['neighbor_w2cs'][0, -1, 0, 0] == 20
-            assert kw['neighbor_Ks'][0, -1, 0, 0] == 200
-            kw['crossattn_cache'].setdefault('original', True)
-            previous = cache.get(start - 1, 2)
-            for i in range(value.shape[2]):
-                cache[start + i] = float(value[:, :, i].mean())
-            return (torch.full_like(value, previous + (88 if start >= 6 else 0)),)
-    class Pipe:
-        frames_per_block = 7
-        local_attn_size = -1
-        vae = SimpleNamespace(device='cpu', config=SimpleNamespace(scale_factor_temporal=4))
-        transformer = Transformer()
-        scheduler = SimpleNamespace(step=lambda noise, *a, **kw: noise)
-        def generate_samples_from_batch(self): pass
-        def _initialize_kv_cache(self, *args): self.kv_cache1 = {}
-        def _initialize_crossattn_cache(self, name): setattr(self, name, {})
-        def create_denoising_step_list(self, steps): return torch.tensor([1000.])
-        def prepare_latents(self, condition, opacity, first):
-            assert not first and torch.all(opacity == .6)
-            return torch.zeros_like(condition)
-    pipe = Pipe()
-    install_starter_inference(pipe, generated_cache=cache_policy)
-    def refresh(pipe, prefix, frame):
-        assert frame == 20 and prefix.shape[2] == 6
-        assert pipe.kv_cache1[0] == 2
-        assert any(start == 1 and t == 1000 for start, t, _ in calls)
-        refreshes.append(frame)
-        return torch.full_like(prefix[:, :, -1:], 77)
-    pipe.starter_refresh = refresh
-    pipe.starter_rgb_count = 25  # Upstream pads to 49 RGB frames / 13 latents here.
-    condition = torch.zeros(1, 1, 14, 2, 2)
-    condition[:, :, 0] = 2
-    opacity = torch.full((1, 53, 2, 2), .6); opacity[:, 0] = 1
-    poses = torch.arange(14).reshape(1, 14, 1)
-    with torch.inference_mode():
-        output = pipe.generate_samples_from_batch(condition, opacity, torch.full((1, 1, 2, 2, 2), 88.),
-            poses, poses, torch.full((1, 2, 4, 4), 20.), poses, torch.full((1, 2, 3, 3), 200.), torch.ones(1), 1, False)
-    assert refreshes == [20], 'Padded views must never trigger a GPT call'
-    assert torch.all(output[:, :, 5] == 77)
-    assert torch.all(output[:, :, 6:8] == 165), 'Next block must receive both corrected temporal and reference context'
-    assert any(start == 1 and t == 0 and value[0, 0, -1, 0, 0] == 77
-               for start, t, value in calls), 'Even last-denoising mode must refresh corrected cache'
-
-
-def test_refresh_reencodes_generated_context_without_clearing_cache(tmp_path):
-    torch = pytest.importorskip('torch')
+def test_prepared_restart_records_actual_roundtrip_before_exact_export(tmp_path):
     (tmp_path / 'inputs').mkdir()
     Image.new('RGB', (16, 16), (30, 30, 30)).save(tmp_path / 'inputs/00020.png')
-    Image.new('RGB', (16, 16), (200, 200, 200)).save(tmp_path / 'anchor.png')
     folder = tmp_path / 'refresh/00020'; folder.mkdir(parents=True)
     Image.new('RGB', (32, 32), (240, 240, 240)).save(folder / 'regenerated.png')
     (folder / 'response.json').write_text('{"status":"ok"}')
-    caches = object()
-    seen = []
-    def encode(video):
-        assert video.shape == (1, 21, 3, 16, 16)
-        assert torch.allclose(video[:, :-1], torch.full_like(video[:, :-1], .25))
-        assert torch.allclose(video[:, -1], torch.full_like(video[:, -1], 240 / 255))
-        seen.append(video)
-        return torch.full((1, 1, 6, 2, 2), 9.)
-    pipe = SimpleNamespace(vae=SimpleNamespace(device='cpu'), kv_cache1=caches,
-        latents_to_rgb=lambda prefix: torch.full((1, 21, 3, 16, 16), .25),
-        video_processor=SimpleNamespace(postprocess_video=lambda value, **kw: value),
-        encode_video_frames=encode,
-        decode_latents_to_video=lambda value: pytest.fail('Must not clear cache'))
     refresh = PeriodicRefresh(tmp_path, list(range(25)))
-    refresh.prepare()
-    # Replacement must use the prepared file without another API handshake.
+    reference, = refresh.prepare()
     (folder / 'response.json').unlink()
-    result = refresh(pipe, torch.zeros(1, 1, 6, 2, 2), 20)
-    assert result.shape == (1, 1, 1, 2, 2) and torch.all(result == 9)
-    assert pipe.kv_cache1 is caches and len(seen) == 1
-    assert Image.open(tmp_path / 'inputs/00020.png').getpixel((0, 0)) == (30, 30, 30)
-    assert not (folder / 'rendered.png').exists()
-    assert not (folder / 'anchor.png').exists()
-    assert refresh.records[0]['frame_index'] == 20
+    roundtrip = tmp_path / 'roundtrip.png'
+    Image.new('RGB', (16, 16), (230, 230, 230)).save(roundtrip)
+    refresh.record_restart(reference, roundtrip, 10 / 255)
+    assert Image.open(folder / 'vae-roundtrip.png').getpixel((0, 0)) == (230,)*3
     assert Image.open(folder / 'fixed.png').size == (16, 16)
+    assert refresh.records[0]['temporal_encoding'] == 'standalone_first_frame'
+    assert refresh.records[0]['vae_roundtrip_mae_0_1'] == 10 / 255
 
 
 @pytest.mark.parametrize('failure', [False, True])
@@ -323,27 +248,3 @@ def test_closed_loop_skips_final_gpt_call_and_exports_exact_starter(tmp_path, mo
     manifest['transforms']['frames'][-1] = {'transform_matrix': [[1, 1], [0, 1]]}
     with pytest.raises(ValueError, match='identical'):
         loop_closure_reference(manifest, {'start': 0, 'count': count}, {'path': 'anchor.png'})
-
-
-def test_closing_temporal_refresh_uses_starter_without_gpt(tmp_path):
-    torch = pytest.importorskip('torch')
-    Image.new('RGB', (16, 16), (204, 204, 204)).save(tmp_path / 'anchor.png')
-    closure = {'frame_index': 20, 'path': 'anchor.png', 'kind': 'edited_render', 'reused_from_frame': 0}
-    refresh = PeriodicRefresh(tmp_path, list(range(21)), closure_reference=closure)
-    assert refresh.prepare() == []
-    def encode(video):
-        assert torch.allclose(video[:, :-1], torch.full_like(video[:, :-1], .25))
-        assert torch.allclose(video[:, -1], torch.full_like(video[:, -1], .8))
-        return torch.ones(1, 1, 6, 2, 2)
-    pipe = SimpleNamespace(vae=SimpleNamespace(device='cpu'),
-        latents_to_rgb=lambda prefix: torch.full((1, 21, 3, 16, 16), .25),
-        video_processor=SimpleNamespace(postprocess_video=lambda value, **kw: value),
-        encode_video_frames=encode)
-    refresh(pipe, torch.zeros(1, 1, 6, 2, 2), 20)
-    assert refresh.records[0]['reused_from_frame'] == 0
-    assert not (tmp_path / 'refresh-request.json').exists()
-    output = tmp_path / 'output'
-    output.mkdir()
-    Image.new('RGB', (16, 16)).save(output / '00020.png')
-    refresh.export_repairs(output)
-    assert (output / '00020.png').read_bytes() == (tmp_path / 'anchor.png').read_bytes()

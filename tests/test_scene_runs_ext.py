@@ -155,7 +155,7 @@ def test_repair_fits_every_propagated_view_and_commits_only_clone(tmp_path):
     np.testing.assert_allclose(candidate.colors,.8)
     assert metrics["generated_frames"]==9
     assert metrics["anchor_role"] == "clean_temporal_starter_and_direct_reconstruction_target"
-    assert metrics["conditioning_mode"] == "gpt-prepared-reference-kv-v3"
+    assert metrics["conditioning_mode"] == "gpt-periodic-exact-starter-v4"
     assert metrics["scene_rgb_conditioning"] is True
     assert metrics["fitting_resolution"] == [64,64]
     assert metrics["exploration_resolution"] == [32,32]

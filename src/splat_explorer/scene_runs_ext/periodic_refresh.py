@@ -68,42 +68,33 @@ class PeriodicRefresh:
                 'kind': 'edited_render', 'reference_encoding': 'independent_image',
                 'reference_camera': 'exact_rgb_pose', 'available_from': 'generation_start'}
 
-    def __call__(self, pipe, prefix, frame):
-        import numpy as np
-        import torch
-        from PIL import Image
-        index = self.indices[frame]
-        references = self.prepared_references + ([self.closure_reference] if self.closure_reference else [])
-        matches = [r for r in references if r['frame_index'] == index]
-        if len(matches) != 1:
-            raise ValueError('Periodic replacement requires a prepared anchor')
-        reference = matches[0]
+    def sequences(self, starter):
+        """Overlap at edited boundaries so each repair is a true first frame.
+
+        Recompute camera conditioning and reset both transformer and VAE context
+        for each sequence. Never splice a standalone latent into a video group.
+        """
+        references = [starter, *self.prepared_references]
+        positions = [self.indices.index(r['frame_index']) for r in references]
+        if positions[0] != 0 or positions != sorted(set(positions)):
+            raise ValueError('Periodic starters must be unique and ordered within the trajectory')
+        for i, (position, reference) in enumerate(zip(positions, references)):
+            end = positions[i + 1] + 1 if i + 1 < len(positions) else len(self.indices)
+            yield {'start': self.indices[position], 'count': end - position}, reference
+
+    def record_restart(self, reference, roundtrip, mae):
+        """Keep the actual standalone VAE result before exact RGB export."""
+        index = reference['frame_index']
         folder = self.root / 'refresh' / f'{index:05d}'
         folder.mkdir(parents=True, exist_ok=True)
-        with Image.open(self.root / reference['path']) as fixed:
-            seed = torch.from_numpy(np.array(fixed.convert('RGB'))).permute(2, 0, 1).float() / 255
-        # decode_latents_to_video clears ALL inference caches upstream. Use the
-        # underlying VAE decoder to preserve temporal and reference KV memory.
-        video = pipe.video_processor.postprocess_video(pipe.latents_to_rgb(prefix), output_type='pt')
-        if video.shape[1] != frame + 1 or video.shape[2:] != seed.shape:
-            raise ValueError('Periodic repair decoded an unexpected video shape')
-        before = video[0, -1].detach().float().cpu()
-        Image.fromarray(before.clamp(0, 1).mul(255).round().byte().permute(1, 2, 0).numpy()).save(folder / 'before.png')
-        video[:, -1] = seed.to(device=video.device, dtype=video.dtype)
-        encoded = pipe.encode_video_frames(video.to(pipe.vae.device))
-        if encoded.shape != prefix.shape:
-            raise ValueError('Periodic repair VAE changed latent dimensions')
+        shutil.copy2(roundtrip, folder / 'vae-roundtrip.png')
         self.records.append({**reference, 'rgb_interval': 20,
-                             'cache': 'clean corrected block; original opacity and cameras'})
-        return encoded[:, :, -1:].to(device=prefix.device, dtype=prefix.dtype)
-
+                             'temporal_encoding': 'standalone_first_frame',
+                             'cache': 'reset; clean starter at timestep zero',
+                             'vae_roundtrip_mae_0_1': mae})
 
     def export_repairs(self, output):
-        """Preserve exact edits, including closure outside a refresh boundary."""
-        for record in self.records:
-            destination = output / f"{record['frame_index']:05d}.png"
-            shutil.copy2(destination, self.root / 'refresh' / f"{record['frame_index']:05d}" / 'vae-roundtrip.png')
-            shutil.copy2(self.root / record['path'], destination)
+        """Starters are exported by the bridge; preserve the exact loop closure."""
         if self.closure_reference:
             shutil.copy2(self.root / self.closure_reference['path'],
                          output / f"{self.indices[-1]:05d}.png")

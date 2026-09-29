@@ -15,18 +15,12 @@ def starter_reference(manifest, segment):
     return matches[0]
 
 
-def latent_chunks(total, block, refresh_every=0):
+def latent_chunks(total, block):
     if total < 1 or block < 1:
         raise ValueError('Latent frame count and block size must be positive')
     yield 0, 1
     for start in range(1, total, block):
-        end = min(start + block, total)
-        while start < end:
-            boundary = (1 + ((start - 1) // refresh_every + 1) * refresh_every
-                        if refresh_every else end)
-            stop = min(end, boundary)
-            yield start, stop
-            start = stop
+        yield start, min(start + block, total)
 
 
 def starter_inputs(seed, count):
@@ -77,11 +71,7 @@ def generate_from_starter(self, condition, rendered_opacity, neighbors_condition
     neighbor_w2cs = neighbor_w2cs.to(device)
     neighbor_Ks = neighbor_Ks.to(device)
     timesteps = self.create_denoising_step_list(num_inference_steps)
-    refresh = getattr(self, 'starter_refresh', None)
-    interval = 20 // temporal if refresh else 0
-    if refresh and 20 % temporal:
-        raise ValueError('Periodic refresh requires a VAE temporal scale dividing 20')
-    for start, end in latent_chunks(total, self.frames_per_block, interval):
+    for start, end in latent_chunks(total, self.frames_per_block):
         rgb_start = 0 if start == 0 else 1 + (start - 1) * temporal
         rgb_end = 1 + (end - 1) * temporal
         opacity = rendered_opacity[:, rgb_start:rgb_end].to(device)
@@ -111,17 +101,7 @@ def generate_from_starter(self, condition, rendered_opacity, neighbors_condition
                         self.prepare_latents(chunk_condition, opacity, False),
                         timesteps[index + 1] * torch.ones(batch, device=device, dtype=torch.long))
         output[:, :, start:end] = latents
-        refreshed = (refresh is not None and end > 1 and (end - 1) % interval == 0
-                     and rgb_end - 1 < self.starter_rgb_count)
-        if refreshed:
-            # Generate normally first. Re-encode the repaired RGB in its causal
-            # video context; a standalone-image latent has different semantics.
-            replacement = refresh(self, output[:, :, :end], rgb_end - 1)
-            if replacement.shape != output[:, :, end-1:end].shape:
-                raise ValueError('Periodic repair returned an incompatible latent')
-            output[:, :, end-1:end] = replacement
-            latents = output[:, :, start:end]
-        if start == 0 or refreshed or getattr(self, 'starter_generated_cache', 'clean') == 'clean':
+        if start == 0 or getattr(self, 'starter_generated_cache', 'clean') == 'clean':
             self.transformer(hidden_states=latents,
                              timestep=torch.zeros(batch, device=device, dtype=latents.dtype), **kwargs)
     return output
@@ -145,7 +125,7 @@ def generation_policy(options):
     exact = schedule != 'upstream'
     return {
         'block_schedule': schedule,
-        'conditioning_mode': ('gpt-prepared-reference-kv-v3' if schedule == 'periodic_starter'
+        'conditioning_mode': ('gpt-periodic-exact-starter-v4' if schedule == 'periodic_starter'
                               else 'gpt-starter-kv-v1' if exact else 'gpt-reference-upstream-v1'),
         'generated_cache': options.get('generated_cache', 'clean') if exact else 'last_denoising',
         'anchor_role': ('clean_temporal_starter_and_direct_reconstruction_target' if exact
@@ -153,7 +133,7 @@ def generation_policy(options):
         'exact_starter_preserved': exact,
         **({'refresh_rgb_interval': 20,
             'refresh_reference_policy': 'all initial and planned repaired references available from generation start',
-            'refresh_cache': 'clean corrected block; other blocks use generated_cache',
-            'refresh_schedule': 'split original blocks at VAE-aligned RGB indices 20,40,60,...'}
+            'refresh_cache': 'reset per sequence; clean standalone starter; generated blocks use generated_cache',
+            'refresh_schedule': 'overlapping exact-starter sequences at RGB indices 20,40,60,...'}
            if schedule == 'periodic_starter' else {}),
     }

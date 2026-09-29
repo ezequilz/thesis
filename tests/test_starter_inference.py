@@ -116,19 +116,20 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
     from PIL import Image
     torch = pytest.importorskip('torch')
     from splat_explorer.scene_runs_ext import artifixer_bridge
+    count = 45 if schedule == 'periodic_starter' else 9
     for i, value in enumerate([40, 220]):
         Image.new('RGB', (32, 32), (value, value, value)).save(tmp_path / f'edit-{i}.png')
     manifest = {'options': {'seed': 42, 'inference_steps': 4, 'camera_scale': 1., 'source_conditioning': source_mode, 'block_schedule': schedule, 'generated_cache': 'clean'},
-                'transforms': {'frames': [{}] * 18},
-                'references': [{'path': f'edit-{i}.png', 'frame_index': 9*i,
+                'transforms': {'frames': [{}] * (2*count)},
+                'references': [{'path': f'edit-{i}.png', 'frame_index': count*i,
                                 'kind': 'edited_render'} for i in range(2)],
-                'segments': [{'start': 0, 'count': 9}, {'start': 9, 'count': 9}]}
+                'segments': [{'start': 0, 'count': count}, {'start': count, 'count': count}]}
     (tmp_path / 'bundle.json').write_text(json.dumps(manifest))
     if source_mode == 'rendered':
         (tmp_path / 'inputs').mkdir()
-        for i in range(18):
+        for i in range(2*count):
             Image.new('RGB', (32,32), (100,100,100)).save(tmp_path / 'inputs' / f'{i:05d}.png')
-        np.save(tmp_path / 'opacity.npy', np.full((18,32,32), .7, dtype=np.float32))
+        np.save(tmp_path / 'opacity.npy', np.full((2*count,32,32), .7, dtype=np.float32))
     # There is intentionally no inputs directory and no opacity.npy.
     parsed = []
     class Parser:
@@ -144,19 +145,20 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
     prepared = []
     from splat_explorer.scene_runs_ext.periodic_refresh import PeriodicRefresh
     def prepare(refresh):
-        # Tiny bridge fixture uses frame 8 of each segment. Actual 20-frame
-        # planning is covered separately without loading the GPU pipeline.
-        i = refresh.indices[-1]
-        folder = tmp_path / 'refresh' / f'{i:05d}'
-        folder.mkdir(parents=True)
-        Image.new('RGB', (32,32), (230,230,230)).save(folder / 'fixed.png')
-        refresh.prepared_references = [{'frame_index': i, 'path': f'refresh/{i:05d}/fixed.png', 'kind': 'edited_render'}]
-        prepared.append(i)
+        refresh.prepared_references = []
+        for offset in range(20, len(refresh.indices) - 1, 20):
+            i = refresh.indices[offset]
+            folder = tmp_path / 'refresh' / f'{i:05d}'
+            folder.mkdir(parents=True)
+            Image.new('RGB', (32,32), (230,230,230)).save(folder / 'fixed.png')
+            refresh.prepared_references.append({'frame_index': i, 'path': f'refresh/{i:05d}/fixed.png', 'kind': 'edited_render'})
+            prepared.append(i)
         return refresh.prepared_references
     monkeypatch.setattr(PeriodicRefresh, 'prepare', prepare)
     def get_pipe(*args):
-        assert prepared == ([8, 17] if schedule == 'periodic_starter' else [])
+        assert prepared == ([20, 40, 65, 85] if schedule == 'periodic_starter' else [])
         return pipe
+    monkeypatch.setattr(artifixer_bridge, 'load_eval_pipe', get_pipe)
     def process(pipe, item, opts, output, rank, device, scale):
         assert pipe.cleared
         pipe.cleared = False
@@ -168,30 +170,31 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
         assert torch.allclose(item['rgb_neighbors'][0], torch.full((3,32,32), 40/255))
         assert torch.allclose(item['rgb_neighbors'][1], torch.full((3,32,32), 220/255))
         index = len(seen)
-        assert torch.allclose(item['rgb_rendered'][0], torch.full((3,32,32), [40,220][index]/255))
+        starts = [0, 20, 40, 45, 65, 85] if schedule == 'periodic_starter' else [0, 9]
+        values = [40, 230, 230, 220, 230, 230] if schedule == 'periodic_starter' else [40, 220]
+        assert torch.allclose(item['rgb_rendered'][0], torch.full((3,32,32), values[index]/255))
+        remaining = len(item['frame_indices']) - 1
         if source_mode == 'none':
             assert item['rgb_rendered'][1:].count_nonzero() == 0
             assert item['opacity'][1:].count_nonzero() == 0
         else:
-            assert torch.allclose(item['rgb_rendered'][1:], torch.full((8,3,32,32), 100/255))
-            assert torch.allclose(item['opacity'][1:], torch.full((8,32,32), .7))
+            assert torch.allclose(item['rgb_rendered'][1:], torch.full((remaining,3,32,32), 100/255))
+            assert torch.allclose(item['opacity'][1:], torch.full((remaining,32,32), .7))
         assert torch.all(item['opacity'][0] == 1)
-        assert item['frame_indices'][0] == index*9
+        assert item['frame_indices'][0] == starts[index]
+        assert item['camera_rays'].flatten().tolist() == item['frame_indices'].tolist(), 'Recompute target cameras for every restart'
         seen.append(item)
         dest = output / 'bundle/frames/batch_0000/pred'
         dest.mkdir(parents=True, exist_ok=True)
         for i in item['frame_indices'].tolist():
             Image.new('RGB', (32,32)).save(dest / f'{i:05d}.png')
         if schedule == 'periodic_starter':
-            from splat_explorer.scene_runs_ext.periodic_refresh import PeriodicRefresh
-            assert isinstance(pipe.starter_refresh, PeriodicRefresh)
-            assert pipe.starter_rgb_count == 9
-            assert prepared == [8, 17]
-            assert item['neighbor_w2cs'].flatten().tolist() == [0, 9, 8, 17]
-            assert item['neighbor_Ks'].flatten().tolist() == [100, 109, 108, 117]
-            assert item['rgb_neighbors'].shape[0] == 4
-            assert torch.allclose(item['rgb_neighbors'][2:], torch.full((2,3,32,32), 230/255))
-            pipe.starter_refresh.records.extend(pipe.starter_refresh.prepared_references)
+            assert not hasattr(pipe, 'starter_refresh'), 'No mid-video latent splice is allowed'
+            assert prepared == [20, 40, 65, 85]
+            assert item['neighbor_w2cs'].flatten().tolist() == [0, 45, 20, 40, 65, 85]
+            assert item['neighbor_Ks'].flatten().tolist() == [100, 145, 120, 140, 165, 185]
+            assert item['rgb_neighbors'].shape[0] == 6
+            assert torch.allclose(item['rgb_neighbors'][2:], torch.full((4,3,32,32), 230/255))
     inference = ModuleType('model_eval.run_inference')
     inference.build_parser = Parser
     inference.get_eval_pipe = get_pipe
@@ -200,6 +203,7 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
     checkpoints.load_transformer_checkpoint = lambda *a: None
     utils = ModuleType('model_training.data.utils')
     utils.compute_camera_rays = lambda cameras, indices, neighbors, **kw: {
+        'camera_rays': torch.tensor(indices),
         'neighbor_w2cs': torch.tensor(neighbors).reshape(-1, 1, 1),
         'neighbor_Ks': (torch.tensor(neighbors) + 100).reshape(-1, 1, 1)}
     utils.load_encoded_prompt = lambda *a: [torch.zeros(1)]
@@ -214,25 +218,30 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
             artifixer_bridge.main()
         return
     artifixer_bridge.main()
-    assert len(seen) == 2
+    assert len(seen) == (6 if schedule == 'periodic_starter' else 2)
     assert parsed[parsed.index('--local_attn_size') + 1] == '21'
     assert '--replace_if_exists' in parsed
     metadata = json.loads((tmp_path/'inference.json').read_text())
-    assert metadata['starter_frames'] == [0,9]
+    assert metadata['starter_frames'] == ([0,20,40,45,65,85] if schedule == 'periodic_starter' else [0,9])
     assert metadata['scene_rgb_conditioning'] is (source_mode == 'rendered')
-    assert len(metadata['starter_diagnostics']) == 2
+    assert len(metadata['starter_diagnostics']) == len(seen)
     assert metadata['block_schedule'] == schedule
     assert metadata['exact_starter_preserved'] is (schedule != 'upstream')
     assert metadata['generated_cache'] == ('clean' if schedule != 'upstream' else 'last_denoising')
     diagnostic = 'starter-vae-roundtrip' if schedule != 'upstream' else 'upstream-first-frame'
     assert (tmp_path / f'{diagnostic}-00000.png').exists()
-    for i, expected in [(0,40),(9,220)]:
+    for i, expected in [(0,40),(count,220)]:
         assert Image.open(tmp_path/f'artifixer-output/bundle/frames/batch_0000/pred/{i:05d}.png').getpixel((0,0)) == ((expected,)*3 if schedule != "upstream" else (0,0,0))
     if schedule == 'periodic_starter':
-        assert metadata['initial_reference_views'] == 2 and metadata['reference_views'] == 4
-        assert [r['frame_index'] for r in metadata['generated_references']] == [8, 17]
+        assert metadata['initial_reference_views'] == 2 and metadata['reference_views'] == 6
+        assert [r['frame_index'] for r in metadata['generated_references']] == [20, 40, 65, 85]
         assert all(r['kind'] == 'edited_render' for r in metadata['generated_references'])
-        assert [r['frame_index'] for r in metadata['periodic_refreshes']] == [8, 17]
-        for i in [8, 17]:
+        assert [r['frame_index'] for r in metadata['periodic_refreshes']] == [20, 40, 65, 85]
+        for i in [20, 40, 65, 85]:
             assert Image.open(tmp_path/f'artifixer-output/bundle/frames/batch_0000/pred/{i:05d}.png').getpixel((0,0)) == (230,230,230)
-            assert (tmp_path/f'refresh/{i:05d}/vae-roundtrip.png').is_file()
+            assert Image.open(tmp_path/f'refresh/{i:05d}/vae-roundtrip.png').getpixel((0,0)) == (0,0,0)
+            assert (tmp_path/f'refresh/{i:05d}/before.png').is_file()
+        assert len(list((tmp_path/'artifixer-output/bundle/frames/batch_0000/pred').glob('*.png'))) == 2*count
+        assert all(r['temporal_encoding'] == 'standalone_first_frame' for r in metadata['periodic_refreshes'])
+        for i, value in [(count - 1, 40), (2*count - 1, 220)]:
+            assert Image.open(tmp_path/f'artifixer-output/bundle/frames/batch_0000/pred/{i:05d}.png').getpixel((0,0)) == (value,)*3
