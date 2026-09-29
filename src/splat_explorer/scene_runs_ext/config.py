@@ -5,7 +5,7 @@ import math
 DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 1000,
             "fitting_safeguards": True,
             "source_conditioning": "rendered", "generated_cache": "last_denoising",
-            "anchor_prefit": "none", "block_schedule": "exact_starter",
+            "anchor_prefit": "none", "block_schedule": "periodic_starter",
             "inference_steps": 4, "seed": 42, "camera_scale": 1.0,
             "max_repair_pixels": 960 * 720, "local_view_count": 5, "local_max_turns": 30,
             "repair_limit": 0, "local_candidate_count": 10}
@@ -48,7 +48,10 @@ def validate_options(value=None):
         raise ValueError('Periodic starter requires rendered source conditioning and opacity')
     if result['anchor_prefit'] != 'none' and result['source_conditioning'] != 'rendered':
         raise ValueError('anchor_prefit requires rendered source conditioning')
-    for key, lower, upper in [("frames", 9, 81), ("fit_iterations", 1, 2000),
+    # Long fitting runs are valid; the optimizer has no fixed iteration ceiling.
+    if type(result["fit_iterations"]) is not int or result["fit_iterations"] < 1:
+        raise ValueError("fit_iterations must be a positive integer")
+    for key, lower, upper in [("frames", 9, 81),
                               ("inference_steps", 1, 50), ("seed", 0, 2**31-1),
                               ("max_repair_pixels", 0, 16777216), ("local_view_count", 5, 9),
                               ("local_candidate_count", 5, 10), ("local_max_turns", 5, 100), ("repair_limit", 0, 100)]:

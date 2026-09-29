@@ -66,7 +66,7 @@ def test_extended_config_policy_and_baseline_are_separate(tmp_path):
     assert new["config"]["repair_height"] == 720
     assert new['config']['extended']['source_conditioning'] == 'rendered'
     assert new['config']['extended']['generated_cache'] == 'last_denoising'
-    assert new['config']['extended']['block_schedule'] == 'exact_starter'
+    assert new['config']['extended']['block_schedule'] == 'periodic_starter'
     upstream = extended.create({'extended': {'block_schedule': 'upstream', 'generated_cache': 'clean'}})
     saved_upstream = store.get_run(upstream['run_id']).config.extended
     assert saved_upstream['block_schedule'] == 'upstream'
@@ -74,17 +74,18 @@ def test_extended_config_policy_and_baseline_are_separate(tmp_path):
     with pytest.raises(ValueError, match='block_schedule'):
         validate_options({'block_schedule': 'invalid'})
     assert new['config']['extended']['max_repair_pixels'] == 960 * 720
-    custom = extended.create({'extended': {'source_conditioning': 'none', 'generated_cache': 'clean',
+    custom = extended.create({'extended': {'source_conditioning': 'none', 'generated_cache': 'clean', 'block_schedule': 'exact_starter',
                                           'max_repair_pixels': 0, 'inference_steps': 8, 'seed': 123}})
     reloaded = store.get_run(custom['run_id']).config.extended
     assert reloaded['source_conditioning'] == 'none' and reloaded['generated_cache'] == 'clean'
     assert reloaded['max_repair_pixels'] == 0 and reloaded['inference_steps'] == 8 and reloaded['seed'] == 123
     legacy_path = store.run_path(custom['run_id']) / 'config.json'
     legacy = json.loads(legacy_path.read_text())
-    for key in ['source_conditioning', 'generated_cache', 'max_repair_pixels']:
+    for key in ['source_conditioning', 'generated_cache', 'max_repair_pixels', 'block_schedule']:
         legacy['extended'].pop(key)
     legacy_path.write_text(json.dumps(legacy))
     historic = store.get_run(custom['run_id']).config.extended
+    assert historic['block_schedule'] == 'exact_starter'
     assert historic['source_conditioning'] == 'none'
     assert historic['generated_cache'] == 'clean' and historic['max_repair_pixels'] == 0
     with pytest.raises(SceneRunValidationError): extended.validate_config({"width":641})
@@ -128,6 +129,7 @@ def propagate(root,runtime,stop):
     cameras=json.loads((root/"bundle.json").read_text())["transforms"]
     count=len(cameras["frames"])
     for i in range(count): Image.new("RGB",(cameras["w"],cameras["h"]),(100,110,120)).save(out/f"{i:05d}.png")
+    (root/"inference.json").write_text(json.dumps({"periodic_refreshes": []}))
     return out
 
 
@@ -153,7 +155,7 @@ def test_repair_fits_every_propagated_view_and_commits_only_clone(tmp_path):
     np.testing.assert_allclose(candidate.colors,.8)
     assert metrics["generated_frames"]==9
     assert metrics["anchor_role"] == "clean_temporal_starter_and_direct_reconstruction_target"
-    assert metrics["conditioning_mode"] == "gpt-starter-kv-v1"
+    assert metrics["conditioning_mode"] == "gpt-periodic-starter-kv-v1"
     assert metrics["scene_rgb_conditioning"] is True
     assert metrics["fitting_resolution"] == [64,64]
     assert metrics["exploration_resolution"] == [32,32]
@@ -511,6 +513,17 @@ def test_bootstrap_failure_reports_missing_pip(tmp_path, monkeypatch):
     monkeypatch.setattr(setup.urllib.request, "urlopen", urlopen)
     with pytest.raises(RuntimeError, match="no pip module"):
         setup.ensure_venv(tmp_path / "artifixer-venv", {"TMPDIR": str(tmp_path)}, lambda *a, **k: None)
+
+
+@pytest.mark.parametrize("iterations", [15000, 30000, 100000])
+def test_long_fit_iteration_budgets(iterations):
+    assert validate_options({"fit_iterations": iterations})["fit_iterations"] == iterations
+
+
+@pytest.mark.parametrize("iterations", [0, -1, True, 1.5, "30000", None])
+def test_fit_iteration_budget_requires_positive_integer(iterations):
+    with pytest.raises(ValueError, match="fit_iterations must be a positive integer"):
+        validate_options({"fit_iterations": iterations})
 
 
 def test_legacy_intervention_cannot_change_repair_prompt_or_routing():

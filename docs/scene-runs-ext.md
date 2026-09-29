@@ -263,7 +263,7 @@ starting at frame zero (25 RGB frames in the first block). The official evaluati
 wrapper pads incomplete blocks and trims their outputs. This mode always retains
 the last denoising cache; clean refresh is disabled in the popup.
 
-**Exact starter (experimental, current)** (`block_schedule: "exact_starter"`)
+**Exact starter (experimental)** (`block_schedule: "exact_starter"`)
 remains the default and the interpretation of older runs. It preserves the first
 latent, caches it at timestep zero, then generates blocks starting at latent 1.
 
@@ -285,9 +285,10 @@ establish which produces better images.
 
 ## Periodic GPT-image repair
 
-Select **Exact starter + GPT repair every 20 frames** immediately below Exact
-starter, or set `extended.block_schedule: "periodic_starter"`. This opt-in
-experiment preserves the initial exact starter and requires rendered RGB and
+New runs default to **Exact starter + GPT repair every 20 frames**, immediately
+below Exact starter. To select it explicitly, set
+`extended.block_schedule: "periodic_starter"`. This experimental schedule
+preserves the initial exact starter and requires rendered RGB and
 opacity plus a GPT-image backend. GSFix3D anchor prefit remains compatible.
 The existing Exact starter and Upstream schedules retain their behavior.
 
