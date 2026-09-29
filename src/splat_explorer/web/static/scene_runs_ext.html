@@ -251,7 +251,9 @@
         <label title="Fit the repaired anchor into a private scene copy before rendering ArtiFixer inputs. Requires Scene RGB + opacity.">Anchor prefit<select id="ext-prefit" disabled><option value="none">Off (current comparison)</option><option value="gsfix3d">GSFix3D first (20 steps)</option></select></label>
         <p id="ext-prefit-status" class="settings-note wide">Repaired-image reference: always supplied throughout generation. Restart the dashboard after the active run to enable the new prefit option.</p>
         <label>Trajectory span / depth<input id="ext-span" type="number" min="0.005" max="0.15" step="0.005" value="0.04"></label>
-        <label>Fit iterations per selected view<input id="ext-iters" type="number" min="1" max="2000" value="1000"></label>
+        <label><span id="ext-iters-label">Total fit iterations per repair</span><input id="ext-iters" type="number" min="1" max="2000" value="1000"></label>
+        <label>Fitting safeguards<select id="ext-safeguards" disabled><option value="true">On (default)</option><option value="false">Off (previous behavior)</option></select></label>
+        <p id="ext-safeguards-status" class="settings-note wide">On limits Gaussian stretching and uses one total fitting budget per repair. Off restores the global scale limit and multiplies iterations by selected views.</p>
         <label title="Scales camera translations for ArtiFixer. Use 1 unless scene scale has been calibrated.">Camera translation scale<input id="ext-scale" type="number" min="0.0001" max="10000" step="any" value="1" required></label>
 <h3>Sampling and exploration</h3>
 <label>Denoising steps<input id="ext-steps" type="number" min="1" max="50" step="1" value="4" required></label>
@@ -363,6 +365,7 @@ const settingsFields = () => [...$("ext-settings-form").querySelectorAll("input,
 const settingsValues = () => Object.fromEntries(settingsFields().map(e => [e.id,e.value]));
 function restoreSettings(values) { for (const e of settingsFields()) if (values[e.id] !== undefined) { e.value=values[e.id]; e.setCustomValidity(""); } syncScheduleSettings(); }
 function syncScheduleSettings() {
+  $("ext-iters-label").textContent = !$("ext-safeguards").disabled && $("ext-safeguards").value === "true" ? "Total fit iterations per repair" : "Fit iterations per selected view";
   const upstream = $("ext-schedule").value === "upstream";
   $("ext-cache").disabled = upstream;
   if (upstream) $("ext-cache").value = "last_denoising";
@@ -403,6 +406,7 @@ function setDefaults(defaults, scenes) {
   }
   for (const [id,key] of [["ext-frames","frames"],["ext-span","span_fraction"],
     ["ext-iters","fit_iterations"],["ext-scale","camera_scale"],["ext-pixels","max_repair_pixels"],
+    ["ext-safeguards","fitting_safeguards"],
     ["ext-source","source_conditioning"],["ext-schedule","block_schedule"],["ext-cache","generated_cache"],["ext-prefit","anchor_prefit"],
     ["ext-steps","inference_steps"],["ext-seed","seed"],["ext-views","local_view_count"],
     ["ext-turns","local_max_turns"],["ext-candidates","local_candidate_count"],["ext-limit","repair_limit"]]) {
@@ -410,6 +414,8 @@ function setDefaults(defaults, scenes) {
   }
   $("ext-prefit").disabled = defaults.extended?.anchor_prefit === undefined;
   if (!$("ext-prefit").disabled) $("ext-prefit-status").textContent = "Repaired-image reference: always supplied throughout generation. Prefit is experimental; inspect adjacent views before trusting it.";
+  $("ext-safeguards").disabled = defaults.extended?.fitting_safeguards === undefined;
+  if ($("ext-safeguards").disabled) $("ext-safeguards-status").textContent = "Restart the dashboard after the active run to enable fitting safeguards. New runs default to On once supported.";
   settingsDefaults = settingsValues();
   updateSettingsSummary();
   syncRepairTime();
@@ -600,7 +606,7 @@ $("run-form").onsubmit = async event => {
     repair_width:Number($("repair-width").value), repair_height:Number($("repair-height").value),
     send_map:true, image_edit_backend:$("image-edit").value,
     repair_backend:$("repair-backend").value, repair_type:$("repair-type").value,
-    extended:{...(!$("ext-prefit").disabled ? {anchor_prefit:$("ext-prefit").value} : {}), inference_steps:Number($("ext-steps").value), seed:Number($("ext-seed").value), local_view_count:Number($("ext-views").value), local_max_turns:Number($("ext-turns").value), local_candidate_count:Number($("ext-candidates").value), repair_limit:Number($("ext-limit").value), source_conditioning:$("ext-source").value, block_schedule:$("ext-schedule").value, generated_cache:$("ext-cache").value, frames:Number($("ext-frames").value), span_fraction:Number($("ext-span").value), fit_iterations:Number($("ext-iters").value), camera_scale:Number($("ext-scale").value), max_repair_pixels:Number($("ext-pixels").value)},
+    extended:{...(!$("ext-safeguards").disabled ? {fitting_safeguards:$("ext-safeguards").value === "true"} : {}), ...(!$("ext-prefit").disabled ? {anchor_prefit:$("ext-prefit").value} : {}), inference_steps:Number($("ext-steps").value), seed:Number($("ext-seed").value), local_view_count:Number($("ext-views").value), local_max_turns:Number($("ext-turns").value), local_candidate_count:Number($("ext-candidates").value), repair_limit:Number($("ext-limit").value), source_conditioning:$("ext-source").value, block_schedule:$("ext-schedule").value, generated_cache:$("ext-cache").value, frames:Number($("ext-frames").value), span_fraction:Number($("ext-span").value), fit_iterations:Number($("ext-iters").value), camera_scale:Number($("ext-scale").value), max_repair_pixels:Number($("ext-pixels").value)},
     repair_trigger:$("repair-trigger").value,
     repair_seconds:Number($("repair-seconds").value),
   };

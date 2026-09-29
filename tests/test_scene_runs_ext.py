@@ -255,7 +255,8 @@ def test_prefit_uses_existing_original_gsfix3d_recipe_and_honors_stop(monkeypatc
         validate_options({'anchor_prefit':'gsfix3d', 'source_conditioning':'none'})
 
 
-def test_selected_views_are_fitted_jointly_with_calibrated_references(tmp_path):
+@pytest.mark.parametrize('safeguards', [True, False])
+def test_selected_views_are_fitted_jointly_with_calibrated_references(tmp_path, safeguards):
     Image.new("RGB",(64,64)).save(tmp_path/"anchor.png")
     Image.new("RGB",(96,96)).save(tmp_path/"earlier.png")
     c = camera()
@@ -265,10 +266,11 @@ def test_selected_views_are_fitted_jointly_with_calibrated_references(tmp_path):
         assert len(views) == 16
         assert all(v.width == 64 and v.height == 64 for v in views)
         np.testing.assert_allclose(views[8].position, other.position)
-        assert kwargs["iterations"] == 2000
+        assert kwargs["iterations"] == (1000 if safeguards else 2000)
+        assert kwargs["fitting_safeguards"] is safeguards
         return {}
     _, metrics = repair(scene(),c,tmp_path/"anchor.png",tmp_path,
-        options={"frames":9},runtime={},proposal={"repair_scope":"scene"},
+        options={"frames":9, "fitting_safeguards": safeguards},runtime={},proposal={"repair_scope":"scene"},
         selected_views=[{"step":0,"camera":other,"reference_path":tmp_path/"earlier.png"}],
         should_stop=lambda:False,on_progress=lambda _:None,
         renderer_factory=Renderer,propagator=propagate,fitter=fitter)
@@ -541,6 +543,28 @@ def test_joint_optimizer_updates_geometry_and_opacity(monkeypatch):
     assert metrics["after"]["target_l1"] < metrics["before"]["target_l1"]
     assert metrics["view_updates"] == [3]
     assert s.num_gaussians == before.num_gaussians
+
+
+@pytest.mark.parametrize('safeguards', [True, False])
+def test_fitter_switch_controls_scale_projection(monkeypatch, safeguards):
+    import sys
+    torch = pytest.importorskip('torch')
+    from splat_explorer.scene_runs_ext.fitting import fit_views
+    def rasterization(**kw):
+        return kw['colors'].mean().expand(1, kw['height'], kw['width'], 3), None, None
+    monkeypatch.setitem(sys.modules, 'gsplat', SimpleNamespace(rasterization=rasterization))
+    # Inject an extreme proposed update to exercise the actual fit-loop guards.
+    def extreme_step(optimizer):
+        with torch.no_grad():
+            optimizer.param_groups[2]['params'][0].copy_(torch.tensor([1e-12, 100., 1.]).log())
+    monkeypatch.setattr(torch.optim.Adam, 'step', extreme_step)
+    s = scene()
+    metrics = fit_views(s, [camera()], [np.full((32,32,3), 200, np.uint8)],
+                        iterations=1, should_stop=lambda: False, on_progress=lambda _: None,
+                        device='cpu', fitting_safeguards=safeguards)
+    np.testing.assert_allclose(s.scales[0], [.5, 2., 1.] if safeguards else [1e-8, 2., 1.], rtol=1e-5)
+    assert metrics['fitting_safeguards'] is safeguards
+    assert (metrics['scale_constraint'] == 'global-ceiling-only') is (not safeguards)
 
 
 def test_single_starter_sends_one_image_in_one_gpt_call(tmp_path):

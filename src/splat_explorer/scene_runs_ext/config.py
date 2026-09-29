@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 1000,
+            "fitting_safeguards": True,
             "source_conditioning": "rendered", "generated_cache": "last_denoising",
             "anchor_prefit": "none", "block_schedule": "exact_starter",
             "inference_steps": 4, "seed": 42, "camera_scale": 1.0,
@@ -32,6 +33,8 @@ def validate_options(value=None):
     if unknown:
         raise ValueError(f"Unknown extended options: {', '.join(sorted(unknown))}")
     result = {**DEFAULTS, **(value or {})}
+    if type(result["fitting_safeguards"]) is not bool:
+        raise ValueError("fitting_safeguards must be a boolean")
     for key, choices in (("source_conditioning", ("none", "rendered")),
                          ("generated_cache", ("clean", "last_denoising")),
                          ("block_schedule", ("exact_starter", "upstream")),

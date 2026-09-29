@@ -47,8 +47,34 @@ def shape_metrics(scales):
             "axis_ratio_above_100": int(np.count_nonzero(ratio > 100))}
 
 
+def scale_trust_bounds(scales, ceiling):
+    """Per-fit bounds preserve thin source surfaces without permitting needles.
+
+    Each axis may halve/double. Axis ratios may reach 20 or the incoming
+    ratio, whichever is larger. These bounds are fixed for this fit, not
+    recomputed after updates. They do not repair already damaged inputs.
+    """
+    values = np.asarray(scales, dtype=np.float32)
+    if (values.ndim != 2 or values.shape[1] != 3 or not values.size
+            or not np.isfinite(values).all() or np.any(values <= 0)
+            or not np.isfinite(ceiling) or ceiling <= 0):
+        raise ValueError("Scale trust bounds require positive finite scales and ceiling")
+    base = np.minimum(values, ceiling)
+    lower = np.log(base * .5)
+    upper = np.log(np.minimum(base * 2., ceiling))
+    ratio = np.maximum(base.max(axis=1) / base.min(axis=1), 20.)
+    return lower, upper, np.log(ratio)[:, None]
+
+
+def constrain_log_scales_(scales, lower, upper, log_ratio):
+    """Project using tensor methods; caller owns the no-grad context."""
+    scales.copy_(scales.maximum(lower).minimum(upper))
+    # Shorten the long axes instead of inflating thin surfaces into blobs.
+    scales.copy_(scales.minimum(scales.amin(dim=1, keepdim=True) + log_ratio))
+
+
 def fit_views(scene, cameras, targets, *, iterations, should_stop, on_progress, device="cuda",
-              scale_ceiling=None, edited_indices=()):
+              scale_ceiling=None, edited_indices=(), fitting_safeguards=True):
     import torch
     import gsplat
     from ..repair_gsfix import photometric_loss
@@ -76,6 +102,8 @@ def fit_views(scene, cameras, targets, *, iterations, should_stop, on_progress, 
     max_scale = initial_scale_ceiling(scene) if scale_ceiling is None else float(scale_ceiling)
     if not np.isfinite(max_scale) or max_scale <= 0:
         raise ValueError("Scale ceiling must be finite and positive")
+    scale_bounds = (tuple(tensor(x) for x in scale_trust_bounds(scene.scales, max_scale))
+                    if fitting_safeguards else None)
     edited_indices = list(edited_indices)
     schedule = view_schedule(len(cameras), iterations, edited_indices)
     edited_set = set(edited_indices)
@@ -122,7 +150,10 @@ def fit_views(scene, cameras, targets, *, iterations, should_stop, on_progress, 
         optimizer.step()
         with torch.no_grad():
             colors.clamp_(0, 1)
-            scales.clamp_(np.log(1e-8), np.log(max_scale))
+            if fitting_safeguards:
+                constrain_log_scales_(scales, *scale_bounds)
+            else:
+                scales.clamp_(np.log(1e-8), np.log(max_scale))
             opacity.clamp_(-12, 12)
         if step % 20 == 0:
             on_progress({"phase": "multiview_fit", "iteration": step+1,
@@ -144,6 +175,9 @@ def fit_views(scene, cameras, targets, *, iterations, should_stop, on_progress, 
             "quality_gate": "disabled", "densification": False,
             "fit_recipe": "fixed-topology-gsplat-l1-ssim",
             "scale_ceiling": max_scale,
+            "fitting_safeguards": fitting_safeguards,
+            "scale_constraint": ("per-fit-axis-factor-2-ratio-max-incoming-or-20"
+                                 if fitting_safeguards else "global-ceiling-only"),
             "shape_before": shape_before, "shape_after": shape_metrics(scene.scales),
             "sampling": "balanced-edited-generated" if edited_set and len(edited_set) < len(cameras) else "uniform",
             "edited_updates": int(visits[list(edited_set)].sum()) if edited_set else 0,

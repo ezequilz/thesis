@@ -264,9 +264,12 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     # The generated closing frame is a consistency diagnostic, not a second
     # conflicting training target at the exact edited camera.
     metrics = fitter(candidate, cameras[:-1], targets[:-1],
-                     iterations=options["fit_iterations"] * len(seeds),
+                     # Safeguards keep a total budget; off reproduces the
+                     # previous per-selected-view budget for comparisons.
+                     iterations=options["fit_iterations"] * (1 if options["fitting_safeguards"] else len(seeds)),
                      should_stop=should_stop, on_progress=on_progress,
-                     scale_ceiling=scale_ceiling, edited_indices=edited_indices)
+                     scale_ceiling=scale_ceiling, edited_indices=edited_indices,
+                     fitting_safeguards=options["fitting_safeguards"])
     check()
     on_progress({"phase": "native_validation"})
     renderer = renderer_factory(candidate)

@@ -3,6 +3,16 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from splat_explorer.scene_runs_ext.fitting import initial_scale_ceiling, view_schedule, shape_metrics
+from splat_explorer.scene_runs_ext.fitting import scale_trust_bounds, constrain_log_scales_
+
+
+def test_safeguards_default_on_and_explicit_off_survives_validation():
+    from splat_explorer.scene_runs_ext.config import validate_options
+    assert validate_options()['fitting_safeguards'] is True
+    assert validate_options({'fitting_safeguards': False})['fitting_safeguards'] is False
+    for invalid in ('false', 0, 1, None):
+        with pytest.raises(ValueError, match='boolean'):
+            validate_options({'fitting_safeguards': invalid})
 
 
 @pytest.mark.parametrize('count', [9, 25, 121, 361])
@@ -51,3 +61,30 @@ def test_shape_diagnostics_detect_thinning_even_below_the_global_ceiling():
     assert stretched.max() < initial_scale_ceiling(SimpleNamespace(scales=original))
     assert shape_metrics(original)['axis_ratio_above_100'] == 0
     assert shape_metrics(stretched)['axis_ratio_above_100'] == 1
+
+
+def test_scale_projection_blocks_needles_and_preserves_source_surfaces():
+    torch = pytest.importorskip('torch')
+    source = np.array([[.01, .06, .01], [.001, .08, .02], [1., 1., 27.]])
+    bounds = tuple(torch.tensor(x) for x in scale_trust_bounds(source, 54.))
+    original = torch.tensor(source).log()
+    unchanged = original.clone()
+    constrain_log_scales_(unchanged, *bounds)
+    np.testing.assert_allclose(unchanged.exp(), source, rtol=1e-6)
+    damaged = torch.tensor([[.004, 4.3, .00001], [.000001, 2., .01], [1., 1., 100.]]).log()
+    constrain_log_scales_(damaged, *bounds)
+    result = damaged.exp().numpy()
+    assert np.all(result >= source * .5 * (1-1e-6))
+    assert np.all(result <= source * 2 * (1+1e-6))
+    ratios = result.max(1) / result.min(1)
+    assert np.all(ratios <= np.maximum(source.max(1)/source.min(1), 20) * (1+1e-6))
+    # A second projection must not progressively change shapes.
+    once = damaged.clone()
+    constrain_log_scales_(damaged, *bounds)
+    torch.testing.assert_close(damaged, once)
+
+
+@pytest.mark.parametrize('scales', [[], [[0., 1., 1.]], [[np.nan, 1., 1.]]])
+def test_scale_bounds_reject_invalid_source(scales):
+    with pytest.raises(ValueError):
+        scale_trust_bounds(scales, 54.)
