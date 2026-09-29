@@ -292,10 +292,12 @@ preserves the initial exact starter and requires rendered RGB and
 opacity plus a GPT-image backend. GSFix3D anchor prefit remains compatible.
 The existing Exact starter and Upstream schedules retain their behavior.
 
-Refreshes occur at **zero-based RGB indices 20, 40, 60, 80, ...** that exist in the
+Temporal replacements occur at **zero-based RGB indices 20, 40, 60, 80, ...** that exist in the
 trajectory (displayed images 21, 41, 61, 81, ...). A 25-image trajectory therefore
 makes one additional GPT call. The frame setting is per trajectory leg: five
-selected cameras at 25 frames per leg produce 121 images and six refreshes. Each uses the original repair prompt, the
+selected cameras at 25 frames per leg produce 121 images and six repairs. All
+planned GPT repairs finish before ArtiFixer generation begins. Each uses the
+original repair prompt, the
 render at that camera, and the unchanged `anchor.png` as a visual reference.
 With prefit enabled, the input is the prefitted candidate's render, matching
 ArtiFixer's source RGB and opacity. Generated RGB is never sent as the repair
@@ -310,16 +312,16 @@ camera positions. This is an inference adaptation, not the paper's trained
 block schedule.
 
 At a boundary, generation first runs normally using prior KV memory, rendered
-opacity, camera rays, and the currently available edited references. The VAE decodes the
+opacity, camera rays, and the complete prepared reference set. The VAE decodes the
 generated prefix without clearing inference caches. Its last RGB frame is
-replaced by the GPT repair and the prefix is re-encoded using upstream VAE
+replaced by the already prepared GPT repair and the prefix is re-encoded using upstream VAE
 normalization. Only its final temporal latent is replaced. Encoding in video
 context is deliberate: a later latent spans four RGB frames, so substituting a
 standalone first-image latent would not have equivalent temporal semantics.
 The corrected block is written back to KV memory at timestep zero, retaining
 actual rendered opacity and camera conditioning. Subsequent blocks use the
-chosen cache policy. Each repair also enters reference cross-attention as described
-below. The repaired boundary becomes context for the next chunk;
+chosen cache policy. Every planned repair is already in reference cross-attention,
+as described below. The repaired boundary becomes context for the next chunk;
 it is not merely swapped into exported images after generation.
 
 The exported repair frame is preserved exactly (after calibrated resizing),
@@ -337,59 +339,62 @@ instead of silently continuing with stale output. Parent cancellation/deadlines
 terminate the disposable inference process while it waits for the relay.
 
 
-### Periodic repairs as calibrated reference views
+### Planned repairs as references from the beginning
 
-The `gpt-periodic-reference-kv-v2` adaptation gives each completed GPT repair
-three roles: corrected temporal context, an independently encoded reference
-image, and a direct edited target for reconstruction. The earlier v1 adaptation
-used periodic repairs only for temporal context and fitting; it kept the initial
-reference set fixed.
+The `gpt-prepared-reference-kv-v3` adaptation prepares every scheduled GPT image
+before loading the ArtiFixer pipeline or generating any target frame. For a
+121-image trajectory, the reference indices are `[0, 20, 40, 60, 80, 100, 120]`
+from the first transformer call. All planned repairs across all segments are
+prepared before the first segment starts. Only real, unpadded RGB frames are
+scheduled. Preparation failure aborts generation.
 
-These roles are distinct in the original method. Section 4.1 encodes reference
-views independently (no temporal compression) and conditions cross-attention on
-their camera intrinsics/extrinsics through PRoPE. The released reconstruction
-builder preserves real selected images and uses predictions for other views.
-Our references remain explicitly labeled `edited_render`: GPT repairs are
-synthetic observations, not captured ground truth. Adding them online is our
-inference adaptation, not a claim about the paper's evaluation protocol.
+The bridge supplies the full fixed image bank through upstream `rgb_neighbors`
+and its independent `encode_neighbors` path, with `max_neighbors_per_encode=1`
+to bound VAE encoding batches. Cameras come from upstream's exact per-image
+neighbor poses, not temporally averaged target poses. Existing camera scaling,
+coordinate frames, intrinsics, and crop transforms apply equally to initial and
+prepared references. The reference set stays fixed, so reference cross-attention
+KV is initialized normally and reused throughout generation.
 
-After repairing RGB index 20, the reference set becomes `[0, 20]`; after index
-40 it becomes `[0, 20, 40]`, and so on. No future repair enters earlier generation.
-The repaired RGB is encoded with upstream `encode_neighbors`, independently of
-the video-context encoding used for its temporal latent. Its reference camera
-comes from the exact rendered RGB pose, not the averaged pose of the four-frame
-latent group. The bridge obtains these cameras via the same upstream helper,
-coordinate frame, camera scale, and optional crop transform as the initial
-references.
+The former v2 rolling 12-view cap is removed: no prepared anchor is evicted or
+withheld until its trajectory position. This fulfills full reference availability
+but can exceed the paper's 0-12 reference training range on long trajectories.
+Reference attention memory grows with the number of prepared anchors; encoding
+one image at a time does not cap the final attention cache. GPU memory and image
+quality therefore still need validation for the chosen trajectory length.
 
-Changing reference images invalidates only `neighbor_crossattn_cache`. The next
-clean corrected-block forward pass rebuilds reference keys/values and upstream
-PRoPE transforms; temporal KV history and the text cross-attention cache remain.
-Subsequent denoising calls receive the expanded image/pose/intrinsic arrays.
+Temporal behavior at indices 20, 40, etc. remains unchanged: generate the block
+normally, decode its prefix without clearing caches, replace its final RGB with
+the prepared repair, re-encode in video context, replace its last latent, and
+refresh the corrected block's temporal KV at timestep zero. No GPT request is
+made at these boundaries. Original rendered opacity and camera conditioning
+remain intact. Earlier frames benefit from future anchor references without
+preloading future temporal latents.
 
-Active reference attention is bounded to 12 views, matching the paper's 0-12
-reference training range. Initial references stay active; the oldest periodic
-reference is evicted when necessary. Every completed repair remains saved and
-used as a fitting target (apart from the existing loop-closure exclusion).
-The cap is a memory/training-range choice, not a proven optimal selection rule.
+Each repair retains three roles: reference image from generation start, periodic
+temporal correction, and direct edited reconstruction target. The original
+method independently encodes real reference photographs and preserves them in
+reconstruction while using predictions for other viewpoints. Our GPT repairs
+remain labeled `edited_render`, not real photographs; their use and temporal
+replacement are inference adaptations.
 
-`inference.json` and the completed `bundle.json` expose `generated_references`
-separately from input `references`, so replay does not accidentally preload
-future repairs. Each refresh records `active_reference_indices`, independent
-image encoding, and exact RGB camera provenance. `reference_views` counts the
-full saved bank, not just its active subset. Fitting reloads each saved fixed
-RGB directly, just as it does the initial anchor, rather than trusting a
-VAE-decoded prediction at that camera.
+`prepared-references.json` records the complete bank before inference.
+`inference.json` and the completed `bundle.json` retain `generated_references`
+separately from initial `references` for provenance. Prepared entries record
+`available_from: generation_start`, independent encoding, and exact RGB camera
+provenance; `periodic_refreshes` records the temporal replacements actually made.
+Fitting still occurs once after generation and reloads each fixed RGB directly;
+the existing loop-closure exclusion remains.
 
-Reviewed upstream source (pinned revision
-`a392c4dfe17459ef9952407accdb9fcdcdddba98`):
+Reviewed upstream source at revision
+`a392c4dfe17459ef9952407accdb9fcdcdddba98`:
 - `model_training/pipeline/pipeline_base.py`: independent neighbor encoding.
 - `model_training/data/utils.py`: exact neighbor versus averaged target cameras.
 - `model_training/net/transformer.py` and `prope.py`: reference KV and pose transforms.
 - `data_processing/artifixer3d.py`: real-anchor/prediction reconstruction assembly.
 
-CPU regressions cover independent reference encoding, exact camera indexing
-including nonzero segment offsets, causal availability, reference-cache
-invalidation, retention of temporal history, bounded reference eviction,
-metadata, and direct fitting targets. GPU quality and memory validation remain
-necessary before concluding that this reduces drift.
+CPU regressions cover completion of all preparation before model loading, future
+references in the first segment, exact reference camera ordering, unpadded
+planning including nonzero segment offsets and more than 12 references, fixed
+reference conditioning, unchanged temporal replacement/cache behavior, metadata,
+and direct fitting targets. GPU quality and memory validation remain outstanding.

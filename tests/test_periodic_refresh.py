@@ -42,19 +42,17 @@ def test_repaired_latent_drives_next_block_without_losing_opacity_or_history(cac
                 assert cache[0] == 2
             if start == 6:
                 assert cache[5] == 77, 'Following block must see corrected KV memory'
-            corrected = start >= 6 or (start == 1 and kw['timestep'][0] == 0)
-            count = 2 if corrected else 1
+            count = 2  # All planned references are present even at frame zero
             assert kw['neighbor_hidden_states'].shape[2] == count
             assert kw['neighbor_w2cs'].shape[1] == count
             assert kw['neighbor_Ks'].shape[1] == count
             ref_cache = kw['neighbor_crossattn_cache']
             if 'count' in ref_cache:
-                assert ref_cache['count'] == count, 'Reference KV must be invalidated after append'
+                assert ref_cache['count'] == count, 'The precomputed reference bank must remain fixed'
             ref_cache['count'] = count
-            if corrected:
-                assert kw['neighbor_hidden_states'][0, 0, -1, 0, 0] == 88
-                assert kw['neighbor_w2cs'][0, -1, 0, 0] == 20
-                assert kw['neighbor_Ks'][0, -1, 0, 0] == 200
+            assert kw['neighbor_hidden_states'][0, 0, -1, 0, 0] == 88
+            assert kw['neighbor_w2cs'][0, -1, 0, 0] == 20
+            assert kw['neighbor_Ks'][0, -1, 0, 0] == 200
             kw['crossattn_cache'].setdefault('original', True)
             previous = cache.get(start - 1, 2)
             for i in range(value.shape[2]):
@@ -82,22 +80,14 @@ def test_repaired_latent_drives_next_block_without_losing_opacity_or_history(cac
         refreshes.append(frame)
         return torch.full_like(prefix[:, :, -1:], 77)
     pipe.starter_refresh = refresh
-    def update_references(pipe, frame, neighbors, w2cs, Ks):
-        assert frame == 20
-        assert pipe.crossattn_cache['original'], 'Text KV memory must remain intact'
-        assert pipe.neighbor_crossattn_cache['count'] == 1
-        return (torch.cat([neighbors, torch.full_like(neighbors, 88)], dim=2),
-                torch.cat([w2cs, torch.full_like(w2cs, 20)], dim=1),
-                torch.cat([Ks, torch.full_like(Ks, 200)], dim=1))
-    refresh.update_reference_conditioning = update_references
     pipe.starter_rgb_count = 25  # Upstream pads to 49 RGB frames / 13 latents here.
     condition = torch.zeros(1, 1, 14, 2, 2)
     condition[:, :, 0] = 2
     opacity = torch.full((1, 53, 2, 2), .6); opacity[:, 0] = 1
     poses = torch.arange(14).reshape(1, 14, 1)
     with torch.inference_mode():
-        output = pipe.generate_samples_from_batch(condition, opacity, torch.ones(1, 1, 1, 2, 2),
-            poses, poses, torch.ones(1, 1, 4, 4), poses, torch.ones(1, 1, 3, 3), torch.ones(1), 1, False)
+        output = pipe.generate_samples_from_batch(condition, opacity, torch.full((1, 1, 2, 2, 2), 88.),
+            poses, poses, torch.full((1, 2, 4, 4), 20.), poses, torch.full((1, 2, 3, 3), 200.), torch.ones(1), 1, False)
     assert refreshes == [20], 'Padded views must never trigger a GPT call'
     assert torch.all(output[:, :, 5] == 77)
     assert torch.all(output[:, :, 6:8] == 165), 'Next block must receive both corrected temporal and reference context'
@@ -127,6 +117,9 @@ def test_refresh_reencodes_generated_context_without_clearing_cache(tmp_path):
         encode_video_frames=encode,
         decode_latents_to_video=lambda value: pytest.fail('Must not clear cache'))
     refresh = PeriodicRefresh(tmp_path, list(range(25)))
+    refresh.prepare()
+    # Replacement must use the prepared file without another API handshake.
+    (folder / 'response.json').unlink()
     result = refresh(pipe, torch.zeros(1, 1, 6, 2, 2), 20)
     assert result.shape == (1, 1, 1, 2, 2) and torch.all(result == 9)
     assert pipe.kv_cache1 is caches and len(seen) == 1
@@ -233,39 +226,25 @@ def test_wait_response_services_periodic_requests(tmp_path, monkeypatch):
     assert calls == ['repair-00001']
 
 
-def test_repairs_are_independent_calibrated_references_with_bounded_active_bank(tmp_path):
-    torch = pytest.importorskip('torch')
-    # Nonzero segment start catches confusion between local RGB offsets and
-    # global frame IDs. Poses are marker tensors, not temporal averages.
-    refresh = PeriodicRefresh(tmp_path, list(range(100, 381)))
-    refresh.reference_w2cs = torch.arange(281).float()[:, None, None].expand(-1, 4, 4)
-    refresh.reference_Ks = (1000 + torch.arange(281)).float()[:, None, None].expand(-1, 3, 3)
-    encoded_pixels = []
-    def encode_neighbors(rgb, max_neighbors_per_encode):
-        assert rgb.shape == (1, 1, 3, 16, 16)
-        assert max_neighbors_per_encode == 1
-        value = round(float(rgb[0, 0, 0, 0, 0]) * 255)
-        encoded_pixels.append(value)
-        return torch.full((1, 1, 1, 2, 2), value, dtype=torch.float32)
-    pipe = SimpleNamespace(vae=SimpleNamespace(device='cpu'), encode_neighbors=encode_neighbors)
-    neighbors = torch.full((1, 1, 1, 2, 2), 17.)
-    poses = torch.zeros(1, 1, 4, 4)
-    Ks = torch.full((1, 1, 3, 3), 1000.)
-    for n, frame in enumerate(range(20, 281, 20), 1):
-        path = f'repair-{frame}.png'
-        Image.new('RGB', (16, 16), (n, n, n)).save(tmp_path / path)
-        refresh.records.append({'frame_index': frame + 100, 'path': path})
-        neighbors, poses, Ks = refresh.update_reference_conditioning(pipe, frame, neighbors, poses, Ks)
-        assert neighbors[0, 0, 0, 0, 0] == 17, 'Original anchor must remain active'
-        assert neighbors[0, 0, -1, 0, 0] == n, 'Use the repaired image, not the video latent'
-        assert poses[0, -1, 0, 0] == frame
-        assert Ks[0, -1, 0, 0] == frame + 1000
-        assert neighbors.shape[2] == poses.shape[1] == Ks.shape[1] == min(n + 1, 12)
-        assert refresh.records[-1]['active_reference_indices'] == refresh.active_reference_indices
-        assert refresh.records[-1]['reference_camera'] == 'exact_rgb_pose'
-    assert encoded_pixels == list(range(1, 15))
-    assert len(refresh.records) == 14, 'All repairs stay in the saved bank and fitting targets'
-    assert refresh.active_reference_indices == [100, *range(180, 381, 20)]
-    assert neighbors[0, 0, :, 0, 0].tolist() == [17, *range(4, 15)]
-    assert poses[0, :, 0, 0].tolist() == [0, *range(80, 281, 20)]
-    assert Ks[0, :, 0, 0].tolist() == [1000, *range(1080, 1281, 20)]
+@pytest.mark.parametrize('count', [9, 20, 21, 25, 41, 281])
+def test_all_planned_references_are_prepared_without_eviction(tmp_path, monkeypatch, count):
+    refresh = PeriodicRefresh(tmp_path, list(range(100, 100 + count)))
+    calls = []
+    def prepare(frame):
+        calls.append(frame)
+        return {'frame_index': refresh.indices[frame], 'path': f'{frame}.png', 'kind': 'edited_render'}
+    monkeypatch.setattr(refresh, 'prepare_frame', prepare)
+    prepared = refresh.prepare()
+    assert calls == list(range(20, count, 20))
+    assert [r['frame_index'] for r in prepared] == list(range(120, 100 + count, 20))
+    assert refresh.records == [], 'Preparation must not perform temporal replacements'
+
+
+def test_failed_preparation_aborts_before_any_replacements(tmp_path, monkeypatch):
+    refresh = PeriodicRefresh(tmp_path, list(range(45)))
+    def fail(frame):
+        raise RuntimeError('GPT repair failed')
+    monkeypatch.setattr(refresh, 'prepare_frame', fail)
+    with pytest.raises(RuntimeError, match='GPT repair failed'):
+        refresh.prepare()
+    assert not refresh.records and not refresh.prepared_references

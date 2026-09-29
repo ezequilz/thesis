@@ -25,59 +25,19 @@ def write_json(path, value):
 
 
 class PeriodicRefresh:
-    MAX_ACTIVE_REFERENCES = 12
-
-    def __init__(self, root, indices, *, initial_reference_indices=None):
+    def __init__(self, root, indices):
         self.root = Path(root)
         self.indices = indices
         self.records = []
-        self.initial_reference_indices = list(initial_reference_indices or [indices[0]])
-        self.active_reference_indices = list(self.initial_reference_indices)
-        if len(self.initial_reference_indices) >= self.MAX_ACTIVE_REFERENCES:
-            raise ValueError('Periodic repair needs room for a new reference within the 12-view budget')
+        self.prepared_references = []
 
-    def update_reference_conditioning(self, pipe, frame, neighbors, w2cs, Ks):
-        """Encode the repaired RGB independently, as upstream reference views are.
+    def prepare(self):
+        """Finish every real (unpadded) planned repair before inference starts."""
+        self.prepared_references = [self.prepare_frame(frame)
+                                    for frame in range(20, len(self.indices), 20)]
+        return self.prepared_references
 
-        Temporal latents summarize four RGB frames and cannot stand in for a
-        single calibrated reference. Cameras supplied by the bridge are exact
-        per-RGB neighbor poses in the same coordinate frame as initial refs.
-        """
-        import numpy as np
-        import torch
-        from PIL import Image
-        index = self.indices[frame]
-        record = self.records[-1]
-        if record['frame_index'] != index or index in self.active_reference_indices:
-            raise ValueError('Periodic reference must match the newly completed repair')
-        if (neighbors.shape[2] != len(self.active_reference_indices)
-                or w2cs.shape[1] != neighbors.shape[2] or Ks.shape[1] != neighbors.shape[2]):
-            raise ValueError('Reference images and calibrated cameras must have matching counts')
-        with Image.open(self.root / record['path']) as image:
-            rgb = torch.from_numpy(np.array(image.convert('RGB'))).permute(2, 0, 1).float() / 255
-        encoded = pipe.encode_neighbors(rgb[None, None].to(pipe.vae.device), max_neighbors_per_encode=1)
-        if encoded.shape != (neighbors.shape[0], neighbors.shape[1], 1, *neighbors.shape[3:]):
-            raise ValueError('Repaired reference has incompatible latent dimensions')
-        pose = self.reference_w2cs[frame:frame+1].unsqueeze(0).to(w2cs)
-        intrinsics = self.reference_Ks[frame:frame+1].unsqueeze(0).to(Ks)
-        neighbors = torch.cat([neighbors, encoded.to(neighbors)], dim=2)
-        w2cs, Ks = torch.cat([w2cs, pose], dim=1), torch.cat([Ks, intrinsics], dim=1)
-        self.active_reference_indices.append(index)
-        # Bound cross-attention memory and stay within the paper's 0-12-view
-        # training range. Keep original anchors plus the most recent repairs.
-        if len(self.active_reference_indices) > self.MAX_ACTIVE_REFERENCES:
-            remove = len(self.initial_reference_indices)
-            keep = [i for i in range(len(self.active_reference_indices)) if i != remove]
-            neighbors, w2cs, Ks = neighbors[:, :, keep], w2cs[:, keep], Ks[:, keep]
-            self.active_reference_indices.pop(remove)
-        record.update(kind='edited_render', reference_encoding='independent_image',
-                      reference_camera='exact_rgb_pose',
-                      active_reference_indices=list(self.active_reference_indices))
-        return neighbors, w2cs, Ks
-
-    def __call__(self, pipe, prefix, frame):
-        import numpy as np
-        import torch
+    def prepare_frame(self, frame):
         from PIL import Image
         index = self.indices[frame]
         folder = self.root / 'refresh' / f'{index:05d}'
@@ -102,7 +62,22 @@ class PeriodicRefresh:
                 raise ValueError('Periodic repair changed camera aspect ratio')
             fixed = edited.convert('RGB').resize(source.size, Image.Resampling.LANCZOS)
             fixed.save(folder / 'fixed.png')
-            seed = torch.from_numpy(np.array(fixed)).permute(2, 0, 1).float() / 255
+        return {'frame_index': index, 'path': f'refresh/{index:05d}/fixed.png',
+                'kind': 'edited_render', 'reference_encoding': 'independent_image',
+                'reference_camera': 'exact_rgb_pose', 'available_from': 'generation_start'}
+
+    def __call__(self, pipe, prefix, frame):
+        import numpy as np
+        import torch
+        from PIL import Image
+        index = self.indices[frame]
+        matches = [r for r in self.prepared_references if r['frame_index'] == index]
+        if len(matches) != 1:
+            raise ValueError('Periodic replacement requires a prepared anchor')
+        reference = matches[0]
+        folder = self.root / 'refresh' / f'{index:05d}'
+        with Image.open(self.root / reference['path']) as fixed:
+            seed = torch.from_numpy(np.array(fixed.convert('RGB'))).permute(2, 0, 1).float() / 255
         # decode_latents_to_video clears ALL inference caches upstream. Use the
         # underlying VAE decoder to preserve temporal and reference KV memory.
         video = pipe.video_processor.postprocess_video(pipe.latents_to_rgb(prefix), output_type='pt')
@@ -114,8 +89,7 @@ class PeriodicRefresh:
         encoded = pipe.encode_video_frames(video.to(pipe.vae.device))
         if encoded.shape != prefix.shape:
             raise ValueError('Periodic repair VAE changed latent dimensions')
-        self.records.append({'frame_index': index, 'rgb_interval': 20,
-                             'path': f'refresh/{index:05d}/fixed.png',
+        self.records.append({**reference, 'rgb_interval': 20,
                              'cache': 'clean corrected block; original opacity and cameras'})
         return encoded[:, :, -1:].to(device=prefix.device, dtype=prefix.dtype)
 

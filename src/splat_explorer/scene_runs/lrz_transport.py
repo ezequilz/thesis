@@ -435,6 +435,7 @@ class LrzSceneRunTransport:
             "--include", "extended/",
             "--include", "extended/bundle.json",
             "--include", "extended/inference.json",
+            "--include", "extended/prepared-references.json",
             "--include", "extended/artifixer.log",
             "--include", "extended/anchor.png",
             "--include", "extended/targets/***",

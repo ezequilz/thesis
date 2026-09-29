@@ -121,14 +121,6 @@ def generate_from_starter(self, condition, rendered_opacity, neighbors_condition
                 raise ValueError('Periodic repair returned an incompatible latent')
             output[:, :, end-1:end] = replacement
             latents = output[:, :, start:end]
-            neighbors_condition, neighbor_w2cs, neighbor_Ks = refresh.update_reference_conditioning(
-                self, rgb_end - 1, neighbors_condition, neighbor_w2cs, neighbor_Ks)
-            # Cached reference K/V otherwise ignore the newly appended image.
-            # Retain temporal KV history and the independent text cross-cache.
-            self._initialize_crossattn_cache('neighbor_crossattn_cache')
-            kwargs.update(neighbor_hidden_states=neighbors_condition,
-                          neighbor_w2cs=neighbor_w2cs, neighbor_Ks=neighbor_Ks,
-                          neighbor_crossattn_cache=self.neighbor_crossattn_cache)
         if start == 0 or refreshed or getattr(self, 'starter_generated_cache', 'clean') == 'clean':
             self.transformer(hidden_states=latents,
                              timestep=torch.zeros(batch, device=device, dtype=latents.dtype), **kwargs)
@@ -153,14 +145,14 @@ def generation_policy(options):
     exact = schedule != 'upstream'
     return {
         'block_schedule': schedule,
-        'conditioning_mode': ('gpt-periodic-reference-kv-v2' if schedule == 'periodic_starter'
+        'conditioning_mode': ('gpt-prepared-reference-kv-v3' if schedule == 'periodic_starter'
                               else 'gpt-starter-kv-v1' if exact else 'gpt-reference-upstream-v1'),
         'generated_cache': options.get('generated_cache', 'clean') if exact else 'last_denoising',
         'anchor_role': ('clean_temporal_starter_and_direct_reconstruction_target' if exact
                         else 'reference_and_direct_reconstruction_target'),
         'exact_starter_preserved': exact,
         **({'refresh_rgb_interval': 20,
-            'refresh_reference_policy': 'initial references plus latest repairs; maximum 12 active views',
+            'refresh_reference_policy': 'all initial and planned repaired references available from generation start',
             'refresh_cache': 'clean corrected block; other blocks use generated_cache',
             'refresh_schedule': 'split original blocks at VAE-aligned RGB indices 20,40,60,...'}
            if schedule == 'periodic_starter' else {}),

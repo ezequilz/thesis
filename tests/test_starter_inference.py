@@ -141,6 +141,22 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
         def clear_inference_caches(self): self.cleared = True
     pipe = Pipe()
     seen = []
+    prepared = []
+    from splat_explorer.scene_runs_ext.periodic_refresh import PeriodicRefresh
+    def prepare(refresh):
+        # Tiny bridge fixture uses frame 8 of each segment. Actual 20-frame
+        # planning is covered separately without loading the GPU pipeline.
+        i = refresh.indices[-1]
+        folder = tmp_path / 'refresh' / f'{i:05d}'
+        folder.mkdir(parents=True)
+        Image.new('RGB', (32,32), (230,230,230)).save(folder / 'fixed.png')
+        refresh.prepared_references = [{'frame_index': i, 'path': f'refresh/{i:05d}/fixed.png', 'kind': 'edited_render'}]
+        prepared.append(i)
+        return refresh.prepared_references
+    monkeypatch.setattr(PeriodicRefresh, 'prepare', prepare)
+    def get_pipe(*args):
+        assert prepared == ([8, 17] if schedule == 'periodic_starter' else [])
+        return pipe
     def process(pipe, item, opts, output, rank, device, scale):
         assert pipe.cleared
         pipe.cleared = False
@@ -170,19 +186,15 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
             from splat_explorer.scene_runs_ext.periodic_refresh import PeriodicRefresh
             assert isinstance(pipe.starter_refresh, PeriodicRefresh)
             assert pipe.starter_rgb_count == 9
-            assert item['neighbor_w2cs'].flatten().tolist() == [0, 9]
-            assert pipe.starter_refresh.reference_w2cs.flatten().tolist() == list(range(index*9, index*9+9))
-            assert pipe.starter_refresh.reference_Ks.flatten().tolist() == list(range(index*9+100, index*9+109))
-            # Mock a completed callback to exercise bridge export/diagnostics;
-            # actual 20-frame scheduling and VAE behavior have CPU tensor tests.
-            i = item['frame_indices'][-1].item()
-            folder = tmp_path / 'refresh' / f'{i:05d}'
-            folder.mkdir(parents=True)
-            Image.new('RGB', (32,32), (230,230,230)).save(folder / 'fixed.png')
-            pipe.starter_refresh.records.append({'frame_index': i, 'path': f'refresh/{i:05d}/fixed.png'})
+            assert prepared == [8, 17]
+            assert item['neighbor_w2cs'].flatten().tolist() == [0, 9, 8, 17]
+            assert item['neighbor_Ks'].flatten().tolist() == [100, 109, 108, 117]
+            assert item['rgb_neighbors'].shape[0] == 4
+            assert torch.allclose(item['rgb_neighbors'][2:], torch.full((2,3,32,32), 230/255))
+            pipe.starter_refresh.records.extend(pipe.starter_refresh.prepared_references)
     inference = ModuleType('model_eval.run_inference')
     inference.build_parser = Parser
-    inference.get_eval_pipe = lambda *a: pipe
+    inference.get_eval_pipe = get_pipe
     inference.process_item = process
     checkpoints = ModuleType('model_eval.checkpoint_loading')
     checkpoints.load_transformer_checkpoint = lambda *a: None

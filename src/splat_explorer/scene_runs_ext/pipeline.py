@@ -275,8 +275,8 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
                 target.save(preview / f'{index:05d}.png')
         edited_indices.extend(record['frame_index'] for record in inference['periodic_refreshes']
                               if record['frame_index'] < len(cameras) - 1)
-        # Input references remain separate so replay cannot use future repairs
-        # before their causal generation boundary. Preserve the completed bank.
+        # Keep initial inputs separate from the planned repaired bank for
+        # provenance. All prepared repairs condition inference from its start.
         manifest['generated_references'] = generated_references
         manifest['reference_views'] = len(references) + len(generated_references)
         (root / 'bundle.json').write_text(json.dumps(manifest, indent=2))
