@@ -5,7 +5,6 @@ No credentials or network client are needed in the ArtiFixer environment.
 """
 from pathlib import Path
 import json
-import shutil
 import time
 
 
@@ -42,9 +41,9 @@ class PeriodicRefresh:
         index = self.indices[frame]
         folder = self.root / 'refresh' / f'{index:05d}'
         folder.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(self.root / 'inputs' / f'{index:05d}.png', folder / 'rendered.png')
-        shutil.copy2(self.root / 'anchor.png', folder / 'anchor.png')
-        # Publish last: the local transport must never see partially written inputs.
+        # Reuse the immutable bundle inputs; refresh folders contain outputs only.
+        source_path = self.root / 'inputs' / f'{index:05d}.png'
+        # Publish after bundle rendering has finished.
         write_json(self.root / 'refresh-request.json', {'frame_index': index})
         response = folder / 'response.json'
         until = time.monotonic() + 1800
@@ -57,7 +56,7 @@ class PeriodicRefresh:
         result = json.loads(response.read_text())
         if result.get('status') != 'ok':
             raise RuntimeError(result.get('error') or 'Periodic GPT-image repair failed')
-        with Image.open(folder / 'rendered.png') as source, Image.open(folder / 'regenerated.png') as edited:
+        with Image.open(source_path) as source, Image.open(folder / 'regenerated.png') as edited:
             if source.width * edited.height != source.height * edited.width:
                 raise ValueError('Periodic repair changed camera aspect ratio')
             fixed = edited.convert('RGB').resize(source.size, Image.Resampling.LANCZOS)
@@ -118,18 +117,27 @@ def service_refresh(transport, request_id, *, deadline, should_stop):
         result = repair_lrz._mux_run(['rsync', '-az', '-e', repair_lrz.rsync_ssh_cmd(transport.cfg), *arguments])
         if result.returncode:
             raise RuntimeError('Periodic repair image transfer failed')
-    transfer([f'{remote}:{remote_folder}', f'{folder}/'])
+    bundle = local_request / 'extended'
+    source = bundle / 'inputs' / f'{index:05d}.png'
+    anchor = bundle / 'anchor.png'
+    remote_bundle = f'{transport.remote_dir}/requests/{request_id}/extended'
     response = folder / 'response.json'
     # A completed local result can be re-uploaded after a transfer failure
     # without purchasing another GPT edit.
     if not response.is_file():
         try:
+            # Each immutable input is downloaded once per repair bundle. Never
+            # use a prior scene's render after fitting has changed the splat.
+            for image, relative in ((source, f'inputs/{index:05d}.png'), (anchor, 'anchor.png')):
+                if not image.is_file():
+                    image.parent.mkdir(parents=True, exist_ok=True)
+                    transfer([f'{remote}:{remote_bundle}/{relative}', str(image)])
             request = json.loads((local_request / 'request.json').read_text())
             prompt = str(request.get('prompt') or transport._run_config.get('image_edit_prompt') or '')
             transport._progress('image_edit', f'Periodic GPT repair at frame {index + 1}')
-            payload = transport._edit_with_clirelay(folder / 'rendered.png', folder / 'regenerated.png',
+            payload = transport._edit_with_clirelay(source, folder / 'regenerated.png',
                                                    prompt + REFERENCE_INSTRUCTION,
-                                                   references=[folder / 'anchor.png'])
+                                                   references=[anchor])
             if should_stop() or time.time() >= deadline:
                 raise InterruptedError('Stopped during periodic image repair')
             write_json(response, {'status': 'ok', 'frame_index': index, 'image_edit': payload})

@@ -123,7 +123,9 @@ def test_refresh_reencodes_generated_context_without_clearing_cache(tmp_path):
     result = refresh(pipe, torch.zeros(1, 1, 6, 2, 2), 20)
     assert result.shape == (1, 1, 1, 2, 2) and torch.all(result == 9)
     assert pipe.kv_cache1 is caches and len(seen) == 1
-    assert Image.open(folder / 'rendered.png').getpixel((0, 0)) == (30, 30, 30)
+    assert Image.open(tmp_path / 'inputs/00020.png').getpixel((0, 0)) == (30, 30, 30)
+    assert not (folder / 'rendered.png').exists()
+    assert not (folder / 'anchor.png').exists()
     assert refresh.records[0]['frame_index'] == 20
     assert Image.open(folder / 'fixed.png').size == (16, 16)
 
@@ -137,9 +139,7 @@ def test_local_relay_uses_original_prompt_and_anchor_and_publishes_response_last
     def transfer(args):
         transfers.append(args[-2:])
         if args[-2].startswith('user@host:'):
-            folder = Path(args[-1])
-            Image.new('RGB', (16, 16)).save(folder / 'rendered.png')
-            Image.new('RGB', (16, 16)).save(folder / 'anchor.png')
+            Image.new('RGB', (16, 16)).save(Path(args[-1]))
         return SimpleNamespace(returncode=0)
     monkeypatch.setattr(repair_lrz, '_mux_run', transfer)
     monkeypatch.setattr(repair_lrz, 'rsync_ssh_cmd', lambda cfg: 'ssh')
@@ -147,7 +147,8 @@ def test_local_relay_uses_original_prompt_and_anchor_and_publishes_response_last
         edits.append(prompt)
         assert prompt.startswith('Repair the damaged door.')
         assert 'FIRST image' in prompt and 'SECOND image' in prompt
-        assert references == [source.parent / 'anchor.png']
+        assert source == request / 'extended/inputs/00020.png'
+        assert references == [request / 'extended/anchor.png']
         if failure:
             raise RuntimeError('Relay failed')
         Image.new('RGB', (16, 16)).save(target)
@@ -248,3 +249,48 @@ def test_failed_preparation_aborts_before_any_replacements(tmp_path, monkeypatch
     with pytest.raises(RuntimeError, match='GPT repair failed'):
         refresh.prepare()
     assert not refresh.records and not refresh.prepared_references
+
+
+def test_refreshes_share_anchor_and_retry_without_downloading_inputs(tmp_path, monkeypatch):
+    from splat_explorer import repair_lrz
+    request = tmp_path / 'requests/repair-00001'
+    request.mkdir(parents=True)
+    (request / 'request.json').write_text('{}')
+    downloads, edits = [], []
+    pending = {'frame_index': 20}
+    fail_upload = [True]
+
+    def transfer(args):
+        source, destination = args[-2:]
+        if source.startswith('user@host:'):
+            downloads.append(source)
+            color = 200 if source.endswith('/anchor.png') else int(Path(source).stem)
+            Image.new('RGB', (16, 16), (color, color, color)).save(destination)
+        elif source.endswith('response.json') and fail_upload[0]:
+            fail_upload[0] = False
+            return SimpleNamespace(returncode=1)
+        return SimpleNamespace(returncode=0)
+
+    def edit(source, target, prompt, references):
+        edits.append(source.name)
+        assert Image.open(source).getpixel((0, 0))[0] == pending['frame_index']
+        assert references == [request / 'extended/anchor.png']
+        assert Image.open(references[0]).getpixel((0, 0))[0] == 200
+        Image.new('RGB', (16, 16)).save(target)
+        return {}
+
+    monkeypatch.setattr(repair_lrz, '_mux_run', transfer)
+    monkeypatch.setattr(repair_lrz, 'rsync_ssh_cmd', lambda cfg: 'ssh')
+    transport = SimpleNamespace(cfg={'user': 'user', 'host': 'host'}, remote_dir='/remote',
+        run_dir=tmp_path, _run_config={}, _remote_json=lambda name: pending,
+        _edit_with_clirelay=edit, _progress=lambda *a: None)
+    with pytest.raises(RuntimeError, match='transfer failed'):
+        service_refresh(transport, 'repair-00001', deadline=float('inf'), should_stop=lambda: False)
+    service_refresh(transport, 'repair-00001', deadline=float('inf'), should_stop=lambda: False)
+    pending['frame_index'] = 40
+    service_refresh(transport, 'repair-00001', deadline=float('inf'), should_stop=lambda: False)
+    assert edits == ['00020.png', '00040.png']
+    assert len(downloads) == 3
+    assert sum(path.endswith('/anchor.png') for path in downloads) == 1
+    assert not list((request / 'extended/refresh').glob('*/anchor.png'))
+    assert not list((request / 'extended/refresh').glob('*/rendered.png'))
