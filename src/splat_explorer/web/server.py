@@ -1272,6 +1272,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     visor_id,
                     which=body.get("which"),
                     toggle=bool(body.get("toggle")),
+                    highlight=bool(body.get("highlight")),
                     client=body.get("client"),
                 )
                 code = 200 if result.get("ok") else (

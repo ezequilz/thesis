@@ -20,7 +20,7 @@ from .scene_run_studio import _cfg_get
 logger = logging.getLogger(__name__)
 
 WHICH = ("original", "repaired")
-_PLY_NAME = {"original": ORIGINAL_PLY, "repaired": REPAIRED_PLY}
+_PLY_NAME = {"original": ORIGINAL_PLY, "repaired": REPAIRED_PLY, "highlight": REPAIRED_PLY}
 _REVIEW_PORT_OFFSET = 2
 _IDLE_TIMEOUT_S = 45.0
 _WATCHDOG_S = 5.0
@@ -90,7 +90,7 @@ class SceneRunViser:
     def ply_paths(self, run_id: str) -> dict[str, Path | None]:
         return {
             name: self.studio.artifact_path(str(run_id), filename)
-            for name, filename in _PLY_NAME.items()
+            for name, filename in _PLY_NAME.items() if name in WHICH
         }
 
     def snapshot(self, run_id: str) -> dict[str, Any]:
@@ -177,6 +177,7 @@ class SceneRunViser:
         which: str | None = None,
         *,
         toggle: bool = False,
+        highlight: bool = False,
         client: str | None = None,
     ) -> dict[str, Any]:
         run_id = str(run_id)
@@ -207,12 +208,15 @@ class SceneRunViser:
         with self._lock:
             current = self._which if self._run_id == run_id else None
             if toggle:
-                requested = "original" if current == "repaired" else "repaired"
+                requested = "original" if current in {"repaired", "highlight"} else "repaired"
             if requested is None:
                 requested = "repaired" if paths["repaired"] is not None else "original"
 
+            if highlight:
+                requested = "highlight"
+            source = "repaired" if requested == "highlight" else requested
             missing = _PLY_NAME[requested]
-            if paths[requested] is None:
+            if paths[source] is None or (highlight and paths["original"] is None):
                 snap = self._snapshot_locked(run_id, paths, showing=self._run_id == run_id)
                 snap.update(
                     ok=False,
@@ -294,7 +298,9 @@ class SceneRunViser:
         return {
             "ok": True,
             "run_id": run_id,
-            "which": self._which if showing else None,
+            "which": ("repaired" if self._which == "highlight" else self._which) if showing else None,
+            "highlight": showing and self._which == "highlight",
+            "highlight_available": all(paths.get(name) is not None for name in WHICH),
             "status": self._status if showing else "idle",
             "viewer_url": (
                 f"http://localhost:{self._port}" if self._port is not None else None
@@ -438,14 +444,21 @@ class SceneRunViser:
             min_opacity = float(_cfg_get(self.cfg, "scene.min_opacity", 0.0) or 0.0)
             lod = int(_cfg_get(self.cfg, "scene.lod_level", 0) or 0)
             scenes = {}
-            for name in (which, *(name for name in WHICH if name != which)):
+            first = "repaired" if which == "highlight" else which
+            for name in (first, *(name for name in WHICH if name != first)):
                 path = paths[name]
                 if path is None:
                     continue
                 with self._lock:
                     if generation != self._generation or self._server is None:
                         return
-                scenes[name] = loader(path, min_opacity=min_opacity, lod_level=lod)
+                scenes[name] = loader(path, min_opacity=0.0, lod_level=lod)
+            if all(name in scenes for name in WHICH):
+                from .repair_difference import repair_difference
+                scenes["highlight"] = repair_difference(scenes["original"], scenes["repaired"])
+            if min_opacity > 0:
+                scenes = {name: scene.filtered_by_opacity(min_opacity)
+                          for name, scene in scenes.items()}
         except Exception as exc:
             logger.exception("Scene-run visor failed to load %s", run_id)
             with self._lock:

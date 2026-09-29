@@ -146,7 +146,7 @@ def test_show_defaults_to_repaired_and_toggle_flips(tmp_path):
     assert first["status"] == "ready"
     assert first["viewer_url"] == "http://localhost:8082"
     assert loaded == [str(run_dir / "scene_repaired.ply"), str(run_dir / "scene_original.ply")]
-    assert visor._server.scene.splats == ["/review/repaired", "/review/original"]
+    assert visor._server.scene.splats == ["/review/repaired", "/review/original", "/review/highlight"]
     handles = dict(visor._handles)
     assert handles["repaired"].visible
     assert not handles["original"].visible
@@ -161,7 +161,7 @@ def test_show_defaults_to_repaired_and_toggle_flips(tmp_path):
     back = visor.show("run_20260915_200000", toggle=True)
     assert back["which"] == "repaired"
     assert len(loaded) == 2
-    assert len(visor._server.scene.splats) == 2
+    assert len(visor._server.scene.splats) == 3
     assert visor._handles == handles
     assert handles["repaired"].visible
     assert not handles["original"].visible
@@ -271,3 +271,41 @@ def test_close_during_load_cannot_repopulate_stopped_session(tmp_path):
     assert visor._server is None
     assert visor._handles == {}
     assert len(loaded) == 1
+
+
+def test_highlight_toggle_reuses_payloads(tmp_path):
+    studio, _ = _studio(tmp_path)
+    visor = SceneRunViser(studio, background=False, server_factory=_FakeServer,
+                          load_scene=lambda *a, **kw: _tiny_scene(), idle_timeout=None)
+    visor.show("run_20260915_200000")
+    highlighted = visor.show("run_20260915_200000", highlight=True)
+    assert highlighted["highlight"] and highlighted["which"] == "repaired"
+    assert visor._handles["highlight"].visible
+    assert not visor._handles["repaired"].visible
+    assert not visor.show("run_20260915_200000", toggle=True)["highlight"]
+    assert visor._handles["original"].visible
+    visor.show("run_20260915_200000", which="repaired")
+    assert visor._handles["repaired"].visible
+    assert len(visor._server.scene.splats) == 3
+
+
+def test_difference_strength_and_reordered_pruned_splats():
+    from splat_explorer.web.repair_difference import repair_difference
+    original = _tiny_scene()
+    original.means[:, 0] = np.arange(4)
+    original.colors[:] = .4
+    repaired = original.filtered(np.array([False, True, True, True]))
+    repaired = repaired.filtered(np.array([2, 0, 1]))
+    repaired.colors[1] += .01
+    repaired.colors[2] += .2
+    before = repaired.copy()
+    result = repair_difference(original, repaired)
+    np.testing.assert_array_equal(result.colors[0], repaired.colors[0])
+    small = result.colors[1, 0] - repaired.colors[1, 0]
+    large = result.colors[2, 0] - repaired.colors[2, 0]
+    assert 0 < small < large
+    for field in ("means", "scales", "quats", "opacities"):
+        np.testing.assert_array_equal(getattr(result, field), getattr(before, field))
+    np.testing.assert_array_equal(repaired.colors, before.colors)
+    repaired.quats *= -1
+    np.testing.assert_allclose(repair_difference(original, repaired).colors, result.colors)
