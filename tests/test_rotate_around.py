@@ -206,8 +206,13 @@ def test_collision_follows_negative_and_elevated_orbits(azimuth, elevation):
                          -5+5*np.cos(phi)*np.cos(theta)])
     scene = scene_at([[0,0,-5], obstacle], scales=[[.1]*3, [.01]*3])
     result = orbit(rig, scene, azimuth_pi=azimuth, elevation_pi=elevation)
-    assert result['blocked']
-    assert 0 < result['completed_fraction'] < .4
+    if azimuth and elevation:
+        assert result['elevation_adjusted']
+        assert not result['blocked']
+        assert result['completed_fraction'] == 1
+    else:
+        assert result['blocked']
+        assert 0 < result['completed_fraction'] < .4
     assert np.linalg.norm(rig.position - obstacle) >= .04 - 1e-7
     assert np.linalg.norm(rig.position - [0,0,-5]) == pytest.approx(5)
 
@@ -252,3 +257,39 @@ def test_blocked_orbit_feedback_requires_translation():
     assert 'heading is unchanged' in note
     assert 'aimed at Gaussian' not in note
     assert not result['shortened']
+
+
+@pytest.mark.parametrize('sign', [-1, 1])
+def test_elevation_fallback_interpolates_from_current_elevation(sign):
+    from splat_explorer.agent.loop import _motion_note
+    pivot = np.array([0., 0., -5.])
+    initial = sign * .1 * np.pi
+    rig = CameraRig(pivot + [0, 5*np.sin(initial), 5*np.cos(initial)])
+    rig.aim_at(pivot)
+    start = rig.position.copy()
+    class HeightLimit:
+        def clamp_motion(self, source, direction, distance):
+            end = source + direction * distance
+            blocked = sign * (end[1] - start[1]) > .6
+            return (0., True) if blocked else (distance, False)
+    result = rig.apply(Action('rotate_around', {'pixel_x': .5, 'pixel_y': .5,
+        'azimuth_pi': .3, 'elevation_pi': sign * .3}), MotionContext(
+        scene=scene_at([pivot]), camera=rig.camera(100,100,75), world=HeightLimit()))
+    assert result['elevation_adjusted']
+    assert result['requested_elevation_pi'] == pytest.approx(sign * .3)
+    assert .1 <= sign * result['elevation_pi'] < .3
+    assert not result['blocked']
+    assert result['completed_fraction'] == 1
+    assert sign * (rig.position[1] - start[1]) <= .6
+    phi = result['elevation_pi'] * np.pi
+    np.testing.assert_allclose(rig.position, pivot + [5*np.cos(phi)*np.sin(.3*np.pi),
+        5*np.sin(phi), 5*np.cos(phi)*np.cos(.3*np.pi)], atol=1e-6)
+    assert 'Elevation target reduced' in _motion_note(result)
+
+
+def test_clear_elevation_request_is_not_adjusted():
+    rig = CameraRig(np.zeros(3))
+    result = orbit(rig, scene_at([[0,0,-5]]), elevation_pi=.25)
+    assert not result['elevation_adjusted']
+    assert result['elevation_pi'] == .25
+    assert result['completed_fraction'] == 1
