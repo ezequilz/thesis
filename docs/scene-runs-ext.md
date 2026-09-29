@@ -252,3 +252,33 @@ stability across checkpoint reloads, starter temporal-cache ordering and camera
 alignment. Tensor tests require PyTorch. The single-starter adaptation has not yet
 been visually validated on a live GPU run; the earlier GPU results above describe
 historical versions, not this change.
+
+
+## Block schedule comparison
+
+In **ArtiFixer settings → Block schedule**, choose **Upstream blocks + GPT
+reference** (`block_schedule: "upstream"`) to use the pinned upstream generation
+method without the exact-starter patch. It denoises seven latent frames per block
+starting at frame zero (25 RGB frames in the first block). The official evaluation
+wrapper pads incomplete blocks and trims their outputs. This mode always retains
+the last denoising cache; clean refresh is disabled in the popup.
+
+**Exact starter (experimental, current)** (`block_schedule: "exact_starter"`)
+remains the default and the interpretation of older runs. It preserves the first
+latent, caches it at timestep zero, then generates blocks starting at latent 1.
+
+Both modes supply the GPT edit through reference conditioning throughout and use
+the same selected source inputs (edited RGB/opacity 1 at the first frame, then
+scene RGB/opacity or zero-opacity noise). Upstream mode does not guarantee exact
+frame-zero latent preservation and does not replace its generated first PNG.
+Its `upstream-first-frame-*.png` diagnostic and reference MAE are saved in
+`inference.json`; the exact mode retains its VAE-roundtrip diagnostics.
+The separate 3D fitting stage still uses the GPT edit as the direct anchor target
+in either mode. Raw upstream outputs remain under `artifixer-output`; `targets`
+contains the fitting targets. Schedule and effective cache policy are recorded
+in the bundle, inference metadata, generation diagnostics, and repair metrics.
+
+For a controlled comparison, keep the GPT edit, trajectory, source conditioning,
+seed, inference steps and fitting settings fixed and change only the schedule.
+This option enables comparison runs; it does not automatically run both modes or
+establish which produces better images.

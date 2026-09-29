@@ -142,8 +142,8 @@ def main():
                 pipe.clear_inference_caches()
             process_item(pipe, item, opts, root / "artifixer-output", 0, device,
                          pipe.vae.config.scale_factor_temporal)
-            # Preserve exact RGB in exports (the causal context already used
-            # its clean encoded latent; this only removes VAE roundtrip loss).
+            # Record frame zero before any export replacement. Only the exact
+            # adapter removes VAE roundtrip loss; upstream output stays intact.
             import shutil
             first_output = root / "artifixer-output/bundle/frames/batch_0000/pred" / f"{indices[0]:05d}.png"
             prefix = 'starter-vae-roundtrip' if exact_starter else 'upstream-first-frame'

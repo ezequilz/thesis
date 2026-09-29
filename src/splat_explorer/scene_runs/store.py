@@ -203,7 +203,7 @@ class SceneRunStore:
         # Reading history must not relabel or silently change those experiments.
         if saved.get('pipeline') == 'extended' and isinstance(saved.get('extended', {}), dict):
             saved['extended'] = {'source_conditioning': 'none', 'generated_cache': 'clean',
-                                 'max_repair_pixels': 0, **saved.get('extended', {})}
+                                 'max_repair_pixels': 0, 'block_schedule': 'exact_starter', **saved.get('extended', {})}
         config = SceneRunConfig.from_dict(saved)
         state = RunState.from_dict(_read_json(path / STATUS_NAME))
         return SceneRun(run_id, str(path), config, state, (path / STOP_NAME).is_file())

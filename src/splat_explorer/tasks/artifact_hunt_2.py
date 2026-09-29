@@ -14,6 +14,7 @@ near, dark = far, black = no geometry at all (background, or a hole in the \
 reconstruction).
 """
 
+
 _IMAGES_RGB_ONLY = """After every action you receive one fresh image \
 rendered from your current camera pose: the RGB view of the scene.
 """

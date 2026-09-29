@@ -57,7 +57,7 @@ def test_clean_starter_drives_future_frames_and_cache_resets(cache_policy, sourc
         local_attn_size = -1
         vae = SimpleNamespace(device='cpu', config=SimpleNamespace(scale_factor_temporal=4))
         transformer = Transformer()
-        generate_samples_from_batch = None
+        def generate_samples_from_batch(self): return "upstream"
         scheduler = SimpleNamespace(step=lambda noise, *a, **kw: noise,
                                     add_noise=lambda clean, noise, t: clean + noise)
         def _initialize_kv_cache(self, *args): self.kv_cache1 = {}
@@ -106,8 +106,9 @@ def test_only_gpt_starter_has_rgb_and_observation_opacity():
     assert seed.count_nonzero() > 0, 'Conditioning must not mutate reference images'
 
 
+@pytest.mark.parametrize('schedule', ['exact_starter', 'upstream'])
 @pytest.mark.parametrize('source_mode', ['none', 'rendered'])
-def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path, monkeypatch, source_mode):
+def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path, monkeypatch, source_mode, schedule):
     import json
     import numpy as np
     import sys
@@ -117,7 +118,7 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
     from splat_explorer.scene_runs_ext import artifixer_bridge
     for i, value in enumerate([40, 220]):
         Image.new('RGB', (32, 32), (value, value, value)).save(tmp_path / f'edit-{i}.png')
-    manifest = {'options': {'seed': 42, 'inference_steps': 4, 'camera_scale': 1., 'source_conditioning': source_mode},
+    manifest = {'options': {'seed': 42, 'inference_steps': 4, 'camera_scale': 1., 'source_conditioning': source_mode, 'block_schedule': schedule, 'generated_cache': 'clean'},
                 'transforms': {'frames': [{}] * 18},
                 'references': [{'path': f'edit-{i}.png', 'frame_index': 9*i,
                                 'kind': 'edited_render'} for i in range(2)],
@@ -135,7 +136,7 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
     class Pipe:
         transformer = SimpleNamespace(eval=lambda: None)
         vae = SimpleNamespace(config=SimpleNamespace(scale_factor_temporal=4))
-        generate_samples_from_batch = None
+        def generate_samples_from_batch(self): return "upstream"
         _initialize_kv_cache = None
         def clear_inference_caches(self): self.cleared = True
     pipe = Pipe()
@@ -143,7 +144,13 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
     def process(pipe, item, opts, output, rank, device, scale):
         assert pipe.cleared
         pipe.cleared = False
-        assert pipe.generate_samples_from_batch.__func__ is generate_from_starter
+        if schedule == 'exact_starter':
+            assert pipe.generate_samples_from_batch.__func__ is generate_from_starter
+        else:
+            assert pipe.generate_samples_from_batch.__func__ is Pipe.generate_samples_from_batch
+            assert not hasattr(pipe, 'starter_generated_cache')
+        assert torch.allclose(item['rgb_neighbors'][0], torch.full((3,32,32), 40/255))
+        assert torch.allclose(item['rgb_neighbors'][1], torch.full((3,32,32), 220/255))
         index = len(seen)
         assert torch.allclose(item['rgb_rendered'][0], torch.full((3,32,32), [40,220][index]/255))
         if source_mode == 'none':
@@ -182,6 +189,10 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
     assert metadata['starter_frames'] == [0,9]
     assert metadata['scene_rgb_conditioning'] is (source_mode == 'rendered')
     assert len(metadata['starter_diagnostics']) == 2
-    assert (tmp_path / 'starter-vae-roundtrip-00000.png').exists()
+    assert metadata['block_schedule'] == schedule
+    assert metadata['exact_starter_preserved'] is (schedule == 'exact_starter')
+    assert metadata['generated_cache'] == ('clean' if schedule == 'exact_starter' else 'last_denoising')
+    diagnostic = 'starter-vae-roundtrip' if schedule == 'exact_starter' else 'upstream-first-frame'
+    assert (tmp_path / f'{diagnostic}-00000.png').exists()
     for i, expected in [(0,40),(9,220)]:
-        assert Image.open(tmp_path/f'artifixer-output/bundle/frames/batch_0000/pred/{i:05d}.png').getpixel((0,0)) == (expected,)*3
+        assert Image.open(tmp_path/f'artifixer-output/bundle/frames/batch_0000/pred/{i:05d}.png').getpixel((0,0)) == ((expected,)*3 if schedule == "exact_starter" else (0,0,0))

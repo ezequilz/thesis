@@ -66,6 +66,13 @@ def test_extended_config_policy_and_baseline_are_separate(tmp_path):
     assert new["config"]["repair_height"] == 720
     assert new['config']['extended']['source_conditioning'] == 'rendered'
     assert new['config']['extended']['generated_cache'] == 'last_denoising'
+    assert new['config']['extended']['block_schedule'] == 'exact_starter'
+    upstream = extended.create({'extended': {'block_schedule': 'upstream', 'generated_cache': 'clean'}})
+    saved_upstream = store.get_run(upstream['run_id']).config.extended
+    assert saved_upstream['block_schedule'] == 'upstream'
+    assert saved_upstream['generated_cache'] == 'last_denoising'
+    with pytest.raises(ValueError, match='block_schedule'):
+        validate_options({'block_schedule': 'invalid'})
     assert new['config']['extended']['max_repair_pixels'] == 960 * 720
     custom = extended.create({'extended': {'source_conditioning': 'none', 'generated_cache': 'clean',
                                           'max_repair_pixels': 0, 'inference_steps': 8, 'seed': 123}})
@@ -560,7 +567,8 @@ def test_single_starter_sends_one_image_in_one_gpt_call(tmp_path):
     assert not list(request.glob('reference*'))
 
 
-def test_generation_precedes_the_only_fit_and_only_starter_is_direct_target(tmp_path):
+@pytest.mark.parametrize('schedule', ['exact_starter', 'upstream'])
+def test_generation_precedes_the_only_fit_and_only_starter_is_direct_target(tmp_path, schedule):
     Image.new('RGB',(32,32),(210,210,210)).save(tmp_path/'anchor.png')
     source=scene()
     calls=[]
@@ -579,16 +587,21 @@ def test_generation_precedes_the_only_fit_and_only_starter_is_direct_target(tmp_
         return {}
     def generate(root,runtime,stop):
         manifest = json.loads((root/'bundle.json').read_text())
-        assert manifest['conditioning_mode'] == 'gpt-starter-kv-v1'
+        assert manifest['block_schedule'] == schedule
+        assert manifest['conditioning_mode'] == ('gpt-starter-kv-v1' if schedule == 'exact_starter' else 'gpt-reference-upstream-v1')
         assert manifest['scene_rgb_conditioning'] is True
         assert calls == []
         assert int(np.array(Image.open(root/'inputs/00000.png'))[0,0,0])==102
         np.testing.assert_allclose(source.colors,.4)
         return propagate(root,runtime,stop)
-    repair(source,camera(),tmp_path/'anchor.png',tmp_path,options={'frames':9,'fit_iterations':1},
+    _, metrics = repair(source,camera(),tmp_path/'anchor.png',tmp_path,options={'frames':9,'fit_iterations':1,'block_schedule':schedule},
            runtime={},proposal={},should_stop=lambda:False,on_progress=lambda _:None,
            renderer_factory=ColoredRenderer,propagator=generate,fitter=fit)
     assert calls==[8]
+    assert metrics['block_schedule'] == schedule
+    assert metrics['exact_starter_preserved'] is (schedule == 'exact_starter')
+    diagnostics = json.loads((tmp_path/'extended/generation-diagnostics.json').read_text())
+    assert diagnostics['block_schedule'] == schedule
 
 
 def test_selection_can_include_last_move_when_anchor_is_an_earlier_tile(tmp_path):
