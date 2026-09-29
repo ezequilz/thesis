@@ -1,8 +1,16 @@
 """Small, serializable controls; executable paths come from server config only."""
 from __future__ import annotations
 import math
+from pathlib import Path
+
+MODEL_VARIANTS = {
+    "14b": "Wan-AI/Wan2.1-T2V-14B-Diffusers",
+    "1.3b": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+}
+DEFAULT_MODEL_VARIANT = "14b"
 
 DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 15000,
+            "model_variant": DEFAULT_MODEL_VARIANT,
             "fitting_safeguards": True,
             "source_conditioning": "rendered", "generated_cache": "last_denoising",
             "anchor_prefit": "none", "block_schedule": "periodic_starter",
@@ -17,10 +25,34 @@ RUNTIME_DEFAULTS = {
     "repo": "/workspace/third_party/ArtiFixer",
     "python": "/workspace/artifixer-venv/bin/python",
     "hf_home": "/workspace/models/huggingface",
-    "checkpoint": "/workspace/models/artifixer/artifixer-1.3b.pt",
-    "model_id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "checkpoint": "/workspace/models/artifixer/artifixer-14b.pt",
+    "model_id": MODEL_VARIANTS[DEFAULT_MODEL_VARIANT],
 }
 UPSTREAM_REVISION = "a392c4dfe17459ef9952407accdb9fcdcdddba98"
+
+
+def validate_model_variant(value):
+    if not isinstance(value, str) or value not in MODEL_VARIANTS:
+        raise ValueError("ArtiFixer model_variant must be 14b or 1.3b")
+    return value
+
+
+def model_runtime(model_variant=DEFAULT_MODEL_VARIANT, overrides=None):
+    """Select a matched release pair, retaining server-configured directories."""
+    variant = validate_model_variant(model_variant)
+    cfg = {**RUNTIME_DEFAULTS, **(overrides or {})}
+    cfg.update(model_variant=variant, model_id=MODEL_VARIANTS[variant],
+               checkpoint=str(Path(cfg["checkpoint"]).with_name(f"artifixer-{variant}.pt")))
+    return cfg
+
+
+def prepared_model_variant(marker):
+    """Read old setup markers by base model ID, never assume the new default."""
+    runtime = (marker or {}).get("artifixer_runtime") or {}
+    for variant, model_id in MODEL_VARIANTS.items():
+        if runtime.get("model_id") == model_id:
+            return variant
+    return None
 
 
 def validate_options(value=None):
@@ -33,6 +65,7 @@ def validate_options(value=None):
     if unknown:
         raise ValueError(f"Unknown extended options: {', '.join(sorted(unknown))}")
     result = {**DEFAULTS, **(value or {})}
+    validate_model_variant(result["model_variant"])
     if type(result["fitting_safeguards"]) is not bool:
         raise ValueError("fitting_safeguards must be a boolean")
     for key, choices in (("source_conditioning", ("none", "rendered")),

@@ -349,11 +349,14 @@ class RepairStudio:
         overwrite: bool = False,
         qwen_required: bool | None = None,
         artifixer_required: bool = False,
+        artifixer_model: str = "14b",
     ) -> dict:
         from ..image_edit import resolve_qwen_required
         from ..repair_lrz import request_lrz_setup
 
         self._require_gpu_available("reloading GPU setup")
+        from ..scene_runs_ext.config import validate_model_variant
+        artifixer_model = validate_model_variant(artifixer_model)
         needed = resolve_qwen_required(qwen_required, cfg=self.app.cfg)
         from ..scene_runs.store import SceneRunStore
         if not isinstance(artifixer_required, bool):
@@ -366,7 +369,7 @@ class RepairStudio:
         try:
             result = request_lrz_setup(
                 force=force, overwrite=overwrite, qwen_required=needed,
-                artifixer_required=artifixer_required, setup_lease=lease,
+                artifixer_required=artifixer_required, artifixer_model=artifixer_model, setup_lease=lease,
             )
         except BaseException:
             lease.release()

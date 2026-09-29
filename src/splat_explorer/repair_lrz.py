@@ -3692,7 +3692,7 @@ def srun_setup_command(cfg: dict, *, qwen_required: bool | None = None) -> str:
         + "export PIP_DISABLE_PIP_VERSION_CHECK=1; "
         + f"export QWEN_required={flag}; "
         + f"python -m splat_explorer.repair_lrz --setup --qwen-required {flag}"
-        + (" --artifixer-required" if cfg.get("artifixer_required") else "")
+        + (f" --artifixer-required --artifixer-model {shlex.quote(cfg.get('artifixer_model', '14b'))}" if cfg.get("artifixer_required") else "")
     )
     setup_cfg = dict(cfg)
     setup_cfg["cpus"] = 1  # nvcc thread pool tracks CPU count; 1 keeps host RAM down
@@ -4199,7 +4199,7 @@ def install_qwen_image_edit_packages(
     }
 
 
-def apply_gpu_setup(*, workspace: str = "/workspace", qwen_required: bool | None = None, artifixer_required: bool = False) -> dict[str, Any]:
+def apply_gpu_setup(*, workspace: str = "/workspace", qwen_required: bool | None = None, artifixer_required: bool = False, artifixer_model: str = "14b") -> dict[str, Any]:
     """Inside the Pyxis container: verify torch/CUDA and install gsplat onto DSS."""
     import sys
 
@@ -4276,7 +4276,7 @@ def apply_gpu_setup(*, workspace: str = "/workspace", qwen_required: bool | None
     artifixer_runtime = None
     if artifixer_required:
         from .scene_runs_ext.setup import provision
-        artifixer_runtime = provision(workspace)
+        artifixer_runtime = provision(workspace, model_variant=artifixer_model)
     job_id = os.environ.get("SLURM_JOB_ID") or os.environ.get("LRZ_JOB_ID") or "unknown"
     family = gpu_family_from_name(gpu)
     body = {
@@ -4422,6 +4422,7 @@ def begin_setup_log(cfg: dict) -> str:
         "ended_at": None,
         "ok": None,
         "mode": mode,
+        "artifixer_model": cfg.get("artifixer_model", "14b") if mode == "artifixer" else None,
         "qwen_required": bool(cfg.get("qwen_required")),
         "message": "Loading GPU setup…",
         "error": None,
@@ -4822,6 +4823,9 @@ def _setup_lrz_gpu_locked(
         )
         mode_changed = marker.get("setup_mode", "baseline") != (
             "artifixer" if cfg.get("artifixer_required") else "baseline")
+        from .scene_runs_ext.config import prepared_model_variant
+        model_changed = bool(cfg.get("artifixer_required")) and prepared_model_variant(marker) != cfg.get("artifixer_model", "14b")
+        mode_changed = mode_changed or model_changed
         if marker.get("ok") and not qwen_missing and not mode_changed:
             marker = dict(marker)
             marker["reused"] = True
@@ -4895,10 +4899,13 @@ def request_lrz_setup(
     overwrite: bool = False,
     qwen_required: bool | None = None,
     artifixer_required: bool = False,
+    artifixer_model: str = "14b",
     setup_lease=None,
 ) -> dict[str, Any]:
     """Start GPU setup in a background thread. Safe to click once per allocation."""
     cfg = dict(load_lrz_config())
+    from .scene_runs_ext.config import validate_model_variant, prepared_model_variant
+    cfg["artifixer_model"] = validate_model_variant(artifixer_model)
     cfg["artifixer_required"] = bool(artifixer_required)
     if not lrz_session_alive(cfg):
         raise RuntimeError(session_required_message())
@@ -4940,7 +4947,7 @@ def request_lrz_setup(
             if setup_lease is not None:
                 setup_lease.release()
             return lrz_setup_status(cfg)
-        if _SETUP["ok"] and _SETUP.get("job_id") == job and not force and (_SETUP.get("detail") or {}).get("setup_mode", "baseline") == ("artifixer" if artifixer_required else "baseline"):
+        if _SETUP["ok"] and _SETUP.get("job_id") == job and not force and (not artifixer_required or prepared_model_variant(_SETUP.get("detail")) == artifixer_model) and (_SETUP.get("detail") or {}).get("setup_mode", "baseline") == ("artifixer" if artifixer_required else "baseline"):
             if setup_lease is not None:
                 setup_lease.release()
             return lrz_setup_status(cfg)
@@ -4964,7 +4971,7 @@ def request_lrz_setup(
                 else "Uploading code to DSS, then starting the PyTorch container…"
             )
             + qwen_note
-            + (" Preparing ArtiFixer (first setup downloads weights and installs an isolated environment)." if artifixer_required else " Baseline mode.")
+            + (f" Preparing ArtiFixer {artifixer_model.upper()} (first setup downloads weights and installs an isolated environment)." if artifixer_required else " Baseline mode.")
         )
     cfg["qwen_required"] = qwen_needed
     try:
@@ -5607,6 +5614,7 @@ def main(argv: list[str] | None = None) -> None:
         "--setup", action="store_true",
         help="Inside the Pyxis container: verify torch/CUDA and install gsplat onto DSS",
     )
+    parser.add_argument("--artifixer-model", choices=("14b", "1.3b"), default="14b")
     parser.add_argument("--artifixer-required", action="store_true", help="Provision and verify ArtiFixer in an isolated environment")
     parser.add_argument(
         "--qwen-required",
@@ -5635,7 +5643,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.setup:
         qwen_flag = None if args.qwen_required is None else args.qwen_required == "true"
-        stats = apply_gpu_setup(qwen_required=qwen_flag, artifixer_required=args.artifixer_required)
+        stats = apply_gpu_setup(qwen_required=qwen_flag, artifixer_required=args.artifixer_required, artifixer_model=args.artifixer_model)
         logger.info("gpu setup done: %s", stats)
         return
     os.environ["TORCH_CUDA_ARCH_LIST"] = os.environ.get("LRZ_CUDA_ARCH") or "8.0"

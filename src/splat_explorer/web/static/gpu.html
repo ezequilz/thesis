@@ -233,6 +233,9 @@
     <label class="chk" title="Prepare the separate ArtiFixer environment and weights for extended scene runs. First setup downloads models; baseline packages stay unchanged.">
       <input type="checkbox" id="in-artifixer-required"> ArtiFixer
     </label>
+    <label>ArtiFixer model
+      <select id="in-artifixer-model"><option value="14b">14B — highest quality (default)</option><option value="1.3b">1.3B — faster, lower memory</option></select>
+    </label>
     <button id="btn-setup" title="Once per allocation: start a job-scoped Pyxis container from YOUR DSS pytorch.sqsh. Tick ArtiFixer first to install the isolated environment /scene-runs-ext needs. Qwen-Image-Edit is installed only when QWEN_required is checked.">Load GPU setup</button>
     <span id="probe-meta" class="hint">At most one remote probe per 10 min while this tab is visible. Reloads reuse cache; availability is a separate one-shot sinfo after the probe finishes.</span>
   </div>
@@ -305,6 +308,7 @@
   </div>
 </div>
 
+<script src="/artifixer_model.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const AUTO_MS = 600000; // 10 min — LRZ throttles tighter squeue loops.
@@ -903,7 +907,7 @@ function setupLabel() {
     const g = s.detail?.gpu || t.gpu_name || "";
     const arch = s.detail?.cuda_arch || t.cuda_arch ? ` sm ${s.detail?.cuda_arch || t.cuda_arch}` : "";
     const family = t.family ? ` · ${t.family}` : "";
-    return `${s.detail?.setup_mode === "artifixer" ? "ArtiFixer" : "Baseline"} · ` + (g ? `ready · ${g}${arch}${family}` : (s.message || "ready"));
+    return `${s.detail?.setup_mode === "artifixer" ? `ArtiFixer ${ArtiFixerModel.prepared(s.detail)?.toUpperCase() || "unknown model"}` : "Baseline"} · ` + (g ? `ready · ${g}${arch}${family}` : (s.message || "ready"));
   }
   if (s.error) return s.error;
   if (snap?.slurm?.state === "R") return "not loaded — click Load GPU setup";
@@ -1090,6 +1094,7 @@ function renderChrome() {
     if (!artiBox.dataset.touched) artiBox.checked = snap?.setup?.detail?.setup_mode === "artifixer";
     artiBox.disabled = probeBusy || setupBusy || !canSetup;
   }
+  $("in-artifixer-model").disabled = setupBusy;
   const wantArti = Boolean($("in-artifixer-required")?.checked);
   const haveArti = snap?.setup?.detail?.setup_mode === "artifixer";
   $("btn-setup").disabled = probeBusy || setupBusy || !canSetup;
@@ -1102,7 +1107,7 @@ function renderChrome() {
     $("btn-setup").textContent = wantArti
       ? "Load GPU setup (ArtiFixer, clear leftover)"
       : "Load GPU setup (clear leftover)";
-  } else if (snap?.setup?.ok && wantArti !== haveArti) {
+  } else if (snap?.setup?.ok && (wantArti !== haveArti || (wantArti && ArtiFixerModel.prepared(snap?.setup?.detail) !== ArtiFixerModel.get()))) {
     $("btn-setup").textContent = wantArti
       ? "Load GPU setup (ArtiFixer)"
       : "Load GPU setup (baseline)";
@@ -1117,6 +1122,7 @@ function renderChrome() {
   } else {
     $("btn-setup").textContent = snap?.setup?.ok ? "Reload GPU setup" : "Load GPU setup";
   }
+  if (wantArti && !setupBusy) $("btn-setup").textContent += ` · ${ArtiFixerModel.get().toUpperCase()}`;
   $("btn-setup").title = needsOverwrite
     ? (setupNeedsOverwrite() || "Clears leftover processes on THIS reserved GPU, then loads splat-explorer.")
     : (wantArti
@@ -1399,6 +1405,18 @@ $("in-qwen-required")?.addEventListener("change", () => {
   $("in-qwen-required").dataset.touched = "1";
 });
 
+$("in-artifixer-model").value = ArtiFixerModel.get();
+ArtiFixerModel.subscribe(value => {
+  $("in-artifixer-model").value = value;
+  renderChrome();
+});
+$("in-artifixer-model").addEventListener("change", () => {
+  $("in-artifixer-required").checked = true;
+  $("in-artifixer-required").dataset.touched = "1";
+  $("in-qwen-required").checked = false;
+  $("in-qwen-required").dataset.touched = "1";
+  ArtiFixerModel.set($("in-artifixer-model").value);
+});
 $("in-artifixer-required")?.addEventListener("change", () => {
   $("in-artifixer-required").dataset.touched = "1";
   if ($("in-artifixer-required").checked) {
@@ -1425,6 +1443,7 @@ $("btn-setup").onclick = async () => {
       overwrite: false,
       QWEN_required: qwenRequired,
       ARTIFIXER_required: Boolean($("in-artifixer-required")?.checked),
+      artifixer_model: ArtiFixerModel.get(),
     });
     setNote("info", snap.message || (reason
       ? "Clearing leftover occupant on this reserved GPU, then loading splat-explorer…"

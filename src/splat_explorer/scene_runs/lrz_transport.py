@@ -240,6 +240,11 @@ class LrzSceneRunTransport:
             mode = marker.get("setup_mode", "baseline")
             if wants_extended and (mode != "artifixer" or not marker.get("artifixer_ready")):
                 raise RuntimeError("Reload GPU setup with ArtiFixer enabled on /scene-runs-ext or /repair/gpu first")
+            if wants_extended:
+                from ..scene_runs_ext.config import prepared_model_variant, validate_options
+                selected = validate_options(config.get("extended"))["model_variant"]
+                if prepared_model_variant(marker) != selected:
+                    raise RuntimeError(f"Reload GPU setup for ArtiFixer {selected.upper()} on /scene-runs-ext or /gpu before starting this run")
             if not wants_extended and mode != "baseline":
                 raise RuntimeError("Reload GPU setup with ArtiFixer disabled before starting a baseline run")
         return {"allocation": row, "setup": marker}
@@ -297,11 +302,15 @@ class LrzSceneRunTransport:
             repair["max_chunks"] = 1
             repair["densify"] = True
             repair["upstream_gsfix3d"] = True
+        extended_runtime = dict(self.app_cfg.get("scene_runs_ext") or {})
+        if config.get("pipeline") == "extended":
+            from ..scene_runs_ext.config import model_runtime, validate_options
+            extended_runtime = model_runtime(validate_options(config.get("extended"))["model_variant"], extended_runtime)
         return {
             "protocol": 1,
             "run_id": self.run_id,
             "scene_run": dict(config),
-            "extended_runtime": dict(self.app_cfg.get("scene_runs_ext") or {}),
+            "extended_runtime": extended_runtime,
             "image_edit": image_edit,
             "image_edit_prompt": config.get("image_edit_prompt"),
             "QWEN_required": qwen,

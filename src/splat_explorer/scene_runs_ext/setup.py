@@ -12,7 +12,7 @@ from pathlib import Path
 import subprocess
 import sys
 import urllib.request
-from .config import UPSTREAM_REVISION
+from .config import UPSTREAM_REVISION, DEFAULT_MODEL_VARIANT, MODEL_VARIANTS, validate_model_variant
 
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 PUBLIC_PYPI = "https://pypi.org/simple"
@@ -161,12 +161,14 @@ def ensure_venv(envdir, env, run):
     return python
 
 
-def provision(workspace="/workspace"):
+def provision(workspace="/workspace", model_variant=DEFAULT_MODEL_VARIANT):
+    model_variant = validate_model_variant(model_variant)
     root = Path(workspace)
     repo = root / "third_party/ArtiFixer"
     envdir = root / "artifixer-venv"
     checkpoint_dir = root / "models/artifixer"
-    model_id = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+    model_id = MODEL_VARIANTS[model_variant]
+    checkpoint_name = f"artifixer-{model_variant}.pt"
     stamp = root / "models/artifixer/setup.json"
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
@@ -230,13 +232,13 @@ def provision(workspace="/workspace"):
     # This download only happens in the explicitly requested setup, never in a run.
     code = (
         "from huggingface_hub import hf_hub_download, snapshot_download; "
-        f"hf_hub_download('nvidia/ArtiFixer', 'artifixer-1.3b.pt', local_dir={str(checkpoint_dir)!r}); "
+        f"hf_hub_download('nvidia/ArtiFixer', {checkpoint_name!r}, local_dir={str(checkpoint_dir)!r}); "
         f"snapshot_download({model_id!r}, allow_patterns=['vae/*', 'transformer/config.json', 'scheduler/*'])"
     )
     run([python, "-c", code])
     runtime = {"repo": str(repo), "python": str(python),
-               "checkpoint": str(checkpoint_dir / "artifixer-1.3b.pt"),
-               "model_id": model_id, "hf_home": env["HF_HOME"]}
+               "checkpoint": str(checkpoint_dir / checkpoint_name),
+               "model_id": model_id, "model_variant": model_variant, "hf_home": env["HF_HOME"]}
     probe_env = dict(env, HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
     subprocess.run([str(python), str(Path(__file__).with_name("artifixer_bridge.py")),
                     "--repo", str(repo), "--checkpoint", runtime["checkpoint"],

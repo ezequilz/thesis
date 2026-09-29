@@ -202,7 +202,7 @@ class SceneRunStore:
         # Missing fields in historical configs predate the new-run defaults.
         # Reading history must not relabel or silently change those experiments.
         if saved.get('pipeline') == 'extended' and isinstance(saved.get('extended', {}), dict):
-            saved['extended'] = {'source_conditioning': 'none', 'generated_cache': 'clean',
+            saved['extended'] = {'model_variant': '1.3b', 'source_conditioning': 'none', 'generated_cache': 'clean',
                                  'max_repair_pixels': 0, 'block_schedule': 'exact_starter', **saved.get('extended', {})}
         config = SceneRunConfig.from_dict(saved)
         state = RunState.from_dict(_read_json(path / STATUS_NAME))

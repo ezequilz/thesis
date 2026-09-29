@@ -775,6 +775,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(200, (STATIC_DIR / "gpu.html").read_bytes(), "text/html; charset=utf-8")
         elif path in ("/scene-runs-ext", "/scene-runs-ext.html"):
             self._send(200, (STATIC_DIR / "scene_runs_ext.html").read_bytes(), "text/html; charset=utf-8")
+        elif path == "/artifixer_model.js":
+            self._send(200, (STATIC_DIR / "artifixer_model.js").read_bytes(), "text/javascript; charset=utf-8")
         elif path in ("/scene-runs", "/scene-runs.html"):
             self._send(200, (STATIC_DIR / "scene_runs.html").read_bytes(), "text/html; charset=utf-8")
         elif self._serve_scene_run_viser_page(path):
@@ -1125,6 +1127,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     overwrite=bool(body.get("overwrite", False)),
                     qwen_required=qwen_required,
                     artifixer_required=body.get("ARTIFIXER_required", False),
+                    artifixer_model=body.get("artifixer_model", "14b"),
                 )
             except Exception as exc:
                 from ..repair_lrz import SetupNeedsOverwrite
