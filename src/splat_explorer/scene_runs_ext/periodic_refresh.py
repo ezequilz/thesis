@@ -5,6 +5,7 @@ No credentials or network client are needed in the ArtiFixer environment.
 """
 from pathlib import Path
 import json
+import shutil
 import time
 
 
@@ -24,16 +25,18 @@ def write_json(path, value):
 
 
 class PeriodicRefresh:
-    def __init__(self, root, indices):
+    def __init__(self, root, indices, *, closure_reference=None):
         self.root = Path(root)
         self.indices = indices
+        self.closure_reference = closure_reference
         self.records = []
         self.prepared_references = []
 
     def prepare(self):
         """Finish every real (unpadded) planned repair before inference starts."""
+        stop = len(self.indices) - (1 if self.closure_reference else 0)
         self.prepared_references = [self.prepare_frame(frame)
-                                    for frame in range(20, len(self.indices), 20)]
+                                    for frame in range(20, stop, 20)]
         return self.prepared_references
 
     def prepare_frame(self, frame):
@@ -70,11 +73,13 @@ class PeriodicRefresh:
         import torch
         from PIL import Image
         index = self.indices[frame]
-        matches = [r for r in self.prepared_references if r['frame_index'] == index]
+        references = self.prepared_references + ([self.closure_reference] if self.closure_reference else [])
+        matches = [r for r in references if r['frame_index'] == index]
         if len(matches) != 1:
             raise ValueError('Periodic replacement requires a prepared anchor')
         reference = matches[0]
         folder = self.root / 'refresh' / f'{index:05d}'
+        folder.mkdir(parents=True, exist_ok=True)
         with Image.open(self.root / reference['path']) as fixed:
             seed = torch.from_numpy(np.array(fixed.convert('RGB'))).permute(2, 0, 1).float() / 255
         # decode_latents_to_video clears ALL inference caches upstream. Use the
@@ -91,6 +96,28 @@ class PeriodicRefresh:
         self.records.append({**reference, 'rgb_interval': 20,
                              'cache': 'clean corrected block; original opacity and cameras'})
         return encoded[:, :, -1:].to(device=prefix.device, dtype=prefix.dtype)
+
+
+    def export_repairs(self, output):
+        """Preserve exact edits, including closure outside a refresh boundary."""
+        for record in self.records:
+            destination = output / f"{record['frame_index']:05d}.png"
+            shutil.copy2(destination, self.root / 'refresh' / f"{record['frame_index']:05d}" / 'vae-roundtrip.png')
+            shutil.copy2(self.root / record['path'], destination)
+        if self.closure_reference:
+            shutil.copy2(self.root / self.closure_reference['path'],
+                         output / f"{self.indices[-1]:05d}.png")
+
+
+def loop_closure_reference(manifest, segment, starter):
+    """Reuse the starter only at its exact calibrated camera pose."""
+    first = segment['start']
+    last = first + segment['count'] - 1
+    frames = manifest['transforms']['frames']
+    if last <= first or frames[first] != frames[last]:
+        raise ValueError('Loop closure requires identical first and last camera poses')
+    return {'frame_index': last, 'path': starter['path'], 'kind': 'edited_render',
+            'reused_from_frame': first}
 
 
 def service_refresh(transport, request_id, *, deadline, should_stop):

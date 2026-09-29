@@ -295,7 +295,7 @@ The existing Exact starter and Upstream schedules retain their behavior.
 Temporal replacements occur at **zero-based RGB indices 20, 40, 60, 80, ...** that exist in the
 trajectory (displayed images 21, 41, 61, 81, ...). A 25-image trajectory therefore
 makes one additional GPT call. The frame setting is per trajectory leg: five
-selected cameras at 25 frames per leg produce 121 images and six repairs. All
+selected cameras at 25 frames per leg produce 121 images and five additional repairs. All
 planned GPT repairs finish before ArtiFixer generation begins. Each uses the
 original repair prompt, the
 render at that camera, and the unchanged `anchor.png` as a visual reference.
@@ -343,10 +343,19 @@ terminate the disposable inference process while it waits for the relay.
 
 The `gpt-prepared-reference-kv-v3` adaptation prepares every scheduled GPT image
 before loading the ArtiFixer pipeline or generating any target frame. For a
-121-image trajectory, the reference indices are `[0, 20, 40, 60, 80, 100, 120]`
+121-image trajectory, the reference indices are `[0, 20, 40, 60, 80, 100]`
 from the first transformer call. All planned repairs across all segments are
 prepared before the first segment starts. Only real, unpadded RGB frames are
 scheduled. Preparation failure aborts generation.
+
+The closing view reuses the initial repaired image without another GPT call.
+The bridge checks that the first and last camera poses are identical. It reuses
+the starter for a closing temporal refresh when that frame falls on a 20-frame
+boundary, and always copies the starter into the final exported frame, including
+loops that end between refresh boundaries. Closure adds no duplicate reference
+to attention and remains excluded from fitting. `inference.json` records this
+reuse in `loop_closures`; the exported closure image difference is therefore zero,
+not an independent measure of generation consistency.
 
 The bridge supplies the full fixed image bank through upstream `rgb_neighbors`
 and its independent `encode_neighbors` path, with `max_neighbors_per_encode=1`

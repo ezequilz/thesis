@@ -8,7 +8,7 @@ from PIL import Image
 
 from splat_explorer.scene_runs_ext.config import validate_options
 from splat_explorer.scene_runs_ext.starter_inference import latent_chunks, install_starter_inference
-from splat_explorer.scene_runs_ext.periodic_refresh import PeriodicRefresh, service_refresh
+from splat_explorer.scene_runs_ext.periodic_refresh import PeriodicRefresh, service_refresh, loop_closure_reference
 
 
 def test_periodic_policy_requires_scene_rgb_and_opacity():
@@ -294,3 +294,56 @@ def test_refreshes_share_anchor_and_retry_without_downloading_inputs(tmp_path, m
     assert sum(path.endswith('/anchor.png') for path in downloads) == 1
     assert not list((request / 'extended/refresh').glob('*/anchor.png'))
     assert not list((request / 'extended/refresh').glob('*/rendered.png'))
+
+
+@pytest.mark.parametrize('count', [21, 25, 121])
+def test_closed_loop_skips_final_gpt_call_and_exports_exact_starter(tmp_path, monkeypatch, count):
+    # Cover both a scheduled refresh at closure and a non-boundary closing view.
+    first = {'transform_matrix': [[1, 0], [0, 1]]}
+    manifest = {'transforms': {'frames': [first.copy() for _ in range(count)]}}
+    closure = loop_closure_reference(manifest, {'start': 0, 'count': count},
+                                     {'path': 'anchor.png'})
+    Image.new('RGB', (16, 16), (213, 57, 109)).save(tmp_path / 'anchor.png')
+    refresh = PeriodicRefresh(tmp_path, list(range(count)), closure_reference=closure)
+    calls = []
+    def prepare(frame):
+        assert frame != count - 1, 'Closure must never request a GPT repair'
+        calls.append(frame)
+        return {'frame_index': frame, 'path': f'{frame}.png', 'kind': 'edited_render'}
+    monkeypatch.setattr(refresh, 'prepare_frame', prepare)
+    bank = refresh.prepare()
+    assert calls == list(range(20, count - 1, 20))
+    assert all(r['frame_index'] != count - 1 for r in bank)
+    output = tmp_path / 'output'
+    output.mkdir()
+    Image.new('RGB', (16, 16)).save(output / f'{count - 1:05d}.png')
+    refresh.export_repairs(output)
+    assert (output / f'{count - 1:05d}.png').read_bytes() == (tmp_path / 'anchor.png').read_bytes()
+    assert not (tmp_path / 'refresh-request.json').exists()
+    manifest['transforms']['frames'][-1] = {'transform_matrix': [[1, 1], [0, 1]]}
+    with pytest.raises(ValueError, match='identical'):
+        loop_closure_reference(manifest, {'start': 0, 'count': count}, {'path': 'anchor.png'})
+
+
+def test_closing_temporal_refresh_uses_starter_without_gpt(tmp_path):
+    torch = pytest.importorskip('torch')
+    Image.new('RGB', (16, 16), (204, 204, 204)).save(tmp_path / 'anchor.png')
+    closure = {'frame_index': 20, 'path': 'anchor.png', 'kind': 'edited_render', 'reused_from_frame': 0}
+    refresh = PeriodicRefresh(tmp_path, list(range(21)), closure_reference=closure)
+    assert refresh.prepare() == []
+    def encode(video):
+        assert torch.allclose(video[:, :-1], torch.full_like(video[:, :-1], .25))
+        assert torch.allclose(video[:, -1], torch.full_like(video[:, -1], .8))
+        return torch.ones(1, 1, 6, 2, 2)
+    pipe = SimpleNamespace(vae=SimpleNamespace(device='cpu'),
+        latents_to_rgb=lambda prefix: torch.full((1, 21, 3, 16, 16), .25),
+        video_processor=SimpleNamespace(postprocess_video=lambda value, **kw: value),
+        encode_video_frames=encode)
+    refresh(pipe, torch.zeros(1, 1, 6, 2, 2), 20)
+    assert refresh.records[0]['reused_from_frame'] == 0
+    assert not (tmp_path / 'refresh-request.json').exists()
+    output = tmp_path / 'output'
+    output.mkdir()
+    Image.new('RGB', (16, 16)).save(output / '00020.png')
+    refresh.export_repairs(output)
+    assert (output / '00020.png').read_bytes() == (tmp_path / 'anchor.png').read_bytes()

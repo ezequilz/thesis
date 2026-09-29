@@ -46,10 +46,10 @@ def load_eval_pipe(opts, device):
 
 try:
     from .starter_inference import install_starter_inference, starter_reference, starter_inputs, generation_policy
-    from .periodic_refresh import PeriodicRefresh
+    from .periodic_refresh import PeriodicRefresh, loop_closure_reference
 except ImportError:  # Executed directly by the GPU worker.
     from starter_inference import install_starter_inference, starter_reference, starter_inputs, generation_policy
-    from periodic_refresh import PeriodicRefresh
+    from periodic_refresh import PeriodicRefresh, loop_closure_reference
 
 
 def crop_camera_conditioning(compute, cameras, indices, neighbors, *, box, source_size, scale):
@@ -131,13 +131,14 @@ def main():
     starters = [starter_reference(manifest, segment) for segment in segments]
     refreshers = []
     generated_references = []
-    for segment in segments:
+    for segment, starter in zip(segments, starters):
         refresh = None
         if options.get('block_schedule') == 'periodic_starter':
             if options.get('source_conditioning') != 'rendered':
                 raise ValueError('Periodic starter requires rendered source conditioning')
             indices = list(range(segment['start'], segment['start'] + segment['count']))
-            refresh = PeriodicRefresh(root, indices)
+            refresh = PeriodicRefresh(root, indices,
+                closure_reference=loop_closure_reference(manifest, segment, starter))
             generated_references.extend(refresh.prepare())
         refreshers.append(refresh)
     # All planned repairs finish before model loading or any generation. Use
@@ -210,10 +211,7 @@ def main():
             if exact_starter:
                 shutil.copy2(root / starter["path"], first_output)
             if refresh:
-                for record in refresh.records:
-                    destination = first_output.parent / f"{record['frame_index']:05d}.png"
-                    shutil.copy2(destination, root / 'refresh' / f"{record['frame_index']:05d}" / 'vae-roundtrip.png')
-                    shutil.copy2(root / record['path'], destination)
+                refresh.export_repairs(first_output.parent)
                 refresh_records.extend(refresh.records)
             del item, renders
     (root / "inference.json").write_text(json.dumps({
@@ -233,6 +231,7 @@ def main():
         "source_conditioning": source_conditioning,
         "starter_diagnostics": starter_diagnostics,
         "periodic_refreshes": refresh_records,
+        "loop_closures": [r.closure_reference for r in refreshers if r],
         "starter_context": ("clean first latent cached at timestep zero before generation" if exact_starter
                             else "upstream blocks from frame zero; edited reference throughout; no exact latent preservation"),
     }, indent=2))
