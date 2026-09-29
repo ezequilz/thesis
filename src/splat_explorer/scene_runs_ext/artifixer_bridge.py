@@ -8,6 +8,41 @@ import argparse
 import json
 from pathlib import Path
 import sys
+from unittest.mock import patch
+
+
+def load_eval_pipe(opts, device):
+    """Build the transformer without a full randomly initialized CPU copy.
+
+    The release checkpoint replaces every parameter strictly. Keep real buffers
+    (including rotary frequencies), but materialize empty BF16 parameters on the
+    GPU before upstream adds its camera and neighbor-conditioning layers.
+    """
+    import torch
+    from accelerate import init_empty_weights
+    from accelerate.utils import set_module_tensor_to_device
+    from diffusers import WanTransformer3DModel
+    from model_eval.run_inference import get_eval_pipe
+    from model_eval.checkpoint_loading import load_transformer_checkpoint
+
+    original = WanTransformer3DModel.from_config
+
+    def empty_transformer(*args, **kwargs):
+        with init_empty_weights(include_buffers=False):
+            model = original(*args, **kwargs)
+        for name, parameter in list(model.named_parameters()):
+            value = torch.empty(parameter.shape, dtype=torch.bfloat16, device=device)
+            set_module_tensor_to_device(model, name, device, value=value, dtype=torch.bfloat16)
+        return model.to(device=device, dtype=torch.bfloat16)
+
+    print("ARTIFIXER_LOADING constructing transformer directly on GPU (BF16)", flush=True)
+    with patch.object(WanTransformer3DModel, "from_config", side_effect=empty_transformer):
+        pipe = get_eval_pipe(opts, device)
+    print("ARTIFIXER_LOADING copying memory-mapped checkpoint", flush=True)
+    load_transformer_checkpoint(pipe.transformer, opts)
+    pipe.transformer.eval().requires_grad_(False)
+    print("ARTIFIXER_LOADED", flush=True)
+    return pipe
 
 try:
     from .starter_inference import install_starter_inference, starter_reference, starter_inputs, generation_policy
@@ -58,8 +93,7 @@ def main():
     import numpy as np
     import torch
     from PIL import Image
-    from model_eval.run_inference import build_parser, get_eval_pipe, process_item
-    from model_eval.checkpoint_loading import load_transformer_checkpoint
+    from model_eval.run_inference import build_parser, process_item
     from model_training.data.utils import compute_camera_rays, load_encoded_prompt
 
     if args.preflight:
@@ -68,8 +102,7 @@ def main():
             "--save_dir", "/tmp/artifixer-probe", "--attention_backend", "native",
         ])
         with torch.inference_mode():
-            pipe = get_eval_pipe(opts, torch.device("cuda:0"))
-            load_transformer_checkpoint(pipe.transformer, opts)
+            pipe = load_eval_pipe(opts, torch.device("cuda:0"))
         print("ARTIFIXER_READY", flush=True)
         return
     if args.request is None:
@@ -115,9 +148,7 @@ def main():
     (root / 'prepared-references.json').write_text(json.dumps(all_references, indent=2))
     device = torch.device("cuda:0")
     with torch.inference_mode():
-        pipe = get_eval_pipe(opts, device)
-        load_transformer_checkpoint(pipe.transformer, opts)
-        pipe.transformer.eval()
+        pipe = load_eval_pipe(opts, device)
         source_conditioning = options.get('source_conditioning', 'none')
         if source_conditioning not in ('none', 'rendered'):
             raise ValueError('Unknown source conditioning mode')
