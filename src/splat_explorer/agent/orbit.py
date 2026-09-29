@@ -80,56 +80,85 @@ def apply_orbit(rig, action, ctx):
     right = np.cross(rig.up, radial)
     end_elevation = start_elevation if elevation is None else elevation * np.pi
     theta = azimuth * np.pi
-    def position(fraction):
-        angle = start_elevation + fraction * (end_elevation - start_elevation)
-        horizontal = np.cos(theta * fraction) * radial + np.sin(theta * fraction) * right
-        return pivot + radius * (np.cos(angle) * horizontal + np.sin(angle) * rig.up)
-    # Check successive short chords along the arc, never the endpoint shortcut.
-    arc_bound = radius * (abs(theta) + abs(end_elevation - start_elevation))
-    steps = max(1, int(np.ceil(arc_bound / .02)), int(np.ceil(abs(theta) / np.radians(2))))
     start = rig.position.copy()
     collision = OrbitCollision(ctx.scene)
-    # |p''(t)| <= radius * (|azimuth| + |elevation change|)^2.
-    # Linear interpolation error on [a,b] is bounded by |p''| (b-a)^2 / 8.
-    curvature_bound = radius * (abs(theta) + abs(end_elevation - start_elevation))**2
-    def blocked_between(a, b):
-        source, dest = position(a), position(b)
-        if collision.intersects(source, dest, curvature_bound * (b - a)**2 / 8):
-            return True
-        delta = dest - source
-        distance = float(np.linalg.norm(delta))
-        return (ctx.world is not None and distance > 1e-10
-                and ctx.world.clamp_motion(source, delta / distance, distance)[1])
-    travelled = 0.
-    blocked = False
-    fraction = 0.
-    for i in range(1, steps + 1):
-        dest = position(i / steps)
-        delta = dest - rig.position
-        distance = float(np.linalg.norm(delta))
-        if distance > 1e-10 and blocked_between(fraction, i / steps):
-            blocked = True
-            low, high = fraction, i / steps
-            # Refine the first blocked interval; every accepted prefix is swept,
-            # so even a thin obstacle between two clear endpoints stops motion.
-            while (high - low) * arc_bound > 1e-5:
-                middle = (low + high) / 2
-                if blocked_between(fraction, middle):
-                    high = middle
-                else:
-                    low = middle
-            dest = position(low)
-            travelled += float(np.linalg.norm(dest - rig.position))
-            rig.position = dest
-            fraction = low
-            break
-        rig.position = dest
-        travelled += distance
-        fraction = i / steps
+    requested_elevation = end_elevation
+
+    def try_elevation(end_elevation):
+        candidate_position = start.copy()
+        def position(fraction):
+            angle = start_elevation + fraction * (end_elevation - start_elevation)
+            horizontal = np.cos(theta * fraction) * radial + np.sin(theta * fraction) * right
+            return pivot + radius * (np.cos(angle) * horizontal + np.sin(angle) * rig.up)
+        # Check successive short chords along the arc, never the endpoint shortcut.
+        arc_bound = radius * (abs(theta) + abs(end_elevation - start_elevation))
+        steps = max(1, int(np.ceil(arc_bound / .02)), int(np.ceil(abs(theta) / np.radians(2))))
+        # |p''(t)| <= radius * (|azimuth| + |elevation change|)^2.
+        # Linear interpolation error on [a,b] is bounded by |p''| (b-a)^2 / 8.
+        curvature_bound = radius * (abs(theta) + abs(end_elevation - start_elevation))**2
+        def blocked_between(a, b):
+            source, dest = position(a), position(b)
+            if collision.intersects(source, dest, curvature_bound * (b - a)**2 / 8):
+                return True
+            delta = dest - source
+            distance = float(np.linalg.norm(delta))
+            return (ctx.world is not None and distance > 1e-10
+                    and ctx.world.clamp_motion(source, delta / distance, distance)[1])
+        travelled = 0.
+        blocked = False
+        fraction = 0.
+        for i in range(1, steps + 1):
+            dest = position(i / steps)
+            delta = dest - candidate_position
+            distance = float(np.linalg.norm(delta))
+            if distance > 1e-10 and blocked_between(fraction, i / steps):
+                blocked = True
+                low, high = fraction, i / steps
+                # Refine the first blocked interval; every accepted prefix is swept,
+                # so even a thin obstacle between two clear endpoints stops motion.
+                while (high - low) * arc_bound > 1e-5:
+                    middle = (low + high) / 2
+                    if blocked_between(fraction, middle):
+                        high = middle
+                    else:
+                        low = middle
+                # Use 80% of the safe prefix, leaving room before the obstacle
+                # instead of parking at the collision boundary. Preserve the
+                # requested orbit curve (including its elevation interpolation).
+                fraction = .8 * low
+                candidate_position = position(fraction) if fraction > 0 else start.copy()
+                samples = max(1, int(np.ceil(steps * fraction)))
+                points = np.array([position(fraction * j / samples)
+                                   for j in range(samples + 1)])
+                travelled = float(np.linalg.norm(np.diff(points, axis=0), axis=1).sum())
+                break
+            candidate_position = dest
+            travelled += distance
+            fraction = i / steps
+        return candidate_position, travelled, blocked, fraction
+
+    best = try_elevation(requested_elevation)
+    # Retry from the original pose, never from a partially moved camera.
+    # Keep the pivot/radius/azimuth and interpolate only the elevation change.
+    if best[2] and abs(requested_elevation - start_elevation) > 1e-8:
+        best_progress = best[1]
+        for scale in (.75, .5, .25, 0.):
+            candidate_elevation = start_elevation + scale * (requested_elevation - start_elevation)
+            candidate = try_elevation(candidate_elevation)
+            if candidate[1] > best_progress + 1e-5:
+                best, best_progress = candidate, candidate[1]
+                end_elevation = candidate_elevation
+                if not candidate[2]:
+                    break
+    rig.position, travelled, blocked, fraction = best
     if travelled > 1e-8:
         rig.aim_at(pivot)
     return {**outcome, 'pivot': pivot.tolist(), 'gaussian_index': index,
             'pixel': [px, py], 'radius': radius, 'azimuth_pi': azimuth,
-            'elevation_pi': end_elevation / np.pi, 'completed_fraction': fraction,
+            'elevation_pi': end_elevation / np.pi,
+            'requested_elevation_pi': requested_elevation / np.pi,
+            'elevation_adjusted': abs(end_elevation - requested_elevation) > 1e-8,
+            'completed_fraction': fraction,
             'travelled': travelled, 'baseline': float(np.linalg.norm(rig.position - start)),
-            'blocked': blocked, 'collision_clearance': ORBIT_CLEARANCE}
+            'blocked': blocked, 'shortened': blocked and fraction > 0,
+            'collision_clearance': ORBIT_CLEARANCE}

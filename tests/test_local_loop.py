@@ -243,3 +243,27 @@ def test_return_restores_entry_pose_without_changing_repair_views(exit_kind):
         np.testing.assert_array_equal(r.position, position)
     rig.position[0] += 1
     assert loop.entry_rig.position[0] == 2  # restored position is not aliased
+
+
+def test_two_failed_orbits_require_successful_translation_before_retry():
+    policy, rig, loop = make_loop()
+    frame = np.zeros((48, 64, 3), np.uint8)
+    orbit = Action('rotate_around', {'pixel_x': .5, 'pixel_y': .5, 'azimuth_pi': .1})
+    for step in range(2):
+        loop.handle(orbit, step, rig)
+        loop.observe(frame, step + 1, rig)  # collision left pose unchanged
+    assert loop.orbit_recovery
+    assert 'rotate_around' not in {t['function']['name'] for t in policy._tools}
+    assert 'move back or strafe' in loop.context()
+    assert 'choose another arc' not in loop.context()
+    assert loop.handle(orbit, 3, rig)[0].name == 'local_noop'
+    move = Action('move', {'direction': 'back', 'distance': .5})
+    loop.handle(move, 4, rig)
+    loop.observe(frame, 5, rig)  # blocked translation must not unlock orbit
+    assert loop.orbit_recovery
+    loop.handle(move, 5, rig)
+    rig.apply(move)
+    loop.observe(frame, 6, rig)
+    assert not loop.orbit_recovery
+    assert 'rotate_around' in {t['function']['name'] for t in policy._tools}
+    assert not loop.steps  # translation still requires re-aiming

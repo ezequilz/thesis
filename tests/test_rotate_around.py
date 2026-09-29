@@ -163,7 +163,8 @@ def test_orbit_stops_at_splat_even_with_collision_disabled(mode):
     gap = np.linalg.norm(rig.position - obstacle) - .06
     assert gap >= ORBIT_CLEARANCE - 1e-7
     if mode in (None, 'off'):
-        assert gap < ORBIT_CLEARANCE + 3e-5
+        assert gap > ORBIT_CLEARANCE + .05
+        assert result['shortened']
     assert np.linalg.norm(rig.position - [0,0,-5]) == pytest.approx(5)
 
 
@@ -217,3 +218,37 @@ def test_arc_error_covers_obstacle_off_the_chord():
     a, b = np.array([-.1,0,0]), np.array([.1,0,0])
     assert not collision.intersects(a, b)
     assert collision.intersects(a, b, arc_error=.03)
+
+
+def test_shortened_orbit_keeps_requested_curve_and_records_view():
+    from splat_explorer.agent.loop import _motion_note
+    rig = CameraRig(np.zeros(3))
+    loop = LocalRepairLoop(SimpleNamespace(), Action('report_artifact'), 0, rig, None, 2)
+    class Wall:
+        def clamp_motion(self, start, direction, distance):
+            return (0., True) if start[0] + direction[0] * distance > 1 else (distance, False)
+    action, _ = loop.handle(Action('rotate_around', {
+        'pixel_x': .5, 'pixel_y': .5, 'azimuth_pi': .5, 'elevation_pi': .25}), 0, rig)
+    result = rig.apply(action, MotionContext(camera=rig.camera(100,100,75),
+        scene=scene_at([[0,0,-5]]), world=Wall()))
+    assert result['shortened']
+    f = result['completed_fraction']
+    theta, phi = f * .5 * np.pi, f * .25 * np.pi
+    np.testing.assert_allclose(rig.position, [5*np.cos(phi)*np.sin(theta),
+        5*np.sin(phi), -5+5*np.cos(phi)*np.cos(theta)], atol=1e-6)
+    assert .7 < rig.position[0] < .85  # deliberate margin from the x=1 boundary
+    assert 'shorter safe orbit' in _motion_note(result)
+    loop.observe(np.zeros((48,64,3), np.uint8), 1, rig)
+    assert loop.steps == [1]
+    assert loop.failed_orbits == 0
+
+
+def test_blocked_orbit_feedback_requires_translation():
+    from splat_explorer.agent.loop import _motion_note
+    rig = CameraRig(np.zeros(3))
+    result = orbit(rig, scene_at([[0,0,-5], [0,0,0]], [.99,.1], [[.1]*3,[.01]*3]))
+    note = _motion_note(result)
+    assert 'Use move' in note
+    assert 'heading is unchanged' in note
+    assert 'aimed at Gaussian' not in note
+    assert not result['shortened']

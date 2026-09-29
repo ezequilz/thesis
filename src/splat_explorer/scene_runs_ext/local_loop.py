@@ -25,6 +25,8 @@ class LocalRepairLoop:
         self.turns = 0
         self.selection_attempts = 0
         self.pending_orbit = False
+        self.failed_orbits = 0
+        self.orbit_recovery = False
         self.pending_move = False
         self.pending_rotation = False
         self.needs_rotation = False
@@ -49,6 +51,14 @@ class LocalRepairLoop:
             policy._task = SimpleNamespace(system_prompt=self.system_prompt,
                 observation_label="Image 1 - RGB view from your current pose:", image_detail="auto")
 
+    def _set_orbit_recovery(self, active):
+        self.orbit_recovery = active
+        if self.saved_tools is not None:
+            names = ('move', 'move_toward', 'rotate') if active else (
+                'move', 'move_toward', 'rotate', 'rotate_around')
+            self.policy._tools = [copy.deepcopy(t) for t in self.saved_tools
+                                  if t['function']['name'] in names]
+
     def system_prompt(self, *args):
         target = (str(self.artifact.args.get('description', '')) + '. Initial region: '
                   + str(self.artifact.args.get('image_region', 'current view')))
@@ -62,6 +72,13 @@ class LocalRepairLoop:
                 'perspectives; height variation is optional. The first selected tile '
                 'will be the reconstruction anchor. Use the printed tile numbers, not step IDs. '
                 'Target: ' + target)
+        if self.orbit_recovery:
+            return (
+                'Repeated orbits failed to translate the camera. Use move to back away or '
+                'strafe into open space, then rotate to re-center the same target. '
+                'Orbit is unavailable until a meaningful translation succeeds. '
+                'Inspect movement feedback; if blocked, try another direction. '
+                'Call exactly one movement tool per turn. Target: ' + target)
         return (
             f'Collect {self.candidates} translated, re-aimed views of the same stationary target. '
             'PREFER rotate_around: pick the same target in CURRENT RGB with normalized '
@@ -104,17 +121,26 @@ class LocalRepairLoop:
             distinct = all(np.linalg.norm(rig.position - r.position) >= self.min_baseline
                            for r in self.rigs)
             if travelled >= self.min_baseline and distinct:
+                self.failed_orbits = 0
                 self.steps.append(step)
                 self.frames.append(np.asarray(observation).copy())
                 self.rigs.append(copy.deepcopy(rig))
                 self.needs_rotation = False
                 self.note = 'Orbit view recorded. Inspect visibility, then orbit to another vantage.'
             else:
-                self.note = 'Orbit blocked, failed, negligible or repeated. Inspect feedback and choose another arc.'
+                self.failed_orbits += 1
+                if self.failed_orbits >= 2:
+                    self._set_orbit_recovery(True)
+                self.note = ('Repeated orbits failed. Translate into open space before retrying.'
+                             if self.orbit_recovery else
+                             'Orbit blocked, failed, negligible or repeated. Inspect feedback and choose another arc.')
             self.pending_orbit = False
         if self.pending_move:
             travelled = np.linalg.norm(rig.position - self.previous_rig.position)
             self.needs_rotation = travelled >= self.min_baseline
+            if self.needs_rotation and self.orbit_recovery:
+                self.failed_orbits = 0
+                self._set_orbit_recovery(False)
             self.note = (f'Translated {travelled:.3f} units. Now rotate to re-center the target.'
                          if self.needs_rotation else
                          'Translation was blocked or negligible. Try another travel direction.')
@@ -185,7 +211,8 @@ class LocalRepairLoop:
         return (f'INNER LOOP: {len(self.steps)}/{self.candidates} movement views recorded. '
                 + ('Select five numbered tiles. ' if self.selecting else
                    'NEXT: rotate to re-center the target. ' if self.needs_rotation else
-                   'NEXT: orbit around the target with rotate_around. ')
+                   'NEXT: move back or strafe into open space before retrying an orbit. '
+                   if self.orbit_recovery else 'NEXT: orbit around the target with rotate_around. ')
                 + height_note + self.note)
 
     def restore_camera(self, rig):
@@ -227,6 +254,9 @@ class LocalRepairLoop:
             self.restore()
             return Action('cancel_local_repair'), 'cancelled'
         if action.name in ('move', 'move_toward', 'rotate', 'rotate_around'):
+            if self.orbit_recovery and action.name == 'rotate_around':
+                self.note = 'Translate into open space before retrying an orbit.'
+                return Action('local_noop'), 'collecting'
             if self.needs_rotation and action.name not in ('rotate', 'rotate_around'):
                 self.note = 'Rotate to re-center the target before translating again.'
                 return Action('local_noop'), 'collecting'

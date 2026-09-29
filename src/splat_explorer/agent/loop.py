@@ -77,11 +77,23 @@ def _motion_note(outcome: dict | None) -> str | None:
     if kind == "local_return":
         return "local view collection finished; camera restored to its pre-local position, yaw and pitch"
     if kind == "rotate_around":
+        if outcome['blocked'] and outcome['baseline'] < 1e-5:
+            return (
+                'previous rotate_around was blocked before meaningful movement; '
+                'camera heading is unchanged. Use move to back away or strafe into '
+                'open space, then re-center the target. Re-picking a pivot cannot '
+                'resolve a collision at the camera position.'
+            )
         return (f"previous rotate_around: baseline={outcome['baseline']:.3f}, "
                 f"arc travel={outcome['travelled']:.3f}, radius={outcome['radius']:.3f}, "
                 f"completed={outcome['completed_fraction']:.0%}, blocked={outcome['blocked']}; "
                 f"aimed at Gaussian {outcome['gaussian_index']} center {outcome['pivot']}. "
-                "Inspect visibility and re-pick the same target for the next orbit.")
+                + (f"Elevation target reduced toward the starting elevation to {outcome['elevation_pi']:.3f} pi for clearance. "
+                   if outcome.get('elevation_adjusted') else "")
+                + ("A shorter safe orbit was used, leaving space before the obstacle. "
+                   "This translated view can be recorded; inspect visibility before continuing."
+                   if outcome.get('shortened') else
+                   "Inspect visibility and re-pick the same target for the next orbit."))
     if kind == "rotate":
         parts = []
         if "yaw_degrees" in outcome:
