@@ -237,7 +237,9 @@ ACTION_TOOLS: list[dict] = [
                 "Omit elevation_pi to preserve current elevation. azimuth_pi=0 with "
                 "elevation omitted means no movement. Prefer +/-0.1 to +/-0.2 for "
                 "overlapping repair views, inspect RGB, and re-pick the same target each call. "
-                "Collision may stop the arc early; check feedback. Large arcs may occlude the target."
+                "The arc always stops before intersecting visible Gaussian extents, with a "
+                "small positive clearance, even when navigation collision is off. Check "
+                "blocked and completed_fraction feedback. Large arcs may occlude the target."
             ),
             "parameters": {
                 "type": "object",

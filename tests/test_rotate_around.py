@@ -144,3 +144,76 @@ def test_failed_or_noop_orbit_does_not_record_candidate():
                   camera=rig.camera(100,100,75)) if amount == 0 else None)
         loop.observe(np.zeros((48,64,3), np.uint8), 1, rig)
     assert not loop.steps
+
+
+@pytest.mark.parametrize('mode', [None, 'off', 'low', 'full'])
+def test_orbit_stops_at_splat_even_with_collision_disabled(mode):
+    from splat_explorer.navigation import CollisionWorld
+    from splat_explorer.agent.orbit_collision import ORBIT_CLEARANCE
+    rig = CameraRig(np.zeros(3))
+    angle = .2
+    obstacle = np.array([5*np.sin(angle), 0, -5+5*np.cos(angle)])
+    scene = scene_at([[0, 0, -5], obstacle], scales=[[.1]*3, [.02]*3])
+    world = None if mode is None else CollisionWorld(scene, collision=mode)
+    result = rig.apply(Action('rotate_around', {'pixel_x':.5, 'pixel_y':.5,
+                       'azimuth_pi':.5}), MotionContext(
+                           camera=rig.camera(100,100,75), scene=scene, world=world))
+    assert result['blocked']
+    assert 0 < result['completed_fraction'] < angle / (np.pi / 2)
+    gap = np.linalg.norm(rig.position - obstacle) - .06
+    assert gap >= ORBIT_CLEARANCE - 1e-7
+    if mode in (None, 'off'):
+        assert gap < ORBIT_CLEARANCE + 3e-5
+    assert np.linalg.norm(rig.position - [0,0,-5]) == pytest.approx(5)
+
+
+def test_swept_collision_catches_thin_rotated_splat_between_clear_endpoints():
+    from splat_explorer.agent.orbit_collision import OrbitCollision
+    scene = scene_at([[0,0,0]], scales=[[1, .0001, .1]])
+    scene.quats[0] = [np.cos(np.pi/4), 0, 0, np.sin(np.pi/4)]
+    collision = OrbitCollision(scene)
+    a, b = np.array([-1.,0,0]), np.array([1.,0,0])
+    assert not collision.intersects(a, a)
+    assert not collision.intersects(b, b)
+    assert collision.intersects(a, b)
+    # A max-scale sphere would incorrectly block this parallel passage.
+    assert not collision.intersects(np.array([.5,-1.,0]), np.array([.5,1.,0]))
+
+
+def test_orbit_initial_overlap_stops_without_moving():
+    rig = CameraRig(np.zeros(3))
+    scene = scene_at([[0,0,-5], [0,0,0]], [.99, .1], [[.1]*3, [.01]*3])
+    result = orbit(rig, scene)
+    assert result['blocked']
+    assert result['completed_fraction'] == 0
+    np.testing.assert_array_equal(rig.position, np.zeros(3))
+
+
+def test_collision_ignores_invisible_and_invalid_splats():
+    from splat_explorer.agent.orbit_collision import OrbitCollision
+    scene = scene_at([[0,0,0], [0,0,0], [np.nan,0,0]], [0, 1, 1])
+    scene.scales[1] = 0
+    collision = OrbitCollision(scene)
+    assert not collision.intersects(np.array([-1.,0,0]), np.array([1.,0,0]))
+
+
+@pytest.mark.parametrize('azimuth,elevation', [(-.5, 0), (.3, .25), (0, -.25)])
+def test_collision_follows_negative_and_elevated_orbits(azimuth, elevation):
+    rig = CameraRig(np.zeros(3))
+    theta, phi = .4 * azimuth * np.pi, .4 * elevation * np.pi
+    obstacle = np.array([5*np.cos(phi)*np.sin(theta), 5*np.sin(phi),
+                         -5+5*np.cos(phi)*np.cos(theta)])
+    scene = scene_at([[0,0,-5], obstacle], scales=[[.1]*3, [.01]*3])
+    result = orbit(rig, scene, azimuth_pi=azimuth, elevation_pi=elevation)
+    assert result['blocked']
+    assert 0 < result['completed_fraction'] < .4
+    assert np.linalg.norm(rig.position - obstacle) >= .04 - 1e-7
+    assert np.linalg.norm(rig.position - [0,0,-5]) == pytest.approx(5)
+
+
+def test_arc_error_covers_obstacle_off_the_chord():
+    from splat_explorer.agent.orbit_collision import OrbitCollision
+    collision = OrbitCollision(scene_at([[0,.03,0]], scales=[[.001]*3]))
+    a, b = np.array([-.1,0,0]), np.array([.1,0,0])
+    assert not collision.intersects(a, b)
+    assert collision.intersects(a, b, arc_error=.03)

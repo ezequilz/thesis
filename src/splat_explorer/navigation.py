@@ -45,6 +45,9 @@ full clamp treats them as walls and traps the agent in one room.
   off  — free-cam: no path clamp (default). move_toward still uses depth to
          walk toward a surface and stops a small margin short of that target.
 
+rotate_around additionally sweeps against oriented three-sigma Gaussian extents
+regardless of this policy, retaining at least 0.01 scene units of clearance.
+
 move_toward
 -----------
 The VLM picks a pixel in its current RGB view plus an amount in [0, 1]. The

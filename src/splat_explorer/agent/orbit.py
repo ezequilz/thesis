@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..rendering.base import quats_to_covariances
+from .orbit_collision import OrbitCollision, ORBIT_CLEARANCE
 
 
 def pick_pivot(scene, camera, pixel_x, pixel_y):
@@ -87,6 +88,18 @@ def apply_orbit(rig, action, ctx):
     arc_bound = radius * (abs(theta) + abs(end_elevation - start_elevation))
     steps = max(1, int(np.ceil(arc_bound / .02)), int(np.ceil(abs(theta) / np.radians(2))))
     start = rig.position.copy()
+    collision = OrbitCollision(ctx.scene)
+    # |p''(t)| <= radius * (|azimuth| + |elevation change|)^2.
+    # Linear interpolation error on [a,b] is bounded by |p''| (b-a)^2 / 8.
+    curvature_bound = radius * (abs(theta) + abs(end_elevation - start_elevation))**2
+    def blocked_between(a, b):
+        source, dest = position(a), position(b)
+        if collision.intersects(source, dest, curvature_bound * (b - a)**2 / 8):
+            return True
+        delta = dest - source
+        distance = float(np.linalg.norm(delta))
+        return (ctx.world is not None and distance > 1e-10
+                and ctx.world.clamp_motion(source, delta / distance, distance)[1])
     travelled = 0.
     blocked = False
     fraction = 0.
@@ -94,10 +107,22 @@ def apply_orbit(rig, action, ctx):
         dest = position(i / steps)
         delta = dest - rig.position
         distance = float(np.linalg.norm(delta))
-        if ctx.world is not None and distance > 1e-10:
-            _, blocked = ctx.world.clamp_motion(rig.position, delta / distance, distance)
-            if blocked:
-                break  # retain the previous safe point exactly on the sphere
+        if distance > 1e-10 and blocked_between(fraction, i / steps):
+            blocked = True
+            low, high = fraction, i / steps
+            # Refine the first blocked interval; every accepted prefix is swept,
+            # so even a thin obstacle between two clear endpoints stops motion.
+            while (high - low) * arc_bound > 1e-5:
+                middle = (low + high) / 2
+                if blocked_between(fraction, middle):
+                    high = middle
+                else:
+                    low = middle
+            dest = position(low)
+            travelled += float(np.linalg.norm(dest - rig.position))
+            rig.position = dest
+            fraction = low
+            break
         rig.position = dest
         travelled += distance
         fraction = i / steps
@@ -107,4 +132,4 @@ def apply_orbit(rig, action, ctx):
             'pixel': [px, py], 'radius': radius, 'azimuth_pi': azimuth,
             'elevation_pi': end_elevation / np.pi, 'completed_fraction': fraction,
             'travelled': travelled, 'baseline': float(np.linalg.norm(rig.position - start)),
-            'blocked': blocked}
+            'blocked': blocked, 'collision_clearance': ORBIT_CLEARANCE}
