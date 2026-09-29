@@ -11,8 +11,10 @@ import sys
 
 try:
     from .starter_inference import install_starter_inference, starter_reference, starter_inputs, generation_policy
+    from .periodic_refresh import PeriodicRefresh
 except ImportError:  # Executed directly by the GPU worker.
     from starter_inference import install_starter_inference, starter_reference, starter_inputs, generation_policy
+    from periodic_refresh import PeriodicRefresh
 
 
 def crop_camera_conditioning(compute, cameras, indices, neighbors, *, box, source_size, scale):
@@ -109,8 +111,16 @@ def main():
         if exact_starter:
             install_starter_inference(pipe, generated_cache=policy['generated_cache'])
         starter_diagnostics = []
+        refresh_records = []
         for segment, starter in zip(segments, starters):
             indices = list(range(segment["start"], segment["start"] + segment["count"]))
+            refresh = None
+            if options.get('block_schedule') == 'periodic_starter':
+                if source_conditioning != 'rendered':
+                    raise ValueError('Periodic starter requires rendered source conditioning')
+                refresh = PeriodicRefresh(root, indices)
+                pipe.starter_refresh = refresh
+                pipe.starter_rgb_count = len(indices)
             seed = rgb(root / starter["path"])
             renders, opacity = starter_inputs(seed, len(indices))
             if source_conditioning == 'rendered':
@@ -155,6 +165,12 @@ def main():
                     float((rgb(roundtrip) - seed).abs().mean())})
             if exact_starter:
                 shutil.copy2(root / starter["path"], first_output)
+            if refresh:
+                for record in refresh.records:
+                    destination = first_output.parent / f"{record['frame_index']:05d}.png"
+                    shutil.copy2(destination, root / 'refresh' / f"{record['frame_index']:05d}" / 'vae-roundtrip.png')
+                    shutil.copy2(root / record['path'], destination)
+                refresh_records.extend(refresh.records)
             del item, renders
     (root / "inference.json").write_text(json.dumps({
         "checkpoint": str(args.checkpoint), "model_id": args.model_id,
@@ -168,6 +184,7 @@ def main():
         "scene_rgb_conditioning": source_conditioning == 'rendered',
         "source_conditioning": source_conditioning,
         "starter_diagnostics": starter_diagnostics,
+        "periodic_refreshes": refresh_records,
         "starter_context": ("clean first latent cached at timestep zero before generation" if exact_starter
                             else "upstream blocks from frame zero; edited reference throughout; no exact latent preservation"),
     }, indent=2))

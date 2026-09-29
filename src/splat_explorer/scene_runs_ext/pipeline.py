@@ -251,14 +251,17 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
         'source_conditioning': options.get('source_conditioning', 'none'),
         **policy,
     }, indent=2))
-    # Only frame zero is an edited observation. Do not insert edits at later
-    # waypoints or at loop closure; all later images are model predictions.
+    # Exact starters and periodic GPT refreshes are edited observations.
     edited_indices = []
     for reference, target in zip(references, anchor_targets):
         start = reference["frame_index"]
         targets[start] = target
         Image.fromarray(target).save(preview / f"{start:05d}.png")
         edited_indices.append(start)
+    if options['block_schedule'] == 'periodic_starter':
+        inference = json.loads((root / 'inference.json').read_text())
+        edited_indices.extend(record['frame_index'] for record in inference['periodic_refreshes']
+                              if record['frame_index'] < len(cameras) - 1)
     on_progress({"phase": "multiview_fit"})
     closure_l1 = float(np.mean(np.abs(targets[-1].astype(np.float32) - targets[0].astype(np.float32))) / 255)
     # The generated closing frame is a consistency diagnostic, not a second

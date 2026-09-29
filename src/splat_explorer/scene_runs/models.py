@@ -93,6 +93,9 @@ class SceneRunConfig:
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
         object.__setattr__(self, "image_edit_backend", image_backend)
+        if (self.pipeline == 'extended' and self.extended['block_schedule'] == 'periodic_starter'
+                and image_backend == 'qwen-image-edit'):
+            raise ValueError('Periodic starter requires a GPT-image backend for anchor-referenced repairs')
         if not isinstance(self.model, str):
             raise ValueError("model must be a string")
         for name in ("width", "height", "duration_seconds", "repair_seconds"):

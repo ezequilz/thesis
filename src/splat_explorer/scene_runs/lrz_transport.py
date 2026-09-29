@@ -439,6 +439,7 @@ class LrzSceneRunTransport:
             "--include", "extended/anchor.png",
             "--include", "extended/targets/***",
             "--include", "extended/references/***",
+            "--include", "extended/refresh/***",
             "--include", "extended/validation/***",
             "--include", REGENERATED_NAME,
             "--include", RENDERED_NAME,
@@ -466,6 +467,10 @@ class LrzSceneRunTransport:
             if should_stop() and not stop_sent:
                 self.stop()
                 stop_sent = True
+            if (not stop_sent and
+                    (self._run_config.get('extended') or {}).get('block_schedule') == 'periodic_starter'):
+                from ..scene_runs_ext.periodic_refresh import service_refresh
+                service_refresh(self, request_id, deadline=deadline, should_stop=should_stop)
             result = repair_lrz._ssh_run(
                 self.cfg,
                 (

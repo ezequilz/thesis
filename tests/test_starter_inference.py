@@ -106,7 +106,7 @@ def test_only_gpt_starter_has_rgb_and_observation_opacity():
     assert seed.count_nonzero() > 0, 'Conditioning must not mutate reference images'
 
 
-@pytest.mark.parametrize('schedule', ['exact_starter', 'upstream'])
+@pytest.mark.parametrize('schedule', ['exact_starter', 'periodic_starter', 'upstream'])
 @pytest.mark.parametrize('source_mode', ['none', 'rendered'])
 def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path, monkeypatch, source_mode, schedule):
     import json
@@ -144,7 +144,7 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
     def process(pipe, item, opts, output, rank, device, scale):
         assert pipe.cleared
         pipe.cleared = False
-        if schedule == 'exact_starter':
+        if schedule != 'upstream':
             assert pipe.generate_samples_from_batch.__func__ is generate_from_starter
         else:
             assert pipe.generate_samples_from_batch.__func__ is Pipe.generate_samples_from_batch
@@ -166,6 +166,17 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
         dest.mkdir(parents=True, exist_ok=True)
         for i in item['frame_indices'].tolist():
             Image.new('RGB', (32,32)).save(dest / f'{i:05d}.png')
+        if schedule == 'periodic_starter':
+            from splat_explorer.scene_runs_ext.periodic_refresh import PeriodicRefresh
+            assert isinstance(pipe.starter_refresh, PeriodicRefresh)
+            assert pipe.starter_rgb_count == 9
+            # Mock a completed callback to exercise bridge export/diagnostics;
+            # actual 20-frame scheduling and VAE behavior have CPU tensor tests.
+            i = item['frame_indices'][-1].item()
+            folder = tmp_path / 'refresh' / f'{i:05d}'
+            folder.mkdir(parents=True)
+            Image.new('RGB', (32,32), (230,230,230)).save(folder / 'fixed.png')
+            pipe.starter_refresh.records.append({'frame_index': i, 'path': f'refresh/{i:05d}/fixed.png'})
     inference = ModuleType('model_eval.run_inference')
     inference.build_parser = Parser
     inference.get_eval_pipe = lambda *a: pipe
@@ -181,6 +192,10 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
         monkeypatch.setitem(sys.modules, name, module)
     monkeypatch.setattr(sys, 'argv', ['bridge', '--request', str(tmp_path), '--repo', str(tmp_path),
                                     '--checkpoint', 'unused', '--model-id', 'test'])
+    if schedule == 'periodic_starter' and source_mode == 'none':
+        with pytest.raises(ValueError, match='rendered source'):
+            artifixer_bridge.main()
+        return
     artifixer_bridge.main()
     assert len(seen) == 2
     assert parsed[parsed.index('--local_attn_size') + 1] == '21'
@@ -190,9 +205,14 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
     assert metadata['scene_rgb_conditioning'] is (source_mode == 'rendered')
     assert len(metadata['starter_diagnostics']) == 2
     assert metadata['block_schedule'] == schedule
-    assert metadata['exact_starter_preserved'] is (schedule == 'exact_starter')
-    assert metadata['generated_cache'] == ('clean' if schedule == 'exact_starter' else 'last_denoising')
-    diagnostic = 'starter-vae-roundtrip' if schedule == 'exact_starter' else 'upstream-first-frame'
+    assert metadata['exact_starter_preserved'] is (schedule != 'upstream')
+    assert metadata['generated_cache'] == ('clean' if schedule != 'upstream' else 'last_denoising')
+    diagnostic = 'starter-vae-roundtrip' if schedule != 'upstream' else 'upstream-first-frame'
     assert (tmp_path / f'{diagnostic}-00000.png').exists()
     for i, expected in [(0,40),(9,220)]:
-        assert Image.open(tmp_path/f'artifixer-output/bundle/frames/batch_0000/pred/{i:05d}.png').getpixel((0,0)) == ((expected,)*3 if schedule == "exact_starter" else (0,0,0))
+        assert Image.open(tmp_path/f'artifixer-output/bundle/frames/batch_0000/pred/{i:05d}.png').getpixel((0,0)) == ((expected,)*3 if schedule != "upstream" else (0,0,0))
+    if schedule == 'periodic_starter':
+        assert [r['frame_index'] for r in metadata['periodic_refreshes']] == [8, 17]
+        for i in [8, 17]:
+            assert Image.open(tmp_path/f'artifixer-output/bundle/frames/batch_0000/pred/{i:05d}.png').getpixel((0,0)) == (230,230,230)
+            assert (tmp_path/f'refresh/{i:05d}/vae-roundtrip.png').is_file()

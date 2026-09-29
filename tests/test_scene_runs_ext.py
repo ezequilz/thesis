@@ -179,7 +179,8 @@ def test_native_repair_resolution_preserves_frustum_and_uses_explicit_budget():
 
 
 @pytest.mark.parametrize('fail_generation', [False, True])
-def test_anchor_prefit_rerenders_paired_sources_without_mutating_parent(tmp_path, fail_generation):
+@pytest.mark.parametrize('schedule', ['exact_starter', 'upstream'])
+def test_anchor_prefit_rerenders_paired_sources_without_mutating_parent(tmp_path, fail_generation, schedule):
     source = scene()
     Image.new('RGB', (32,32), (210,210,210)).save(tmp_path/'anchor.png')
     order = []
@@ -205,6 +206,7 @@ def test_anchor_prefit_rerenders_paired_sources_without_mutating_parent(tmp_path
         assert np.array(Image.open(root/'validation/prefit-000.png'))[0,0,0] == 204
         manifest = json.loads((root/'bundle.json').read_text())
         assert manifest['persistent_edited_reference'] and manifest['fitting_stages'] == 2
+        assert manifest['block_schedule'] == schedule
         assert manifest['references'][0]['path'] == 'anchor.png'
         if fail_generation:
             raise RuntimeError('test generation failure')
@@ -216,7 +218,7 @@ def test_anchor_prefit_rerenders_paired_sources_without_mutating_parent(tmp_path
         return {}
     def run():
         return repair(source, camera(), tmp_path/'anchor.png', tmp_path,
-                      options={'frames':9, 'fit_iterations':1, 'anchor_prefit':'gsfix3d'},
+                      options={'frames':9, 'fit_iterations':1, 'anchor_prefit':'gsfix3d', 'block_schedule':schedule},
                       runtime={}, proposal={}, should_stop=lambda:False, on_progress=lambda _:None,
                       renderer_factory=CandidateRenderer, propagator=generate, fitter=fit,
                       anchor_prefitter=prefit)

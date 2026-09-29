@@ -37,13 +37,15 @@ def validate_options(value=None):
         raise ValueError("fitting_safeguards must be a boolean")
     for key, choices in (("source_conditioning", ("none", "rendered")),
                          ("generated_cache", ("clean", "last_denoising")),
-                         ("block_schedule", ("exact_starter", "upstream")),
+                         ("block_schedule", ("exact_starter", "periodic_starter", "upstream")),
                          ("anchor_prefit", ("none", "gsfix3d"))):
         if result[key] not in choices:
             raise ValueError(f"{key} must be one of {choices}")
     # Upstream keeps its final denoising cache; clean refresh is adapter-only.
     if result['block_schedule'] == 'upstream':
         result['generated_cache'] = 'last_denoising'
+    if result['block_schedule'] == 'periodic_starter' and result['source_conditioning'] != 'rendered':
+        raise ValueError('Periodic starter requires rendered source conditioning and opacity')
     if result['anchor_prefit'] != 'none' and result['source_conditioning'] != 'rendered':
         raise ValueError('anchor_prefit requires rendered source conditioning')
     for key, lower, upper in [("frames", 9, 81), ("fit_iterations", 1, 2000),

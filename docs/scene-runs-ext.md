@@ -282,3 +282,54 @@ For a controlled comparison, keep the GPT edit, trajectory, source conditioning,
 seed, inference steps and fitting settings fixed and change only the schedule.
 This option enables comparison runs; it does not automatically run both modes or
 establish which produces better images.
+
+## Periodic GPT-image repair
+
+Select **Exact starter + GPT repair every 20 frames** immediately below Exact
+starter, or set `extended.block_schedule: "periodic_starter"`. This opt-in
+experiment preserves the initial exact starter and requires rendered RGB and
+opacity plus a GPT-image backend. GSFix3D anchor prefit remains compatible.
+The existing Exact starter and Upstream schedules retain their behavior.
+
+Refreshes occur at **zero-based RGB indices 20, 40, 60, 80, ...** that exist in the
+trajectory (displayed images 21, 41, 61, 81, ...). A 25-image trajectory therefore
+makes one additional GPT call. The frame setting is per trajectory leg: five
+selected cameras at 25 frames per leg produce 121 images and six refreshes. Each uses the original repair prompt, the
+render at that camera, and the unchanged `anchor.png` as a visual reference.
+With prefit enabled, the input is the prefitted candidate's render, matching
+ArtiFixer's source RGB and opacity. Generated RGB is never sent as the repair
+input. The local transport services these requests through the same CliRelay
+backend/model as the initial edit; credentials stay off the GPU worker.
+
+The pinned upstream code uses seven latent frames per block and a temporal VAE
+scale of four. In the Exact starter adaptation, blocks after the starter cover
+28 RGB frames, not 21. The new schedule splits those blocks where necessary to
+finish a VAE group at each 20-image boundary, without dropping or duplicating
+camera positions. This is an inference adaptation, not the paper's trained
+block schedule.
+
+At a boundary, generation first runs normally using prior KV memory, rendered
+opacity, camera rays, and the fixed anchor reference. The VAE decodes the
+generated prefix without clearing inference caches. Its last RGB frame is
+replaced by the GPT repair and the prefix is re-encoded using upstream VAE
+normalization. Only its final temporal latent is replaced. Encoding in video
+context is deliberate: a later latent spans four RGB frames, so substituting a
+standalone first-image latent would not have equivalent temporal semantics.
+The corrected block is written back to KV memory at timestep zero, retaining
+actual rendered opacity and camera conditioning. Subsequent blocks use the
+chosen cache policy. The repaired boundary becomes context for the next chunk;
+it is not merely swapped into exported images after generation.
+
+The exported repair frame is preserved exactly (after calibrated resizing),
+as with the original starter, and is included among direct edited fitting
+targets. Loop closure remains excluded from fitting. The final latent's four
+RGB frames can change through the causal VAE round trip. Visual consistency
+and reduced drift still require a GPU comparison; CPU tests validate control
+flow and tensor/cache contracts, not image quality.
+
+`extended/refresh/XXXXX/` stores the rendered input, anchor, generated boundary
+before intervention, GPT output, resized fixed output, VAE round trip, and relay
+response. `inference.json` records actual refreshes; bundle/metrics record the
+interval and special clean-cache policy. Refresh failures abort the candidate
+instead of silently continuing with stale output. Parent cancellation/deadlines
+terminate the disposable inference process while it waits for the relay.
