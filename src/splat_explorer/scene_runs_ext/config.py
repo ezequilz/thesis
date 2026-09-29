@@ -3,12 +3,14 @@ from __future__ import annotations
 import math
 
 DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 1000,
+            "source_conditioning": "rendered", "generated_cache": "last_denoising",
             "inference_steps": 4, "seed": 42, "camera_scale": 1.0,
-            "max_repair_pixels": 0, "local_view_count": 5, "local_max_turns": 30,
+            "max_repair_pixels": 960 * 720, "local_view_count": 5, "local_max_turns": 30,
             "repair_limit": 0, "local_candidate_count": 10}
-# 4:3, 3× the 640×480 VLM default, and a multiple of 16 for the GPU rasterizer.
-REPAIR_WIDTH = 1920
-REPAIR_HEIGHT = 1440
+# 4:3 at 720 lines, matching the paper's stated resolution range.
+# Both dimensions are VAE-aligned; preserve the exploration camera aspect ratio.
+REPAIR_WIDTH = 960
+REPAIR_HEIGHT = 720
 RUNTIME_DEFAULTS = {
     "repo": "/workspace/third_party/ArtiFixer",
     "python": "/workspace/artifixer-venv/bin/python",
@@ -29,6 +31,10 @@ def validate_options(value=None):
     if unknown:
         raise ValueError(f"Unknown extended options: {', '.join(sorted(unknown))}")
     result = {**DEFAULTS, **(value or {})}
+    for key, choices in (("source_conditioning", ("none", "rendered")),
+                         ("generated_cache", ("clean", "last_denoising"))):
+        if result[key] not in choices:
+            raise ValueError(f"{key} must be one of {choices}")
     for key, lower, upper in [("frames", 9, 81), ("fit_iterations", 1, 2000),
                               ("inference_steps", 1, 50), ("seed", 0, 2**31-1),
                               ("max_repair_pixels", 0, 16777216), ("local_view_count", 5, 9),

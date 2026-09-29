@@ -197,6 +197,23 @@ Prepared inputs, edited references, and experiment scripts are under
 `outputs/artifixer-local-railing/`. A subsequent user-run live test exposed overly
 small inner-loop movements, motivating the object-coverage revision below.
 
+## Starter diagnosis and controlled comparisons
+
+The [29 September investigation](artifixer-starter-diagnosis.md) distinguishes
+raw generation drift from severe smearing in the fitted splat. New extended
+options `source_conditioning` (`none` or `rendered`) and `generated_cache`
+(`clean` or `last_denoising`) support isolated comparisons; new runs default to `rendered` and `last_denoising`. The dashboard exposes
+both options in the **ArtiFixer settings** popup, together with resolution,
+denoising steps, seed, trajectory, exploration and fitting controls. Apply changes
+to the next queued run, cancel to discard the draft, or restore defaults. Historical
+runs retain their saved settings. Image-repair renders default to 960×720, and the ArtiFixer pixel
+budget defaults to 691200 (960×720 at 4:3), preserving framing if the editor
+returns a larger image. Zero explicitly opts back into native resolution. Rendered mode uses actual paired RGB/opacity after the exact
+edited starter, including opacity mixing at every denoising step.
+`inference.json` now includes the unreplaced starter VAE-roundtrip image and MAE.
+`generation-diagnostics.json` records camera and raw-image observations before
+fitting. These changes have CPU coverage; visual improvement requires GPU tests.
+
 ## Object-coverage revision validation
 
 Local regression checks cover unchanged outer v3 tools, normal inner movement,

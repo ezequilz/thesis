@@ -40,6 +40,14 @@
   .setup-status.ok { color:var(--ok); }
   .setup-status.warn { color:var(--warn); }
   .setup-status.err { color:var(--err); }
+  dialog { width:min(700px, calc(100vw - 24px)); max-height:90vh; overflow:auto; padding:24px;
+    background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:10px; }
+  dialog::backdrop { background:rgba(0,0,0,.65); }
+  dialog h2 { margin:0; font-size:20px; }
+  dialog h3 { grid-column:1/-1; margin:18px 0 4px; font-size:14px; }
+  .wide { grid-column:1/-1; }
+  .settings-note { color:var(--dim); font-size:12px; margin:4px 0 12px; }
+  @media(max-width:480px) { #ext-settings-form { grid-template-columns:1fr; } }
   form { display:grid; grid-template-columns:1fr 1fr; gap:8px 10px; }
   label { display:flex; flex-direction:column; gap:3px; color:var(--dim); font-size:11px; }
   label.wide, .actions { grid-column:1/-1; }
@@ -180,8 +188,6 @@
         <label>VLM backend<input id="backend" name="backend" value="cli_relay" readonly></label>
         <label title="Resolution the VLM agent sees on every step.">VLM width<input id="width" name="width" type="number" min="64" max="3840" value="640"></label>
         <label title="Resolution the VLM agent sees on every step.">VLM height<input id="height" name="height" type="number" min="64" max="2160" value="480"></label>
-        <label title="Rendered on report_artifact and sent to the image model. Saved for debugging. The agent still receives the VLM resolution.">Image repair width<input id="repair-width" name="repair_width" type="number" min="64" max="3840" value="1920"></label>
-        <label title="Must keep the same aspect ratio as the VLM resolution. Multiples of 16.">Image repair height<input id="repair-height" name="repair_height" type="number" min="64" max="2880" value="1440"></label>
         <label class="wide">VLM model<input id="model" name="model" value="gpt-5.6-luna"></label>
         <label>Image edit<select id="image-edit" name="image_edit_backend">
           <option value="gpt-image-2.5-sunburst">gpt-image-2.5 sunburst (CliRelay)</option>
@@ -199,11 +205,8 @@
           <option value="every_artifact">every artifact</option>
           <option value="every_step">every step after first artifact</option>
         </select></label>
-        <label>Samples per camera leg<input id="ext-frames" type="number" min="9" max="81" step="4" value="25"></label>
-        <label title="0 uses the largest exact-aspect resolution below the returned edited image. Set an explicit pixel budget only when GPU memory requires it; framing is preserved.">Reconstruction pixel budget (0 = native)<input id="ext-pixels" type="number" min="0" max="16777216" value="0"></label>
-        <label>Trajectory span / depth<input id="ext-span" type="number" min="0.005" max="0.15" step="0.005" value="0.04"></label>
-        <label>Fit iterations per selected view<input id="ext-iters" type="number" min="1" max="2000" value="1000"></label>
-        <label>Scene units → metres<span class="stepper"><input id="ext-scale" type="number" min="0.0001" max="10000" step="0.1" value="1"><span class="nudge"><button type="button" data-step="1" aria-label="Increase scene scale">▴</button><button type="button" data-step="-1" aria-label="Decrease scene scale">▾</button></span></span></label>
+        <div class="actions"><button type="button" id="ext-settings-open">ArtiFixer settings…</button></div>
+        <p id="ext-settings-summary" class="settings-note wide" aria-live="polite"></p>
         <label id="repair-time-wrap" style="display:none">Repair Time (seconds)<input id="repair-seconds" name="repair_seconds" type="number" min="1" max="43200" value="180"></label>
         <label class="wide locked" title="Scene runs always render and send the exploration map.">
           <input id="send-map" type="checkbox" checked disabled> Send exploration map (locked)
@@ -231,6 +234,33 @@
     <iframe id="capture-frame" title="Scene-run capture visor" src="http://localhost:8080" allow="autoplay"></iframe>
   </div></div>
 </aside>
+<dialog id="ext-settings" aria-labelledby="ext-settings-title">
+  <h2 id="ext-settings-title">ArtiFixer settings</h2>
+  <p class="settings-note">Applies to the next queued run. Existing runs keep their saved settings.</p>
+  <form id="ext-settings-form">
+    <h3>Image resolution</h3>
+        <label title="Rendered on report_artifact and sent to the image model. Saved for debugging. The agent still receives the VLM resolution.">Image repair width<input id="repair-width" name="repair_width" type="number" min="64" max="3840" value="960"></label>
+        <label title="Must keep the same aspect ratio as the VLM resolution. Multiples of 16.">Image repair height<input id="repair-height" name="repair_height" type="number" min="64" max="2880" value="720"></label>
+<p class="settings-note wide">Default: 960×720 at 4:3. Repair dimensions must match the VLM aspect ratio and be multiples of 16. The pixel budget also caps larger returned edits; it never crops the image.</p>
+    <h3>Generation and reconstruction</h3>
+        <label>Samples per camera leg<input id="ext-frames" type="number" min="9" max="81" step="4" value="25"></label>
+        <label title="Caps the edited image, trajectory renders and ArtiFixer inputs while preserving aspect ratio. 691200 gives 960×720 for 4:3. Zero opts into native edited-image resolution.">ArtiFixer pixel budget<input id="ext-pixels" type="number" min="0" max="16777216" value="691200"></label>
+        <label title="Keep the repaired starter and use the original scene renders and opacity to guide later viewpoints.">ArtiFixer source<select id="ext-source"><option value="rendered">Scene RGB + opacity (default)</option><option value="none">Starter only + noise</option></select></label>
+        <label title="Choose how generated frames enter temporal memory. Both modes retain the clean edited starter. Visual improvement is still experimental.">Generated-frame cache<select id="ext-cache"><option value="last_denoising">Last denoising state (upstream)</option><option value="clean">Clean refresh (previous)</option></select></label>
+        <label>Trajectory span / depth<input id="ext-span" type="number" min="0.005" max="0.15" step="0.005" value="0.04"></label>
+        <label>Fit iterations per selected view<input id="ext-iters" type="number" min="1" max="2000" value="1000"></label>
+        <label title="Scales camera translations for ArtiFixer. Use 1 unless scene scale has been calibrated.">Camera translation scale<input id="ext-scale" type="number" min="0.0001" max="10000" step="any" value="1" required></label>
+<h3>Sampling and exploration</h3>
+<label>Denoising steps<input id="ext-steps" type="number" min="1" max="50" step="1" value="4" required></label>
+<label>Random seed<input id="ext-seed" type="number" min="0" max="4294967295" step="1" value="42" required></label>
+<label>Local view count<input id="ext-views" type="number" min="5" max="9" step="1" value="5" required></label>
+<label>Local exploration turn limit<input id="ext-turns" type="number" min="5" max="100" step="1" value="30" required></label>
+<label>Candidate view count<input id="ext-candidates" type="number" min="5" max="10" step="1" value="10" required></label>
+<label>Repair limit (0 = unlimited)<input id="ext-limit" type="number" min="0" max="100" step="1" value="0" required></label>
+<p class="settings-note wide">Scene conditioning and the upstream cache policy are experimental defaults. Use starter-only and clean refresh to compare with the previous approach.</p>
+    <div class="actions"><button type="button" id="ext-settings-reset">Restore defaults</button><span class="spacer"></span><button type="button" id="ext-settings-cancel">Cancel</button><button type="submit">Apply settings</button></div>
+  </form>
+</dialog>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -325,6 +355,26 @@ function bumpInput(input, direction) {
 function snapSteppers() {
   document.querySelectorAll(".stepper input").forEach(snapInput);
 }
+let settingsDefaults = {}, settingsSnapshot = {};
+const settingsFields = () => [...$("ext-settings-form").querySelectorAll("input,select")];
+const settingsValues = () => Object.fromEntries(settingsFields().map(e => [e.id,e.value]));
+function restoreSettings(values) { for (const e of settingsFields()) if (values[e.id] !== undefined) { e.value=values[e.id]; e.setCustomValidity(""); } }
+function updateSettingsSummary() {
+  $("ext-settings-summary").textContent = `${$("repair-width").value}×${$("repair-height").value} repair · ${$("ext-source").selectedOptions[0].textContent} · ${$("ext-cache").selectedOptions[0].textContent}`;
+}
+function validateSettings() {
+  const w=Number($("repair-width").value), h=Number($("repair-height").value);
+  $("repair-height").setCustomValidity(w%16 || h%16 || w*Number($("height").value)!==h*Number($("width").value) ? "Use multiples of 16 with the same aspect ratio as the VLM image." : "");
+  $("ext-frames").setCustomValidity((Number($("ext-frames").value)-1)%4 ? "Use 1 + 4n frames, such as 9, 25 or 81." : "");
+  return $("ext-settings-form").checkValidity();
+}
+$("ext-settings-open").onclick = () => { settingsSnapshot=settingsValues(); $("ext-settings").showModal(); };
+$("ext-settings-reset").onclick = () => { restoreSettings(settingsDefaults); validateSettings(); };
+$("ext-settings-cancel").onclick = () => { restoreSettings(settingsSnapshot); $("ext-settings").close(); };
+$("ext-settings").addEventListener("cancel", () => restoreSettings(settingsSnapshot));
+$("ext-settings-form").addEventListener("input", validateSettings);
+$("ext-settings-form").onsubmit = event => { event.preventDefault(); if (!validateSettings()) { $("ext-settings-form").reportValidity(); return; } updateSettingsSummary(); $("ext-settings").close(); };
+
 function setDefaults(defaults, scenes) {
   if (!first) return;
   first = false;
@@ -340,6 +390,15 @@ function setDefaults(defaults, scenes) {
     ["repair-type","repair_type"],["repair-trigger","repair_trigger"],["repair-seconds","repair_seconds"]]) {
     if (defaults[key] !== undefined) $(id).value = defaults[key];
   }
+  for (const [id,key] of [["ext-frames","frames"],["ext-span","span_fraction"],
+    ["ext-iters","fit_iterations"],["ext-scale","camera_scale"],["ext-pixels","max_repair_pixels"],
+    ["ext-source","source_conditioning"],["ext-cache","generated_cache"],
+    ["ext-steps","inference_steps"],["ext-seed","seed"],["ext-views","local_view_count"],
+    ["ext-turns","local_max_turns"],["ext-candidates","local_candidate_count"],["ext-limit","repair_limit"]]) {
+    if (defaults.extended?.[key] !== undefined) $(id).value = defaults.extended[key];
+  }
+  settingsDefaults = settingsValues();
+  updateSettingsSummary();
   syncRepairTime();
   layoutCapture();
 }
@@ -451,6 +510,9 @@ function renderDetail() {
     ["VLM", [cfg.backend,cfg.model].filter(Boolean).join(" · ") || "–"],
     ["VLM resolution", cfg.width && cfg.height ? `${cfg.width}×${cfg.height}` : "–"],
     ["image repair", cfg.repair_width && cfg.repair_height ? `${cfg.repair_width}×${cfg.repair_height}` : "–"],
+    ["ArtiFixer source", cfg.extended?.source_conditioning || "none (legacy)"],
+    ["generated cache", cfg.extended?.generated_cache || "clean (legacy)"],
+    ["ArtiFixer pixel budget", cfg.extended?.max_repair_pixels || "native"],
     ["image / repair", [cfg.image_edit_backend,cfg.repair_backend].filter(Boolean).join(" → ") || "–"],
     ["repair type", cfg.repair_type === "looped" ? "looped" : "original GSFix3D"],
     ["repair trigger", cfg.repair_trigger || "–"],
@@ -514,6 +576,7 @@ async function tick() {
 $("run-form").onsubmit = async event => {
   event.preventDefault();
   snapSteppers();
+  if (!validateSettings()) { $("ext-settings").showModal(); $("ext-settings-form").reportValidity(); return; }
   $("start").disabled = true; $("message").textContent = "Writing queued run…";
   const body = {
     scene_id:$("scene").value, duration_seconds:Math.round(Number($("duration").value) * 3600),
@@ -522,7 +585,7 @@ $("run-form").onsubmit = async event => {
     repair_width:Number($("repair-width").value), repair_height:Number($("repair-height").value),
     send_map:true, image_edit_backend:$("image-edit").value,
     repair_backend:$("repair-backend").value, repair_type:$("repair-type").value,
-    extended:{frames:Number($("ext-frames").value), span_fraction:Number($("ext-span").value), fit_iterations:Number($("ext-iters").value), camera_scale:Number($("ext-scale").value), max_repair_pixels:Number($("ext-pixels").value)},
+    extended:{inference_steps:Number($("ext-steps").value), seed:Number($("ext-seed").value), local_view_count:Number($("ext-views").value), local_max_turns:Number($("ext-turns").value), local_candidate_count:Number($("ext-candidates").value), repair_limit:Number($("ext-limit").value), source_conditioning:$("ext-source").value, generated_cache:$("ext-cache").value, frames:Number($("ext-frames").value), span_fraction:Number($("ext-span").value), fit_iterations:Number($("ext-iters").value), camera_scale:Number($("ext-scale").value), max_repair_pixels:Number($("ext-pixels").value)},
     repair_trigger:$("repair-trigger").value,
     repair_seconds:Number($("repair-seconds").value),
   };

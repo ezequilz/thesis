@@ -177,7 +177,11 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     for segment in segments:
         starter_reference(manifest, segment)
     manifest["conditioning_mode"] = "gpt-starter-kv-v1"
-    manifest["scene_rgb_conditioning"] = False
+    scene_conditioned = options.get('source_conditioning', 'none') == 'rendered'
+    manifest["scene_rgb_conditioning"] = scene_conditioned
+    manifest["generated_cache"] = options.get('generated_cache', 'clean')
+    from .diagnostics import trajectory_diagnostics, image_diagnostics
+    manifest['trajectory_diagnostics'] = trajectory_diagnostics(manifest['transforms'])
     (root / "bundle.json").write_text(json.dumps(manifest, indent=2))
     render_seconds = time.monotonic()-started
     # GPT images seed inference directly. Do not deform sparse geometry first:
@@ -187,7 +191,8 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     for reference in references:
         with Image.open(root / reference["path"]) as image:
             anchor_targets.append(np.array(image.convert("RGB")))
-    manifest["conditioning_scene"] = "diagnostic only; RGB and opacity not supplied to generation"
+    manifest["conditioning_scene"] = ("original RGB and opacity supplied after edited starter" if scene_conditioned
+                                      else "diagnostic only; RGB and opacity not supplied to generation")
     manifest["anchor_role"] = "clean_temporal_starter_and_direct_reconstruction_target"
     manifest["fitting_stages"] = 1
     manifest["scale_ceiling"] = scale_ceiling
@@ -209,6 +214,14 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
             targets.append(np.asarray(image.convert("RGB")))
         shutil.copy2(path, preview / path.name)
     propagate_seconds = time.monotonic()-started-render_seconds
+    # Record raw generation before fitting, so a smeared splat cannot be
+    # mistaken for a diffusion failure. These observations are not a gate.
+    (root / 'generation-diagnostics.json').write_text(json.dumps({
+        'trajectory': manifest['trajectory_diagnostics'],
+        'generation': image_diagnostics(targets),
+        'source_conditioning': options.get('source_conditioning', 'none'),
+        'generated_cache': options.get('generated_cache', 'clean'),
+    }, indent=2))
     # Only frame zero is an edited observation. Do not insert edits at later
     # waypoints or at loop closure; all later images are model predictions.
     edited_indices = []
@@ -238,7 +251,9 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
                    render_seconds=render_seconds, propagation_seconds=propagate_seconds,
                    total_seconds=time.monotonic()-started, generated_frames=len(cameras),
                    baseline="single-starter-single-fit-artifixer-v5",
-                   conditioning_mode="gpt-starter-kv-v1", scene_rgb_conditioning=False,
+                   conditioning_mode="gpt-starter-kv-v1", scene_rgb_conditioning=scene_conditioned,
+                   source_conditioning=options.get('source_conditioning', 'none'),
+                   generated_cache=options.get('generated_cache', 'clean'),
                    anchor_role="clean_temporal_starter_and_direct_reconstruction_target",
                    fitting_stages=1, scale_ceiling=scale_ceiling,
                    loop_closure_excluded_from_fit=True,

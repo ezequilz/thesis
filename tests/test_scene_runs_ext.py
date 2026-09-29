@@ -62,8 +62,24 @@ def test_extended_config_policy_and_baseline_are_separate(tmp_path):
     assert new["config"]["pipeline"]=="extended"
     assert new["config"]["extended"]["frames"]==9
     assert old["config"]["repair_backend"]=="gsfix-gsplat"
-    assert new["config"]["width"] == 640 and new["config"]["repair_width"] == 1920
-    assert new["config"]["repair_height"] == 1440
+    assert new["config"]["width"] == 640 and new["config"]["repair_width"] == 960
+    assert new["config"]["repair_height"] == 720
+    assert new['config']['extended']['source_conditioning'] == 'rendered'
+    assert new['config']['extended']['generated_cache'] == 'last_denoising'
+    assert new['config']['extended']['max_repair_pixels'] == 960 * 720
+    custom = extended.create({'extended': {'source_conditioning': 'none', 'generated_cache': 'clean',
+                                          'max_repair_pixels': 0, 'inference_steps': 8, 'seed': 123}})
+    reloaded = store.get_run(custom['run_id']).config.extended
+    assert reloaded['source_conditioning'] == 'none' and reloaded['generated_cache'] == 'clean'
+    assert reloaded['max_repair_pixels'] == 0 and reloaded['inference_steps'] == 8 and reloaded['seed'] == 123
+    legacy_path = store.run_path(custom['run_id']) / 'config.json'
+    legacy = json.loads(legacy_path.read_text())
+    for key in ['source_conditioning', 'generated_cache', 'max_repair_pixels']:
+        legacy['extended'].pop(key)
+    legacy_path.write_text(json.dumps(legacy))
+    historic = store.get_run(custom['run_id']).config.extended
+    assert historic['source_conditioning'] == 'none'
+    assert historic['generated_cache'] == 'clean' and historic['max_repair_pixels'] == 0
     with pytest.raises(SceneRunValidationError): extended.validate_config({"width":641})
     with pytest.raises(SceneRunValidationError): extended.validate_config({"image_edit_backend":"qwen-image-edit"})
     with pytest.raises(SceneRunValidationError, match="multiples of 16"):
@@ -131,7 +147,7 @@ def test_repair_fits_every_propagated_view_and_commits_only_clone(tmp_path):
     assert metrics["generated_frames"]==9
     assert metrics["anchor_role"] == "clean_temporal_starter_and_direct_reconstruction_target"
     assert metrics["conditioning_mode"] == "gpt-starter-kv-v1"
-    assert metrics["scene_rgb_conditioning"] is False
+    assert metrics["scene_rgb_conditioning"] is True
     assert metrics["fitting_resolution"] == [64,64]
     assert metrics["exploration_resolution"] == [32,32]
     assert len(list((tmp_path/"extended/targets").glob("*.png")))==9
@@ -146,6 +162,9 @@ def test_native_repair_resolution_preserves_frustum_and_uses_explicit_budget():
     np.testing.assert_allclose(native.intrinsics[:2] / 2.2, c.intrinsics[:2], rtol=1e-6)
     limited = repair_camera(c, (1448,1086), max_pixels=640*480)
     assert (limited.width,limited.height) == (640,480)
+    default_limited = repair_camera(c, (1448,1086), max_pixels=validate_options()['max_repair_pixels'])
+    assert (default_limited.width, default_limited.height) == (960,720)
+    np.testing.assert_allclose(default_limited.intrinsics[:2] / 1.5, c.intrinsics[:2], rtol=1e-6)
     with pytest.raises(ValueError, match="aspect ratio"):
         repair_camera(c, (1448,1024))
     with pytest.raises(ValueError, match="pixel budget"):
@@ -484,7 +503,7 @@ def test_generation_precedes_the_only_fit_and_only_starter_is_direct_target(tmp_
     def generate(root,runtime,stop):
         manifest = json.loads((root/'bundle.json').read_text())
         assert manifest['conditioning_mode'] == 'gpt-starter-kv-v1'
-        assert manifest['scene_rgb_conditioning'] is False
+        assert manifest['scene_rgb_conditioning'] is True
         assert calls == []
         assert int(np.array(Image.open(root/'inputs/00000.png'))[0,0,0])==102
         np.testing.assert_allclose(source.colors,.4)

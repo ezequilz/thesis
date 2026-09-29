@@ -24,9 +24,12 @@ def test_single_starter_then_complete_nonoverlapping_chunks(total):
     assert [i for a, b in chunks for i in range(a, b)] == list(range(total))
 
 
-def test_clean_starter_drives_future_frames_and_cache_resets():
+@pytest.mark.parametrize('cache_policy', ['clean', 'last_denoising'])
+@pytest.mark.parametrize('source_alpha', [0., .5])
+def test_clean_starter_drives_future_frames_and_cache_resets(cache_policy, source_alpha):
     torch = pytest.importorskip('torch')
     calls = []
+    prepared = []
     class Transformer:
         patch_size = (1, 1, 1)
         _cp_world_size = 1
@@ -44,7 +47,7 @@ def test_clean_starter_drives_future_frames_and_cache_resets():
                 cache['starter'] = value.clone()
             else:
                 assert 'starter' in cache, 'Future frames must see clean starter context'
-                assert kw['opacity'].count_nonzero() == 0
+                assert torch.all(kw['opacity'] == source_alpha)
             return (torch.ones_like(value) * cache['starter'].mean(),)
     class Pipe:
         frames_per_block = 7
@@ -57,8 +60,12 @@ def test_clean_starter_drives_future_frames_and_cache_resets():
         def _initialize_kv_cache(self, *args): self.kv_cache1 = {}
         def _initialize_crossattn_cache(self, name): setattr(self, name, {})
         def create_denoising_step_list(self, steps): return torch.tensor([1000., 500.])
+        def prepare_latents(self, condition, opacity, first):
+            assert not first and torch.all(opacity == source_alpha)
+            prepared.append(condition.clone())
+            return condition * source_alpha + torch.randn_like(condition) * (1-source_alpha)
     pipe = Pipe()
-    install_starter_inference(pipe)
+    install_starter_inference(pipe, generated_cache=cache_policy)
     outputs = []
     with torch.inference_mode():
         for starter in [2., 5.]:
@@ -66,14 +73,21 @@ def test_clean_starter_drives_future_frames_and_cache_resets():
             condition = torch.full((1, 1, 14, 2, 2), 99.)
             condition[:, :, 0] = starter
             opacity = torch.zeros(1, 53, 2, 2); opacity[:, 0] = 1
+            opacity[:, 1:] = source_alpha
             poses = torch.arange(14).reshape(1, 14, 1)
             outputs.append(pipe.generate_samples_from_batch(condition, opacity,
                 torch.ones(1), poses, poses, torch.ones(1), poses, torch.ones(1),
                 torch.ones(1), 2, False))
     assert torch.all(outputs[0] == 2.) and torch.all(outputs[1] == 5.)
-    assert [c[0] for c in calls[:7]] == [0, 1, 1, 1, 8, 8, 8]
-    assert [c[3] for c in calls[:7]] == [1, 28, 28, 28, 24, 24, 24]
-    assert all(calls[i][2].count_nonzero() == 0 for i in [0, 3, 6, 7, 10, 13])
+    assert len(prepared) == 8, 'Initial and intermediate samples must both use opacity mixing'
+    assert all(torch.all(value == 99.) for value in prepared)
+    if cache_policy == 'clean':
+        assert [c[0] for c in calls[:7]] == [0, 1, 1, 1, 8, 8, 8]
+        assert [c[3] for c in calls[:7]] == [1, 28, 28, 28, 24, 24, 24]
+        assert all(calls[i][2].count_nonzero() == 0 for i in [0, 3, 6, 7, 10, 13])
+    else:
+        assert [c[0] for c in calls[:5]] == [0, 1, 1, 8, 8]
+        assert sum(c[2].count_nonzero() == 0 for c in calls) == 2
 
 
 def test_only_gpt_starter_has_rgb_and_observation_opacity():
@@ -89,8 +103,10 @@ def test_only_gpt_starter_has_rgb_and_observation_opacity():
     assert seed.count_nonzero() > 0, 'Conditioning must not mutate reference images'
 
 
-def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path, monkeypatch):
+@pytest.mark.parametrize('source_mode', ['none', 'rendered'])
+def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path, monkeypatch, source_mode):
     import json
+    import numpy as np
     import sys
     from types import ModuleType
     from PIL import Image
@@ -98,12 +114,17 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
     from splat_explorer.scene_runs_ext import artifixer_bridge
     for i, value in enumerate([40, 220]):
         Image.new('RGB', (32, 32), (value, value, value)).save(tmp_path / f'edit-{i}.png')
-    manifest = {'options': {'seed': 42, 'inference_steps': 4, 'camera_scale': 1.},
+    manifest = {'options': {'seed': 42, 'inference_steps': 4, 'camera_scale': 1., 'source_conditioning': source_mode},
                 'transforms': {'frames': [{}] * 18},
                 'references': [{'path': f'edit-{i}.png', 'frame_index': 9*i,
                                 'kind': 'edited_render'} for i in range(2)],
                 'segments': [{'start': 0, 'count': 9}, {'start': 9, 'count': 9}]}
     (tmp_path / 'bundle.json').write_text(json.dumps(manifest))
+    if source_mode == 'rendered':
+        (tmp_path / 'inputs').mkdir()
+        for i in range(18):
+            Image.new('RGB', (32,32), (100,100,100)).save(tmp_path / 'inputs' / f'{i:05d}.png')
+        np.save(tmp_path / 'opacity.npy', np.full((18,32,32), .7, dtype=np.float32))
     # There is intentionally no inputs directory and no opacity.npy.
     parsed = []
     class Parser:
@@ -122,8 +143,13 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
         assert pipe.generate_samples_from_batch.__func__ is generate_from_starter
         index = len(seen)
         assert torch.allclose(item['rgb_rendered'][0], torch.full((3,32,32), [40,220][index]/255))
-        assert item['rgb_rendered'][1:].count_nonzero() == 0
-        assert item['opacity'][1:].count_nonzero() == 0
+        if source_mode == 'none':
+            assert item['rgb_rendered'][1:].count_nonzero() == 0
+            assert item['opacity'][1:].count_nonzero() == 0
+        else:
+            assert torch.allclose(item['rgb_rendered'][1:], torch.full((8,3,32,32), 100/255))
+            assert torch.allclose(item['opacity'][1:], torch.full((8,32,32), .7))
+        assert torch.all(item['opacity'][0] == 1)
         assert item['frame_indices'][0] == index*9
         seen.append(item)
         dest = output / 'bundle/frames/batch_0000/pred'
@@ -151,6 +177,8 @@ def test_bridge_generates_from_each_edit_without_reading_scene_renders(tmp_path,
     assert '--replace_if_exists' in parsed
     metadata = json.loads((tmp_path/'inference.json').read_text())
     assert metadata['starter_frames'] == [0,9]
-    assert metadata['scene_rgb_conditioning'] is False
+    assert metadata['scene_rgb_conditioning'] is (source_mode == 'rendered')
+    assert len(metadata['starter_diagnostics']) == 2
+    assert (tmp_path / 'starter-vae-roundtrip-00000.png').exists()
     for i, expected in [(0,40),(9,220)]:
         assert Image.open(tmp_path/f'artifixer-output/bundle/frames/batch_0000/pred/{i:05d}.png').getpixel((0,0)) == (expected,)*3

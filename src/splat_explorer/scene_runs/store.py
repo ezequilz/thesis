@@ -198,7 +198,13 @@ class SceneRunStore:
         path = self.run_path(run_id)
         if not path.is_dir():
             raise FileNotFoundError(f"scene run not found: {run_id}")
-        config = SceneRunConfig.from_dict(_read_json(path / CONFIG_NAME))
+        saved = _read_json(path / CONFIG_NAME)
+        # Missing fields in historical configs predate the new-run defaults.
+        # Reading history must not relabel or silently change those experiments.
+        if saved.get('pipeline') == 'extended' and isinstance(saved.get('extended', {}), dict):
+            saved['extended'] = {'source_conditioning': 'none', 'generated_cache': 'clean',
+                                 'max_repair_pixels': 0, **saved.get('extended', {})}
+        config = SceneRunConfig.from_dict(saved)
         state = RunState.from_dict(_read_json(path / STATUS_NAME))
         return SceneRun(run_id, str(path), config, state, (path / STOP_NAME).is_file())
 

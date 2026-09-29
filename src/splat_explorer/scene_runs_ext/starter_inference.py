@@ -1,7 +1,7 @@
 """GPT-image-seeded causal inference for the pinned ArtiFixer KV pipeline.
 
 The clean first latent is temporal context, not a denoised prediction. Later
-frames use noise, calibrated cameras and edited references, never splat RGB.
+frames use calibrated cameras, edited references, and optional scene renders.
 This is an inference adaptation; it does not guarantee multiview consistency.
 """
 from __future__ import annotations
@@ -44,8 +44,8 @@ def generate_from_starter(self, condition, rendered_opacity, neighbors_condition
 
     Uses upstream encoding, scheduler, transformer and decoding. A dedicated
     t=0 forward pass inserts the starter into KV memory before any new frame is
-    sampled. Every generated block also refreshes KV memory with its clean
-    output rather than leaving the last noisy denoising input in the cache.
+    sampled. Generated-block cache refresh is an explicit ablation: upstream
+    retains the last denoising input; the original adaptation refreshes at t=0.
     """
     import torch
     if torch.is_grad_enabled() or use_exit_flag or ignore_neighbors:
@@ -88,23 +88,30 @@ def generate_from_starter(self, condition, rendered_opacity, neighbors_condition
             # Wan's causal VAE encodes the first RGB frame as one latent frame.
             latents = condition[:, :, :1].to(device).clone()
         else:
-            shape = condition[:, :, start:end].to(device)
-            latents = torch.randn_like(shape)
+            chunk_condition = condition[:, :, start:end].to(device)
+            # Match the training source distribution at every denoising step.
+            # Zero opacity reduces this to independent Gaussian noise.
+            latents = self.prepare_latents(chunk_condition, opacity, False)
             for index, timestep in enumerate(timesteps):
                 noise = self.transformer(hidden_states=latents,
                     timestep=timestep.expand(batch).to(latents.dtype), **kwargs)[0]
                 latents = self.scheduler.step(noise, timestep.expand(batch), latents, to_final=True)
                 if index + 1 < len(timesteps):
-                    latents = self.scheduler.add_noise(latents, torch.randn_like(latents),
+                    latents = self.scheduler.add_noise(latents,
+                        self.prepare_latents(chunk_condition, opacity, False),
                         timesteps[index + 1] * torch.ones(batch, device=device, dtype=torch.long))
         output[:, :, start:end] = latents
-        self.transformer(hidden_states=latents,
-                         timestep=torch.zeros(batch, device=device, dtype=latents.dtype), **kwargs)
+        if start == 0 or getattr(self, 'starter_generated_cache', 'clean') == 'clean':
+            self.transformer(hidden_states=latents,
+                             timestep=torch.zeros(batch, device=device, dtype=latents.dtype), **kwargs)
     return output
 
 
-def install_starter_inference(pipe):
+def install_starter_inference(pipe, *, generated_cache='clean'):
     """Patch only this disposable inference instance, never upstream files."""
     if not hasattr(pipe, 'generate_samples_from_batch') or not hasattr(pipe, '_initialize_kv_cache'):
         raise ValueError('Starter inference requires the ArtiFixer KV-cache pipeline')
+    if generated_cache not in ('clean', 'last_denoising'):
+        raise ValueError('Unknown generated-cache policy')
+    pipe.starter_generated_cache = generated_cache
     pipe.generate_samples_from_batch = MethodType(generate_from_starter, pipe)

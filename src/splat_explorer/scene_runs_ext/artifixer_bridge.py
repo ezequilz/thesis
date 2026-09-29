@@ -99,11 +99,24 @@ def main():
         pipe = get_eval_pipe(opts, device)
         load_transformer_checkpoint(pipe.transformer, opts)
         pipe.transformer.eval()
-        install_starter_inference(pipe)
+        source_conditioning = options.get('source_conditioning', 'none')
+        if source_conditioning not in ('none', 'rendered'):
+            raise ValueError('Unknown source conditioning mode')
+        install_starter_inference(pipe, generated_cache=options.get('generated_cache', 'clean'))
+        starter_diagnostics = []
         for segment, starter in zip(segments, starters):
             indices = list(range(segment["start"], segment["start"] + segment["count"]))
             seed = rgb(root / starter["path"])
             renders, opacity = starter_inputs(seed, len(indices))
+            if source_conditioning == 'rendered':
+                renders = torch.stack([rgb(root / 'inputs' / f'{i:05d}.png') for i in indices])
+                alpha = np.load(root / 'opacity.npy', mmap_mode='r', allow_pickle=False)
+                opacity = torch.from_numpy(np.array(alpha[indices], dtype=np.float32))
+                if opacity.shape != renders.shape[:1] + renders.shape[-2:]:
+                    raise ValueError('Rendered opacity dimensions do not match RGB')
+                if not torch.isfinite(opacity).all() or (opacity < 0).any() or (opacity > 1).any():
+                    raise ValueError('Rendered opacity must be finite and in [0, 1]')
+                renders[0], opacity[0] = seed, 1
             item = {"scene_id": "bundle", "rgb_rendered": renders,
                     "rgb_neighbors": reference,
                     "opacity": opacity,
@@ -127,7 +140,12 @@ def main():
             # Preserve exact RGB in exports (the causal context already used
             # its clean encoded latent; this only removes VAE roundtrip loss).
             import shutil
-            shutil.copy2(root / starter["path"], root / "artifixer-output/bundle/frames/batch_0000/pred" / f"{indices[0]:05d}.png")
+            first_output = root / "artifixer-output/bundle/frames/batch_0000/pred" / f"{indices[0]:05d}.png"
+            roundtrip = root / f'starter-vae-roundtrip-{indices[0]:05d}.png'
+            shutil.copy2(first_output, roundtrip)
+            starter_diagnostics.append({'frame_index': indices[0], 'vae_roundtrip': roundtrip.name,
+                'vae_roundtrip_mae_0_1': float((rgb(roundtrip) - seed).abs().mean())})
+            shutil.copy2(root / starter["path"], first_output)
             del item, renders
     (root / "inference.json").write_text(json.dumps({
         "checkpoint": str(args.checkpoint), "model_id": args.model_id,
@@ -136,7 +154,10 @@ def main():
         "reference": "image-edited anchor; synthetic, not a captured photograph",
         "conditioning_mode": "gpt-starter-kv-v1",
         "starter_frames": [s["start"] for s in segments],
-        "scene_rgb_conditioning": False,
+        "scene_rgb_conditioning": source_conditioning == 'rendered',
+        "source_conditioning": source_conditioning,
+        "generated_cache": options.get('generated_cache', 'clean'),
+        "starter_diagnostics": starter_diagnostics,
         "starter_context": "clean first latent cached at timestep zero before generation",
     }, indent=2))
 
