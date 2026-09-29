@@ -199,6 +199,33 @@ small inner-loop movements, motivating the object-coverage revision below.
 
 ## Starter diagnosis and controlled comparisons
 
+### Optional GSFix3D anchor prefit
+
+`anchor_prefit: "gsfix3d"` enables the existing scene-run **original GSFix3D**
+20-step densification/pruning recipe before ArtiFixer. Default is `"none"` for
+comparison. Select it in **ArtiFixer settings → Anchor prefit**; it requires
+`source_conditioning: "rendered"`. The repaired image remains a fixed reference
+throughout every denoising block in either mode, independently of temporal memory.
+This was already the generation behavior; explicit metadata and regression
+assertions now document it.
+
+The prefit mutates only a private candidate, using the same edited anchor at its
+calibrated working resolution. Camera selection and original validation images
+are computed before prefit. All trajectory RGB **and opacity** are then rendered
+from the candidate; no original opacity is reused with changed RGB. ArtiFixer
+uses these paired renders plus the unchanged repaired reference. The final
+multiview fitter continues from this candidate. Failed/stopped stages do not
+publish the partially fitted scene.
+
+Inspect `anchor-prefit.json`, `validation/prefit-*.png`, source `inputs/`, and
+generated `targets/` separately. These distinguish poor single-view transfer,
+loss at nearby angles, and diffusion reverting the edit. Metrics record one or
+two fitting stages. This experiment does not guarantee cross-view detail or
+correct new geometry; it has CPU integration coverage, not a new GPU result.
+An already-running dashboard needs a restart to load the new option; the popup
+detects older backends and disables it with an explanation until then. Do not
+restart a running experiment just to enable the option.
+
 The [29 September investigation](artifixer-starter-diagnosis.md) distinguishes
 raw generation drift from severe smearing in the fitted splat. New extended
 options `source_conditioning` (`none` or `rendered`) and `generated_cache`

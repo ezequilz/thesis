@@ -15,7 +15,8 @@ from PIL import Image
 from .config import RUNTIME_DEFAULTS, UPSTREAM_REVISION, validate_options
 from .bundle import camera_bundle, continuous_camera_bundle, transforms, repair_camera
 from .fitting import BACKGROUND, fit_views, initial_scale_ceiling
-from .starter_inference import starter_reference
+from .starter_inference import starter_reference, generation_policy
+from .prefit import prefit_anchor
 
 
 def validate_runtime(runtime):
@@ -97,7 +98,8 @@ def propagate(root, runtime, should_stop):
 
 def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposal,
            should_stop, on_progress, renderer_factory=BundleRenderer,
-           propagator=propagate, fitter=fit_views, selected_views=None, scale_ceiling=None):
+           propagator=propagate, fitter=fit_views, selected_views=None, scale_ceiling=None,
+           anchor_prefitter=prefit_anchor):
     """Return a fully fitted clone; never mutate the incumbent on failure/stop."""
     options = validate_options(options)
     scale_ceiling = initial_scale_ceiling(scene) if scale_ceiling is None else scale_ceiling
@@ -144,6 +146,36 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     cameras, waypoint_indices = continuous_camera_bundle(
         views, anchor_depth, frames=options["frames"], span_fraction=options["span_fraction"])
     segments = [{"start": 0, "count": len(cameras)}]
+    with Image.open(anchor_path) as image:
+        if image.width * camera.height != image.height * camera.width:
+            raise ValueError("Edited anchor aspect ratio changed; cannot assign the original calibrated camera")
+        image.convert("RGB").resize((camera.width, camera.height), Image.Resampling.LANCZOS).save(root / "anchor.png")
+    candidate = scene.copy()
+    prefit_metrics = None
+    prefit_seconds = 0.
+    if options['anchor_prefit'] == 'gsfix3d':
+        check()
+        rendered_anchor = renderer.render(camera)[0]
+        del renderer
+        _release_cuda()
+        on_progress({'phase': 'anchor_prefit'})
+        prefit_started = time.monotonic()
+        with Image.open(root / 'anchor.png') as image:
+            edited_anchor = np.array(image.convert('RGB'))
+        prefit_metrics = anchor_prefitter(candidate, camera, rendered_anchor, edited_anchor,
+                                         should_stop=should_stop, on_progress=on_progress)
+        check()
+        prefit_seconds = time.monotonic() - prefit_started
+        (root / 'anchor-prefit.json').write_text(json.dumps(prefit_metrics, indent=2))
+        _release_cuda()
+        renderer = renderer_factory(candidate)
+        # Same diagnostic cameras as the original scene: compare angle falloff
+        # before diffusion or final fitting can obscure the prefit's effect.
+        for i, view in enumerate(validation_cameras):
+            check()
+            rgb, _, _ = renderer.render(view)
+            Image.fromarray(rgb).save(validation_dir / f'prefit-{i:03d}.png')
+        on_progress({'phase': 'bundle_render'})
     inputs = root / "inputs"
     inputs.mkdir(exist_ok=True)
     alphas = []
@@ -157,10 +189,6 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     del renderer
     _release_cuda()
     np.save(root / "opacity.npy", np.stack(alphas).astype(np.float32))
-    with Image.open(anchor_path) as image:
-        if image.width * camera.height != image.height * camera.width:
-            raise ValueError("Edited anchor aspect ratio changed; cannot assign the original calibrated camera")
-        image.convert("RGB").resize((camera.width, camera.height), Image.Resampling.LANCZOS).save(root / "anchor.png")
     digest = hashlib.sha256()
     for value in (scene.means, scene.scales, scene.quats, scene.opacities, scene.colors):
         digest.update(np.ascontiguousarray(value).tobytes())
@@ -176,25 +204,26 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
                 "upstream_adapter_revision": UPSTREAM_REVISION}
     for segment in segments:
         starter_reference(manifest, segment)
-    manifest["conditioning_mode"] = "gpt-starter-kv-v1"
+    policy = generation_policy(options)
+    manifest.update(policy)
     scene_conditioned = options.get('source_conditioning', 'none') == 'rendered'
     manifest["scene_rgb_conditioning"] = scene_conditioned
-    manifest["generated_cache"] = options.get('generated_cache', 'clean')
     from .diagnostics import trajectory_diagnostics, image_diagnostics
     manifest['trajectory_diagnostics'] = trajectory_diagnostics(manifest['transforms'])
     (root / "bundle.json").write_text(json.dumps(manifest, indent=2))
     render_seconds = time.monotonic()-started
-    # GPT images seed inference directly. Do not deform sparse geometry first:
-    # generate the complete supervision set, then reconstruct exactly once.
-    candidate = scene.copy()
+    # The optional prefit changes only this candidate and its paired source
+    # renders. The edited reference itself remains unchanged throughout.
     anchor_targets = []
     for reference in references:
         with Image.open(root / reference["path"]) as image:
             anchor_targets.append(np.array(image.convert("RGB")))
-    manifest["conditioning_scene"] = ("original RGB and opacity supplied after edited starter" if scene_conditioned
+    manifest["conditioning_scene"] = (("prefitted RGB and opacity supplied after edited starter" if prefit_metrics is not None
+                                       else "original RGB and opacity supplied after edited starter") if scene_conditioned
                                       else "diagnostic only; RGB and opacity not supplied to generation")
-    manifest["anchor_role"] = "clean_temporal_starter_and_direct_reconstruction_target"
-    manifest["fitting_stages"] = 1
+    manifest['anchor_prefit'] = options['anchor_prefit']
+    manifest['persistent_edited_reference'] = True
+    manifest["fitting_stages"] = 2 if prefit_metrics is not None else 1
     manifest["scale_ceiling"] = scale_ceiling
     manifest["target_sampling"] = "balanced-edited-generated"
     (root / "bundle.json").write_text(json.dumps(manifest, indent=2))
@@ -220,7 +249,7 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
         'trajectory': manifest['trajectory_diagnostics'],
         'generation': image_diagnostics(targets),
         'source_conditioning': options.get('source_conditioning', 'none'),
-        'generated_cache': options.get('generated_cache', 'clean'),
+        **policy,
     }, indent=2))
     # Only frame zero is an edited observation. Do not insert edits at later
     # waypoints or at loop closure; all later images are model predictions.
@@ -250,12 +279,13 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
     metrics.update(pipeline="extended", backend="artifixer-gsplat", proposal=proposal,
                    render_seconds=render_seconds, propagation_seconds=propagate_seconds,
                    total_seconds=time.monotonic()-started, generated_frames=len(cameras),
-                   baseline="single-starter-single-fit-artifixer-v5",
-                   conditioning_mode="gpt-starter-kv-v1", scene_rgb_conditioning=scene_conditioned,
+                   baseline=("gsfix3d-prefit-artifixer-v1" if prefit_metrics is not None
+                             else "single-starter-single-fit-artifixer-v5"),
+                   **policy, scene_rgb_conditioning=scene_conditioned,
                    source_conditioning=options.get('source_conditioning', 'none'),
-                   generated_cache=options.get('generated_cache', 'clean'),
-                   anchor_role="clean_temporal_starter_and_direct_reconstruction_target",
-                   fitting_stages=1, scale_ceiling=scale_ceiling,
+                   fitting_stages=manifest['fitting_stages'], scale_ceiling=scale_ceiling,
+                   anchor_prefit=options['anchor_prefit'], anchor_prefit_metrics=prefit_metrics,
+                   anchor_prefit_seconds=prefit_seconds, persistent_edited_reference=True,
                    loop_closure_excluded_from_fit=True,
                    generated_loop_closure_l1=closure_l1,
                    edited_target_indices=edited_indices,

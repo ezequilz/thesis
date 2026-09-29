@@ -10,9 +10,9 @@ from pathlib import Path
 import sys
 
 try:
-    from .starter_inference import install_starter_inference, starter_reference, starter_inputs
+    from .starter_inference import install_starter_inference, starter_reference, starter_inputs, generation_policy
 except ImportError:  # Executed directly by the GPU worker.
-    from starter_inference import install_starter_inference, starter_reference, starter_inputs
+    from starter_inference import install_starter_inference, starter_reference, starter_inputs, generation_policy
 
 
 def crop_camera_conditioning(compute, cameras, indices, neighbors, *, box, source_size, scale):
@@ -75,6 +75,8 @@ def main():
     root = args.request.resolve()
     manifest = json.loads((root / "bundle.json").read_text())
     options = manifest["options"]
+    policy = generation_policy(options)
+    exact_starter = policy["exact_starter_preserved"]
     torch.manual_seed(options["seed"])
     opts = build_parser().parse_args([
         "--checkpoint_pt", str(args.checkpoint), "--model_id", args.model_id,
@@ -102,7 +104,10 @@ def main():
         source_conditioning = options.get('source_conditioning', 'none')
         if source_conditioning not in ('none', 'rendered'):
             raise ValueError('Unknown source conditioning mode')
-        install_starter_inference(pipe, generated_cache=options.get('generated_cache', 'clean'))
+        # Leave the upstream method untouched for the comparison. process_item
+        # handles padding to complete blocks and trims padded output frames.
+        if exact_starter:
+            install_starter_inference(pipe, generated_cache=policy['generated_cache'])
         starter_diagnostics = []
         for segment, starter in zip(segments, starters):
             indices = list(range(segment["start"], segment["start"] + segment["count"]))
@@ -141,24 +146,30 @@ def main():
             # its clean encoded latent; this only removes VAE roundtrip loss).
             import shutil
             first_output = root / "artifixer-output/bundle/frames/batch_0000/pred" / f"{indices[0]:05d}.png"
-            roundtrip = root / f'starter-vae-roundtrip-{indices[0]:05d}.png'
+            prefix = 'starter-vae-roundtrip' if exact_starter else 'upstream-first-frame'
+            roundtrip = root / f'{prefix}-{indices[0]:05d}.png'
             shutil.copy2(first_output, roundtrip)
-            starter_diagnostics.append({'frame_index': indices[0], 'vae_roundtrip': roundtrip.name,
-                'vae_roundtrip_mae_0_1': float((rgb(roundtrip) - seed).abs().mean())})
-            shutil.copy2(root / starter["path"], first_output)
+            starter_diagnostics.append({'frame_index': indices[0],
+                ('vae_roundtrip' if exact_starter else 'generated_first_frame'): roundtrip.name,
+                ('vae_roundtrip_mae_0_1' if exact_starter else 'reference_mae_0_1'):
+                    float((rgb(roundtrip) - seed).abs().mean())})
+            if exact_starter:
+                shutil.copy2(root / starter["path"], first_output)
             del item, renders
     (root / "inference.json").write_text(json.dumps({
         "checkpoint": str(args.checkpoint), "model_id": args.model_id,
         "frames": count, "text_conditioning": "disabled (official zero embedding)",
         "segments": len(segments), "reference_views": len(references),
         "reference": "image-edited anchor; synthetic, not a captured photograph",
-        "conditioning_mode": "gpt-starter-kv-v1",
+        "reference_conditioning": "fixed edited references supplied to every transformer call; separate from temporal KV cache",
+        "anchor_prefit": options.get('anchor_prefit', 'none'),
+        **policy,
         "starter_frames": [s["start"] for s in segments],
         "scene_rgb_conditioning": source_conditioning == 'rendered',
         "source_conditioning": source_conditioning,
-        "generated_cache": options.get('generated_cache', 'clean'),
         "starter_diagnostics": starter_diagnostics,
-        "starter_context": "clean first latent cached at timestep zero before generation",
+        "starter_context": ("clean first latent cached at timestep zero before generation" if exact_starter
+                            else "upstream blocks from frame zero; edited reference throughout; no exact latent preservation"),
     }, indent=2))
 
 

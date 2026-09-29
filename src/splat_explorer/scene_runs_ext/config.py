@@ -4,6 +4,7 @@ import math
 
 DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 1000,
             "source_conditioning": "rendered", "generated_cache": "last_denoising",
+            "anchor_prefit": "none", "block_schedule": "exact_starter",
             "inference_steps": 4, "seed": 42, "camera_scale": 1.0,
             "max_repair_pixels": 960 * 720, "local_view_count": 5, "local_max_turns": 30,
             "repair_limit": 0, "local_candidate_count": 10}
@@ -32,9 +33,16 @@ def validate_options(value=None):
         raise ValueError(f"Unknown extended options: {', '.join(sorted(unknown))}")
     result = {**DEFAULTS, **(value or {})}
     for key, choices in (("source_conditioning", ("none", "rendered")),
-                         ("generated_cache", ("clean", "last_denoising"))):
+                         ("generated_cache", ("clean", "last_denoising")),
+                         ("block_schedule", ("exact_starter", "upstream")),
+                         ("anchor_prefit", ("none", "gsfix3d"))):
         if result[key] not in choices:
             raise ValueError(f"{key} must be one of {choices}")
+    # Upstream keeps its final denoising cache; clean refresh is adapter-only.
+    if result['block_schedule'] == 'upstream':
+        result['generated_cache'] = 'last_denoising'
+    if result['anchor_prefit'] != 'none' and result['source_conditioning'] != 'rendered':
+        raise ValueError('anchor_prefit requires rendered source conditioning')
     for key, lower, upper in [("frames", 9, 81), ("fit_iterations", 1, 2000),
                               ("inference_steps", 1, 50), ("seed", 0, 2**31-1),
                               ("max_repair_pixels", 0, 16777216), ("local_view_count", 5, 9),

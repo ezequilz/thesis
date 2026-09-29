@@ -30,10 +30,13 @@ def test_clean_starter_drives_future_frames_and_cache_resets(cache_policy, sourc
     torch = pytest.importorskip('torch')
     calls = []
     prepared = []
+    fixed_reference = torch.tensor([17.])
     class Transformer:
         patch_size = (1, 1, 1)
         _cp_world_size = 1
         def __call__(self, **kw):
+            assert kw['neighbor_hidden_states'] is fixed_reference
+            assert kw['ignore_neighbors'] is False
             start = kw['frame_offset']
             value = kw['hidden_states']
             calls.append((start, value.clone(), kw['timestep'].clone(), kw['opacity'].shape[1]))
@@ -76,7 +79,7 @@ def test_clean_starter_drives_future_frames_and_cache_resets(cache_policy, sourc
             opacity[:, 1:] = source_alpha
             poses = torch.arange(14).reshape(1, 14, 1)
             outputs.append(pipe.generate_samples_from_batch(condition, opacity,
-                torch.ones(1), poses, poses, torch.ones(1), poses, torch.ones(1),
+                fixed_reference, poses, poses, torch.ones(1), poses, torch.ones(1),
                 torch.ones(1), 2, False))
     assert torch.all(outputs[0] == 2.) and torch.all(outputs[1] == 5.)
     assert len(prepared) == 8, 'Initial and intermediate samples must both use opacity mixing'

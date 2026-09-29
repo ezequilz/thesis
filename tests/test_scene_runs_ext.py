@@ -171,6 +171,83 @@ def test_native_repair_resolution_preserves_frustum_and_uses_explicit_budget():
         repair_camera(c, (1448,1086), max_pixels=1)
 
 
+@pytest.mark.parametrize('fail_generation', [False, True])
+def test_anchor_prefit_rerenders_paired_sources_without_mutating_parent(tmp_path, fail_generation):
+    source = scene()
+    Image.new('RGB', (32,32), (210,210,210)).save(tmp_path/'anchor.png')
+    order = []
+    class CandidateRenderer(Renderer):
+        def __init__(self, value): self.value = value
+        def render(self, camera):
+            rgb, alpha, depth = super().render(camera)
+            rgb[:] = round(float(self.value.colors[0,0])*255)
+            alpha[:] = float(self.value.colors[0,0])
+            return rgb, alpha, depth
+    def prefit(candidate, camera, rendered, edited, **kwargs):
+        order.append('prefit')
+        assert candidate is not source
+        assert rendered[0,0,0] == 102 and edited[0,0,0] == 210
+        candidate.colors[:] = .8
+        return {'n_iters': 20}
+    def generate(root, runtime, stop):
+        order.append('generate')
+        assert np.array(Image.open(root/'inputs/00001.png'))[0,0,0] == 204
+        np.testing.assert_allclose(np.load(root/'opacity.npy'), .8)
+        assert np.array(Image.open(root/'anchor.png'))[0,0,0] == 210
+        assert np.array(Image.open(root/'validation/before-000.png'))[0,0,0] == 102
+        assert np.array(Image.open(root/'validation/prefit-000.png'))[0,0,0] == 204
+        manifest = json.loads((root/'bundle.json').read_text())
+        assert manifest['persistent_edited_reference'] and manifest['fitting_stages'] == 2
+        assert manifest['references'][0]['path'] == 'anchor.png'
+        if fail_generation:
+            raise RuntimeError('test generation failure')
+        return propagate(root, runtime, stop)
+    def fit(candidate, cameras, targets, **kwargs):
+        order.append('fit')
+        np.testing.assert_allclose(candidate.colors, .8)
+        candidate.colors[:] = .9
+        return {}
+    def run():
+        return repair(source, camera(), tmp_path/'anchor.png', tmp_path,
+                      options={'frames':9, 'fit_iterations':1, 'anchor_prefit':'gsfix3d'},
+                      runtime={}, proposal={}, should_stop=lambda:False, on_progress=lambda _:None,
+                      renderer_factory=CandidateRenderer, propagator=generate, fitter=fit,
+                      anchor_prefitter=prefit)
+    if fail_generation:
+        with pytest.raises(RuntimeError, match='test generation failure'): run()
+        assert order == ['prefit', 'generate']
+    else:
+        candidate, metrics = run()
+        assert order == ['prefit', 'generate', 'fit']
+        assert metrics['fitting_stages'] == 2 and metrics['anchor_prefit_metrics']['n_iters'] == 20
+        np.testing.assert_allclose(candidate.colors, .9)
+    np.testing.assert_allclose(source.colors, .4)
+
+
+def test_prefit_uses_existing_original_gsfix3d_recipe_and_honors_stop(monkeypatch):
+    from splat_explorer.scene_runs import gpu_worker
+    from splat_explorer.scene_runs_ext.prefit import prefit_anchor
+    calls = []
+    class Backend:
+        def apply_until(self, *args, should_stop):
+            calls.append(args)
+            assert not should_stop()
+            self.on_progress({'iteration': 20})
+            return {'n_iters':20, 'render_rgb':np.zeros((2,2,3))}
+    def factory(params):
+        assert params == {'repair_type':'original'}
+        return Backend()
+    monkeypatch.setattr(gpu_worker, '_default_repair_factory', factory)
+    progress = []
+    result = prefit_anchor(None, None, None, None, should_stop=lambda:False, on_progress=progress.append)
+    assert result == {'n_iters':20} and progress[0]['phase'] == 'anchor_prefit'
+    with pytest.raises(InterruptedError):
+        prefit_anchor(None, None, None, None, should_stop=lambda:True, on_progress=progress.append)
+    assert len(calls) == 1
+    with pytest.raises(ValueError, match='requires rendered'):
+        validate_options({'anchor_prefit':'gsfix3d', 'source_conditioning':'none'})
+
+
 def test_selected_views_are_fitted_jointly_with_calibrated_references(tmp_path):
     Image.new("RGB",(64,64)).save(tmp_path/"anchor.png")
     Image.new("RGB",(96,96)).save(tmp_path/"earlier.png")

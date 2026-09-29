@@ -115,3 +115,19 @@ def install_starter_inference(pipe, *, generated_cache='clean'):
         raise ValueError('Unknown generated-cache policy')
     pipe.starter_generated_cache = generated_cache
     pipe.generate_samples_from_batch = MethodType(generate_from_starter, pipe)
+
+
+def generation_policy(options):
+    """Describe the effective schedule, including legacy exact-starter requests."""
+    schedule = options.get('block_schedule', 'exact_starter')
+    if schedule not in ('exact_starter', 'upstream'):
+        raise ValueError('Unknown block schedule')
+    exact = schedule == 'exact_starter'
+    return {
+        'block_schedule': schedule,
+        'conditioning_mode': 'gpt-starter-kv-v1' if exact else 'gpt-reference-upstream-v1',
+        'generated_cache': options.get('generated_cache', 'clean') if exact else 'last_denoising',
+        'anchor_role': ('clean_temporal_starter_and_direct_reconstruction_target' if exact
+                        else 'reference_and_direct_reconstruction_target'),
+        'exact_starter_preserved': exact,
+    }
