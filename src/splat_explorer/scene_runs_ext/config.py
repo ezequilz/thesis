@@ -10,6 +10,7 @@ MODEL_VARIANTS = {
 DEFAULT_MODEL_VARIANT = "1.3b"
 
 DEFAULTS = {"frames": 25, "span_fraction": 0.04, "fit_iterations": 15000,
+            "fit_iterations_per_view": 1000,
             "model_variant": DEFAULT_MODEL_VARIANT,
             "fitting_safeguards": True,
             "source_conditioning": "rendered", "generated_cache": "last_denoising",
@@ -84,6 +85,8 @@ def validate_options(value=None):
     # Long fitting runs are valid; the optimizer has no fixed iteration ceiling.
     if type(result["fit_iterations"]) is not int or result["fit_iterations"] < 1:
         raise ValueError("fit_iterations must be a positive integer")
+    if type(result["fit_iterations_per_view"]) is not int or result["fit_iterations_per_view"] < 0:
+        raise ValueError("fit_iterations_per_view must be a nonnegative integer (0 means unlimited)")
     for key, lower, upper in [("frames", 9, 81),
                               ("inference_steps", 1, 50), ("seed", 0, 2**31-1),
                               ("max_repair_pixels", 0, 16777216), ("local_view_count", 5, 9),

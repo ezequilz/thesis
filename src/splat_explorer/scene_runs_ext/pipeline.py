@@ -290,7 +290,8 @@ def repair(scene, camera, anchor_path, request_dir, *, options, runtime, proposa
                      iterations=options["fit_iterations"] * (1 if options["fitting_safeguards"] else len(seeds)),
                      should_stop=should_stop, on_progress=on_progress,
                      scale_ceiling=scale_ceiling, edited_indices=edited_indices,
-                     fitting_safeguards=options["fitting_safeguards"])
+                     fitting_safeguards=options["fitting_safeguards"],
+                     fit_iterations_per_view=options["fit_iterations_per_view"])
     check()
     on_progress({"phase": "native_validation"})
     renderer = renderer_factory(candidate)

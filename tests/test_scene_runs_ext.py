@@ -57,10 +57,11 @@ def test_extended_config_policy_and_baseline_are_separate(tmp_path):
     baseline=SceneRunStudio(app,store)
     extended=SceneRunStudio(app,store,pipeline="extended")
     old=baseline.create({})
-    new=extended.create({"extended":{"frames":9}})
+    new=extended.create({"extended":{"frames":9,"fit_iterations_per_view":2500}})
     assert len(baseline.list_runs())==len(extended.list_runs())==1
     assert new["config"]["pipeline"]=="extended"
     assert new["config"]["extended"]["frames"]==9
+    assert store.get_run(new["run_id"]).config.extended["fit_iterations_per_view"] == 2500
     assert old["config"]["repair_backend"]=="gsfix-gsplat"
     assert new["config"]["width"] == 640 and new["config"]["repair_width"] == 960
     assert new["config"]["repair_height"] == 720
@@ -143,11 +144,12 @@ def test_repair_fits_every_propagated_view_and_commits_only_clone(tmp_path):
         assert np.array_equal(targets[0][0,0], [0,0,0])
         assert all(np.array_equal(t[0,0], [100,110,120]) for t in targets[1:])
         assert kw['edited_indices'] == [0]
+        assert kw['fit_iterations_per_view'] == 7
         assert kw['scale_ceiling'] == 2.
         candidate.colors[:]=.8
         return {"n_iters":3}
     candidate, metrics=repair(s,camera(),tmp_path/"anchor.png",tmp_path,
-        options={"frames":9,"fit_iterations":3},runtime={},proposal={"intervention":"appearance"},
+        options={"frames":9,"fit_iterations":3,"fit_iterations_per_view":7},runtime={},proposal={"intervention":"appearance"},
         should_stop=lambda:False,on_progress=lambda p:phases.append(p["phase"]),
         renderer_factory=Renderer,propagator=propagate,fitter=fitter)
     assert phases==["bundle_render","artifixer_propagate","multiview_fit","native_validation"]

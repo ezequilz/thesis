@@ -17,13 +17,19 @@ def initial_scale_ceiling(scene):
     return max(float(np.max(scales)) * 2, 1e-4)
 
 
-def view_schedule(count, iterations, edited_indices=()):
+def view_schedule(count, iterations, edited_indices=(), per_view_limit=1000):
     """Balance supervision sources rather than overweighting correlated frames.
 
     Both pools are shuffled without replacement. With both sources present,
     half the updates use direct edits and half use generated views, independent
-    of trajectory length. No source weighting is inferred from image quality.
+    of trajectory length until a pool reaches its per-view cap. Remaining
+    updates go to the other pool; fitting ends when the total budget or all
+    per-view caps are exhausted. No weighting is inferred from image quality.
     """
+    if type(per_view_limit) is not int or per_view_limit < 0:
+        raise ValueError("Invalid per-view iteration limit")
+    # Zero disables the image cap; the total budget remains finite.
+    per_view_limit = per_view_limit or iterations
     edited = sorted(set(edited_indices))
     if count < 1 or iterations < 1 or any(type(i) is not int or not 0 <= i < count for i in edited):
         raise ValueError("Invalid fitting view schedule")
@@ -32,11 +38,18 @@ def view_schedule(count, iterations, edited_indices=()):
     pools = [p for p in (edited, generated) if p]
     rng = np.random.default_rng(0)
     pending = [[] for _ in pools]
-    for step in range(iterations):
+    visits = np.zeros(count, dtype=int)
+    for step in range(min(iterations, count * per_view_limit)):
         source = step % len(pools)
+        if not any(visits[i] < per_view_limit for i in pools[source]):
+            source = next(j for j, pool in enumerate(pools)
+                          if any(visits[i] < per_view_limit for i in pool))
         if not pending[source]:
-            pending[source] = list(rng.permutation(pools[source]))
-        yield int(pending[source].pop())
+            pending[source] = list(rng.permutation(
+                [i for i in pools[source] if visits[i] < per_view_limit]))
+        index = int(pending[source].pop())
+        visits[index] += 1
+        yield index
 
 
 def shape_metrics(scales):
@@ -74,7 +87,7 @@ def constrain_log_scales_(scales, lower, upper, log_ratio):
 
 
 def fit_views(scene, cameras, targets, *, iterations, should_stop, on_progress, device="cuda",
-              scale_ceiling=None, edited_indices=(), fitting_safeguards=True):
+              scale_ceiling=None, edited_indices=(), fitting_safeguards=True, fit_iterations_per_view=1000):
     import torch
     import gsplat
     from ..repair_gsfix import photometric_loss
@@ -105,7 +118,9 @@ def fit_views(scene, cameras, targets, *, iterations, should_stop, on_progress, 
     scale_bounds = (tuple(tensor(x) for x in scale_trust_bounds(scene.scales, max_scale))
                     if fitting_safeguards else None)
     edited_indices = list(edited_indices)
-    schedule = view_schedule(len(cameras), iterations, edited_indices)
+    effective_iterations = (min(iterations, len(cameras) * fit_iterations_per_view)
+                            if fit_iterations_per_view else iterations)
+    schedule = view_schedule(len(cameras), iterations, edited_indices, fit_iterations_per_view)
     edited_set = set(edited_indices)
     shape_before = shape_metrics(scene.scales)
     def render(i):
@@ -157,7 +172,7 @@ def fit_views(scene, cameras, targets, *, iterations, should_stop, on_progress, 
             opacity.clamp_(-12, 12)
         if step % 20 == 0:
             on_progress({"phase": "multiview_fit", "iteration": step+1,
-                         "iterations": iterations, "loss": float(loss.detach()), "target_l1": float(l1.detach())})
+                         "iterations": effective_iterations, "loss": float(loss.detach()), "target_l1": float(l1.detach())})
     after = measure()
     for value in (means, scales, quats, opacity, colors):
         if not torch.isfinite(value).all():
@@ -169,7 +184,8 @@ def fit_views(scene, cameras, targets, *, iterations, should_stop, on_progress, 
     scene.quats = cpu(torch.nn.functional.normalize(quats, dim=-1))
     scene.opacities = cpu(opacity.sigmoid())
     scene.colors = cpu(colors)
-    return {"before": before, "after": after, "n_iters": iterations,
+    return {"before": before, "after": after, "n_iters": int(visits.sum()),
+            "requested_iterations": iterations, "fit_iterations_per_view": fit_iterations_per_view,
             "n_views": len(cameras), "n_gaussians": scene.num_gaussians,
             "metric_reference": "synthetic fitting targets, not ground truth",
             "quality_gate": "disabled", "densification": False,

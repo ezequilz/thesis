@@ -88,3 +88,31 @@ def test_scale_projection_blocks_needles_and_preserves_source_surfaces():
 def test_scale_bounds_reject_invalid_source(scales):
     with pytest.raises(ValueError):
         scale_trust_bounds(scales, 54.)
+
+
+@pytest.mark.parametrize('edited', [[], [0], [0, 1], [0, 1, 2, 3]])
+def test_per_view_cap_exhausts_views_without_exceeding_total(edited):
+    schedule = list(view_schedule(4, 100, edited, per_view_limit=3))
+    assert np.bincount(schedule, minlength=4).tolist() == [3, 3, 3, 3]
+    limited = list(view_schedule(4, 8, edited, per_view_limit=3))
+    assert len(limited) == 8
+    assert np.bincount(limited, minlength=4).max() <= 3
+    assert limited == list(view_schedule(4, 8, edited, per_view_limit=3))
+
+
+def test_per_view_limit_defaults_and_validation():
+    from splat_explorer.scene_runs_ext.config import validate_options
+    assert validate_options()['fit_iterations_per_view'] == 1000
+    assert validate_options({'fit_iterations_per_view': 2500})['fit_iterations_per_view'] == 2500
+    for invalid in (-1, True, 1.5, '1000', None):
+        with pytest.raises(ValueError, match='fit_iterations_per_view'):
+            validate_options({'fit_iterations_per_view': invalid})
+    assert len(list(view_schedule(1, 50000))) == 1000
+
+
+def test_unlimited_image_steps_preserves_total_and_source_balance():
+    from splat_explorer.scene_runs_ext.config import validate_options
+    assert validate_options({'fit_iterations_per_view': 0})['fit_iterations_per_view'] == 0
+    visits = np.bincount(list(view_schedule(3, 6000, [0], per_view_limit=0)))
+    assert visits.tolist() == [3000, 1500, 1500]
+    assert len(list(view_schedule(1, 2500, per_view_limit=0))) == 2500
