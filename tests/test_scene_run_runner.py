@@ -191,7 +191,8 @@ def test_repair_reload_keeps_policy_and_pose_state(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("repair_trigger", ["every_step", "regenerate_yes", "every_artifact"])
-def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_path, monkeypatch, repair_trigger):
+@pytest.mark.parametrize("regenerate", ["yes", "no"])
+def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_path, monkeypatch, repair_trigger, regenerate):
     now = datetime(2026, 9, 15, 18, 43, tzinfo=timezone.utc)
     store = SceneRunStore(tmp_path / "scene-runs", clock=lambda: now)
     created = store.create_run({
@@ -231,7 +232,7 @@ def test_extended_report_uses_repair_resolution_only_for_the_image_model(tmp_pat
                     "description": "floater",
                     "image_region": "center",
                     "severity": "high",
-                    "regenerate": "no",
+                    "regenerate": regenerate,
                 })
             if step < 21:
                 if step % 2:

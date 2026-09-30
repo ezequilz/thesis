@@ -303,6 +303,26 @@ def test_agent_view_selection_only_resolves_completed_recorded_cameras(tmp_path)
         selected_views(request,{"repair_scope":"scene"},3)
 
 
+@pytest.mark.parametrize('bundled', [False, True])
+def test_selected_waypoints_never_reuse_other_regenerations(tmp_path, bundled):
+    from splat_explorer.repair_lrz import camera_to_dict
+    request = tmp_path / 'repair-00003'
+    request.mkdir()
+    observation = tmp_path / 'render-00001'
+    observation.mkdir()
+    body = {'step': 1, 'operation': 'render', 'camera': camera_to_dict(camera())}
+    (observation / 'request.json').write_text(json.dumps(body))
+    (observation / 'response.json').write_text(json.dumps({'status': 'ok'}))
+    earlier = tmp_path / 'repair-00001'
+    earlier.mkdir()
+    (earlier / 'request.json').write_text(json.dumps({'camera': body['camera']}))
+    Image.new('RGB', (32, 32), 'red').save(earlier / 'regenerated.png')
+    if bundled:
+        Image.new('RGB', (32, 32), 'red').save(request / 'reference-00001.png')
+    views = selected_views(request, {'view_steps': [1]}, 3)
+    assert set(views[0]) == {'step', 'camera'}
+
+
 @pytest.mark.parametrize("failure",["missing_frame","fit_error","stop"])
 def test_failed_candidate_never_mutates_source(tmp_path,failure):
     s=scene(); Image.new("RGB",(32,32)).save(tmp_path/"anchor.png")

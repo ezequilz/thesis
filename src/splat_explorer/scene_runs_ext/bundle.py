@@ -27,7 +27,7 @@ def repair_camera(camera, image_size, *, max_pixels=0):
 
 
 def selected_views(request_dir, proposal, current_step):
-    """Resolve agent IDs against worker-owned observations, never model poses/paths."""
+    """Resolve camera waypoints only; never import another repair's images."""
     import json
     from pathlib import Path
     from ..repair_lrz import camera_from_dict
@@ -53,18 +53,6 @@ def selected_views(request_dir, proposal, current_step):
                 or json.loads(response.read_text()).get("status") != "ok"):
             raise ValueError(f"Selected step {step} is not a completed observation")
         view = {"step": step, "camera": camera_from_dict(body["camera"])}
-        bundled = Path(request_dir) / f"reference-{step:05d}.png"
-        if bundled.is_file():
-            view["reference_path"] = bundled
-            result.append(view)
-            continue
-        edited = root / f"repair-{step:05d}" / "regenerated.png"
-        edit_request = edited.with_name("request.json")
-        if edited.is_file() and edit_request.is_file():
-            edit_body = json.loads(edit_request.read_text())
-            # Only reuse a reference registered at exactly this observed pose.
-            if edit_body.get("camera") == body["camera"]:
-                view["reference_path"] = edited
         result.append(view)
     if proposal.get("repair_scope", "local") == "scene" and not result:
         raise ValueError("Scene reconstruction requires earlier view_steps; explore relevant views first")
