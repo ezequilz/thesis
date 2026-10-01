@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shlex
 import shutil
@@ -170,6 +171,8 @@ class LrzSceneRunTransport:
         self.remote_dir = remote_scene_run_dir(self.cfg, self.run_id)
         self._effective_deadline: float | None = None
         self._started = False
+        self._staged = False
+        self._launch_attempted = False
         self._run_config: dict[str, Any] = {}
 
     def _progress(self, phase: str, message: str, **fields: Any) -> None:
@@ -327,6 +330,7 @@ class LrzSceneRunTransport:
             raise FileNotFoundError(f"scene-run source PLY missing: {source}")
         self.run_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_json(self.run_dir / "worker_config.json", self._worker_config(config))
+        self.cleanup_finished_runs()
         repair_lrz.sync_code_to_dss(self.cfg)
         remote = f"{self.cfg['user']}@{self.cfg['host']}"
         ssh_e = repair_lrz.rsync_ssh_cmd(self.cfg)
@@ -334,16 +338,11 @@ class LrzSceneRunTransport:
             repair_lrz.ssh_argv(self.cfg, multiplex=True)
             + [f"mkdir -p {shlex.quote(self.remote_dir + '/requests')}"]
         )
+        self._staged = True
         repair_lrz._mux_run([
             "rsync", "-az", "-e", ssh_e,
-            "--exclude", f"/{STOP_NAME}",
-            "--exclude", "/requests/",
-            "--exclude", f"/{HEARTBEAT_NAME}",
-            "--exclude", f"/{WORKER_NAME}",
-            "--exclude", "/launcher.pid",
-            "--exclude", "/worker.log",
-            f"{self.run_dir}/",
-            f"{remote}:{self.remote_dir}/",
+            str(self.run_dir / "worker_config.json"),
+            f"{remote}:{self.remote_dir}/worker_config.json",
         ])
         repair_lrz._mux_run([
             "rsync", "-az", "-e", ssh_e,
@@ -387,6 +386,7 @@ class LrzSceneRunTransport:
         command = scene_worker_launch_command(
             self.cfg, self.run_id, overall_deadline=effective,
         )
+        self._launch_attempted = True
         result = repair_lrz._ssh_run(self.cfg, command, timeout=30)
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
@@ -708,23 +708,86 @@ class LrzSceneRunTransport:
                 (result.stderr or result.stdout or "could not stop LRZ worker").strip()
             )
 
+    def _cleanup_state(self, run_id: str, *, delete: bool = False) -> bool:
+        """Only remove stopped workers or staging directories never launched.
+
+        A stale heartbeat alone is deliberately insufficient evidence of exit.
+        Recheck the same guard immediately before deletion; never follow symlinks.
+        """
+        path = remote_scene_run_dir(self.cfg, run_id)
+        script = """
+import json, pathlib, shutil, sys
+p = pathlib.Path(sys.argv[1])
+if p.is_symlink() or not p.is_dir():
+    sys.exit(3)
+def read(name):
+    try:
+        return json.loads((p / name).read_text())
+    except (OSError, ValueError):
+        return {}
+never_launched = not any((p / n).exists() for n in ('launcher.pid', 'worker.json', 'heartbeat.json'))
+finished = read('worker.json').get('status') in ('stopped', 'error') and read('heartbeat.json').get('status') == 'stopped'
+if not (never_launched or finished):
+    sys.exit(3)
+if sys.argv[2] == 'delete':
+    shutil.rmtree(p)
+"""
+        command = "python3 -c " + shlex.quote(script) + " " + shlex.quote(path)
+        command += " " + ("delete" if delete else "check")
+        result = repair_lrz._ssh_run(self.cfg, command, timeout=60)
+        if result.returncode == 3:
+            return False
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr or "Remote scene cleanup failed")
+        return True
+
+    def _archive_and_remove(self, run_id: str, local_dir: Path) -> bool:
+        if not self._cleanup_state(run_id):
+            return False
+        remote = f"{self.cfg['user']}@{self.cfg['host']}"
+        # Preserve all remote-generated artifacts, including logs/intermediates
+        # from failed requests. Local manager metadata must not be overwritten.
+        excludes = ("scene.ply", "scene_original.ply", "status.json", "config.json",
+                    "events.jsonl", "actions.jsonl", "STOP", "launcher.pid")
+        argv = ["rsync", "-azc", "-e", repair_lrz.rsync_ssh_cmd(self.cfg)]
+        for name in excludes:
+            argv.extend(["--exclude", "/" + name])
+        argv.extend([f"{remote}:{remote_scene_run_dir(self.cfg, run_id)}/", f"{local_dir}/"])
+        repair_lrz._mux_run(argv)
+        # A failed copy raises above and retains the only remote copy.
+        return self._cleanup_state(run_id, delete=True)
+
+    def cleanup_finished_runs(self) -> None:
+        """Retry cleanup for locally finished runs before consuming more quota."""
+        for status_path in sorted(self.run_dir.parent.glob("*/status.json")):
+            if status_path.parent.name == self.run_id:
+                continue
+            try:
+                status = json.loads(status_path.read_text())
+                if status.get("status") not in {"completed", "stopped", "error", "gpu_expired"}:
+                    continue
+                self._archive_and_remove(status_path.parent.name, status_path.parent)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Retaining remote scene-run %s: cleanup could not complete", status_path.parent.name)
+
     def close(self) -> None:
-        """Best-effort final checkpoint pull; the worker owns its deadline."""
-        if not self._started:
+        """Stop, archive successfully, then discard the remote working scene."""
+        if not self._staged:
             return
-        # Release the GPU worker before the manager releases its shared lease.
-        # The next setup/run must not overlap an idle worker retaining tensors.
-        self.stop()
-        until = time.monotonic() + 30.0
-        while time.monotonic() < until:
-            worker = self._remote_json(WORKER_NAME) or {}
-            if worker.get("status") in {"stopped", "error"}:
-                break
-            time.sleep(self.poll_seconds)
-        else:
-            raise RuntimeError("GPU worker has not exited yet; wait before reloading setup")
-        try:
-            self.pull_checkpoint()
-        except Exception:
-            # A run can close before the first repair, so no checkpoint may exist.
-            pass
+        if self._launch_attempted:
+            self.stop()
+            until = time.monotonic() + 30.0
+            while time.monotonic() < until:
+                worker = self._remote_json(WORKER_NAME) or {}
+                heartbeat = self._remote_json(HEARTBEAT_NAME) or {}
+                if (worker.get("status") in {"stopped", "error"}
+                        and heartbeat.get("status") == "stopped"):
+                    break
+                time.sleep(self.poll_seconds)
+            else:
+                raise RuntimeError("GPU worker has not exited yet; remote files retained")
+        if not self._archive_and_remove(self.run_id, self.run_dir):
+            raise RuntimeError("Remote worker shutdown unconfirmed; remote files retained")
+        self._started = False
+        self._staged = False

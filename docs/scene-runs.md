@@ -64,3 +64,19 @@ env, or `image_edit.QWEN_required`). A Qwen scene-run refuses to start until
 Reload GPU setup has installed those packages. Model weights are never
 downloaded implicitly; preload Qwen into the remote Hugging Face cache or
 explicitly enable the one-time download in configuration.
+
+## Remote scene storage
+
+LRZ scene-run directories are temporary working storage, shared by baseline and
+extended runs. Each new run uploads only its worker configuration and original
+scene (`scene.ply`); original scenes are not cached across runs. Local original
+and repaired PLY copies are no longer uploaded as extra inputs.
+
+On close, the manager requests shutdown, waits for the worker's final markers,
+syncs remote results and diagnostics into the existing local run directory, and
+removes the remote run directory only after that sync succeeds. It preserves
+local manager metadata and omits redundant original scene files. No separate
+local archive is created. A failed sync or unconfirmed shutdown retains remote
+files and records `remote_cleanup_failed`. Before staging another run, cleanup
+is retried for locally finished runs. Stale running markers alone do not permit
+automatic deletion. Model caches and GPU setup are unaffected.

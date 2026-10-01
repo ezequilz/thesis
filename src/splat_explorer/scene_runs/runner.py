@@ -649,6 +649,7 @@ class SceneRunExecutor:
                 error = f"{type(exc).__name__}: {exc}"
                 logger.exception("Scene-run %s failed", self._run_id)
         finally:
+            cleanup_error = None
             if gpu is not None:
                 try:
                     if terminal in ("stopped", "error", "gpu_expired"):
@@ -657,8 +658,10 @@ class SceneRunExecutor:
                     logger.exception("Could not stop scene-run GPU worker")
                 try:
                     gpu.close()
-                except Exception:
+                except Exception as exc:
+                    cleanup_error = str(exc)
                     logger.exception("Could not close scene-run GPU transport")
+                    self._event("remote_cleanup_failed", error=cleanup_error)
             finished = self.clock()
             self._status(
                 status=terminal,
@@ -669,6 +672,7 @@ class SceneRunExecutor:
                 ),
                 error=error,
                 finished_at=finished,
+                remote_cleanup_error=cleanup_error,
                 steps=steps_done,
                 repairs=repairs,
                 artifacts=artifacts,
