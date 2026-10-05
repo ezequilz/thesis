@@ -5098,10 +5098,20 @@ def probe_job(cfg: dict | None = None, *, password: str | None = None) -> str:
     return state
 
 
+class RemoteCommandError(RuntimeError):
+    """Compact UI error retaining complete diagnostics for durable job logs."""
+
+    def __init__(self, argv: list[str], result: subprocess.CompletedProcess):
+        super().__init__(format_remote_command_error(argv, result))
+        self.returncode = result.returncode
+        self.stdout = result.stdout or ""
+        self.stderr = result.stderr or ""
+
+
 def _mux_run(argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
-    result = subprocess.run(argv, check=False, capture_output=True, text=True)
+    result = subprocess.run(argv, check=False, capture_output=True, text=True, errors="replace")
     if check and result.returncode != 0:
-        raise RuntimeError(format_remote_command_error(argv, result))
+        raise RemoteCommandError(argv, result)
     return result
 
 

@@ -40,6 +40,7 @@ image-edit = [
 
 [project.scripts]
 splat-explorer = "splat_explorer.cli:main"
+splatfix = "splat_explorer.splatfix.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

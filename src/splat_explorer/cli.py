@@ -370,7 +370,13 @@ def main() -> None:
     )
     p_scene_runs.set_defaults(func=cmd_scene_run_manager)
 
+    from .splatfix.cli import add_parser as add_splatfix_parser
+    add_splatfix_parser(sub)
+
     args = parser.parse_args()
+    if args.command == "splatfix":
+        from .config import load_dotenv
+        load_dotenv()
     cfg = load_config(args.config)
     from .image_edit import apply_image_edit_overrides
 

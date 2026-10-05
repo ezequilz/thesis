@@ -51,6 +51,13 @@ class SceneRunManager:
         self.stop_event.set()
 
     def run_forever(self) -> None:
+        import fcntl
+        manager_lock = (self.root / ".manager.lock").open("a")
+        try:
+            fcntl.flock(manager_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            manager_lock.close()
+            raise RuntimeError("A scene-run manager is already running")
         self._install_signals()
         self._recover_interrupted()
         logger.info("Scene-run manager ready (%s)", self.root)
@@ -64,11 +71,13 @@ class SceneRunManager:
             if not run_id:
                 self.stop_event.wait(self.poll_seconds)
                 continue
-            if self._stop_requested(run_id):
+            if self._stop_requested(run_id) and not (candidate.get("state") or {}).get("details", {}).get("remote_dir"):
                 self._update(run_id, status="stopped", phase="finished",
                              message="Stopped while queued", finished_at=time.time())
                 continue
-            gpu = self._gpu_ready()
+            from ..splatfix.jobs import requires_gpu
+            resuming = (candidate.get("state") or {}).get("details", {}).get("remote_dir")
+            gpu = self._gpu_ready() if requires_gpu(candidate.get("config", {})) and not resuming else {"ready": True, "message": "Local stage"}
             if not gpu.get("ready"):
                 self._update(
                     run_id,
@@ -93,6 +102,10 @@ class SceneRunManager:
                 self.stop_event.wait(5.0)
                 continue
             try:
+                # Another manager may have completed this candidate while we waited.
+                fresh = getattr(self.store, "get_run", lambda _: None)(run_id)
+                if fresh is not None and fresh.state.status.value not in QUEUE_STATUSES:
+                    continue
                 executor = self.executor_factory(self.cfg, self.store)
                 executor.execute(run_id)
             except Exception as exc:
@@ -108,13 +121,16 @@ class SceneRunManager:
             finally:
                 self._release_lease(lease)
         self._heartbeat(stopped=True)
+        manager_lock.close()
 
     def run_once(self) -> bool:
         """Run one ready queue item; useful for tests and manual recovery."""
         candidate = self._next_queued()
         if candidate is None:
             return False
-        gpu = self._gpu_ready(force=True)
+        from ..splatfix.jobs import requires_gpu
+        resuming = (candidate.get("state") or {}).get("details", {}).get("remote_dir")
+        gpu = self._gpu_ready(force=True) if requires_gpu(candidate.get("config", {})) and not resuming else {"ready": True}
         if not gpu.get("ready"):
             return False
         run_id = str(candidate.get("id") or candidate.get("run_id"))
@@ -123,6 +139,9 @@ class SceneRunManager:
         if lease is None:
             return False
         try:
+            fresh = getattr(self.store, "get_run", lambda _: None)(run_id)
+            if fresh is not None and fresh.state.status.value not in QUEUE_STATUSES:
+                return False
             self.executor_factory(self.cfg, self.store).execute(run_id)
         finally:
             self._release_lease(lease)
@@ -147,9 +166,12 @@ class SceneRunManager:
         for row in self._list():
             state = row.get("state", row.get("status"))
             status = state.get("status") if isinstance(state, dict) else state
-            if status in QUEUE_STATUSES:
+            from ..splatfix.jobs import is_due
+            if status in QUEUE_STATUSES and (row.get("stop_requested") or is_due(row.get("config", {}))):
                 queued.append(row)
+        from ..splatfix.jobs import requires_gpu
         queued.sort(key=lambda r: (
+            0 if (r.get("state") or {}).get("details", {}).get("remote_dir") else (2 if requires_gpu(r.get("config", {})) else 1),
             str((r.get("state") or {}).get("created_at") or r.get("created_at") or ""),
             str(r.get("id") or r.get("run_id") or ""),
         ))
@@ -179,6 +201,11 @@ class SceneRunManager:
             if status not in ACTIVE_STATUSES:
                 continue
             run_id = str(row.get("id") or row.get("run_id") or "")
+            config = row.get("config") or {}
+            details = state.get("details", {}) if isinstance(state, dict) else {}
+            if config.get("pipeline") == "splatfix" and config.get("splatfix", {}).get("stage") in ("repair", "benchmark") and details.get("remote_dir"):
+                self._update(run_id, status="queued", message="Reattaching to the existing GPU reconstruction after restart")
+                continue
             if status == "starting":
                 self._update(
                     run_id,

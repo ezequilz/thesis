@@ -237,6 +237,9 @@ class SceneRunExecutor:
         ).resolve()
         detail = self._detail(self._run_id)
         params = dict(detail.get("config") or detail.get("params") or {})
+        if params.get("pipeline") == "splatfix":
+            from ..splatfix.executor import SplatfixExecutor
+            return SplatfixExecutor(self.cfg, self.store).execute(run_id)
         state = dict(detail.get("state") or detail.get("status") or {})
         state_details = dict(state.get("details") or {})
         started = self.clock()

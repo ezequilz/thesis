@@ -187,6 +187,8 @@ class DashboardApp:
         self.repair = RepairStudio(self)
         self.scene_runs = SceneRunStudio(self)
         self.scene_runs_ext = SceneRunStudio(self, pipeline="extended")
+        from .splatfix_studio import SplatfixStudio
+        self.splatfix = SplatfixStudio(self)
         threading.Thread(target=self._load_scene, daemon=True).start()
 
     # --- scene ----------------------------------------------------------------
@@ -767,6 +769,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path in ("/", "/index.html"):
             self._send(200, (STATIC_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
+        elif path in ("/splatfix", "/splatfix.html"):
+            self._send(200, (STATIC_DIR / "splatfix.html").read_bytes(), "text/html; charset=utf-8")
+        elif path.startswith("/api/splatfix"):
+            self._serve_splatfix(path)
         elif path in ("/spectator", "/spectator.html"):
             self._send(200, (STATIC_DIR / "spectator.html").read_bytes(), "text/html; charset=utf-8")
         elif path in ("/repair", "/repair.html"):
@@ -1196,6 +1202,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._send_json({"ok": False, "message": "Invalid JSON body."}, 400)
             return
+        if path.startswith("/api/splatfix"):
+            self._serve_splatfix(path, body)
+            return
         if path == "/api/run":
             ok, message = self.app.start_run(body)
         elif path == "/api/stop":
@@ -1218,6 +1227,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "not found"}, 404)
             return
         self._send_json({"ok": ok, "message": message}, 200 if ok else 409)
+
+    def _serve_splatfix(self, path: str, body=None) -> None:
+        try:
+            studio = self.app.splatfix
+            if self.command == "GET" and path == "/api/splatfix":
+                self._send_json(studio.snapshot())
+            elif self.command == "GET" and path == "/api/splatfix/file":
+                query = parse_qs(urlsplit(self.path).query)
+                target = studio.allowed_file(query.get("path", [""])[0])
+                self._send(200, target.read_bytes(), mimetypes.guess_type(target.name)[0] or "application/octet-stream")
+            elif self.command == "POST" and path == "/api/splatfix/jobs":
+                self._send_json({"ok": True, "job": studio.create(body)}, 201)
+            elif self.command == "POST" and path == "/api/splatfix/cancel":
+                if not isinstance(body, dict):
+                    raise ValueError("Request must be an object")
+                self._send_json({"ok": True, "job": studio.cancel(str(body.get("run_id") or ""))})
+            else:
+                self._send_json({"error": "not found"}, 404)
+        except (ValueError, TypeError, KeyError, FileNotFoundError) as exc:
+            self._send_json({"ok": False, "error": str(exc)}, 400)
 
     def _serve_scene_runs_post(self, path: str, body: dict) -> None:
         from .scene_run_studio import SceneRunValidationError

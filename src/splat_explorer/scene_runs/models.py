@@ -70,10 +70,14 @@ class SceneRunConfig:
     repair_height: int = 0
     pipeline: str = "baseline"
     extended: dict[str, Any] = field(default_factory=dict)
+    splatfix: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.pipeline not in {"baseline", "extended"}:
-            raise ValueError("pipeline must be baseline or extended")
+        if self.pipeline not in {"baseline", "extended", "splatfix"}:
+            raise ValueError("pipeline must be baseline, extended or splatfix")
+        if self.pipeline == "splatfix":
+            from ..splatfix.jobs import validate_job
+            object.__setattr__(self, "splatfix", validate_job(self.splatfix))
         if self.pipeline == "extended":
             from ..scene_runs_ext.config import validate_options, validate_repair_resolution
             object.__setattr__(self, "extended", validate_options(self.extended))
@@ -134,6 +138,8 @@ class SceneRunConfig:
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
+        if self.pipeline != "splatfix":
+            data.pop("splatfix", None)
         data["repair_trigger"] = self.repair_trigger.value
         data["repair_type"] = self.repair_type.value
         if self.pipeline == "baseline":

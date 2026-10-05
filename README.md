@@ -22,6 +22,10 @@ trace for later evaluation.
 
 ## Repository layout
 
+For the checkpointed view-selection and authors-method reconstruction pipeline,
+see [Splatfix](docs/splatfix.md). It supports saved GPT-image repairs and an
+unedited baseline, both using fresh official ArtiFixer reconstruction.
+
 ```
 3dgs_rooms/                     Splat assets (.sog bundles; mounted read-only in Docker)
 configs/default.yaml            All knobs: scene, renderer, camera, agent, viewer
@@ -49,6 +53,7 @@ src/splat_explorer/
   repair_gsfix3d.py             CUDA/gsplat GSFix3D paper refine (default)
   repair_gsfix.py               Frozen CUDA baseline (uncapped RGB; A/B)
   repair_mlx.py                 Apple Silicon refine via gsplat-mlx (Metal)
+  splatfix/                     View checkpoints, GPT-image edits, official ArtiFixer reconstruction
   tasks/
     registry.py                   Prompt variant switch (agent.prompt: v1 / v2 / v3)
     artifact_hunt.py              Task prompt v1 + scoring placeholder [STUB]

@@ -420,6 +420,19 @@ class SceneRunStore:
             try:
                 lease_path.mkdir()
             except FileExistsError:
+                prior_owner = self.gpu_lease_owner() or {}
+                if prior_owner.get("run_id") != run_id:
+                    try:
+                        prior = self.get_run(prior_owner.get("run_id", ""))
+                    except (OSError, ValueError, TypeError):
+                        prior = None
+                    # A dead local controller does not mean its detached LRZ
+                    # reconstruction stopped. Only that run may reattach and
+                    # reclaim this lease until remote completion is observed.
+                    if (prior is not None and prior.config.pipeline == "splatfix"
+                            and prior.state.details.get("remote_dir")
+                            and not prior.state.details.get("remote_finished")):
+                        return None
                 if attempt or not self._recover_stale_local_lease():
                     return None
                 continue

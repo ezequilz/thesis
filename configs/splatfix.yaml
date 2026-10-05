@@ -1,0 +1,12 @@
+# Use: python -m splat_explorer.splatfix.cli --config configs/splatfix.yaml select
+# Credentials come from .env / CLIRELAY_API_KEY; do not put secrets here.
+agent:
+  vlm_backend: cli_relay
+
+splatfix:
+  runtime:
+    repo: /workspace/third_party/ArtiFixer
+    python: /workspace/artifixer-venv/bin/python
+    checkpoint: /workspace/models/artifixer/artifixer-1.3b.pt
+    model_id: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+    hf_home: /workspace/models/huggingface

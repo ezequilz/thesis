@@ -2518,3 +2518,22 @@ def test_gpu_setup_omits_qwen_packages_when_not_required(tmp_path, monkeypatch):
 
 
 
+
+
+def test_mux_error_keeps_complete_diagnostics_and_decodes_invalid_utf8():
+    import sys
+    from splat_explorer.repair_lrz import _mux_run, RemoteCommandError
+
+    command = [sys.executable, '-c',
+               "import os; os.write(2, b'initial transport cause\\n' + b'x' * 900 + b'\\xff'); os.write(1, b'partial output'); raise SystemExit(255)"]
+    with pytest.raises(RemoteCommandError) as caught:
+        _mux_run(command)
+    error = caught.value
+    assert error.returncode == 255
+    assert error.stderr.startswith('initial transport cause\n')
+    assert error.stderr.endswith('\ufffd')
+    assert error.stdout == 'partial output'
+    assert len(str(error)) < len(error.stderr)
+    unchecked = _mux_run(command, check=False)
+    assert unchecked.returncode == 255
+    assert unchecked.stderr == error.stderr
