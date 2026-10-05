@@ -1,7 +1,7 @@
 """Photographic COLMAP benchmark through the pinned authors' command line tools.
 
-This path does not use the splatfix rendered-anchor adapter. The source-camera
-trajectory is reproducible; the unpublished project-page orbit is not claimed.
+This path does not use the splatfix rendered-anchor adapter. Authors orbit
+interpolation provides a reproducible smooth camera trajectory; the unpublished project-page orbit is not claimed.
 """
 from __future__ import annotations
 import json
@@ -16,13 +16,18 @@ import uuid
 
 MODEL_IDS = {'1.3b': 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers',
              '14b': 'Wan-AI/Wan2.1-T2V-14B-Diffusers'}
-LIMITATION = ('Uses the source COLMAP camera trajectory. The exact project-page Bicycle '
+LIMITATION = ('Uses the authors orbit interpolation with published reference and test cameras. The exact project-page Bicycle '
               'orbit and original random state are unavailable; this is an authors-code '
               'reproduction with the published reference photographs, not pixel-identical video reproduction. '
               'Generic authors preparation receives all source photographs for metric alignment and '
               'caption generation (194 for the released Bicycle input, including its 25 published test views). '
-              'All nonreference source cameras are generated supervision (191 for Bicycle), rather than '
-              'only the 25 published test cameras. This is not a verified reproduction of the paper evaluation protocol.')
+              'Interpolated targets include the exact published test cameras; reference cameras are appended once as photographic context. '
+              'This is not a verified reproduction of the paper evaluation protocol.')
+SOURCE_CAMERA_LIMITATION = LIMITATION.replace(
+    'Uses the authors orbit interpolation with published reference and test cameras.',
+    'Diagnostic mode uses all source COLMAP cameras in source order.').replace(
+    'Interpolated targets include the exact published test cameras; reference cameras are appended once as photographic context.',
+    'All nonreference source cameras are generated supervision (191 for Bicycle).')
 
 
 def benchmark_runtime(runtime=None):
@@ -75,6 +80,38 @@ def _verify_preparation(split, selected_names):
     if actual != selected_names:
         raise ValueError('Prepared references differ from the published selected photographs')
     return scene_id, entry, len(frames), selected
+
+
+def _orbit_test_indices(source_data, prepared_data, provenance, names, selected):
+    """Resolve target identities without adding forbidden file_path to targets."""
+    import numpy as np
+    mapping = provenance.get('target_name_to_index')
+    if not isinstance(mapping, dict) or set(mapping) != set(names):
+        raise ValueError('Orbit provenance must map every published test photograph exactly once')
+    indices = [mapping[name] for name in names]
+    frames = prepared_data['frames']
+    if (any(type(index) is not int or not 0 <= index < len(frames) for index in indices)
+            or len(set(indices)) != len(indices) or set(indices) & set(selected)):
+        raise ValueError('Orbit published test indices must identify distinct target cameras')
+    source_by_name = {}
+    for frame in source_data['frames']:
+        name = Path(frame['file_path']).name
+        if name in source_by_name:
+            raise ValueError('Source transforms contain duplicate image basenames')
+        source_by_name[name] = frame
+    for name, index in zip(names, indices):
+        if name not in source_by_name:
+            raise ValueError('Source transforms omitted a published test photograph')
+        original, target = source_by_name[name], frames[index]
+        left, right = np.asarray(original['transform_matrix']), np.asarray(target['transform_matrix'])
+        if (left.shape != (4, 4) or right.shape != (4, 4)
+                or not np.allclose(left, right, rtol=0, atol=1e-12)):
+            raise ValueError(f'Orbit changed the exact published test pose: {name}')
+        for key in ('w', 'h', 'fl_x', 'fl_y', 'cx', 'cy'):
+            a, b = original.get(key, source_data.get(key)), target.get(key, prepared_data.get(key))
+            if a is None or b is None or not math.isclose(a, b, rel_tol=0, abs_tol=1e-12):
+                raise ValueError(f'Orbit changed published test calibration {key}: {name}')
+    return indices
 
 
 def _prediction_frames(save_dir, scene_id, required):
@@ -287,6 +324,13 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
     if should_stop():
         raise InterruptedError('Benchmark stopped')
     cfg = benchmark_runtime(runtime)
+    trajectory_mode = cfg.get('trajectory_mode', 'author_orbit')
+    if trajectory_mode not in ('author_orbit', 'source_cameras'):
+        raise ValueError('trajectory_mode must be author_orbit or source_cameras')
+    if trajectory_mode == 'author_orbit' and not published_test_names:
+        raise ValueError('Author orbit benchmark requires published target camera names')
+    cfg['trajectory_mode'] = trajectory_mode
+    limitation = LIMITATION if trajectory_mode == 'author_orbit' else SOURCE_CAMERA_LIMITATION
     # Match authors normal Hugging Face metadata lookups. Cached tokenizer
     # weights alone do not satisfy every optional-config lookup in offline mode.
     cfg['model_hub_offline'] = (runtime or {}).get('model_hub_offline', False)
@@ -305,8 +349,8 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
     manifest = {'status': 'running', 'created_at': utc_now(), 'source_dir': str(source),
                 'source_metadata': metadata, 'selected_images': names, 'runtime': cfg,
                 'upstream_revision': UPSTREAM_REVISION, 'runtime_compatibility': RUNTIME_COMPATIBILITY,
-                'native_library_path_active': bool(cfg.get('native_library_dir') and Path(cfg['native_library_dir']).is_dir()), 'trajectory': 'all source COLMAP cameras',
-                'limitation': LIMITATION, 'stages': [],
+                'native_library_path_active': bool(cfg.get('native_library_dir') and Path(cfg['native_library_dir']).is_dir()), 'trajectory': trajectory_mode,
+                'limitation': limitation, 'stages': [],
                 'input_sha256': input_hashes,
                 'base_reconstruction_steps': 10000, 'artifixer3d_steps': 30000,
                 'reference_kind': 'original photographs', 'initialization': 'original COLMAP sparse points',
@@ -319,7 +363,7 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
                     'published_test_count': len(published_test_names),
                     'metric_alignment_input': 'all source photographs and their original COLMAP observations',
                     'caption_input': 'all source photographs passed to the official video processor; processor controls sampling',
-                    'generated_supervision': 'all nonreference source cameras',
+                    'generated_supervision': ('authors interpolated orbit targets' if trajectory_mode == 'author_orbit' else 'all nonreference source cameras'),
                     'metrics_computed': False,
                     'metric_policy': ('Any later published-split score must match filenames to published_test_images, '
                                       'exclude all reference images, use photographic ground truth only for scoring, '
@@ -370,7 +414,8 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
         return [cfg['python'], '-m', 'model_eval.run_inference', '--evalset', 'reconstructed_colmap',
                 '--checkpoint_pt', cfg['checkpoint'], '--model_id', cfg['model_id'],
                 '--save_dir', str(destination), '--split_path', str(split),
-                '--num_views', '3', '--render_trajectory', 'all_frames', '--save_frame_outputs_only']
+                '--num_views', '3', '--render_trajectory',
+                'trajectory' if trajectory_mode == 'author_orbit' else 'all_frames', '--save_frame_outputs_only']
     try:
         if resume:
             on_progress({'phase': 'copy_preparation', 'output_dir': str(root), 'resume_from': resume['root']})
@@ -392,17 +437,49 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
                 verified[key] = actual
             proof['post_preparation_verified_sha256'] = verified
             atomic_json(root / 'benchmark-run.json', manifest)
+        if trajectory_mode == 'author_orbit':
+            source_transforms = json.loads(_metadata_path(split, entry, 'transforms_path').read_text())
+            target_names_path = root / 'orbit-target-names.json'
+            atomic_json(target_names_path, published_test_names)
+            trajectory_path = root / 'author-orbit.json'
+            provenance_path = root / 'author-orbit-provenance.json'
+            stage('orbit_path', [cfg['python'], str(Path(__file__).with_name('author_trajectory.py').resolve()),
+                '--repo', cfg['repo'], '--transforms', str(_metadata_path(split, entry, 'transforms_path')),
+                '--selected-indices', str(_metadata_path(split, entry, 'selected_indices_path')),
+                '--target-names', str(target_names_path), '--metric-scale', str(entry['metric_scale']),
+                '--interp-distance', '0.1', '--output', str(trajectory_path), '--provenance', str(provenance_path)])
+            # The upstream CLI always writes split.json. Preserve its source-camera
+            # split for preparation reuse; retain the separate trajectory split.
+            source_split_bytes = split.read_bytes()
+            trajectory_split = prepared / 'split_trajectory.json'
+            try:
+                stage('orbit_render', prep + ['--phases', 'render', '--trajectory_path', str(trajectory_path)])
+                trajectory_split.write_bytes(split.read_bytes())
+            finally:
+                split.write_bytes(source_split_bytes)
+            split = trajectory_split
+            scene_id, entry, frame_count, selected = _verify_preparation(split, names)
+            targets = json.loads(_metadata_path(split, entry, 'target_indices_path').read_text())
+            if targets != [i for i in range(frame_count) if i not in selected]:
+                raise ValueError('Official orbit target indices overlap or omit photographic contexts')
+            manifest['orbit_provenance'] = json.loads(provenance_path.read_text())
+            manifest['inference_split'] = str(split.relative_to(root))
         required = [i for i in range(frame_count) if i not in selected]
         if not required:
             raise ValueError('Benchmark needs held-out source views in addition to the three references')
-        frames = json.loads(_metadata_path(split, entry, 'transforms_path').read_text())['frames']
-        prepared_names = [Path(frame['file_path']).name for frame in frames]
-        if len(set(prepared_names)) != len(prepared_names):
-            raise ValueError('Prepared source trajectory contains duplicate image basenames')
-        name_to_index = {name: index for index, name in enumerate(prepared_names)}
-        if any(name not in name_to_index for name in published_test_names):
-            raise ValueError('Prepared source trajectory omitted a published test photograph')
-        test_indices = [name_to_index[name] for name in published_test_names]
+        prepared_transforms = json.loads(_metadata_path(split, entry, 'transforms_path').read_text())
+        frames = prepared_transforms['frames']
+        if trajectory_mode == 'author_orbit':
+            test_indices = _orbit_test_indices(source_transforms, prepared_transforms,
+                manifest['orbit_provenance'], published_test_names, selected)
+        else:
+            prepared_names = [Path(frame['file_path']).name for frame in frames]
+            if len(set(prepared_names)) != len(prepared_names):
+                raise ValueError('Prepared source trajectory contains duplicate image basenames')
+            name_to_index = {name: index for index, name in enumerate(prepared_names)}
+            if any(name not in name_to_index for name in published_test_names):
+                raise ValueError('Prepared source trajectory omitted a published test photograph')
+            test_indices = [name_to_index[name] for name in published_test_names]
         if set(test_indices) & set(selected):
             raise ValueError('Prepared reference cameras overlap published test photographs')
         manifest['evaluation'].update(prepared_frame_count=frame_count,
@@ -412,7 +489,8 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
         stage('inference', inference(split, root / 'inference'))
         predictions = _prediction_frames(root / 'inference', scene_id, required)
         stage('artifixer3d', [cfg['python'], '-m', 'data_processing.run_artifixer3d',
-                             '--scene_root', str(prepared), '--artifixer_frames_dir', str(predictions)])
+                             '--scene_root', str(prepared), '--artifixer_frames_dir', str(predictions),
+                             '--split_path', str(split)])
         plus_split = prepared / 'split_artifixer3d_plus.json'
         plus_scene, plus_entry = _split_entry(plus_split)
         if plus_scene != scene_id:
@@ -433,8 +511,12 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
                   'source_dir': str(source), 'model_variant': cfg['model_variant'],
                   'selected_images': names, 'metric_scale': entry['metric_scale'],
                   'camera_scale': entry['camera_scale'], 'frame_count': frame_count,
-                  'upstream_revision': UPSTREAM_REVISION, 'limitation': LIMITATION,
+                  'upstream_revision': UPSTREAM_REVISION, 'limitation': limitation,
+                  'trajectory_mode': trajectory_mode, 'inference_split': str(split.relative_to(root)),
                   'merged': False, 'ply_stage': 'ArtiFixer3D; + produces postprocessed images'}
+        if trajectory_mode == 'author_orbit':
+            result['orbit_provenance_path'] = str(provenance_path.relative_to(root))
+            result['target_name_to_index'] = dict(manifest['orbit_provenance']['target_name_to_index'])
         atomic_json(root / 'result.json', result)
         manifest.update(status='complete', result=result)
         return result

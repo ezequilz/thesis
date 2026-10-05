@@ -115,14 +115,25 @@ allows normal model metadata access; the remaining worker phases retain their
 configured offline policy. These local caption and encoding calls do not send
 images to an external VLM/GPT service.
 
-Each selected view receives a smooth local trajectory anchored at that exact
-camera. Defaults are 25 frames per trajectory and a span of 0.04 times the
-visible median depth. `--frames` accepts `1 + 4*n` with at least 9 frames;
-`--span-fraction` changes its size. Trajectories, original rendered RGBs and
-opacity are prepared once, hashed, and reused by both arms with identical
-settings. Changing trajectory settings creates another cache. Original anchor
-RGBs are referenced directly rather than copied. Saved camera poses use OpenCV C2W.
-Closed loops remain intact for diffusion. Before reconstruction, an explicit
+Selected cameras now define one continuous path through the authors' unchanged
+`Renderer.interpolate_orbit_poses`: PCA orbit ordering, linear camera positions,
+SLERP rotations, and the authors' default spacing `0.1 / metric_scale`, with
+`loop=False`. Original anchor depth is prepared first for scale measurement;
+the resulting path is then rendered and cached for both arms. At least two
+distinct saved poses with shared intrinsics are required. Every anchor appears
+exactly once in the full path. For reference-only inputs, the first anchor is
+the start context and the remaining cameras are waypoints (two-camera inputs
+use the authors' direct ordering). This input adaptation is recorded.
+If the default spacing produces only anchors and no generated viewpoints,
+the adapter retries the same authors' interpolator with smaller spacing.
+The requested and effective spacing, and the reason for the adjustment, are
+recorded in trajectory provenance.
+
+Legacy `--frames` and `--span-fraction` are retained for CLI compatibility but
+do not control the new path. Existing caches remain unchanged; the Python API
+can explicitly select `trajectory_mode='legacy_local_loops'` for diagnostics.
+Original anchor RGBs are referenced directly rather than copied. Saved camera
+poses use OpenCV C2W. Before reconstruction, an explicit
 index map removes repeated camera poses from the training catalogue, including
 loop endpoints and overlaps across anchors. A saved reference takes priority
 over a generated image at the exact same calibrated pose. Distinct nearby
@@ -322,8 +333,14 @@ transforms the sparse points to that coordinate system. Measured pixel
 observations are scaled to the released image dimensions for MoGe alignment.
 It records input SHA256 hashes and refuses to overwrite an existing input.
 
-The generic authors' COLMAP entry point currently operates on all 194 source
-cameras. It is an execution test with the published three reference photographs,
+The default benchmark uses the authors' orbit interpolation through the three
+reference cameras and the 25 published test poses, preserving exact test nodes
+for scoring. Only novel targets enter generated supervision; photographic
+references are appended as contexts by the official preparation entry point.
+`split_trajectory.json` records this inference catalogue, while `split.json`
+preserves the source-camera preparation for reuse. Runtime option
+`trajectory_mode='source_cameras'` retains the earlier filename-order diagnostic.
+The benchmark is an execution test with the published three reference photographs,
 not proof of matching the unpublished website orbit or the paper's complete
 benchmark protocol. The run manifest retains this distinction; do not report
 metrics over all 191 non-reference images as the published 25-image test split.
@@ -356,3 +373,9 @@ outputs and reuses a copied preparation. The worker validates tokenizer and text
 encoder identity before sharing caption embeddings across model variants.
 `preparation_from` and `resume_from` cannot be combined. Running and cancelled
 jobs are not preparation sources.
+
+Benchmark downloads retain RGB renders, opacity, checkpoints, PLYs, logs and
+evaluation/provenance records. Dense depth maps under the prepared benchmark
+tree remain on LRZ; they are regenerable diagnostics and are not used by
+inference or evaluation. `artifact-download-policy.json` records this policy.
+Saved-view repair downloads keep their anchor depth because scale replay needs it.

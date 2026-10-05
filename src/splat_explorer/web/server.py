@@ -769,6 +769,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path in ("/", "/index.html"):
             self._send(200, (STATIC_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
+        elif path in ("/splatfix/results", "/splatfix/results/viser"):
+            filename = "scene_run_viser.html" if path.endswith("/viser") else "splatfix_results.html"
+            self._send(200, (STATIC_DIR / filename).read_bytes(), "text/html; charset=utf-8")
         elif path in ("/splatfix", "/splatfix.html"):
             self._send(200, (STATIC_DIR / "splatfix.html").read_bytes(), "text/html; charset=utf-8")
         elif path.startswith("/api/splatfix"):
@@ -1233,6 +1236,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
             studio = self.app.splatfix
             if self.command == "GET" and path == "/api/splatfix":
                 self._send_json(studio.snapshot())
+            elif self.command == "GET" and path == "/api/splatfix/results":
+                self._send_json({"results": studio.results.entries()})
+            elif path == "/api/splatfix/results/viser":
+                query = parse_qs(urlsplit(self.path).query)
+                key = query.get("id", [""])[0]
+                if studio.results.detail(key) is None:
+                    self._send_json({"ok": False, "error": "Result not found"}, 404)
+                    return
+                visor = studio.results.visor
+                if self.command == "GET":
+                    result = visor.snapshot(key)
+                elif self.command == "POST" and isinstance(body, dict):
+                    if body.get("stop"):
+                        result = visor.release(key, client=body.get("client"))
+                    elif body.get("heartbeat"):
+                        result = visor.heartbeat(key, client=body.get("client"))
+                    elif "view_delta" in body:
+                        result = visor.move_view(key, body["view_delta"], client=body.get("client"))
+                    else:
+                        result = visor.show(key, which=body.get("which"), toggle=bool(body.get("toggle")), client=body.get("client"))
+                else:
+                    raise ValueError("Request must be an object")
+                self._send_json(result, 200 if result.get("ok") else 409)
             elif self.command == "GET" and path == "/api/splatfix/file":
                 query = parse_qs(urlsplit(self.path).query)
                 target = studio.allowed_file(query.get("path", [""])[0])
@@ -1296,6 +1322,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         visor_id, client=body.get("client"),
                     )
                     self._send_json(result)
+                    return
+                if "view_delta" in body:
+                    result = studio.visor.move_view(visor_id, body["view_delta"], client=body.get("client"))
+                    self._send_json(result, 200 if result.get("ok") else 409)
                     return
                 result = studio.visor.show(
                     visor_id,

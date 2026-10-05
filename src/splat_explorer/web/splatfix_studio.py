@@ -2,7 +2,7 @@
 from __future__ import annotations
 from pathlib import Path
 from urllib.parse import quote
-from ..splatfix.checkpoint import Checkpoint
+from ..splatfix.checkpoint import Checkpoint, camera_from_record
 from ..splatfix.jobs import read_json, validate_job, registered_benchmark
 from .scene_run_studio import SceneRunStudio
 
@@ -11,6 +11,8 @@ class SplatfixStudio(SceneRunStudio):
     def __init__(self, app, store=None):
         super().__init__(app, store, pipeline='splatfix')
         self.checkpoint_root = Path(self.cfg.output.dir).resolve() / 'splatfix'
+        from .splatfix_results import ResultCatalog
+        self.results = ResultCatalog(self)
         self.benchmark_root = Path(self.cfg.output.dir).resolve() / 'benchmarks'
 
     def checkpoints(self):
@@ -23,10 +25,17 @@ class SplatfixStudio(SceneRunStudio):
                 views = [{**v, 'original_url': self.file_url(cp.image_path(v)),
                           'repaired_url': self.file_url(cp.image_path(v, True)) if v.get('repaired_rgb') else None}
                          for v in cp.views]
+                distinct = len({tuple(camera_from_record(view).c2w.ravel()) for view in cp.views})
+                reconstruction_reason = ('Finish selecting all views before reconstruction' if not cp.complete
+                    else 'Authors smooth orbit requires at least two distinct saved camera poses' if distinct < 2
+                    else 'Saved anchor poses must be distinct for authors smooth orbit' if distinct != len(cp.views)
+                    else 'Saved cameras are ready for authors smooth orbit')
+                reconstruction_ready = cp.complete and distinct >= 2 and distinct == len(cp.views)
                 result.append({'id': str(cp.root), 'name': cp.root.name, 'scene': Path(cp.manifest['scene_path']).name,
                                'scene_path': cp.manifest['scene_path'],
                                'created_at': cp.manifest.get('created_at'), 'views': views, 'target_views': cp.target_views,
-                               'complete': cp.complete, 'edited': sum(bool(v.get('repaired_rgb')) for v in views),
+                               'complete': cp.complete, 'reconstruction_ready': reconstruction_ready,
+                               'reconstruction_readiness': reconstruction_reason, 'distinct_camera_poses': distinct, 'edited': sum(bool(v.get('repaired_rgb')) for v in views),
                                'trajectory_caches': len(list((cp.root / 'trajectories').glob('*/trajectory.json'))),
                                'metadata': cp.manifest.get('metadata', {})})
             except (OSError, ValueError, KeyError):
@@ -163,6 +172,8 @@ class SplatfixStudio(SceneRunStudio):
             cp = checkpoints[checkpoint]
             if not cp['complete']:
                 raise ValueError('Finish selecting all views before starting this stage')
+            if options['stage'] == 'repair' and not cp['reconstruction_ready']:
+                raise ValueError(cp['reconstruction_readiness'])
             if options['stage'] == 'repair' and options['mode'] == 'edited' and cp['edited'] != cp['target_views']:
                 raise ValueError('Repair all checkpoint images before GPT-image improved reconstruction')
             options['checkpoint'] = checkpoint

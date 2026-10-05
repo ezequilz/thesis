@@ -425,6 +425,12 @@ def inference(root, request, trajectory, plus=False):
     with torch.inference_mode():
         for segment in trajectory['segments']:
             indices = list(range(segment['start'], segment['start'] + segment['count']))
+            if request.get('trajectory_mode') == 'authors_orbit':
+                # Match ReconstructedColmapDataset's explicit-trajectory contract:
+                # saved anchors condition inference and supervise fitting directly.
+                indices = [index for index in indices if index not in neighbors]
+            if not indices:
+                continue
             if plus:
                 renders = torch.stack([rgb(render_dir / 'renders' / f'{i:05d}.png') for i in indices])
                 opacity = torch.stack([torch.from_numpy(np.array(Image.open(render_dir / 'opacity' / f'{i:05d}.png').convert('L'), dtype=np.float32) / 255) for i in indices])
@@ -444,6 +450,7 @@ def inference(root, request, trajectory, plus=False):
         result = json.loads((root / 'distillation.json').read_text())
         result.update(plus_frames=str(output / 'splatfix/frames/batch_0000/pred'),
                       mode=request['mode'], upstream_revision=request['upstream_revision'],
+                      inference_target_policy=request.get('inference_target_policy', 'all_segment_frames'),
                       camera_scale=request['camera_scale'],
                       camera_scale_provenance=request.get('camera_scale_provenance'),
                       scale_estimate=request.get('scale_estimate'),

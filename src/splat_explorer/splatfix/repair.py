@@ -196,6 +196,105 @@ def prepare_trajectory(checkpoint, *, frames=25, span_fraction=.04,
     return root, manifest
 
 
+def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
+                       renderer_factory=None, scene_path=None):
+    """Render immutable anchors or one authored orbit, shared across both arms.
+
+    Anchor preparation is intentionally independent of the orbit: MoGe needs
+    only original anchor RGB, opacity and depth to choose metric spacing.
+    """
+    from dataclasses import replace
+    from ..scene import load_scene
+    from ..scene_runs_ext.bundle import transforms
+    from .rendering import BundleRenderer, release_cuda
+    from .checkpoint import validate_source
+    cp = checkpoint if isinstance(checkpoint, Checkpoint) else Checkpoint.load(checkpoint)
+    if not cp.complete:
+        raise ValueError('Finish selecting all requested views before repair')
+    anchors = [camera_from_record(view) for view in cp.views]
+    for camera in anchors:
+        if camera.width % 16 or camera.height % 16:
+            raise ValueError('Saved image width and height must be multiples of 16 for ArtiFixer')
+        if ((camera.width, camera.height) != (anchors[0].width, anchors[0].height)
+                or not np.array_equal(camera.intrinsics, anchors[0].intrinsics)):
+            raise ValueError('All saved views must share resolution and intrinsics')
+    if orbit is None:
+        cameras = anchors
+        anchor_indices = list(range(len(anchors)))
+    else:
+        poses = np.asarray(orbit['poses'], dtype=np.float64)
+        if poses.ndim != 3 or poses.shape[1:] != (4, 4) or not np.isfinite(poses).all():
+            raise ValueError('Invalid authored camera orbit')
+        cameras = [replace(anchors[0], position=pose[:3, 3], rotation=pose[:3, :3]) for pose in poses]
+        anchor_indices = []
+        for camera in anchors:
+            matches = [i for i, pose in enumerate(poses) if np.array_equal(pose, camera.c2w)]
+            if len(matches) != 1:
+                raise ValueError('Authored orbit must contain every saved anchor exactly once')
+            anchor_indices.append(matches[0])
+    source_path = str(Path(scene_path).resolve()) if scene_path else cp.manifest['scene_path']
+    recipe = {'trajectory_version': 3, 'kind': 'authors_orbit' if orbit else 'scale_anchors',
+              'views': [{k: v for k, v in view.items() if k in ('id', 'camera', 'original_rgb')} for view in cp.views],
+              'source': cp.manifest.get('source_fingerprint', cp.manifest['scene_path']),
+              'scene_load': cp.manifest.get('metadata', {}).get('scene_load', {}),
+              'rgb': [digest_file(cp.image_path(view)) for view in cp.views], 'orbit': orbit}
+    signature = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
+    cache = cp.root / 'trajectories'
+    completed = sorted(cache.glob(signature[:16] + '_*/trajectory.json'))
+    if completed:
+        root = completed[0].parent
+        manifest = json.loads(completed[0].read_text())
+        for path, digest in manifest['sha256'].items():
+            if digest_file(cp.root / path) != digest:
+                raise ValueError(f'Saved trajectory changed: {path}')
+        return root, manifest
+    validate_source(Checkpoint(cp.root, {**cp.manifest, 'scene_path': source_path}))
+    root = cache / (signature[:16] + '_' + uuid.uuid4().hex[:8])
+    root.mkdir(parents=True, exist_ok=False)
+    renderer = None
+    records, anchor_records = [], [None] * len(anchors)
+    lookup = {index: i for i, index in enumerate(anchor_indices)}
+    try:
+        scene = load_scene(source_path, **cp.manifest.get('metadata', {}).get('scene_load', {}))
+        renderer = (renderer_factory or BundleRenderer)(scene)
+        for index, camera in enumerate(cameras):
+            if should_stop():
+                raise InterruptedError('Trajectory rendering stopped')
+            rgb, alpha, depth = renderer.render(camera)
+            alpha_path = root / f'{index:05d}.npy'
+            np.save(alpha_path, np.asarray(alpha, dtype=np.float32))
+            if index in lookup:
+                anchor_index = lookup[index]
+                view = cp.views[anchor_index]
+                rgb_path = cp.image_path(view)
+                depth_path = root / f'anchor-{view["id"]}-depth.npy'
+                np.save(depth_path, np.asarray(depth, dtype=np.float32))
+                anchor_records[anchor_index] = {'view_id': view['id'], 'frame_index': index,
+                    'original_rgb': view['original_rgb'], 'depth': str(depth_path.relative_to(cp.root)),
+                    'opacity': str(alpha_path.relative_to(cp.root))}
+            else:
+                rgb_path = root / f'{index:05d}.png'
+                Image.fromarray(rgb).save(rgb_path)
+            records.append({'rgb': str(rgb_path.relative_to(cp.root)), 'opacity': str(alpha_path.relative_to(cp.root))})
+        write_seed_points(root / 'points3D.bin', scene)
+        manifest = {'schema_version': 3, 'depth_convention': 'expected_camera_z',
+                    'camera_convention': 'opencv_c2w', 'signature': signature, 'recipe': recipe,
+                    'transforms': {'camera_model': 'OPENCV', **transforms(cameras)},
+                    'segments': [{'start': 0, 'count': len(cameras)}], 'anchors': anchor_records,
+                    'frames': records, 'points3d': str((root / 'points3D.bin').relative_to(cp.root)),
+                    'source_scene': source_path}
+        paths = {entry[key] for entry in records for key in ('rgb', 'opacity')} | {manifest['points3d']} | {anchor['depth'] for anchor in anchor_records}
+        manifest['sha256'] = {path: digest_file(cp.root / path) for path in sorted(paths)}
+        atomic_json(root / 'trajectory.json', manifest)
+    except Exception:
+        shutil.rmtree(root)
+        raise
+    finally:
+        del renderer
+        release_cuda()
+    return root, manifest
+
+
 def run_worker(command, *, cwd, env, log_path, should_stop):
     with Path(log_path).open('w') as log:
         process = subprocess.Popen(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -218,7 +317,7 @@ def run_worker(command, *, cwd, env, log_path, should_stop):
 
 def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frames=25,
                span_fraction=.04, seed=42, camera_scale=None, should_stop=lambda: False,
-               on_progress=lambda event: None):
+               on_progress=lambda event: None, trajectory_mode='authors_orbit'):
     """Run independently with cached authors local captioning; never merge PLYs."""
     if mode not in ('edited', 'baseline'):
         raise ValueError('mode must be edited or baseline')
@@ -237,9 +336,20 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         with Image.open(path) as image:
             if image.size != (camera.width, camera.height):
                 raise ValueError('Reference dimensions differ from saved camera')
+    if trajectory_mode not in ('authors_orbit', 'legacy_local_loops'):
+        raise ValueError('Unknown trajectory_mode')
+    if trajectory_mode == 'authors_orbit':
+        pose_keys = {tuple(camera_from_record(view).c2w.ravel()) for view in cp.views}
+        if len(pose_keys) < 2:
+            raise ValueError('Authors smooth orbit requires at least two distinct saved camera poses')
+        if len(pose_keys) != len(cp.views):
+            raise ValueError('Saved anchor poses must be distinct for authors smooth orbit')
     cfg = validate_runtime(runtime)
-    on_progress({'phase': 'trajectory'})
-    trajectory_root, trajectory = prepare_trajectory(cp, frames=frames, span_fraction=span_fraction, should_stop=should_stop, scene_path=cfg.get('scene_path'))
+    on_progress({'phase': 'anchor_geometry' if trajectory_mode == 'authors_orbit' else 'trajectory'})
+    if trajectory_mode == 'authors_orbit':
+        trajectory_root, trajectory = prepare_saved_path(cp, should_stop=should_stop, scene_path=cfg.get('scene_path'))
+    else:
+        trajectory_root, trajectory = prepare_trajectory(cp, frames=frames, span_fraction=span_fraction, should_stop=should_stop, scene_path=cfg.get('scene_path'))
     root = Path(output_dir).resolve() / f'{mode}_{uuid.uuid4().hex[:12]}'
     root.mkdir(parents=True, exist_ok=False)
     points = cfg.get('source_points3d') or str(cp.root / trajectory['points3d'])
@@ -253,7 +363,11 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                'source_points3d': str(Path(points).resolve()),
                'initialization': 'source_colmap_points' if cfg.get('source_points3d') else 'original_splat_positions_and_rgb',
                'upstream_revision': UPSTREAM_REVISION, 'fit_iterations': 30000,
-               'input_adaptation': 'Saved selected renders replace photographic anchors; edited mode uses cached GPT-image RGB; cached authors local Qwen/UMT5 caption of originals; independently sampled local camera loops.',
+               'input_adaptation': 'Saved selected renders replace photographic anchors; edited mode uses cached GPT-image RGB; cached authors local Qwen/UMT5 caption of originals.',
+               'trajectory_mode': trajectory_mode,
+               'inference_target_policy': ('exclude_saved_anchor_indices' if trajectory_mode == 'authors_orbit'
+                                           else 'all_segment_frames'),
+               'legacy_trajectory_parameters': {'frames': frames, 'span_fraction': span_fraction, 'used': trajectory_mode == 'legacy_local_loops'},
                'runtime_compatibility': RUNTIME_COMPATIBILITY,
                'native_library_path_active': bool(cfg.get('native_library_dir') and Path(cfg['native_library_dir']).is_dir()),
                'reference_sha256': [digest_file(path) for path in references],
@@ -261,11 +375,30 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
     atomic_json(root / 'request.json', request)
     env = runtime_environment(cfg)
     try:
-        phases = ('scale', 'caption', 'infer', 'distill', 'plus') if camera_scale is None else ('caption', 'infer', 'distill', 'plus')
+        phases = (('scale',) if camera_scale is None else ()) + (('orbit',) if trajectory_mode == 'authors_orbit' else ()) + ('caption', 'infer', 'distill', 'plus')
         for phase in phases:
             if should_stop():
                 raise InterruptedError('Splatfix repair stopped')
             on_progress({'phase': phase, 'output_dir': str(root)})
+            if phase == 'orbit':
+                atomic_json(root / 'anchor-transforms.json', {**trajectory['transforms'], 'camera_convention': 'opencv_c2w'})
+                atomic_json(root / 'anchor-indices.json', list(range(len(cp.views))))
+                command = [cfg['python'], str(Path(__file__).with_name('author_trajectory.py')),
+                    '--repo', cfg['repo'], '--transforms', str(root / 'anchor-transforms.json'),
+                    '--selected-indices', str(root / 'anchor-indices.json'),
+                    '--metric-scale', str(request['camera_scale'] / .01),
+                    '--output', str(root / 'orbit-targets.json'), '--provenance', str(root / 'orbit-provenance.json'),
+                    '--full-output', str(root / 'orbit-full.json')]
+                run_worker(command, cwd=cfg['repo'], env=env, log_path=root / 'orbit.log', should_stop=should_stop)
+                orbit_provenance = json.loads((root / 'orbit-provenance.json').read_text())
+                full = json.loads((root / 'orbit-full.json').read_text())
+                poses = np.asarray([frame['transform_matrix'] for frame in full['frames']]) @ np.diag([1., -1., -1., 1.])
+                orbit = {'poses': poses.tolist(), 'provenance': {key: value for key, value in orbit_provenance.items() if key != 'source_transforms'}}
+                trajectory_root, trajectory = prepare_saved_path(cp, orbit=orbit, should_stop=should_stop, scene_path=cfg.get('scene_path'))
+                request.update(trajectory=str(trajectory_root / 'trajectory.json'), trajectory_signature=trajectory['signature'],
+                               orbit_provenance=orbit_provenance)
+                atomic_json(root / 'request.json', request)
+                continue
             run_worker([cfg['python'], str(Path(__file__).with_name('official_worker.py')), '--request', str(root / 'request.json'), '--phase', phase],
                        cwd=cfg['repo'], env=(runtime_environment({**cfg, 'model_hub_offline': False}) if phase == 'caption' else env), log_path=root / f'{phase}.log', should_stop=should_stop)
             if phase == 'caption':

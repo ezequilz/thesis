@@ -309,3 +309,28 @@ def test_difference_strength_and_reordered_pruned_splats():
     np.testing.assert_array_equal(repaired.colors, before.colors)
     repaired.quats *= -1
     np.testing.assert_allclose(repair_difference(original, repaired).colors, result.colors)
+
+
+def test_saved_views_initialize_navigate_and_preserve_free_camera_on_splat_toggle(tmp_path):
+    studio, _ = _studio(tmp_path)
+    views = [dict(center=np.array([i, 2., 3.]), forward=np.array([0., 0., -1.]),
+                  up=np.array([0., 1., 0.]), vfov=0.7, label=str(i)) for i in (1., 4.)]
+    studio.review_views = lambda _: views
+    viewer = SceneRunViser(studio, background=False, server_factory=_FakeServer,
+                           load_scene=lambda *a, **k: _tiny_scene(), idle_timeout=None)
+    run = 'run_20260915_200000'
+    assert viewer.show(run)['view_index'] == 0
+    camera = SimpleNamespace()
+    client = SimpleNamespace(camera=camera)
+    viewer._server._clients['test'] = client
+    viewer._server._connect(client)
+    np.testing.assert_array_equal(camera.position, views[0]['center'])
+    np.testing.assert_array_equal(camera.look_at, views[0]['center'] + views[0]['forward'])
+    assert camera.fov == .7
+    assert viewer.move_view(run, 1)['view_index'] == 1
+    np.testing.assert_array_equal(camera.position, views[1]['center'])
+    camera.position = np.array([8., 9., 10.])  # free orbit/pan after selecting a view
+    viewer.show(run, toggle=True)
+    np.testing.assert_array_equal(camera.position, [8., 9., 10.])
+    assert viewer.move_view(run, 1)['view_index'] == 0  # wrap
+    assert viewer.move_view(run, -1)['view_index'] == 1

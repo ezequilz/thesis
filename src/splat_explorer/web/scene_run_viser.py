@@ -83,6 +83,8 @@ class SceneRunViser:
         self._error: str | None = None
         self._generation = 0
         self._view: dict | None = None
+        self._saved_views: list[dict] = []
+        self._view_index: int | None = None
         self._handles: dict[str, Any] = {}
         self._clients: dict[str, float] = {}
         self._watchdog_started = False
@@ -92,6 +94,31 @@ class SceneRunViser:
             name: self.studio.artifact_path(str(run_id), filename)
             for name, filename in _PLY_NAME.items() if name in WHICH
         }
+
+    def review_views(self, run_id):
+        getter = getattr(self.studio, "review_views", None)
+        if callable(getter):
+            return getter(run_id)
+        from .review_cameras import historical_views
+        return historical_views(self.studio.root / run_id)
+
+    def move_view(self, run_id, delta, *, client=None):
+        if isinstance(delta, bool) or delta not in (-1, 1):
+            raise ValueError("view_delta must be -1 or 1")
+        paths = self.ply_paths(run_id)
+        with self._lock:
+            if self._run_id != run_id or self._status != "ready" or not self._saved_views:
+                return {**self._snapshot_locked(run_id, paths, showing=self._run_id == run_id),
+                        "ok": False, "message": "No saved camera available yet."}
+            self._touch_client_locked(client)
+            self._view_index = ((self._view_index or 0) + delta) % len(self._saved_views)
+            self._view = self._saved_views[self._view_index]
+            from ..rendering.viser_viewer import _apply_view
+            _apply_view(self._server, self._view)
+            return self._snapshot_locked(run_id, paths, showing=True)
+
+    def highlight_supported(self, run_id: str) -> bool:
+        return True
 
     def snapshot(self, run_id: str) -> dict[str, Any]:
         run_id = str(run_id)
@@ -132,6 +159,8 @@ class SceneRunViser:
         self._status = "idle"
         self._error = None
         self._view = None
+        self._saved_views = []
+        self._view_index = None
         self._handles.clear()
         self._clients.clear()
         if server is None:
@@ -195,6 +224,8 @@ class SceneRunViser:
                 "error": "not found",
             }
 
+        if highlight and not self.highlight_supported(run_id):
+            return {**self.snapshot(run_id), "ok": False, "error": "highlight unavailable", "message": "Highlight is unavailable for this reconstruction."}
         paths = self.ply_paths(run_id)
         requested = str(which or "").strip().lower() or None
         if requested is not None and requested not in WHICH:
@@ -267,6 +298,9 @@ class SceneRunViser:
 
             self._generation += 1
             generation = self._generation
+            if self._run_id != run_id:
+                self._saved_views = []
+                self._view_index = None
             self._run_id = run_id
             self._which = requested
             self._status = "loading"
@@ -300,7 +334,10 @@ class SceneRunViser:
             "run_id": run_id,
             "which": ("repaired" if self._which == "highlight" else self._which) if showing else None,
             "highlight": showing and self._which == "highlight",
-            "highlight_available": all(paths.get(name) is not None for name in WHICH),
+            "view_count": len(self._saved_views) if showing else 0,
+            "view_index": self._view_index if showing else None,
+            "view_label": self._view.get("label") if showing and self._view else None,
+            "highlight_available": self.highlight_supported(run_id) and all(paths.get(name) is not None for name in WHICH),
             "status": self._status if showing else "idle",
             "viewer_url": (
                 f"http://localhost:{self._port}" if self._port is not None else None
@@ -339,7 +376,7 @@ class SceneRunViser:
             return
         host = str(_cfg_get(self.cfg, "viewer.host", "0.0.0.0") or "0.0.0.0")
         base = int(_cfg_get(self.cfg, "viewer.port", 8080) or 8080)
-        port = base + _REVIEW_PORT_OFFSET
+        port = base + getattr(self, "port_offset", _REVIEW_PORT_OFFSET)
         factory = self._server_factory
         if factory is None:
             try:
@@ -443,6 +480,7 @@ class SceneRunViser:
         try:
             min_opacity = float(_cfg_get(self.cfg, "scene.min_opacity", 0.0) or 0.0)
             lod = int(_cfg_get(self.cfg, "scene.lod_level", 0) or 0)
+            saved_views = self.review_views(run_id)
             scenes = {}
             first = "repaired" if which == "highlight" else which
             for name in (first, *(name for name in WHICH if name != first)):
@@ -453,7 +491,7 @@ class SceneRunViser:
                     if generation != self._generation or self._server is None:
                         return
                 scenes[name] = loader(path, min_opacity=0.0, lod_level=lod)
-            if all(name in scenes for name in WHICH):
+            if self.highlight_supported(run_id) and all(name in scenes for name in WHICH):
                 from .repair_difference import repair_difference
                 scenes["highlight"] = repair_difference(scenes["original"], scenes["repaired"])
             if min_opacity > 0:
@@ -492,7 +530,11 @@ class SceneRunViser:
                 logger.exception("Scene-run visor failed to install %s", run_id)
                 return
             scene = scenes[which]
-            view = _view_pose(scene, up_axis, fov_deg)
+            self._saved_views = saved_views
+            if not keep_camera:
+                self._view_index = 0 if saved_views else None
+            view = (saved_views[self._view_index or 0] if saved_views
+                    else _view_pose(scene, up_axis, fov_deg))
             self._view = view
             if saved:
                 _restore_client_cameras(saved)

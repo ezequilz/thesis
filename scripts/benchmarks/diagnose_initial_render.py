@@ -53,7 +53,8 @@ def main():
         save_gt=False, computes_extra_metrics=False,
         config_overrides={'path': str(args.dataset), 'experiment_name': 'initial_render_diagnostic',
                           'selected_indices_file': None, 'train_test_split_file': None,
-                          'image_path_override': None, 'use_wandb': False})
+                          'image_path_override': None, 'dataset.test_split_interval': 0,
+                          'use_wandb': False})
     renderer.writer = None
     report['global_step'] = int(renderer.global_step)
     if report['global_step'] != 10000:
@@ -91,20 +92,37 @@ def main():
                          intr=torch.IntTensor([camera_id]), is_override=[False])
         a = render(native, args.output / f'native-{index:05d}.png')
         b = render(converted, args.output / f'trajectory-{index:05d}.png')
+        # Isolate the principal-point/model distinction from pose conversion.
+        # This control uses the native camera's calibration and pose through
+        # the OPENCV rendering path; it does not alter the benchmark inputs.
+        native_id = int(native['intr'][0])
+        native_camera = dataset.intrinsics[native_id][0]
+        matched_intrinsics = dict(intrinsics)
+        matched_intrinsics.update(
+            fl_x=float(native_camera['focal_length'][0]),
+            fl_y=float(native_camera['focal_length'][1]),
+            cx=float(native_camera['principal_point'][0]),
+            cy=float(native_camera['principal_point'][1]))
+        matched_id = -(len(trajectory['frames']) + index + 1)
+        dataset.add_opencv_intrinsics_from_mapping(matched_id, matched_intrinsics)
+        matched_batch = dict(converted, pose=native['pose'].clone(),
+                             intr=torch.IntTensor([matched_id]))
+        c = render(matched_batch, args.output / f'matched-calibration-{index:05d}.png')
         gt = np.asarray(Image.open(image_path).convert('RGB'), dtype=np.float64) / 255
         prior_path = args.baseline_dir / f'{index:05d}.png'
         prior = np.asarray(Image.open(prior_path).convert('RGB'), dtype=np.float64) / 255
-        native_id = int(native['intr'][0])
         def serial(value):
             return value.tolist() if hasattr(value, 'tolist') else str(value)
         report['frames'].append({'index': index, 'name': image_path.name,
             'source_photo_sha256': digest(image_path), 'stored_baseline': str(prior_path.resolve()),
             'stored_baseline_sha256': digest(prior_path), 'native_camera_id': native_id,
             'native_camera': json.loads(json.dumps(dataset.intrinsics[native_id][0], default=serial)),
-            'trajectory_camera': intrinsics,
+            'trajectory_camera': {key: value for key, value in intrinsics.items()
+                                  if key != 'frames'},
             'native_pose': native['pose'].reshape(4, 4).numpy().tolist(), 'trajectory_pose': pose.tolist(),
             'pose_max_absolute_difference': float(np.max(np.abs(native['pose'].reshape(4, 4).numpy() - pose))),
             'native_vs_trajectory': score(a, b), 'native_vs_ground_truth': score(a, gt),
+            'native_vs_matched_calibration': score(a, c),
             'trajectory_vs_ground_truth': score(b, gt), 'trajectory_vs_stored_baseline': score(b, prior),
             'native_vs_stored_baseline': score(a, prior)})
         (args.output / 'report.json').write_text(json.dumps(report, indent=2, default=serial))

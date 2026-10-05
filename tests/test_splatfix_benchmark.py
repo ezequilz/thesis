@@ -4,6 +4,10 @@ import pytest
 from splat_explorer.splatfix import benchmark, repair
 
 
+CALIBRATION = {'w': 640, 'h': 480, 'fl_x': 500, 'fl_y': 500, 'cx': 320, 'cy': 240}
+POSE = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+
+
 def source_fixture(tmp_path):
     root = tmp_path / 'source'
     (root / 'colmap/images').mkdir(parents=True)
@@ -20,9 +24,11 @@ def source_fixture(tmp_path):
     return root
 
 
-def install_worker(monkeypatch, missing_scale=False, fail_phase=None):
+def install_worker(monkeypatch, missing_scale=False, fail_phase=None, trajectory_mode="source_cameras"):
     calls = []
     cfg = {**repair.DEFAULT_RUNTIME, 'model_variant': '1.3b'}
+    if trajectory_mode is not None:
+        cfg['trajectory_mode'] = trajectory_mode
     monkeypatch.setattr(benchmark, 'benchmark_runtime', lambda runtime: {**cfg, **(runtime or {})})
     def worker(command, *, log_path, **kwargs):
         def value(flag):
@@ -31,6 +37,8 @@ def install_worker(monkeypatch, missing_scale=False, fail_phase=None):
         calls.append((phase, command, kwargs))
         Path(log_path).write_text('official stage')
         if phase == fail_phase:
+            if phase == 'orbit_render':
+                (Path(value('--output_root')) / 'split.json').write_text('partially replaced split')
             raise RuntimeError('fixture stage failure')
         if phase == 'caption':
             prepared = Path(value('--output_root'))
@@ -38,16 +46,28 @@ def install_worker(monkeypatch, missing_scale=False, fail_phase=None):
             (prepared / 'caption.h5').write_bytes(b'real caption fixture')
             (prepared / 'base.pt').write_bytes(b'base reconstruction')
             (prepared / 'selected.json').write_text('[0,1,2]')
-            (prepared / 'transforms.json').write_text(json.dumps({'frames': [{'file_path': n} for n in ['a.jpg', 'b.jpg', 'c.jpg', 'd.jpg']]}))
+            (prepared / 'transforms.json').write_text(json.dumps({**CALIBRATION, 'frames': [{'file_path': n, 'transform_matrix': POSE} for n in ['a.jpg', 'b.jpg', 'c.jpg', 'd.jpg']]}))
             entry = {'prompt_path': 'caption.h5', 'transforms_path': 'transforms.json', 'selected_indices_path': 'selected.json',
                      'reconstruction_checkpoint': 'base.pt', 'camera_scale': .025, 'metric_scale': 2.5}
             if missing_scale:
                 del entry['metric_scale']
             (prepared / 'split.json').write_text(json.dumps({'test': {'bicycle': entry}}))
+        elif phase == 'orbit_path':
+            Path(value('--output')).write_text(json.dumps({**CALIBRATION, 'frames': [{'transform_matrix': POSE}, {'transform_matrix': POSE}]}))
+            Path(value('--provenance')).write_text(json.dumps({'target_name_to_index': {'d.jpg': 0}, 'method': 'authors'}))
+        elif phase == 'orbit_render':
+            prepared = Path(value('--output_root'))
+            entry = json.loads((prepared / 'split.json').read_text())['test']['bicycle']
+            (prepared / 'orbit-selected.json').write_text('[2,3,4]')
+            (prepared / 'orbit-targets.json').write_text('[0,1]')
+            (prepared / 'orbit-transforms.json').write_text(json.dumps({**CALIBRATION, 'frames': [{'transform_matrix': POSE}, {'transform_matrix': POSE}] + [{'file_path': n, 'transform_matrix': POSE} for n in ['a.jpg', 'b.jpg', 'c.jpg']]}))
+            entry.update(transforms_path='orbit-transforms.json', selected_indices_path='orbit-selected.json', target_indices_path='orbit-targets.json')
+            (prepared / 'split.json').write_text(json.dumps({'test': {'bicycle': entry}}))
         elif phase in ('inference', 'plus'):
             directory = Path(value('--save_dir')) / 'checkpoint/official_run/bicycle/frames/batch_0000/pred'
             directory.mkdir(parents=True)
-            (directory / '00003.png').write_bytes(b'official prediction')
+            for index in range(4):
+                (directory / f'{index:05d}.png').write_bytes(b'official prediction')
         elif phase == 'artifixer3d':
             prepared = Path(value('--scene_root'))
             checkpoint = prepared / 'fresh.pt'
@@ -397,3 +417,72 @@ def test_resume_remains_same_model_and_options_are_exclusive(tmp_path, monkeypat
     with pytest.raises(ValueError, match='not both'):
         benchmark.run_benchmark(source, tmp_path / 'new-runs', runtime=runtime)
     assert not calls
+
+
+def test_default_uses_author_orbit_and_preserves_source_preparation(tmp_path, monkeypatch):
+    source = source_fixture(tmp_path)
+    calls = install_worker(monkeypatch, trajectory_mode=None)
+    result = benchmark.run_benchmark(source, tmp_path / 'runs')
+    root = Path(result['output_dir'])
+    assert result['trajectory_mode'] == 'author_orbit'
+    assert result['inference_split'] == 'prepared/bicycle/split_trajectory.json'
+    source_entry = json.loads((root / 'prepared/bicycle/split.json').read_text())['test']['bicycle']
+    assert source_entry['transforms_path'] == 'transforms.json'
+    manifest = json.loads((root / 'benchmark-run.json').read_text())
+    assert manifest['evaluation']['published_test_prepared_indices'] == [0]
+    assert manifest['evaluation']['generated_supervision_count'] == 2
+    assert manifest['orbit_provenance']['target_name_to_index'] == {'d.jpg': 0}
+    for phase, command, _ in calls:
+        if phase in ('inference', 'plus'):
+            assert command[command.index('--render_trajectory') + 1] == 'trajectory'
+        if phase == 'artifixer3d':
+            assert command[command.index('--split_path') + 1].endswith('/split_trajectory.json')
+        if phase == 'orbit_path':
+            assert command[command.index('--metric-scale') + 1] == '2.5'
+            assert command[command.index('--interp-distance') + 1] == '0.1'
+
+
+def test_failed_orbit_render_restores_source_split(tmp_path, monkeypatch):
+    source = source_fixture(tmp_path)
+    install_worker(monkeypatch, trajectory_mode=None, fail_phase='orbit_render')
+    with pytest.raises(RuntimeError, match='fixture stage failure'):
+        benchmark.run_benchmark(source, tmp_path / 'runs')
+    root = next((tmp_path / 'runs').glob('benchmark_*'))
+    source_entry = json.loads((root / 'prepared/bicycle/split.json').read_text())['test']['bicycle']
+    assert source_entry['transforms_path'] == 'transforms.json'
+
+
+def test_invalid_trajectory_mode_fails_before_author_commands(tmp_path, monkeypatch):
+    source = source_fixture(tmp_path)
+    calls = install_worker(monkeypatch)
+    with pytest.raises(ValueError, match='trajectory_mode'):
+        benchmark.run_benchmark(source, tmp_path / 'runs', runtime={'trajectory_mode': 'unknown'})
+    assert not calls
+
+
+@pytest.mark.parametrize('mutation, message', [
+    ('missing', 'every published'), ('reference', 'distinct target'),
+    ('pose', 'exact published'), ('calibration', 'calibration'),
+])
+def test_orbit_mapping_verifies_original_target_cameras(mutation, message):
+    import copy
+    source = {**CALIBRATION, 'frames': [{'file_path': 'heldout.jpg', 'transform_matrix': POSE}]}
+    prepared = {**CALIBRATION, 'frames': [{'transform_matrix': copy.deepcopy(POSE)}, {'file_path': 'ref.jpg', 'transform_matrix': POSE}]}
+    provenance = {'target_name_to_index': {'heldout.jpg': 0}}
+    if mutation == 'missing':
+        provenance['target_name_to_index'] = {}
+    elif mutation == 'reference':
+        provenance['target_name_to_index']['heldout.jpg'] = 1
+    elif mutation == 'pose':
+        prepared['frames'][0]['transform_matrix'][0][3] += .001
+    elif mutation == 'calibration':
+        prepared['fl_x'] += .25
+    with pytest.raises(ValueError, match=message):
+        benchmark._orbit_test_indices(source, prepared, provenance, ['heldout.jpg'], [1])
+
+
+def test_orbit_mapping_rejects_two_test_names_sharing_camera_index():
+    source = {**CALIBRATION, 'frames': [{'file_path': name, 'transform_matrix': POSE} for name in ['a.jpg', 'b.jpg']]}
+    prepared = {**CALIBRATION, 'frames': [{'transform_matrix': POSE}]}
+    with pytest.raises(ValueError, match='distinct target'):
+        benchmark._orbit_test_indices(source, prepared, {'target_name_to_index': {'a.jpg': 0, 'b.jpg': 0}}, ['a.jpg', 'b.jpg'], [])

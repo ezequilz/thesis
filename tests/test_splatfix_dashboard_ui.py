@@ -22,7 +22,7 @@ const context=vm.createContext({document:{getElementById:get},fetch:()=>new Prom
 vm.runInContext(source,context);
 Promise.resolve(vm.runInContext(`(async()=>{
   state={scenes:[],jobs:[],checkpoints:[{id:'/saved/cp',name:'Saved camera checkpoint',scene:'Original scene',complete:true,
-    target_views:7,edited:7,trajectory_caches:1,views:[]}]};
+    target_views:7,edited:7,trajectory_caches:1,reconstruction_ready:true,views:[]}]};
   selected='/saved/cp';$('scene').value='unrelated-current-scene';$('views').value='7';$('mode').value='edited';
   assert.equal(payload('select').views,7);
   assert.equal(payload('select').scene_id,'unrelated-current-scene');
@@ -58,7 +58,10 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal($('edit-now').disabled,false);
   cp.edited=cp.target_views;renderCheckpoint();
   assert.equal($('repair-now').disabled,false);
-  cp.complete=false;renderCheckpoint();
+  cp.reconstruction_ready=false;cp.reconstruction_readiness='Need two distinct cameras';renderCheckpoint();
+  assert.equal($('repair-now').disabled,true);assert.equal($('edit-now').disabled,false);
+  assert.match($('repair-readiness').textContent,/two distinct cameras/);
+  cp.reconstruction_ready=true;cp.complete=false;renderCheckpoint();
   assert.equal($('edit-now').disabled,true);
   assert.equal($('repair-now').disabled,true);
   // View finding and editing each schedule independently with immutable inputs.

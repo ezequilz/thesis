@@ -27,6 +27,9 @@
     border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer;
     background: var(--accent); color: #091525; font-weight: 650;
   }
+  #view-nav {display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim)}
+  #view-nav button {padding:2px 7px;font-size:14px;background:transparent;color:var(--text);border:1px solid var(--border)}
+  #view-nav[hidden] {display:none}
   #highlight { background: transparent; color: var(--dim); border: 1px solid var(--border); }
   #highlight[aria-pressed="true"] { background: #302527; color: #d9a5a5; border-color: #705053; }
   header { flex-wrap: wrap; }
@@ -45,6 +48,7 @@
   <h1>splat-explorer <span id="title">· visor</span></h1>
   <span id="hint" class="hint">Loading repaired splat…</span>
   <span class="spacer"></span>
+  <span id="view-nav" hidden><button id="view-prev" aria-label="Previous saved view" disabled>‹</button><span id="view-index"></span><button id="view-next" aria-label="Next saved view" disabled>›</button></span>
   <a href="/scene-runs">scene runs</a>
   <button id="highlight" type="button" aria-pressed="false" disabled
     title="Approximate difference from the nearest original Gaussian. Stronger red means a larger change; opacity is preserved. Deleted splats are not shown.">Highlight repair</button>
@@ -56,13 +60,16 @@
 </div>
 <script>
 "use strict";
-const runId = decodeURIComponent(location.pathname.replace(/^\/+|\/viser\/?$/g, ""));
+const resultReview = location.pathname === "/splatfix/results/viser";
+const resultId = new URLSearchParams(location.search).get("id");
+const runId = resultReview ? resultId : decodeURIComponent(location.pathname.replace(/^\/+|\/viser\/?$/g, ""));
 const client = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now());
 const $ = id => document.getElementById(id);
 const title = $("title"), hint = $("hint"), flip = $("flip");
 const highlight = $("highlight");
 const frame = $("frame"), overlay = $("overlay");
-const api = `/api/scene-runs/${encodeURIComponent(runId)}/viser`;
+const api = resultReview ? `/api/splatfix/results/viser?id=${encodeURIComponent(runId)}` : `/api/scene-runs/${encodeURIComponent(runId)}/viser`;
+if(resultReview){highlight.hidden=true;document.querySelector("header a").href="/splatfix/results";document.querySelector("header a").textContent="Results";document.querySelector("h1").firstChild.textContent="Review ";}
 let state = null, pending = false, timer = null, started = false, closed = false, revision = 0;
 
 function plyLabel(which) {
@@ -79,10 +86,14 @@ function render() {
   const status = state?.status || "idle";
   const showing = status === "ready" ? which : (state?.which || "repaired");
   document.title = `splat-explorer · ${runId} visor`;
-  title.textContent = `· ${runId}`;
+  title.textContent = `· ${state?.label || runId}`;
   flip.textContent = showing === "original" ? "Show repaired" : "Show original";
   const other = showing === "original" ? "repaired" : "original";
   const otherReady = Boolean(state?.[other]);
+  $("view-nav").hidden = !state?.view_count;
+  $("view-index").textContent = `View ${(state?.view_index ?? 0)+1} / ${state?.view_count || 0}`;
+  $("view-index").title = state?.view_label || "";
+  $("view-prev").disabled = $("view-next").disabled = pending || status !== "ready" || state?.view_count < 2;
   highlight.disabled = pending || status !== "ready" || !state?.highlight_available;
   highlight.setAttribute("aria-pressed", String(Boolean(state?.highlight)));
   flip.disabled = pending || status === "loading" || !otherReady;
@@ -176,8 +187,11 @@ async function changeView(body) {
   render();
   timer = setTimeout(tick, state?.status === "loading" ? 1000 : 8000);
 };
+$("view-prev").onclick = () => { if(!$("view-prev").disabled) changeView({view_delta:-1}); };
+$("view-next").onclick = () => { if(!$("view-next").disabled) changeView({view_delta:1}); };
 flip.onclick = () => { if (!flip.disabled) changeView({toggle: true}); };
 highlight.onclick = () => { if (!highlight.disabled) changeView({which: "repaired", highlight: !state?.highlight}); };
+window.addEventListener("keydown", event => { if(event.code === "Space" && !event.repeat && event.target === document.body){event.preventDefault();flip.click();} });
 window.addEventListener("pagehide", stopVisor);
 window.addEventListener("pageshow", event => {
   if (event.persisted) { closed = false; started = false; frame.removeAttribute("src"); tick(); }

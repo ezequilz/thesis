@@ -73,6 +73,59 @@ def test_shape_mismatch_fails_without_resampling(tmp_path):
         evaluation.evaluation_plan(root)
 
 
+def test_authored_orbit_uses_its_own_split_not_source_camera_order(tmp_path):
+    root, _ = fixture_run(tmp_path)
+    prepared = root / 'prepared/bicycle'
+    (prepared / 'split.json').rename(prepared / 'split_trajectory.json')
+    (prepared / 'split.json').write_text('{}')  # Source split is not the inference catalogue.
+    result = json.loads((root / 'result.json').read_text())
+    result['inference_split'] = 'prepared/bicycle/split_trajectory.json'
+    (root / 'result.json').write_text(json.dumps(result))
+    plan = evaluation.evaluation_plan(root)
+    assert len(plan['pairs']) == 25
+    assert [row['prepared_index'] for row in plan['pairs']] == list(range(26, 1, -1))
+
+
+def test_inference_split_cannot_point_to_a_different_run(tmp_path):
+    root, _ = fixture_run(tmp_path)
+    result = json.loads((root / 'result.json').read_text())
+    result['inference_split'] = '../another-run/split.json'
+    (root / 'result.json').write_text(json.dumps(result))
+    with pytest.raises(ValueError, match='must belong'):
+        evaluation.evaluation_plan(root)
+
+
+@pytest.mark.parametrize('wrong_pose', [False, True])
+def test_target_only_orbit_uses_verified_pose_mapping(tmp_path, wrong_pose):
+    root, _ = fixture_run(tmp_path)
+    prepared = root / 'prepared/bicycle'
+    source = json.loads((prepared / 'transforms.json').read_text())
+    mapping = {}
+    for index, frame in enumerate(source['frames']):
+        if 2 <= index <= 26:
+            mapping[Path(frame.pop('file_path')).name] = index
+    if wrong_pose:
+        source['frames'][2]['transform_matrix'][0][3] = 1
+    (prepared / 'orbit.json').write_text(json.dumps(source))
+    split = json.loads((prepared / 'split.json').read_text())
+    split['test']['bicycle']['transforms_path'] = 'orbit.json'
+    (prepared / 'split_trajectory.json').write_text(json.dumps(split))
+    plus = json.loads((prepared / 'split_artifixer3d_plus.json').read_text())
+    plus['test']['bicycle']['transforms_path'] = 'orbit.json'
+    (prepared / 'split_artifixer3d_plus.json').write_text(json.dumps(plus))
+    result = json.loads((root / 'result.json').read_text())
+    result.update(inference_split='prepared/bicycle/split_trajectory.json', trajectory_mode='author_orbit')
+    (root / 'result.json').write_text(json.dumps(result))
+    manifest = json.loads((root / 'benchmark-run.json').read_text())
+    manifest['orbit_provenance'] = {'target_name_to_index': mapping}
+    (root / 'benchmark-run.json').write_text(json.dumps(manifest))
+    if wrong_pose:
+        with pytest.raises(ValueError, match='original published test pose'):
+            evaluation.evaluation_plan(root)
+    else:
+        assert len(evaluation.evaluation_plan(root)['pairs']) == 25
+
+
 def test_published_ground_truth_digest_is_checked(tmp_path):
     root, source = fixture_run(tmp_path)
     Image.new('RGB', (24, 16), color='red').save(source / 'colmap/images/photo_003.png')

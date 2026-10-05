@@ -118,8 +118,10 @@ def _add_stages(parser):
     repair.add_argument("--scene", type=Path, help="Relocated source asset on the GPU host (same content)")
     repair.add_argument("--output", required=True, type=Path, help="Parent directory for isolated reconstruction runs")
     repair.add_argument("--mode", choices=("edited", "baseline"), default="edited")
-    repair.add_argument("--frames", type=positive_int, default=25, help="Frames per view trajectory")
-    repair.add_argument("--span-fraction", type=float, default=.04)
+    repair.add_argument("--frames", type=positive_int, default=25,
+                        help="Legacy compatibility only; authored orbit spacing determines frame count")
+    repair.add_argument("--span-fraction", type=float, default=.04,
+                        help="Legacy compatibility only; new paths interpolate saved cameras")
     repair.add_argument("--seed", type=int, default=42)
     repair.add_argument("--camera-scale", type=float, default=None,
                         help="Explicit manual camera multiplier; default measures scale with cached official MoGe alignment")

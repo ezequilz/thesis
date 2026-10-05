@@ -38,8 +38,12 @@ def _resolve(split, entry, key):
 
 
 def _names(frames):
-    names = [Path(frame['file_path']).name for frame in frames]
-    if len(set(names)) != len(names):
+    # Official target-only trajectories deliberately omit file_path; only
+    # photographic contexts carry filenames. Never infer target identity from
+    # generated filenames or camera order.
+    names = [Path(frame['file_path']).name if 'file_path' in frame else None for frame in frames]
+    named = [name for name in names if name is not None]
+    if len(set(named)) != len(named):
         raise ValueError('Ambiguous duplicate source filenames in prepared transforms')
     return names
 
@@ -68,8 +72,10 @@ def evaluation_plan(run_dir):
     if (not isinstance(references, list) or len(references) != 3 or len(set(references)) != 3
             or set(names) & set(references)):
         raise ValueError('Published test images must exclude all three reference photographs')
-    split = root / 'prepared/bicycle/split.json'
-    plus_split = split.with_name('split_artifixer3d_plus.json')
+    split = (root / result.get('inference_split', 'prepared/bicycle/split.json')).resolve()
+    if not split.is_relative_to(root):
+        raise ValueError('Inference split must belong to the evaluated run')
+    plus_split = root / 'prepared/bicycle/split_artifixer3d_plus.json'
     scene, initial = _split(split)
     plus_scene, plus = _split(plus_split)
     if scene != plus_scene:
@@ -85,6 +91,21 @@ def evaluation_plan(run_dir):
         if not np.allclose(left['transform_matrix'], right['transform_matrix'], rtol=0, atol=1e-7):
             raise ValueError('Initial and plus camera poses differ')
     indices = {name: index for index, name in enumerate(frame_names)}
+    if result.get('trajectory_mode') == 'author_orbit':
+        indices = run.get('orbit_provenance', {}).get('target_name_to_index', {})
+        if (set(indices) != set(names) or any(type(i) is not int or not 0 <= i < len(frames)
+                                            for i in indices.values())
+                or len(set(indices.values())) != len(names)):
+            raise ValueError('Authored orbit requires a unique index for each published test pose')
+        source_split = root / 'prepared/bicycle/split.json'
+        _, source_entry = _split(source_split)
+        source_transforms = _resolve(source_split, source_entry, 'transforms_path')
+        source_frames = _read(source_transforms)['frames']
+        source_by_name = dict(zip(_names(source_frames), source_frames))
+        for name, index in indices.items():
+            if name not in source_by_name or not np.allclose(
+                    frames[index]['transform_matrix'], source_by_name[name]['transform_matrix'], rtol=0, atol=1e-12):
+                raise ValueError('Authored orbit mapping differs from the original published test pose')
     selected = _read(_resolve(split, initial, 'selected_indices_path'))
     plus_selected = _read(_resolve(plus_split, plus, 'selected_indices_path'))
     if (any(type(index) is not int or not 0 <= index < len(frames) for index in selected)

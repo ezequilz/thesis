@@ -30,7 +30,8 @@ def checkpoint(studio, count=1, complete=True):
     cp = Checkpoint.create(studio.checkpoint_root, '/fake/scene.ply', target_views=count)
     if complete:
         camera = Camera(np.zeros(3), np.eye(3), width=16, height=16, fov_deg=60)
-        for _ in range(count):
+        for index in range(count):
+            camera.position = np.array([float(index), 0., 0.])
             cp.add_view(Image.new('RGB', (16, 16)), camera)
     return cp
 
@@ -86,7 +87,7 @@ def test_completed_candidate_not_reexecuted_after_lease(studio, monkeypatch):
 
 
 def test_checkpoint_dependencies_and_cancel(studio):
-    cp = checkpoint(studio)
+    cp = checkpoint(studio, count=2)
     original = json.loads((cp.root / 'checkpoint.json').read_text())
     baseline = studio.create({'stage': 'repair', 'mode': 'baseline', 'checkpoint': str(cp.root)})
     assert baseline['config']['splatfix']['mode'] == 'baseline'
@@ -137,7 +138,7 @@ def test_gpu_worker_passes_only_saved_inputs_and_cooperative_stop(tmp_path, monk
 
 
 def test_restart_reattaches_gpu_job_instead_of_replaying(studio):
-    cp = checkpoint(studio)
+    cp = checkpoint(studio, count=2)
     job = studio.create({'stage': 'repair', 'mode': 'baseline', 'checkpoint': str(cp.root)})
     studio.store.update_status(job['run_id'], status='running', remote_dir='/workspace/job')
     manager = SceneRunManager(studio.cfg, store=studio.store)
@@ -174,7 +175,7 @@ def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypat
     from splat_explorer import repair_lrz as lrz
     from splat_explorer.scene_runs.lrz_transport import LrzSceneRunTransport
     from splat_explorer.splatfix.executor import SplatfixExecutor
-    cp = checkpoint(studio)
+    cp = checkpoint(studio, count=2)
     source = tmp_path / 'source.ply'
     source.write_text('offline source fixture')
     cp.manifest['scene_path'] = str(source)
@@ -212,10 +213,11 @@ def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypat
     assert request['checkpoint'].endswith('/checkpoint')
     assert request['runtime']['scene_path'].endswith('/source/source.ply')
     assert any('--exclude=source/' in call for call in transfers)
+    assert not any('--exclude=/results/*/prepared/**/depth/' in call for call in transfers)
 
 
 def test_cancel_pending_remote_job_still_reattaches_without_gpu_probe(studio, monkeypatch):
-    cp = checkpoint(studio)
+    cp = checkpoint(studio, count=2)
     job = studio.create({'stage': 'repair', 'mode': 'baseline', 'checkpoint': str(cp.root)})
     studio.store.update_status(job['run_id'], status='queued', remote_dir='/dss/job')
     studio.cancel(job['run_id'])
@@ -236,7 +238,7 @@ def test_cancel_pending_remote_job_still_reattaches_without_gpu_probe(studio, mo
 def test_unresolved_remote_lease_cannot_be_reclaimed_by_other_work(studio, monkeypatch):
     import socket
     from splat_explorer.scene_runs import store as store_module
-    cp = checkpoint(studio)
+    cp = checkpoint(studio, count=2)
     job = studio.create({'stage': 'repair', 'mode': 'baseline', 'checkpoint': str(cp.root)})
     other = studio.create({'stage': 'select', 'scene_id': 'room'})
     lease = studio.store.acquire_gpu_lease(job['run_id'])
@@ -342,6 +344,7 @@ def test_benchmark_remote_stages_dataset_and_matched_model(studio, monkeypatch):
     assert '14B' in request['runtime']['model_id']
     assert any(str(source) + '/' in call for call in transfers)
     assert any('--exclude=benchmark-input/' in call for call in transfers)
+    assert any('--exclude=/results/*/prepared/**/depth/' in call for call in transfers)
     assert result['source'] == str(source)
 
 
@@ -379,7 +382,7 @@ def test_result_gallery_uses_recorded_output_not_an_arbitrary_ply(studio):
 
 def test_current_phase_log_available_before_job_completion(studio):
     from splat_explorer.splatfix.live_logs import PhaseLogMirror
-    cp = checkpoint(studio)
+    cp = checkpoint(studio, count=2)
     job = studio.create({'stage': 'repair', 'mode': 'baseline', 'checkpoint': str(cp.root)})
     root = studio.store.run_path(job['run_id'])
     studio.store.update_status(job['run_id'], status='running', phase='reconstruct')
@@ -580,7 +583,7 @@ def test_benchmark_executor_dispatches_resume_into_new_job(studio, monkeypatch, 
 
 
 def test_saved_checkpoint_controls_scene_provenance_not_scene_dropdown(studio):
-    cp = checkpoint(studio)
+    cp = checkpoint(studio, count=2)
     studio.scenes = lambda: [{'id': 'original-scene', 'path': '/fake/scene.ply'},
                             {'id': 'unrelated-scene', 'path': '/fake/other.ply'}]
     for stage in ('edit', 'repair'):
@@ -591,9 +594,11 @@ def test_saved_checkpoint_controls_scene_provenance_not_scene_dropdown(studio):
 
 
 def test_independent_repair_schedules_preserve_same_cameras_and_input_modes(studio):
-    cp = checkpoint(studio)
-    Image.new('RGB', (16, 16)).save(cp.root / 'views/000/repaired.png')
-    cp.views[0]['repaired_rgb'] = 'views/000/repaired.png'
+    cp = checkpoint(studio, count=2)
+    for view in cp.views:
+        path = cp.image_path(view).with_name('repaired.png')
+        Image.new('RGB', (16, 16)).save(path)
+        view['repaired_rgb'] = str(path.relative_to(cp.root))
     cp.save()
     before = (cp.root / 'checkpoint.json').read_bytes()
     future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
@@ -715,3 +720,96 @@ def test_completed_remote_transfer_failure_retains_diagnostics_and_artifacts(stu
     assert saved.read_bytes() == b'previously downloaded PLY'
     assert not any('/STOP' in command for command in commands)
     assert studio.jobs()[0]['transfer_log_url'] == studio.file_url(root / 'artifact-transfer.log')
+
+
+def test_single_view_stays_inspectable_and_editable_but_cannot_queue_reconstruction(studio):
+    cp = checkpoint(studio, count=1)
+    row = next(item for item in studio.checkpoints() if item['id'] == str(cp.root))
+    assert row['complete'] is True
+    assert row['distinct_camera_poses'] == 1
+    assert row['reconstruction_ready'] is False
+    studio.create({'stage': 'edit', 'checkpoint': str(cp.root)})
+    before = len(studio.store.list_runs())
+    for mode in ('baseline', 'edited'):
+        with pytest.raises(ValueError, match='at least two distinct'):
+            studio.create({'stage': 'repair', 'mode': mode, 'checkpoint': str(cp.root)})
+    assert len(studio.store.list_runs()) == before
+
+
+def test_duplicate_saved_poses_do_not_claim_reconstruction_ready(studio):
+    cp = checkpoint(studio, count=3)
+    cp.views[-1]['camera'] = cp.views[0]['camera']
+    cp.save()
+    row = next(item for item in studio.checkpoints() if item['id'] == str(cp.root))
+    assert row['distinct_camera_poses'] == 2
+    assert row['reconstruction_ready'] is False
+    with pytest.raises(ValueError, match='must be distinct'):
+        studio.create({'stage': 'repair', 'mode': 'baseline', 'checkpoint': str(cp.root)})
+    assert studio.jobs() == []
+
+
+def test_legacy_single_view_history_remains_visible(studio):
+    cp = checkpoint(studio, count=1)
+    historical = studio.store.create_run({'pipeline': 'splatfix', 'scene_id': 'room',
+        'duration_seconds': 3600, 'splatfix': {'stage': 'repair', 'mode': 'baseline', 'checkpoint': str(cp.root)}})
+    studio.store.update_status(historical.run_id, status='completed', message='Legacy reconstruction completed')
+    row = next(item for item in studio.jobs() if item['run_id'] == historical.run_id)
+    assert row['state']['status'] == 'completed'
+    assert row['state']['message'] == 'Legacy reconstruction completed'
+    assert studio.checkpoints()[0]['reconstruction_ready'] is False
+
+
+@pytest.mark.parametrize('terminal,exit_code,expected', [
+    ('completed', '0', 'completed'),
+    ('error', '1', 'error'),
+    ('stopped', '0', 'stopped'),
+    (None, '0', 'error'),
+    ('running', '0', 'error'),
+    ('running', '1', 'error'),
+])
+def test_executor_rereads_worker_status_after_launcher_exit(studio, monkeypatch, terminal, exit_code, expected):
+    """A launcher sentinel can become visible after the first status snapshot."""
+    from splat_explorer import repair_lrz as lrz
+    from splat_explorer.splatfix import executor
+    source = benchmark_input(studio)
+    job = studio.create({'stage': 'benchmark', 'source': str(source)})
+    root = studio.store.run_path(job['run_id'])
+    remote_dir = '/dss/work/splatfix-jobs/' + job['run_id']
+    studio.store.update_status(job['run_id'], remote_dir=remote_dir)
+    monkeypatch.setattr(lrz, 'load_lrz_config', lambda: {'workspace': '/dss/work', 'user': 'u', 'host': 'h'})
+    monkeypatch.setattr(lrz, 'rsync_ssh_cmd', lambda cfg: 'ssh')
+    commands, transfers, snapshots = [], [], []
+    monkeypatch.setattr(lrz, '_mux_run', lambda argv: transfers.append(argv))
+    monkeypatch.setattr(executor.time, 'sleep', lambda _: pytest.fail('Exited launcher must not be polled again'))
+    def ssh(cfg, command, **kwargs):
+        commands.append(command)
+        body = ''
+        if 'worker-status.json' in command:
+            snapshots.append(command)
+            if len(snapshots) == 1:
+                body = json.dumps({'status': 'running', 'phase': 'plus'})
+            elif terminal is not None:
+                body = json.dumps({'status': terminal, 'phase': 'finished', 'message': 'Final worker detail'})
+        elif 'launcher-exit' in command:
+            assert len(snapshots) == 1
+            body = exit_code + '\n'
+        elif '/launched' in command:
+            body = 'launched'
+        return SimpleNamespace(returncode=0, stderr='', stdout=body)
+    monkeypatch.setattr(lrz, '_ssh_run', ssh)
+    result = executor.SplatfixExecutor(studio.cfg, studio.store).execute(job['run_id'])
+    state = studio.store.get_run(job['run_id']).state
+    assert len(snapshots) == 2
+    assert state.status.value == expected
+    assert state.details['remote_finished'] is True
+    assert len(transfers) == 1
+    assert '--exclude=source/' in transfers[0]
+    assert transfers[0][-1] == str(root / 'gpu') + '/'
+    if terminal == 'completed':
+        assert result['results'] == str(root / 'gpu/results')
+    elif terminal == 'error':
+        assert state.details['error'] == 'Final worker detail'
+    elif terminal not in ('completed', 'error', 'stopped'):
+        assert 'GPU launcher exited before stage completion' in state.details['error']
+    if terminal in ('completed', 'error', 'stopped'):
+        assert not any('/STOP' in command for command in commands)

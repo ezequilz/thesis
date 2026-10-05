@@ -276,7 +276,18 @@ class SplatfixExecutor:
                     break
                 exited = ssh('if [ -f ' + shlex.quote(remote_dir + '/launcher-exit') + ' ]; then cat ' + shlex.quote(remote_dir + '/launcher-exit') + '; fi')
                 if exited.strip():
+                    # The worker can publish its terminal status between the
+                    # first status read and this exit-sentinel read. Its final
+                    # status is authoritative; exit code zero alone is not.
+                    raw = ssh('if [ -f ' + shlex.quote(remote_dir + '/worker-status.json') + ' ]; then cat ' + shlex.quote(remote_dir + '/worker-status.json') + '; fi')
+                    state = json.loads(raw) if raw.strip() else {}
+                    log_mirror.poll(state)
+                    if state != last and state:
+                        last = state
+                        update(phase=state.get('phase', 'reconstruction'), message=state.get('message') or state.get('phase', 'Running'))
                     update(remote_finished=True)
+                    if state.get('status') in ('completed', 'error', 'stopped'):
+                        break
                     raise RuntimeError('GPU launcher exited before stage completion (code ' + exited.strip() + '); inspect the GPU stage log')
                 if time.monotonic() - started > 24 * 3600:
                     raise TimeoutError('GPU stage exceeded 24 hours; inspect remote stage.log')
@@ -287,7 +298,15 @@ class SplatfixExecutor:
         finally:
             # Pull partial results/logs as well; checkpoint trajectories are reusable by both arms.
             try:
-                lrz._mux_run(['rsync', '-az', '--exclude=source/', '--exclude=benchmark-input/', '-e', lrz.rsync_ssh_cmd(cfg),
+                # Dense benchmark depth is a regenerable rendering diagnostic,
+                # not inference input or a reconstruction deliverable. Keep it
+                # on LRZ rather than duplicating gigabytes on the desktop.
+                excludes = ['--exclude=/results/*/prepared/**/depth/'] if benchmark else []
+                atomic_json(root / 'artifact-download-policy.json', {
+                    'remote_dir': remote_dir, 'excluded_patterns': excludes,
+                    'retained': 'RGB renders, opacity, model checkpoints, PLY, evaluation/provenance and logs',
+                    'excluded_artifacts_remain_on_remote': True})
+                lrz._mux_run(['rsync', '-az', '--exclude=source/', '--exclude=benchmark-input/', *excludes, '-e', lrz.rsync_ssh_cmd(cfg),
                               endpoint + ':' + remote_dir + '/', str(root / 'gpu') + '/'])
             except lrz.RemoteCommandError as exc:
                 # Keep the initial SSH error as well as the rsync tail; the UI
