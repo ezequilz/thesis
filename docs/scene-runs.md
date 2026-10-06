@@ -13,8 +13,10 @@ remain available for isolated testing.
 Open `http://127.0.0.1:8090/scene-runs`. Before a queued run can start,
 `/repair/gpu` must show a selected LRZ allocation in `ST=R` with its setup
 loaded. The local scene-run manager is independent of the browser and writes
-`outputs/scene-run-manager.log`. `./scripts/start.sh` always stops and
-restarts that manager so queued runs pick up the current scene-run code.
+`outputs/scene-run-manager.log`. `./scripts/start.sh` restarts that manager
+when scene-run code, configs, or host libraries changed, and when it is not
+already healthy, so a repeat start does not drop a queued run. `--force`
+restarts it anyway.
 
 Each run starts from the selected catalog scene and writes only below:
 

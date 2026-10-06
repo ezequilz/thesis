@@ -90,3 +90,15 @@ def test_completed_benchmark_attempts_metrics_then_chart_without_hiding_failure(
 def test_cancel_prevents_postprocessing(tmp_path):
     with pytest.raises(InterruptedError):
         run_evaluation.finalize_run_evaluation(tmp_path,{},should_stop=lambda:True)
+
+
+def test_job_worker_runs_evaluation_after_reconstruction(tmp_path, monkeypatch):
+    from splat_explorer.splatfix import job_worker, benchmark
+    atomic_json(tmp_path/'worker-request.json',{'stage':'benchmark','source':'source','output':'output',
+                                               'runtime':{'python':'python','repo':'repo'}})
+    monkeypatch.setattr(benchmark,'run_benchmark',lambda *a,**kw:{'output_dir':str(tmp_path/'result')})
+    calls=[]
+    monkeypatch.setattr(run_evaluation,'finalize_run_evaluation',lambda *a,**kw:calls.append(a))
+    job_worker.execute(tmp_path)
+    assert calls[0][0]==str(tmp_path/'result')
+    assert json.loads((tmp_path/'worker-status.json').read_text())['status']=='completed'

@@ -51,7 +51,20 @@ def chart_data(run_dir, metrics=None):
         segments = [sorted(targets)]
     else:
         request = _read(root / 'request.json')
-        trajectory = _read(resolve(request['trajectory']))
+        try:
+            trajectory_path = resolve(request['trajectory'])
+        except ValueError:
+            # Historical workers kept the checkpoint beside results/. Only
+            # remap that exact job-local layout, never an arbitrary JSON path.
+            checkpoint = root.parent.parent / 'checkpoint'
+            recorded_checkpoint = Path(request['checkpoint_root'])
+            relative = Path(request['trajectory']).relative_to(recorded_checkpoint)
+            trajectory_path = (checkpoint / relative).resolve()
+            if (root.parent.name != 'results' or recorded_checkpoint.name != 'checkpoint'
+                    or not checkpoint.resolve().is_relative_to(root.parent.parent.resolve())
+                    or not trajectory_path.is_relative_to(checkpoint.resolve())):
+                raise ValueError('Chart trajectory must belong to this job checkpoint')
+        trajectory = _read(trajectory_path)
         transforms = trajectory['transforms']
         transforms = {**transforms, 'camera_convention': trajectory.get('camera_convention', 'opencv_c2w')}
         selected = [a['frame_index'] for a in trajectory['anchors']]
@@ -74,8 +87,24 @@ def chart_data(run_dir, metrics=None):
         poses = poses @ np.diag([1., -1., -1., 1.])
     elif convention != 'opengl_c2w':
         raise ValueError('Unsupported chart camera convention')
-    # Stable across paths: use reference up when available, otherwise all cameras.
+    # Prefer the complete source capture to a few potentially tilted references.
+    # This also keeps the height axis stable when the generated path changes.
     up = poses[selected or list(range(len(poses))), :3, 1].mean(axis=0)
+    axis_source = 'Mean reference camera +Y'
+    source_split = root / 'prepared/bicycle/split.json'
+    if source_split.is_file():
+        source_scenes = _read(source_split).get('test', {})
+        if len(source_scenes) == 1:
+            source_entry = next(iter(source_scenes.values()))
+            source_transforms = _read(resolve(source_entry['transforms_path'], source_split.parent))
+            source_poses = np.asarray([f['transform_matrix'] for f in source_transforms['frames']], dtype=float)
+            source_convention = source_transforms.get('camera_convention', 'opengl_c2w')
+            if source_convention == 'opencv_c2w':
+                source_poses = source_poses @ np.diag([1., -1., -1., 1.])
+            elif source_convention != 'opengl_c2w':
+                raise ValueError('Unsupported source camera convention')
+            up = source_poses[:, :3, 1].mean(axis=0)
+            axis_source = 'Mean source capture camera +Y'
     if np.linalg.norm(up) < 1e-8:
         raise ValueError('Ambiguous camera up; chart needs a known scene up direction')
     up /= np.linalg.norm(up)
@@ -88,7 +117,7 @@ def chart_data(run_dir, metrics=None):
                     key=lambda r: r['prepared_index'])
     run_id = next((p for p in root.parts if p.startswith('run_')), root.name)
     return {'schema_version': 1, 'scene': scene, 'run_id': run_id, 'target_count': len(targets),
-            'height_axis': 'Estimated scene up (mean reference camera +Y)', 'up': up.tolist(),
+            'height_axis': axis_source, 'up': up.tolist(),
             'segments': [{'indices': s, 'heights': heights[s].tolist(), 'motion': m}
                          for s, m in zip(segments, motion)],
             'height_range': float(np.ptp(heights[targets])),

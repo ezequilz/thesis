@@ -173,6 +173,18 @@ class SplatfixStudio(SceneRunStudio):
             if options.get('preparation_from'):
                 from ..splatfix.resume import validate_preparation
                 validate_preparation(self.store, options)
+            if options.get('repeat_from'):
+                from ..splatfix.resume import validate_preparation
+                from ..splatfix.repeat_benchmark import inherited_inference_command
+                prior = validate_preparation(self.store, {**options, 'preparation_from': options['repeat_from']})
+                if prior.state.status.value != 'completed' or prior.config.splatfix['model'] != options['model']:
+                    raise ValueError('Repeat requires a completed benchmark with the same model')
+                manifests = list((Path(prior.path) / 'gpu/results').glob('*/benchmark-run.json'))
+                if len(manifests) != 1:
+                    raise ValueError('Repeat requires one downloaded original benchmark manifest')
+                original = read_json(manifests[0])
+                for phase in ('inference', 'plus'):
+                    inherited_inference_command(original, phase, 'new-split', 'new-output')
             scene_id = 'benchmark-' + source.parent.name
         else:
             checkpoints = {cp['id']: cp for cp in self.checkpoints()}

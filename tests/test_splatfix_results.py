@@ -174,9 +174,13 @@ def test_detail_shows_run_comparison_and_exact_photographic_references(tmp_path)
     manifest.write_text(json.dumps(data))
     (root / 'stage-comparison.jpg').write_bytes(b'comparison')
     (root / 'stage-comparison.json').write_text(json.dumps({'caption': 'Separate control included'}))
+    (root / 'trajectory-quality.png').write_bytes(b'chart')
+    (root / 'trajectory-quality.json').write_text(json.dumps({'caption': 'Actual run trajectory'}))
     key = studio.results.entries()[0]['id']
     row = studio.results.run_detail(key)
     assert row['stage_comparison']['caption'] == 'Separate control included'
+    assert [item['title'] for item in row['comparison_gallery']] == ['Stage comparison', 'Trajectory and image quality']
+    assert row['comparison_gallery'][1]['caption'] == 'Actual run trajectory'
     assert row['reference_images'] == [{'index': 1, 'name': 'photo.jpg', 'url': studio.file_url(prep / 'images/photo.jpg')}]
     (prep / 'images/photo.jpg').unlink()
     (prep / 'images/photo.jpg').symlink_to(tmp_path / 'secret.jpg')

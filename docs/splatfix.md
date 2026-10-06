@@ -267,8 +267,10 @@ splat-explorer --config configs/splatfix.yaml dashboard
 splat-explorer --config configs/splatfix.yaml scene-run-manager
 ```
 
-The usual `scripts/start.sh` also starts both services. Restart them after
-updating the code when no jobs are active. The main workspace has four sections:
+The usual `scripts/start.sh` also starts both services, and reloads them
+when `src/` or `configs/` change. That restart interrupts an active job, so
+avoid a code-changing start while a reconstruct is running. `--force` restarts
+them even when those files are unchanged. The main workspace has four sections:
 
 1. **Find views** selects the catalog scene and 6, 8, 10, or 12 views. It saves
    original calibrated RGBs without immediately making GPT-image edit calls.
@@ -470,9 +472,11 @@ launching another full reconstruction.
 
 A benchmark job can set `repeat_from` to a completed benchmark job ID (same
 source and model, mutually exclusive with `resume_from`/`preparation_from`).
-The worker copies historical preparation without applying current resolution
-preprocessing. The prior ArtiFixer3D checkpoint and its saved RGB/opacity renders
-replace the simple reconstruction input. Original photographic references,
+The worker copies the original orbit and conditioning. The prior ArtiFixer3D
+checkpoint replaces the simple reconstruction input. The requested resolution
+profile calibrates references and intrinsics and freshly renders RGB/opacity with
+the pinned upstream renderer, preserving every original camera pose. The
+`early_original` profile can reuse historical RGB/opacity without resizing. Original photographic references,
 trajectory, caption, camera scale and COLMAP point initialization stay fixed.
 The native checkpoint represents the same splat as its exported PLY; avoiding a
 PLY roundtrip preserves all trained parameters and the authors' renderer output.
@@ -480,4 +484,32 @@ Inference, fresh 30,000-step reconstruction, export and the plus image pass run
 again. Old diffusion predictions are not used as the new predictions. The output
 manifest records parent hashes and repair pass number. Authors' stochastic
 inference/training behavior is retained; this is not a deterministic paired trial.
-Historical image sizes are preserved even if current resolution defaults differ.
+Legacy manifests without `inference_settings` replay the recorded completed
+inference/plus commands, preserving defaults from the pinned upstream revision.
+The `training` profile uses v1 sizing (816 × 544 for Bicycle); it does not reuse
+old full-resolution RGB/opacity as inference inputs.
+
+### Per-run trajectory and quality chart
+
+Every completed Splatfix dashboard reconstruction now runs an evaluation phase.
+Benchmark jobs attempt the pinned photographic PSNR/SSIM/LPIPS evaluation in the
+configured ArtiFixer environment. Each run writes `trajectory-quality.png` and
+`trajectory-quality.json` from its actual inference cameras and available
+per-image metrics. Saved-view jobs without photographic ground truth show only
+camera motion. Independent inference segments are not connected across cuts.
+Height uses the mean source-capture camera up vector where available, otherwise
+reference camera up; the vector and its source are recorded in the JSON.
+
+The run detail page's **Stage comparison** gallery has previous/next arrows,
+keyboard navigation, a position label, and full-size image links. It includes
+both the saved stage image and the new evaluation chart when present. The chart
+has no hypothetical ellipse overlay. `evaluation-status.json` records partial
+failures, which the page reports without discarding a completed reconstruction.
+Missing metric weights must be provisioned before photographic evaluation can
+succeed; geometric charts require no GPU or extra plotting libraries.
+
+Existing downloaded results can be backfilled without rerunning inference:
+
+```sh
+python -m splat_explorer.splatfix.evaluation_chart /absolute/path/to/result
+```

@@ -15,9 +15,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies in their own layer so code edits don't re-download them.
+# The BuildKit pip cache keeps wheels between builds; a version bump fetches
+# only the packages whose requirement changed. scripts/start.sh skips this
+# build entirely when the Dockerfile is unchanged.
 # Keep this list in sync with pyproject.toml (core + viewer + vlm extras).
 # Do not install [apple] here: mlx-metal is macOS-only and will fail on Linux.
-RUN pip install --no-cache-dir \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install \
     "numpy>=1.26" \
     "pillow>=10.0" \
     "pyyaml>=6.0" \
@@ -28,7 +32,8 @@ RUN pip install --no-cache-dir \
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY configs ./configs
-RUN pip install --no-cache-dir --no-deps .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-deps .
 
 # Splat assets and outputs are bind-mounted by docker-compose:
 #   ./3dgs_rooms -> /app/3dgs_rooms (ro),  ./outputs -> /app/outputs

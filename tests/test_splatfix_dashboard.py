@@ -306,9 +306,10 @@ def test_benchmark_worker_uses_official_dataset_entrypoint(tmp_path, monkeypatch
         calls.append((source, output, kwargs['runtime']))
         kwargs['on_progress']({'phase': 'colmap_preparation'})
         assert not kwargs['should_stop']()
-        return {'splat_path': 'official.ply'}
+        return {'splat_path': 'official.ply', 'output_dir': '/results/completed'}
     monkeypatch.setitem(sys.modules, 'splat_explorer.splatfix.benchmark', SimpleNamespace(run_benchmark=benchmark))
     monkeypatch.setattr(job_worker, 'run_repair', lambda *a, **kw: pytest.fail('Benchmark must not use saved-view repair'))
+    monkeypatch.setattr('splat_explorer.splatfix.run_evaluation.finalize_run_evaluation', lambda *a, **kw: None)
     (tmp_path / 'worker-request.json').write_text(json.dumps({'stage': 'benchmark', 'source': '/benchmark-input',
         'output': '/results', 'runtime': {'model_variant': '14b'}}))
     job_worker.execute(tmp_path)

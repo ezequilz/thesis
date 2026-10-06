@@ -66,7 +66,7 @@ src/splat_explorer/
 Dockerfile                      CPU image (loader, cpu renderer, viewer, harness)
 docker/Dockerfile.gpu           CUDA image for gsplat [STUB — untested]
 docker-compose.yml              Services: render-test, viewer, harness
-scripts/start.sh                Start/restart the stack: CliRelay + build + viewer
+scripts/start.sh                Start/restart the stack; skips unchanged installs
 ```
 
 ## Quick start (Docker)
@@ -75,13 +75,17 @@ scripts/start.sh                Start/restart the stack: CliRelay + build + view
 ./scripts/start.sh
 ```
 
-Safe to re-run at any time; it (re)starts the whole stack in order: the
-Docker daemon itself if needed (Docker Desktop / OrbStack on macOS), CliRelay
-at http://localhost:8317 (cloned to `~/CliRelay` on first run; panel at
-`/manage`, admin password printed from its `.env`), builds the image, and
-(re)starts the interactive viewer at http://localhost:8080 plus the episode
-dashboard at http://localhost:8090 — killing stale locally-run instances
-holding those ports if needed. Optional one-off jobs:
+Safe to re-run at any time. It brings up the Docker daemon if needed
+(Docker Desktop / OrbStack on macOS) and CliRelay at http://localhost:8317
+(cloned to `~/CliRelay` on first run; panel at `/manage`, admin password
+printed from its `.env`). Repeat runs skip work that is already current:
+pip reuses its wheel cache and reinstalls a library only when the installed
+version no longer matches `pyproject.toml`, the image is rebuilt only when
+`Dockerfile` changes (and that build keeps a pip download cache), and the
+viewer, dashboard, and scene-run manager reload when `src/` or `configs/`
+change or when they are not already healthy. `--force` reinstalls, rebuilds,
+and restarts everything. Stale locally-run instances holding the viewer or
+dashboard ports are still cleared. Optional one-off jobs:
 `--render-test` renders a sanity panorama to `outputs/test_views/`,
 `--episode` runs an agent episode into `outputs/episodes/<timestamp>/`, and
 `--stop` shuts everything down (project + CliRelay).

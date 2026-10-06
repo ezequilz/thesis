@@ -22,6 +22,7 @@ def execute(root):
             if request['runtime'].get('repeat_from'):
                 from .repeat_benchmark import run_repeat_benchmark
                 result = run_repeat_benchmark(request['runtime']['repeat_from'], request['output'],
+                                              resolution_profile=request['runtime'].get('resolution_profile', 'training'),
                                               should_stop=stop, on_progress=progress)
             else:
                 from .benchmark import run_benchmark
