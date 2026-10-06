@@ -18,9 +18,11 @@ def prepare(result_root: Path, output: Path, start: int = 280, stop: int = 343):
     selected = json.loads((source.parent / scene['selected_indices_path']).read_text())
     original_targets = json.loads((source.parent / scene['target_indices_path']).read_text())
     targets = list(range(start, stop))
-    # Seven latent frames/block, four RGB frames/latent: preserve temporal phase.
+    # A 28-frame offset aligns subsequent block boundaries and four-frame
+    # sampling phase, not the causal VAE boundary state. The first block covers
+    # 25 RGB frames, followed by 28-frame blocks; a fresh run reinitializes it.
     if start % 28 or not targets or not set(targets).issubset(original_targets):
-        raise ValueError('Use a nonempty original target interval starting at a 28-frame boundary')
+        raise ValueError('Use a nonempty original target interval with a start offset divisible by 28')
     if set(targets) & set(selected) or 321 not in targets:
         raise ValueError('Control must contain failing camera321 and exclude references')
     remote_result = Path(result['output_dir'])
@@ -38,12 +40,21 @@ def prepare(result_root: Path, output: Path, start: int = 280, stop: int = 343):
         'original_target_count': len(original_targets), 'target_indices': targets,
         'reference_indices': selected, 'failing_target_index': 321,
         'failing_target_position': targets.index(321), 'rgb_block_alignment': 28,
+        'temporal_alignment': {
+            'first_rgb_block_length': 25, 'later_rgb_block_length': 28,
+            'offset_multiple': 28, 'identical_vae_context': False,
+            'note': 'A 28-frame offset aligns subsequent block boundaries, but restart changes '
+                    'causal VAE boundary context, sink content, and the first block.',
+        },
         'camera_scale': scene['camera_scale'],
         'failing_target_pose': transforms['frames'][321]['transform_matrix'],
         'unchanged': ['model', 'reference images', 'caption', 'calibration',
                       'render and opacity files', 'frame identities', 'authors inference defaults'],
-        'changed': ['preceding autoregressive target history'],
+        'changed': ['preceding autoregressive target history', 'VAE boundary context',
+                    'sink content', 'first block', 'random sampling realization'],
         'limits': ['Authors CLI has no seed option; comparison with historical output is not noise-paired.',
+                   'Restart also changes VAE boundary context, sink content, and the first block; '
+                   'this does not isolate KV-history length alone.',
                    'A changed outcome would motivate repeated controlled trials, not prove a logic bug.',
                    'This is a diagnostic, not a proposed replacement baseline.'],
     }

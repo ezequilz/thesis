@@ -14,7 +14,8 @@ from splat_explorer.splatfix.checkpoint import Checkpoint
 from splat_explorer.splatfix.cli import add_parser, repair_splat
 
 
-def test_public_select_command_without_api(tmp_path):
+@pytest.mark.parametrize("profile, dimensions", [("training", (960, 544)), ("720p", (1280, 720))])
+def test_public_select_command_without_api(tmp_path, profile, dimensions):
     random = np.random.default_rng(8)
     count = 60
     scene = GaussianScene(
@@ -32,6 +33,7 @@ def test_public_select_command_without_api(tmp_path):
         "camera": {"start_position": [0, 0, 0], "up_axis": "+y"},
         "renderer": {"width": 64, "height": 48},
         "agent": {"vlm_backend": "scripted"},
+        "splatfix": {"resolution_profile": profile},
     }))
     output = tmp_path / "runs"
     env = dict(os.environ)
@@ -43,6 +45,7 @@ def test_public_select_command_without_api(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     checkpoint = Checkpoint.load(next(output.iterdir()))
     assert checkpoint.complete and len(checkpoint.views) == 8
+    assert all((view["camera"]["width"], view["camera"]["height"]) == dimensions for view in checkpoint.views)
     assert len(list(checkpoint.root.rglob("*.png"))) == 8
     assert all("repaired_rgb" not in view for view in checkpoint.views)
     assert checkpoint.manifest["metadata"]["scene_load"]["min_opacity"] == .05
@@ -74,5 +77,5 @@ def test_repair_command_passes_only_saved_run_and_runtime(monkeypatch, tmp_path)
                              "--artifixer-repo", "/gpu/official"])
     repair_splat(Config({"splatfix": {"runtime": {"python": "/gpu/python"}}}), args)
     assert received["mode"] == "baseline"
-    assert received["runtime"] == {"repo": "/gpu/official", "python": "/gpu/python"}
+    assert received["runtime"] == {"repo": "/gpu/official", "python": "/gpu/python", "resolution_profile": "training"}
     assert received["checkpoint"] == tmp_path / "saved"

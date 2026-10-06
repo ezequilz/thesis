@@ -207,3 +207,32 @@ def test_metric_checkout_still_requires_pinned_revision(tmp_path, monkeypatch):
     monkeypatch.setattr(evaluation, 'UPSTREAM_REVISION', '0' * 40)
     with pytest.raises(ValueError, match='must be pinned'):
         evaluation._validate_metric_source(repo)
+
+
+def test_declared_calibrated_resolution_applies_to_ground_truth_only(tmp_path, monkeypatch):
+    from splat_explorer.splatfix.resolution import resize_plan
+    root, source = fixture_run(tmp_path)
+    manifest_path = root / 'benchmark-run.json'
+    manifest = json.loads(manifest_path.read_text())
+    policy = resize_plan(24, 16)
+    manifest['resolution_policy'] = {'version': 1, 'profile': 'training',
+                                    'images': {p.name: policy for p in (source / 'colmap/images').iterdir()}}
+    manifest_path.write_text(json.dumps(manifest))
+    for method in evaluation.METHODS:
+        for p in (root / method).glob('*.png'):
+            with Image.open(p) as image:
+                image.crop((4, 0, 20, 16)).save(p)
+    calls = []
+    def compute(pred, gt):
+        assert pred.shape == gt.shape == (16, 16, 3)
+        calls.append(1)
+        return {'psnr': 20., 'ssim': .9, 'lpips': .1}
+    monkeypatch.setattr(evaluation, 'load_official_metrics', lambda *args: (compute, {}))
+    result = evaluation.evaluate_benchmark(root)
+    assert len(calls) == 100
+    assert 'calibrated' in result['image_policy']
+    assert Image.open(next((source / 'colmap/images').iterdir())).size == (24, 16)
+    manifest['resolution_policy']['images'][manifest['source_metadata']['test_images'][0]] = {**policy, 'scale': .5}
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match='resolution plan differs'):
+        evaluation.evaluation_plan(root)

@@ -157,3 +157,48 @@ def test_detail_page_has_accessible_fullsize_navigation():
     assert "e.key==='ArrowLeft'" in html and "e.key==='ArrowRight'" in html
     assert 'requestFullscreen' in html and 'aria-label="Close image"' in html
     assert 'g.verified_inputs' in html
+
+
+def test_detail_shows_run_comparison_and_exact_photographic_references(tmp_path):
+    studio, _, root = setup(tmp_path)
+    prep = root / 'prepared'
+    (prep / 'images').mkdir(parents=True)
+    (prep / 'images/photo.jpg').write_bytes(b'photo')
+    (prep / 'selected.json').write_text('[1]')
+    (prep / 'transforms.json').write_text(json.dumps({'frames': [{}, {'file_path': 'images/photo.jpg'}]}))
+    (prep / 'split.json').write_text(json.dumps({'test': {'scene': {
+        'selected_indices_path': 'selected.json', 'transforms_path': 'transforms.json', 'image_root': '.'}}}))
+    manifest = root / 'result.json'
+    data = json.loads(manifest.read_text())
+    data['inference_split'] = 'prepared/split.json'
+    manifest.write_text(json.dumps(data))
+    (root / 'stage-comparison.jpg').write_bytes(b'comparison')
+    (root / 'stage-comparison.json').write_text(json.dumps({'caption': 'Separate control included'}))
+    key = studio.results.entries()[0]['id']
+    row = studio.results.run_detail(key)
+    assert row['stage_comparison']['caption'] == 'Separate control included'
+    assert row['reference_images'] == [{'index': 1, 'name': 'photo.jpg', 'url': studio.file_url(prep / 'images/photo.jpg')}]
+    (prep / 'images/photo.jpg').unlink()
+    (prep / 'images/photo.jpg').symlink_to(tmp_path / 'secret.jpg')
+    (tmp_path / 'secret.jpg').write_bytes(b'private')
+    assert studio.results.run_detail(key)['reference_images'] == []
+
+
+def test_saved_references_recover_remote_links_only_when_run_hash_matches(tmp_path):
+    import hashlib
+    studio, run, root = setup(tmp_path)
+    cp = studio.checkpoint_root / 'saved'
+    (cp / 'views/000').mkdir(parents=True)
+    image = cp / 'views/000/repaired.png'
+    image.write_bytes(b'actual edited reference')
+    config = json.loads((run / 'config.json').read_text())
+    config['splatfix'].update(checkpoint=str(cp), stage='repair', mode='baseline')
+    (run / 'config.json').write_text(json.dumps(config))
+    remote = '/workspace/job/checkpoint/views/000/repaired.png'
+    (root / 'request.json').write_text(json.dumps({'checkpoint_root': '/workspace/job/checkpoint',
+        'references': [remote], 'reference_sha256': [hashlib.sha256(image.read_bytes()).hexdigest()]}))
+    (root / 'supervision.json').write_text(json.dumps({'groups': [{'source_index': 4, 'reference': remote}]}))
+    key = studio.results.entries()[0]['id']
+    assert studio.results.run_detail(key)['reference_images'][0]['url'] == studio.file_url(image)
+    image.write_bytes(b'a newer edit must not be shown for the historical run')
+    assert studio.results.run_detail(key)['reference_images'] == []

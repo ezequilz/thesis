@@ -13,7 +13,10 @@ def validate_job(raw):
     stage = raw.get('stage')
     if stage not in ('select', 'edit', 'repair', 'benchmark'):
         raise ValueError('stage must be select, edit, repair or benchmark')
-    result = {'stage': stage}
+    from .resolution import profile_size
+    profile = raw.get('resolution_profile', 'training')
+    profile_size(profile)
+    result = {'stage': stage, 'resolution_profile': profile}
     scheduled = raw.get('scheduled_at')
     if scheduled:
         instant = datetime.fromisoformat(str(scheduled).replace('Z', '+00:00'))
@@ -41,7 +44,9 @@ def validate_job(raw):
         result.update(source=source, mode='baseline', model=model)
         if raw.get('resume_from') is not None and raw.get('preparation_from') is not None:
             raise ValueError('resume_from and preparation_from are mutually exclusive')
-        for key in ('resume_from', 'preparation_from'):
+        if raw.get('repeat_from') and (raw.get('resume_from') or raw.get('preparation_from')):
+            raise ValueError('repeat_from cannot be combined with preparation or resume')
+        for key in ('resume_from', 'preparation_from', 'repeat_from'):
             if raw.get(key) is not None:
                 from ..scene_runs.store import RUN_ID_PATTERN
                 prior = raw[key]

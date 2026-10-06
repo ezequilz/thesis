@@ -164,6 +164,23 @@ def build_author_orbit(reference_poses, intrinsics, metric_scale, *, target_pose
                         'requested_target_indices': [i for i, n in enumerate(target_nodes) if n == node_index]})
     if not frames:
         raise ValueError('Authors interpolation produced no non-reference targets; use smaller spacing')
+    # Use the trusted cameras' up estimate for both paths. Interpolation is
+    # continuous within each leg, but azimuth sorting need not produce a flat
+    # or globally smooth path when the inputs span multiple capture heights.
+    if __package__:
+        from .trajectory_diagnostics import summarize_trajectory
+    else:  # The GPU worker invokes this file directly in the authors' venv.
+        from trajectory_diagnostics import summarize_trajectory
+    reference_up = references[:, :3, 1].mean(axis=0)
+    diagnostic_up = reference_up if np.linalg.norm(reference_up) >= 1e-8 else None
+    motion = {
+        'full_path': summarize_trajectory(
+            [f['transform_matrix'] for f in full_frames], up=diagnostic_up),
+        'generated_targets': summarize_trajectory(
+            [f['transform_matrix'] for f in frames], up=diagnostic_up),
+        'scope': 'Geometry only; no visibility, image quality, or safe-path guarantee. '
+                 'Up is estimated from reference camera +Y when unambiguous.',
+    }
     return {
         'trajectory': {**camera, 'camera_convention': 'opengl_c2w', 'frames': frames},
         'full_trajectory': {**camera, 'camera_convention': 'opengl_c2w', 'frames': full_frames},
@@ -180,6 +197,7 @@ def build_author_orbit(reference_poses, intrinsics, metric_scale, *, target_pose
             'reference_node_indices': reference_nodes, 'requested_target_node_indices': target_nodes,
             'unique_input_nodes': len(nodes), 'author_frame_count': len(interpolated),
             'target_frame_count': len(frames), 'frames': mapping, 'removed_frames': removed,
+            'motion_diagnostics': motion,
         },
     }
 

@@ -1,4 +1,6 @@
 import json
+import struct
+from PIL import Image
 from pathlib import Path
 import pytest
 from splat_explorer.splatfix import benchmark, repair
@@ -14,9 +16,15 @@ def source_fixture(tmp_path):
     (root / 'colmap/sparse/0').mkdir(parents=True)
     names = ['a.jpg', 'b.jpg', 'c.jpg']
     for name in names + ['d.jpg']:
-        (root / 'colmap/images' / name).write_bytes(name.encode())
-    for name in ('cameras.bin', 'images.bin', 'points3D.bin'):
-        (root / 'colmap/sparse/0' / name).write_bytes(b'original COLMAP')
+        Image.new('RGB', (640, 480)).save(root / 'colmap/images' / name)
+    sparse = root / 'colmap/sparse/0'
+    (sparse / 'cameras.bin').write_bytes(struct.pack('<QiiQQdddd', 1, 1, 1, 640, 480, 500, 500, 320, 240))
+    with (sparse / 'images.bin').open('wb') as f:
+        f.write(struct.pack('<Q', 4))
+        for index, name in enumerate(names + ['d.jpg']):
+            f.write(struct.pack('<idddddddi', index+1, 1, 0, 0, 0, 0, 0, 0, 1))
+            f.write(name.encode() + b'\0' + struct.pack('<Q', 0))
+    (sparse / 'points3D.bin').write_bytes(struct.pack('<Q', 0))
     (root / 'selected_images.txt').write_text('\n'.join(names))
     hashes = {str(p.relative_to(root)): repair.digest_file(p) for p in root.rglob('*') if p.is_file()}
     (root / 'benchmark.json').write_text(json.dumps({'name': 'bicycle', 'selected_images': names,
@@ -185,7 +193,7 @@ def test_resume_copies_only_preparation_materializes_links_and_runs_real_phases(
             prepared = root / 'prepared/bicycle'
             assert (prepared / 'base.pt').read_bytes() == old_checkpoint
             assert not (prepared / 'photo.jpg').is_symlink()
-            assert (prepared / 'photo.jpg').read_bytes() == b'a.jpg'
+            assert (prepared / 'photo.jpg').read_bytes() == (source / 'colmap/images/a.jpg').read_bytes()
             assert not (root / 'inference').exists()
             assert not (prepared / 'artifixer3d').exists()
             assert not (root / 'caption.log').exists()
@@ -486,3 +494,14 @@ def test_orbit_mapping_rejects_two_test_names_sharing_camera_index():
     prepared = {**CALIBRATION, 'frames': [{'transform_matrix': POSE}]}
     with pytest.raises(ValueError, match='distinct target'):
         benchmark._orbit_test_indices(source, prepared, {'target_name_to_index': {'a.jpg': 0, 'b.jpg': 0}}, ['a.jpg', 'b.jpg'], [])
+
+
+def test_old_or_different_resolution_preparation_cannot_be_reused(tmp_path, monkeypatch):
+    source, prior = failed_prepared_run(tmp_path, monkeypatch)
+    install_worker(monkeypatch)
+    with pytest.raises(ValueError, match='resolution policy differs'):
+        benchmark.run_benchmark(source, tmp_path / 'runs', runtime={'resume_from': str(prior), 'resolution_profile': '720p'})
+    path = prior / 'benchmark-run.json'
+    old = json.loads(path.read_text()); del old['resolution_policy']; path.write_text(json.dumps(old))
+    with pytest.raises(ValueError, match='resolution policy differs'):
+        benchmark.run_benchmark(source, tmp_path / 'runs', runtime={'resume_from': str(prior)})

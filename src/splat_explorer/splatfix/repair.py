@@ -21,6 +21,7 @@ from .checkpoint import Checkpoint, atomic_json, camera_from_record
 
 UPSTREAM_REVISION = 'a392c4dfe17459ef9952407accdb9fcdcdddba98'
 DEFAULT_RUNTIME = {
+    'resolution_profile': 'training',
     'repo': '/workspace/third_party/ArtiFixer',
     'python': '/workspace/artifixer-venv/bin/python',
     'checkpoint': '/workspace/models/artifixer/artifixer-1.3b.pt',
@@ -75,6 +76,8 @@ def digest_file(path):
 
 def validate_runtime(runtime=None):
     cfg = {**DEFAULT_RUNTIME, **(runtime or {})}
+    from .resolution import profile_size
+    profile_size(cfg['resolution_profile'])
     repo = Path(cfg['repo']).resolve()
     for relative in ('model_eval/run_inference.py', 'data_processing/artifixer3d.py',
                      'thirdparty/3DGRUT-ArtiFixer/threedgrut/trainer.py',
@@ -348,6 +351,11 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         if len(pose_keys) != len(cp.views):
             raise ValueError('Saved anchor poses must be distinct for authors smooth orbit')
     cfg = validate_runtime(runtime)
+    from .resolution import prepare_checkpoint
+    root = Path(output_dir).resolve() / f'{mode}_{uuid.uuid4().hex[:12]}'
+    root.mkdir(parents=True, exist_ok=False)
+    cp = prepare_checkpoint(cp, root / 'checkpoint', cfg['resolution_profile'])
+    references = [str(cp.image_path(view, repaired=mode == 'edited')) for view in cp.views]
     on_progress({'phase': 'anchor_geometry' if trajectory_mode == 'authors_orbit' else 'trajectory'})
     if trajectory_mode == 'authors_orbit':
         trajectory_root, trajectory = prepare_saved_path(cp, should_stop=should_stop, scene_path=cfg.get('scene_path'))
@@ -355,10 +363,10 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         trajectory_root, trajectory = prepare_trajectory(cp, frames=frames, span_fraction=span_fraction, should_stop=should_stop, scene_path=cfg.get('scene_path'))
     if mode == 'baseline':
         references = [str(cp.root / anchor['original_rgb']) for anchor in trajectory['anchors']]
-    root = Path(output_dir).resolve() / f'{mode}_{uuid.uuid4().hex[:12]}'
-    root.mkdir(parents=True, exist_ok=False)
     points = cfg.get('source_points3d') or str(cp.root / trajectory['points3d'])
-    request = {'checkpoint_root': str(cp.root), 'trajectory': str(trajectory_root / 'trajectory.json'),
+    request = {'resolution_profile': cfg['resolution_profile'],
+               'resolution': cp.manifest.get('metadata', {}).get('resolution'),
+               'checkpoint_root': str(cp.root), 'trajectory': str(trajectory_root / 'trajectory.json'),
                'references': references, 'runtime': cfg, 'mode': mode, 'seed': seed,
                'camera_scale': float(camera_scale) if camera_scale is not None else None,
                'camera_scale_provenance': ('explicit manual scene-unit multiplier' if camera_scale is not None

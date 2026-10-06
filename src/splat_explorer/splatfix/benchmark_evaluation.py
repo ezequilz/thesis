@@ -132,6 +132,12 @@ def evaluation_plan(run_dir):
             raise ValueError(f'Published photographic ground truth changed: {name}')
         with Image.open(gt) as image:
             size = image.size
+        transform = run.get('resolution_policy', {}).get('images', {}).get(name)
+        if transform:
+            from .resolution import resize_plan
+            if transform != resize_plan(*size, transform['profile']):
+                raise ValueError('Ground-truth resolution plan differs from source geometry')
+            size = tuple(transform['output_wh'])
         paths = {method: directory / f'{index:05d}.png' for method, directory in directories.items()}
         for method, path in paths.items():
             if not path.is_file():
@@ -140,7 +146,7 @@ def evaluation_plan(run_dir):
                 if image.size != size:
                     raise ValueError(f'{method} shape mismatch for {name}: {image.size} vs original {size}; no implicit resize')
         pairs.append({'name': name, 'prepared_index': index, 'width': size[0], 'height': size[1],
-                      'ground_truth': str(gt), 'predictions': {k: str(v) for k, v in paths.items()}})
+                      'ground_truth_transform': transform, 'ground_truth': str(gt), 'predictions': {k: str(v) for k, v in paths.items()}})
     return {'root': str(root), 'pairs': pairs, 'references': references,
             'run_sha256': digest_file(root / 'benchmark-run.json'),
             'source_metadata_sha256': digest_file(source / 'benchmark.json'),
@@ -218,6 +224,9 @@ def evaluate_benchmark(run_dir, *, repo=None, device='cpu', output=None):
     values = {method: {metric: [] for metric in METRICS} for method in METHODS}
     for pair in plan['pairs']:
         target = _rgb(pair['ground_truth'])
+        if pair.get('ground_truth_transform'):
+            from .resolution import resize_image
+            target = np.asarray(resize_image(Image.fromarray(target), pair['ground_truth_transform']))
         record = {**pair, 'sha256': {'ground_truth': digest_file(pair['ground_truth'])}, 'metrics': {}}
         for method, path in pair['predictions'].items():
             prediction = _rgb(path)
@@ -233,7 +242,9 @@ def evaluate_benchmark(run_dir, *, repo=None, device='cpu', output=None):
         records.append(record)
     result = {'schema_version': 1, 'published_test_count': len(records), 'reference_images_excluded': plan['references'],
               'aggregation': 'unweighted arithmetic mean of per-image metrics over published 25 photographs only',
-              'image_policy': 'original RGB dimensions; [0,1] full image; no resize, mask, crop, or color alignment',
+              'image_policy': ('explicit calibrated resize/crop recorded per image; all four methods and ground truth share dimensions'
+                               if any(p.get('ground_truth_transform') for p in plan['pairs']) else
+                               'original RGB dimensions; [0,1] full image; no resize, mask, crop, or color alignment'),
               'official_inference_resize': 'Upstream VAE inputs are aligned to multiples of 16; upstream predictions are saved at original target dimensions.',
               'metrics': provenance, 'benchmark_provenance': {key: value for key, value in plan.items() if key != 'pairs'},
               'per_image': records,
@@ -241,6 +252,8 @@ def evaluate_benchmark(run_dir, *, repo=None, device='cpu', output=None):
                             for method, metrics in values.items()},
               'scope': 'Published Bicycle test-image scores; not a website-orbit match or verified paper-protocol reproduction.'}
     atomic_json(destination, result)
+    from .evaluation_chart import write_evaluation_chart
+    write_evaluation_chart(plan['root'], result)
     return result
 
 

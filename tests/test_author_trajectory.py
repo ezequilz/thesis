@@ -43,6 +43,7 @@ def test_delegates_cv_scale_and_keeps_exact_targets_without_anchor_duplicates():
     assert result['provenance']['reference_frame_indices'] == [0, 2, 3]
     assert result['provenance']['frames'][1]['full_frame_index'] == 4
     assert len(result['full_trajectory']['frames']) == 5
+    assert result['provenance']['motion_diagnostics']['generated_targets']['frame_count'] == 2
     assert {f['reason'] for f in result['provenance']['removed_frames']} == {'reference_camera', 'duplicate_target'}
 
 

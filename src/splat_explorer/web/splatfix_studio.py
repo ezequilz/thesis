@@ -15,6 +15,13 @@ class SplatfixStudio(SceneRunStudio):
         self.results = ResultCatalog(self)
         self.benchmark_root = Path(self.cfg.output.dir).resolve() / 'benchmarks'
 
+    def defaults(self):
+        from ..splatfix.resolution import profile_size
+        defaults = super().defaults()
+        defaults['width'], defaults['height'] = profile_size(
+            self.cfg.get('splatfix', {}).get('resolution_profile', 'training'))
+        return defaults
+
     def checkpoints(self):
         manifests = list(self.checkpoint_root.glob('*/checkpoint.json'))
         manifests += list(self.root.glob('run_*/checkpoints/*/checkpoint.json'))
@@ -140,15 +147,18 @@ class SplatfixStudio(SceneRunStudio):
         from ..scene_runs.store import _pid_alive
         alive = _pid_alive(int(manager.get("pid") or 0))
         from .. import repair_lrz
+        from ..splatfix.resolution import PROFILES, PROFILE_LABELS
         return {'scenes': self.scenes(), 'checkpoints': self.checkpoints(), 'jobs': self.jobs(), 'benchmarks': self.benchmarks(),
                 'manager': {'active': manager.get('status') == 'running' and alive, 'updated_at': manager.get('updated_at')},
                 'compute': {'configured': repair_lrz.lrz_configured(), 'label': 'Configured LRZ allocation'},
-                'defaults': {'views': 6, 'frames': 25, 'span_fraction': .04}}
+                'resolution_profiles': [{'id': key, 'label': PROFILE_LABELS[key], 'width': size[0], 'height': size[1]} for key, size in PROFILES.items()],
+                'defaults': {'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', 'training'), 'views': 6, 'frames': 25, 'span_fraction': .04,
+                             'width': self.defaults()['width'], 'height': self.defaults()['height']}}
 
     def create(self, body):
         if not isinstance(body, dict):
             raise ValueError('Request must be an object')
-        options = validate_job(body)
+        options = validate_job({'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', 'training'), **body})
         scene_id = str(body.get('scene_id') or '')
         if options['stage'] == 'select':
             scenes = {s['id']: s for s in self.scenes()}
@@ -182,7 +192,10 @@ class SplatfixStudio(SceneRunStudio):
             source_path = Path(cp['scene_path']).resolve()
             scene_id = next((str(scene['id']) for scene in self.scenes()
                              if scene.get('path') and Path(scene['path']).resolve() == source_path), cp['scene'])
+        from ..splatfix.resolution import profile_size
+        width, height = profile_size(options['resolution_profile'])
         run = self.store.create_run({'pipeline': 'splatfix', 'splatfix': options,
+                                     'width': width, 'height': height,
                                      'scene_id': scene_id, 'duration_seconds': 24 * 3600})
         return run.to_dict()
 

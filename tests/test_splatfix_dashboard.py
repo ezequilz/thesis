@@ -264,7 +264,7 @@ def test_registered_benchmark_queues_without_checkpoint(studio):
     source = benchmark_input(studio)
     job = studio.create({'stage': 'benchmark', 'source': str(source)})
     options = job['config']['splatfix']
-    assert options == {'stage': 'benchmark', 'source': str(source), 'mode': 'baseline', 'model': '1.3b'}
+    assert options == {'stage': 'benchmark', 'source': str(source), 'mode': 'baseline', 'model': '1.3b', 'resolution_profile': 'training'}
     assert studio.benchmarks()[0]['ready']
     assert 'not confirmed' in studio.benchmarks()[0]['provenance_note']
     from splat_explorer.splatfix.jobs import requires_gpu

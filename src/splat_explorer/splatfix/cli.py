@@ -27,6 +27,9 @@ def select_views(cfg, args):
     scene_path = Path(args.scene or cfg.scene.path).expanduser().resolve()
     renderer_cfg = Config(dict(cfg.renderer))
     renderer_cfg["backend"] = args.renderer
+    from .resolution import profile_size
+    renderer_cfg["width"], renderer_cfg["height"] = profile_size(
+        cfg.get("splatfix", {}).get("resolution_profile", "training"))
     scene = load_scene(scene_path, min_opacity=cfg.scene.min_opacity,
                        lod_level=int(cfg.scene.get("lod_level", 0)))
     renderer = make_renderer(scene, renderer_cfg)
@@ -79,6 +82,7 @@ def inspect_checkpoint(cfg, args):
 def repair_splat(cfg, args):
     from .repair import run_repair
     runtime = dict(cfg.get("splatfix", {}).get("runtime", {}))
+    runtime["resolution_profile"] = cfg.get("splatfix", {}).get("resolution_profile", "training")
     for key in ("repo", "python", "checkpoint", "model_id", "hf_home", "source_points3d"):
         value = getattr(args, "artifixer_" + key, None)
         if value is not None:

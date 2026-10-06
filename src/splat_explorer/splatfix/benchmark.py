@@ -226,6 +226,10 @@ def _resume_preparation(cfg, input_hashes, names, metadata, upstream_revision):
         if old.get(key) != expected:
             raise ValueError(f'Resume source differs in {key}')
     old_runtime = old.get('runtime', {})
+    from .resolution import POLICY_VERSION
+    policy = old.get('resolution_policy', {})
+    if policy.get('version') != POLICY_VERSION or policy.get('profile') != cfg.get('resolution_profile', 'training'):
+        raise ValueError('Preparation resolution policy differs; start a fresh benchmark')
     if not comparison:
         for key in ('model_variant', 'model_id', 'checkpoint'):
             if old_runtime.get(key) != cfg.get(key):
@@ -373,7 +377,7 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
                     'source_image_count': len(list((colmap / 'images').glob('*'))),
                     'published_test_images': published_test_names,
                     'published_test_count': len(published_test_names),
-                    'metric_alignment_input': 'all source photographs and their original COLMAP observations',
+                    'metric_alignment_input': 'all source photographs and COLMAP observations after the recorded calibrated resolution transform',
                     'caption_input': 'all source photographs passed to the official video processor; processor controls sampling',
                     'generated_supervision': ('authors interpolated orbit targets' if trajectory_mode == 'author_orbit' else 'all nonreference source cameras'),
                     'metrics_computed': False,
@@ -419,6 +423,8 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
             record['elapsed_seconds'] = time.monotonic() - started
             atomic_json(root / 'benchmark-run.json', manifest)
 
+    from .resolution import prepare_colmap
+    colmap = root / 'conditioning-colmap'
     prep = [cfg['python'], '-m', 'data_processing.prepare_colmap_artifixer_inputs',
             '--colmap_dir', str(colmap), '--output_root', str(prepared),
             '--selected_image_names_file', str(selection), '--text_encoder_model_id', cfg['model_id']]
@@ -431,6 +437,8 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
                 *[part for key, value in INFERENCE_DEFAULTS.items()
                   for part in ('--' + key, str(value))]]
     try:
+        manifest['resolution_policy'] = prepare_colmap(source / 'colmap', colmap, cfg.get('resolution_profile', 'training'))
+        atomic_json(root / 'benchmark-run.json', manifest)
         if resume:
             on_progress({'phase': 'copy_preparation', 'output_dir': str(root), 'resume_from': resume['root']})
             _copy_preparation(resume, root / 'prepared', should_stop)
@@ -520,7 +528,7 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
             raise FileNotFoundError('Official PLYExporter did not produce the reconstructed splat')
         stage('plus', inference(plus_split, root / 'plus'))
         plus_frames = _prediction_frames(root / 'plus', scene_id, required)
-        result = {'output_dir': str(root), 'splat_path': str(splat), 'plus_frames': str(plus_frames),
+        result = {'resolution_policy': manifest['resolution_policy'], 'output_dir': str(root), 'splat_path': str(splat), 'plus_frames': str(plus_frames),
                   'prediction_frames': str(predictions), 'reconstruction_checkpoint': str(checkpoint),
                   'source_dir': str(source), 'model_variant': cfg['model_variant'],
                   'selected_images': names, 'metric_scale': entry['metric_scale'],

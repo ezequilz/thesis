@@ -19,13 +19,20 @@ def execute(root):
         publish(status='running', phase='validation')
         progress = lambda event: publish(status='running', **event)
         if request.get('stage') == 'benchmark':
-            from .benchmark import run_benchmark
-            result = run_benchmark(request['source'], request['output'], runtime=request['runtime'],
-                                   should_stop=stop, on_progress=progress)
+            if request['runtime'].get('repeat_from'):
+                from .repeat_benchmark import run_repeat_benchmark
+                result = run_repeat_benchmark(request['runtime']['repeat_from'], request['output'],
+                                              should_stop=stop, on_progress=progress)
+            else:
+                from .benchmark import run_benchmark
+                result = run_benchmark(request['source'], request['output'], runtime=request['runtime'],
+                                       should_stop=stop, on_progress=progress)
         else:
             result = run_repair(request['checkpoint'], request['output'], mode=request['mode'],
                                 frames=request['frames'], span_fraction=request['span_fraction'],
                                 runtime=request['runtime'], should_stop=stop, on_progress=progress)
+        from .run_evaluation import finalize_run_evaluation
+        finalize_run_evaluation(result['output_dir'], request['runtime'], should_stop=stop, on_progress=progress)
         publish(status='completed', phase='finished', result=result)
     except InterruptedError as exc:
         publish(status='stopped', phase='finished', message=str(exc))

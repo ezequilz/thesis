@@ -4,6 +4,10 @@ agent:
   vlm_backend: cli_relay
 
 splatfix:
+  # Typical released DL3DV training preprocessing: 960x540 -> 960x544.
+  # Set 720p explicitly for 1280x720 novel camera renders.
+  # early_original: v0, original 960x720 captures and uncapped source inputs.
+  resolution_profile: training
   runtime:
     repo: /workspace/third_party/ArtiFixer
     python: /workspace/artifixer-venv/bin/python

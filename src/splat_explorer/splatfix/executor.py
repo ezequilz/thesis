@@ -149,6 +149,7 @@ class SplatfixExecutor:
         from ..scene.catalog import apply_spec, spec_by_id
         cfg = copy.deepcopy(self.cfg)
         cfg['agent']['vlm_backend'] = 'cli_relay'
+        cfg.setdefault('splatfix', {})['resolution_profile'] = run.config.splatfix['resolution_profile']
         if run.config.splatfix['stage'] == 'select':
             apply_spec(cfg, spec_by_id(cfg, run.config.scene_id))
         # Persist parameters, never resolved environment credentials.
@@ -191,6 +192,12 @@ class SplatfixExecutor:
         saved = self.store.get_run(run_id).state.details
         # Reattachment only needs DSS/SSH, even if the original allocation expired.
         if not saved.get('remote_dir'):
+            if options.get('repeat_from'):
+                marker = lrz.read_remote_setup_marker(cfg)
+                if not marker.get('ok') or str(marker.get('job_id')) != str(cfg['job_id']):
+                    update(phase='gpu_setup', message='Preparing the new GPU allocation for repeat repair')
+                    lrz.setup_lrz_gpu({**cfg, 'artifixer_required': True, 'artifixer_model': options['model']},
+                                      qwen_required=False)
             LrzSceneRunTransport(self.cfg, run_id, root).validate()
         remote_dir = saved.get('remote_dir') or str(cfg['workspace']).rstrip('/') + '/splatfix-jobs/' + run_id
         container_dir = '/workspace/splatfix-jobs/' + run_id
@@ -210,11 +217,19 @@ class SplatfixExecutor:
             lrz.sync_code_to_dss(cfg)
             from .repair import DEFAULT_RUNTIME
             runtime = {**DEFAULT_RUNTIME, **dict(self.cfg.get('splatfix', {}).get('runtime', {}))}
+            runtime['resolution_profile'] = options['resolution_profile']
             if benchmark:
                 from .jobs import registered_benchmark
                 source, _ = registered_benchmark(Path(self.cfg.output.dir) / 'benchmarks', options['source'])
                 from ..scene_runs_ext.config import model_runtime
                 runtime = model_runtime(options['model'], runtime)
+                if options.get('repeat_from'):
+                    from .resume import resolve_remote_preparation
+                    prior = self.store.get_run(options['repeat_from'])
+                    if prior.state.status.value != 'completed' or prior.config.splatfix['model'] != options['model']:
+                        raise ValueError('Repeat requires a completed benchmark with the same model')
+                    runtime['repeat_from'] = resolve_remote_preparation(
+                        self.store, {**options, 'preparation_from': options['repeat_from']}, cfg, ssh)
                 if options.get('resume_from'):
                     from .resume import resolve_remote_resume
                     runtime['resume_from'] = resolve_remote_resume(self.store, options, cfg, ssh)

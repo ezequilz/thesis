@@ -114,12 +114,41 @@ class ResultCatalog:
         gallery = {'frames': [], 'reference_count': None, 'verified_inputs': False,
                    'stage': 'ArtiFixer · reconstruction inputs'}
         row['gallery'] = gallery
+        row['reference_images'] = []
+        row['stage_comparison'] = None
+        row['comparison_gallery'] = []
         if manifest is None:
             return row
         result = read_json(manifest, {})
         root = manifest.parent
+        from ..splatfix.resolution import PROFILE_LABELS
+        recorded_request = read_json(root / 'request.json', {})
+        profile = result.get('resolution_policy', {}).get('profile') or recorded_request.get('resolution_profile')
+        row['resolution_setting'] = PROFILE_LABELS.get(profile, 'Early original resolution · unversioned run')
         def local(raw):
             return self.studio.result_artifact(manifest, raw)
+        comparison = local('stage-comparison.jpg')
+        if comparison and comparison.is_file():
+            metadata = read_json(root / 'stage-comparison.json', {})
+            row['stage_comparison'] = {'url': self.studio.file_url(comparison),
+                                       'caption': metadata.get('caption', 'Same-camera comparison across stages. Open the image for full resolution.')}
+            row['comparison_gallery'].append({**row['stage_comparison'], 'title': 'Stage comparison'})
+        chart = local('trajectory-quality.png')
+        if chart and chart.is_file():
+            metadata = read_json(root / 'trajectory-quality.json', {})
+            row['comparison_gallery'].append({'url': self.studio.file_url(chart),
+                'title': 'Trajectory and image quality',
+                'caption': metadata.get('caption', 'Camera motion and available per-view evaluation scores.')})
+        row['evaluation_status'] = read_json(root / 'evaluation-status.json', {})
+        def add_reference(path, index, name=None):
+            if path is None or path.suffix.lower() not in ('.png', '.jpg', '.jpeg'):
+                return
+            try:
+                path = self.studio.allowed_file(str(path))
+            except ValueError:
+                return
+            row['reference_images'].append({'index': index, 'name': name or path.name,
+                                             'url': self.studio.file_url(path)})
         prediction = local(result.get('prediction_frames'))
         if prediction is None:
             # Saved-view worker uses this fixed first-pass location (not plus/).
@@ -133,6 +162,33 @@ class ResultCatalog:
                 allowed = {int(g['source_index']) for g in groups if not g.get('reference')}
                 gallery['reference_count'] = sum(bool(g.get('reference')) for g in groups)
                 gallery['verified_inputs'] = True
+                # These are materialized copies of the actual conditioning
+                # references, including edited RGB, rather than viewer previews.
+                reference_index = 0
+                request = read_json(root / 'request.json', {})
+                reference_hashes = dict(zip(request.get('references', []), request.get('reference_sha256', [])))
+                for group in groups:
+                    if group.get('reference'):
+                        path = local(f'source_colmap/images/anchor_{reference_index:05d}.png')
+                        if path is None and reference_index < len(request.get('references', [])):
+                            path = local(request['references'][reference_index])
+                        # Downloaded source_colmap links may still point into
+                        # /workspace. Recover only the recorded checkpoint file
+                        # with the exact hash used for this run.
+                        if path is None:
+                            checkpoint = row['config'].get('splatfix', {}).get('checkpoint')
+                            remote_checkpoint = request.get('checkpoint_root')
+                            expected = reference_hashes.get(group['reference'])
+                            if checkpoint and remote_checkpoint and expected:
+                                try:
+                                    relative = Path(group['reference']).relative_to(remote_checkpoint)
+                                    candidate = self.studio.allowed_file(str(Path(checkpoint) / relative))
+                                    if candidate.is_relative_to(Path(checkpoint).resolve()) and hashlib.sha256(candidate.read_bytes()).hexdigest() == expected:
+                                        path = candidate
+                                except ValueError:
+                                    pass
+                        add_reference(path, group['source_index'], f'Reference {reference_index + 1}')
+                        reference_index += 1
         if allowed is None:
             split = local(result.get('inference_split') or 'prepared/bicycle/split.json')
             if split and split.is_file():
@@ -152,6 +208,18 @@ class ResultCatalog:
                         allowed = set(target_ids) if isinstance(target_ids, list) else set(range(int(result.get('frame_count', 0))))
                         allowed -= set(refs)
                         gallery['verified_inputs'] = True
+                        transforms = split_asset(scene.get('transforms_path'))
+                        image_root = split_asset(scene.get('image_root'))
+                        cameras = read_json(transforms, {}).get('frames', []) if transforms else []
+                        if image_root:
+                            for index in refs:
+                                if type(index) is int and 0 <= index < len(cameras):
+                                    raw = cameras[index].get('file_path')
+                                    if raw:
+                                        path = local(str(image_root / raw))
+                                        if path is None and result.get('resolution_policy'):
+                                            path = local(str(Path('conditioning-colmap/images') / Path(raw).name))
+                                        add_reference(path, index, Path(raw).name)
         if prediction and prediction.is_dir():
             frames = [p for p in prediction.glob('*.png') if p.stem.isdigit()
                       and p.resolve().is_relative_to(root.resolve())]
@@ -170,6 +238,9 @@ class ResultCatalog:
         if not row:
             return []
         if row['_manifest']:
+            derivative = row['_manifest'].parent / 'checkpoint'
+            if (derivative / 'checkpoint.json').is_file():
+                return checkpoint_views(derivative)
             checkpoint = row['config'].get('splatfix', {}).get('checkpoint')
             if checkpoint and Path(checkpoint).resolve().is_relative_to(Path(self.cfg.output.dir).resolve()):
                 return checkpoint_views(checkpoint)

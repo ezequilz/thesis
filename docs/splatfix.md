@@ -52,6 +52,55 @@ resolution is resized only if its aspect ratio matches. A changed aspect ratio
 is rejected. Metadata stores the prompt, backend, response dimensions and
 completion state without saving another base64 copy of the image.
 
+## Resolution policy
+
+**v0 · Early original resolution** is preserved as `early_original` in the
+resolution setting selector and `splatfix.resolution_profile`. It restores the
+previous 960 × 720 camera-capture default, leaves saved checkpoints unchanged,
+and copies photographic/COLMAP inputs byte-for-byte without a resolution cap.
+For the original bicycle data, saved images remain 1237 × 822; the authors'
+loader works internally at 1232 × 816 and saves back at the source dimensions.
+This is the early Splatfix resolution setting, not an authors-endorsed preset.
+Only resolution behavior is versioned; other current pipeline settings remain
+in effect. Historical unversioned runs are labelled separately in run details.
+
+**v1 · Training-aligned resolution** (`training`) remains the default.
+**v1 · 720p resolution** (`720p`) is the capped alternative.
+
+New Splatfix captures use **960 × 544** for VLM camera observations, saved
+cameras, trajectory renders and both diffusion passes. The `training` profile
+is the default even when the general explorer configuration uses 960 × 720.
+The released [training loader](https://github.com/nv-tlabs/ArtiFixer/blob/a392c4dfe17459ef9952407accdb9fcdcdddba98/model_training/data/dl3dv_base.py)
+reads DL3DV `images_4`; typical 960 × 540 frames become 960 × 544 under its
+[nearest-multiple-of-16 preprocessing](https://github.com/nv-tlabs/ArtiFixer/blob/a392c4dfe17459ef9952407accdb9fcdcdddba98/model_training/data/utils.py).
+This motivates the default; an exact training-size histogram for the released
+checkpoints is unavailable, and optimal quality at this size is not established.
+
+Set `splatfix.resolution_profile: 720p` in configuration for **1280 × 720** new
+camera renders. Dashboard job requests can override `resolution_profile` with
+`training`, `720p` or `early_original`; direct Python repair/benchmark calls use that runtime key.
+The chosen profile is captured in the queued job and passed to GPU inference.
+Other explorer pipelines retain their own resolution settings.
+
+Existing photographs and saved cameras keep their calibrated aspect: fit within
+the profile without upscaling, uniformly scale, then symmetrically crop fewer
+than 16 output pixels per dimension for alignment. Intrinsics and COLMAP image
+observations receive the same transform; world poses and points stay unchanged.
+Bicycle's 1237 × 822 photographs therefore become **816 × 544** (`training`) or
+**1072 × 720** (`720p`). Forcing those photographs into a widescreen aspect would
+change their framing substantially. Derived COLMAP images use lossless PNG
+payloads under the published filenames to retain split identity.
+
+Preparation writes derived inputs inside the new result directory. Original
+photographs, checkpoints and historical results remain untouched. Benchmark
+preparation from an older or different policy is rejected; run fresh preparation.
+Evaluation applies the recorded transform to photographic ground truth and
+requires all four stages to have exactly those dimensions. These scores should
+not be compared directly with historical scores at a different resolution.
+This preprocessing adaptation is recorded explicitly; upstream source and
+inference/history settings are unchanged. A GPU quality comparison is still
+needed to establish whether resolution reduces autoregressive drift.
+
 ## Reconstruct on the GPU
 
 Use a GPU environment with this project, PyTorch and gsplat for initial
@@ -416,3 +465,19 @@ photographic Bicycle benchmarks use their separate preparation pipeline.
 This fixes the reference-source mismatch; it does not establish pixel equivalence
 between CUDA gsplat and the interactive viewer. Verify fresh source renders before
 launching another full reconstruction.
+
+### Consecutive benchmark repair
+
+A benchmark job can set `repeat_from` to a completed benchmark job ID (same
+source and model, mutually exclusive with `resume_from`/`preparation_from`).
+The worker copies historical preparation without applying current resolution
+preprocessing. The prior ArtiFixer3D checkpoint and its saved RGB/opacity renders
+replace the simple reconstruction input. Original photographic references,
+trajectory, caption, camera scale and COLMAP point initialization stay fixed.
+The native checkpoint represents the same splat as its exported PLY; avoiding a
+PLY roundtrip preserves all trained parameters and the authors' renderer output.
+Inference, fresh 30,000-step reconstruction, export and the plus image pass run
+again. Old diffusion predictions are not used as the new predictions. The output
+manifest records parent hashes and repair pass number. Authors' stochastic
+inference/training behavior is retained; this is not a deterministic paired trial.
+Historical image sizes are preserved even if current resolution defaults differ.
