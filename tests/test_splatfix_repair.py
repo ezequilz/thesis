@@ -43,9 +43,10 @@ def test_cached_trajectory_is_identical_and_does_not_duplicate_anchor(tmp_path, 
     cp = make_checkpoint(tmp_path)
     calls = mock_scene(monkeypatch)
     root, first = repair.prepare_trajectory(cp, frames=9, renderer_factory=FakeRenderer)
-    assert first['frames'][0]['rgb'] == cp.views[0]['original_rgb']
-    assert first['frames'][-1]['rgb'] == cp.views[0]['original_rgb']
-    assert len(list(root.glob('*.png'))) == 7
+    assert first['frames'][0]['rgb'] == first['anchors'][0]['original_rgb']
+    assert first['frames'][0]['rgb'] != cp.views[0]['original_rgb']
+    assert first['frames'][-1]['rgb'] == first['frames'][0]['rgb']
+    assert len(list(root.glob('*.png'))) == 8
     assert calls == [{'min_opacity': .05, 'lod_level': 2}]
     again, second = repair.prepare_trajectory(cp, frames=9, renderer_factory=lambda _: pytest.fail('Cache must not render'))
     assert root == again and first == second
@@ -98,7 +99,8 @@ def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, 
         phases.append(phase)
         root = Path(command[command.index('--request') + 1]).parent
         req = json.loads((root / 'request.json').read_text())
-        assert req['references'] == [str(cp.image_path(cp.views[0], repaired=mode == 'edited'))]
+        assert req['references'] == ([str(cp.image_path(cp.views[0], repaired=True))] if mode == 'edited'
+                                     else [str(cp.root / trajectory['anchors'][0]['original_rgb'])])
         assert req['fit_iterations'] == 30000
         if phase == 'caption':
             assert kwargs['env']['HF_HUB_OFFLINE'] == '0'
@@ -454,7 +456,7 @@ def test_measurement_colmap_has_real_observations_and_roundtrips_depth(tmp_path,
     directory = tmp_path / 'measurement'
     counts = measurement_colmap(directory, request, trajectory)
     assert counts == [1024]
-    assert (directory / 'images/anchor_00001.png').resolve() == cp.image_path(cp.views[0])
+    assert (directory / 'images/anchor_00001.png').resolve() == cp.root / trajectory['anchors'][0]['original_rgb']
     with (directory / 'sparse/0/images.bin').open('rb') as stream:
         assert struct.unpack('<Q', stream.read(8))[0] == 1
         pose = struct.unpack('<idddddddi', stream.read(64))
@@ -638,7 +640,7 @@ def test_caption_cache_originals_only_exact_models_and_both_modes(tmp_path, monk
         transforms = json.loads((kwargs['input_path'] / 'transforms.json').read_text())
         frames = transforms['frames']
         assert len(frames) == anchor_count
-        assert (kwargs['input_path'] / frames[0]['file_path']).resolve() == cp.image_path(cp.views[0])
+        assert (kwargs['input_path'] / frames[0]['file_path']).resolve() == cp.root / trajectory['anchors'][0]['original_rgb']
         assert kwargs['captioning_model_id'] == '/frozen/' + worker.CAPTION_MODEL_ID
         assert kwargs['text_encoder_model_id'] == '/frozen/wan-test'
         assert kwargs['dataset_downsample_factor'] == 1
@@ -850,6 +852,9 @@ def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypa
         path = Path(command[command.index('--request') + 1])
         req = json.loads(path.read_text())
         trajectory = json.loads(Path(req['trajectory']).read_text())
+        if mode == 'baseline':
+            assert req['references'] == [str(cp.root / a['original_rgb']) for a in trajectory['anchors']]
+            assert req['reference_sha256'] == [repair.digest_file(p) for p in req['references']]
         if phase == 'scale':
             assert len(trajectory['frames']) == 2
             assert [anchor['frame_index'] for anchor in trajectory['anchors']] == [0, 1]
@@ -873,6 +878,35 @@ def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypa
     assert len(set(roots)) == 1
     # This shared cache contains original renders even when the edited arm ran.
     trajectory = json.loads(Path(roots[0]).read_text())
-    assert [trajectory['frames'][i]['rgb'] for i in [0, 2]] == [v['original_rgb'] for v in cp.views]
+    assert [trajectory['frames'][i]['rgb'] for i in [0, 2]] == [a['original_rgb'] for a in trajectory['anchors']]
+    assert all(a['original_rgb'] != v['original_rgb'] for a, v in zip(trajectory['anchors'], cp.views))
     same_root, _ = repair.prepare_saved_path(cp, orbit=trajectory['recipe']['orbit'], renderer_factory=lambda _: pytest.fail('Cache must be shared'))
     assert same_root == Path(roots[0]).parent
+
+
+@pytest.mark.parametrize('kind', ['legacy', 'saved'])
+def test_repair_rerenders_source_anchors_instead_of_selection_preview(tmp_path, monkeypatch, kind):
+    cp = make_checkpoint(tmp_path)
+    mock_scene(monkeypatch)
+    preview = cp.image_path(cp.views[0])
+    before = preview.read_bytes()
+    class SourceRenderer(FakeRenderer):
+        def render(self, camera):
+            rgb, alpha, depth = super().render(camera)
+            return np.full_like(rgb, 210), alpha, depth
+    if kind == 'legacy':
+        _, trajectory = repair.prepare_trajectory(cp, frames=9, renderer_factory=SourceRenderer)
+    else:
+        _, trajectory = repair.prepare_saved_path(cp, renderer_factory=SourceRenderer)
+    anchor = trajectory['anchors'][0]
+    assert anchor['selection_rgb'] == cp.views[0]['original_rgb']
+    assert preview.read_bytes() == before
+    assert np.all(np.asarray(Image.open(cp.root / anchor['original_rgb'])) == 210)
+    assert trajectory['frames'][anchor['frame_index']]['rgb'] == anchor['original_rgb']
+    # Changing the generated anchor is detected on cache reuse, not silently accepted.
+    (cp.root / anchor['original_rgb']).write_bytes(b'bad')
+    with pytest.raises(ValueError, match='changed'):
+        if kind == 'legacy':
+            repair.prepare_trajectory(cp, frames=9)
+        else:
+            repair.prepare_saved_path(cp)

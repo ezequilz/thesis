@@ -769,8 +769,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path in ("/", "/index.html"):
             self._send(200, (STATIC_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
-        elif path in ("/splatfix/results", "/splatfix/results/viser"):
-            filename = "scene_run_viser.html" if path.endswith("/viser") else "splatfix_results.html"
+        elif path in ("/splatfix/results", "/splatfix/results/viser", "/splatfix/results/run"):
+            filename = "scene_run_viser.html" if path.endswith("/viser") else "splatfix_result_detail.html" if path.endswith("/run") else "splatfix_results.html"
             self._send(200, (STATIC_DIR / filename).read_bytes(), "text/html; charset=utf-8")
         elif path in ("/splatfix", "/splatfix.html"):
             self._send(200, (STATIC_DIR / "splatfix.html").read_bytes(), "text/html; charset=utf-8")
@@ -1238,6 +1238,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json(studio.snapshot())
             elif self.command == "GET" and path == "/api/splatfix/results":
                 self._send_json({"results": studio.results.entries()})
+            elif self.command == "GET" and path == "/api/splatfix/results/run":
+                key = parse_qs(urlsplit(self.path).query).get("id", [""])[0]
+                result = studio.results.run_detail(key)
+                self._send_json(result or {"error": "Result not found"}, 200 if result else 404)
             elif path == "/api/splatfix/results/viser":
                 query = parse_qs(urlsplit(self.path).query)
                 key = query.get("id", [""])[0]

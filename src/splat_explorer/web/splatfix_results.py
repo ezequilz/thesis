@@ -95,6 +95,7 @@ class ResultCatalog:
                 'result_name': manifest.parent.name if manifest else record['run_id'],
                 'original': original is not None, 'repaired': repaired is not None,
                 'viser_url': '/splatfix/results/viser?id=' + quote(key),
+                'detail_url': '/splatfix/results/run?id=' + quote(key),
                 'ply_url': self.studio.file_url(repaired) if repaired else None,
                 'provenance_url': self.studio.file_url(manifest) if manifest else None,
                 'preview_url': preview[0] if preview else None,
@@ -102,6 +103,66 @@ class ResultCatalog:
                 'metrics_scope': metrics.get('scope'), 'metrics_url': self.studio.file_url(metrics_file) if metrics else None,
                 'limitation': result.get('limitation'), 'config': config,
                 '_manifest': manifest, '_paths': {'original': original, 'repaired': repaired}}
+
+    def run_detail(self, key):
+        """List first-pass inputs without reading pixel data or trusting remote paths."""
+        row = self.detail(key)
+        if row is None:
+            return None
+        manifest = row.pop('_manifest')
+        row.pop('_paths')
+        gallery = {'frames': [], 'reference_count': None, 'verified_inputs': False,
+                   'stage': 'ArtiFixer · reconstruction inputs'}
+        row['gallery'] = gallery
+        if manifest is None:
+            return row
+        result = read_json(manifest, {})
+        root = manifest.parent
+        def local(raw):
+            return self.studio.result_artifact(manifest, raw)
+        prediction = local(result.get('prediction_frames'))
+        if prediction is None:
+            # Saved-view worker uses this fixed first-pass location (not plus/).
+            prediction = local('inference/splatfix/frames/batch_0000/pred')
+        allowed = None
+        supervision = local(result.get('supervision_manifest') or 'supervision.json')
+        if supervision and supervision.is_file():
+            data = read_json(supervision, {})
+            groups = data.get('groups', [])
+            if groups:
+                allowed = {int(g['source_index']) for g in groups if not g.get('reference')}
+                gallery['reference_count'] = sum(bool(g.get('reference')) for g in groups)
+                gallery['verified_inputs'] = True
+        if allowed is None:
+            split = local(result.get('inference_split') or 'prepared/bicycle/split.json')
+            if split and split.is_file():
+                scenes = read_json(split, {}).get('test', {})
+                if len(scenes) == 1:
+                    scene = next(iter(scenes.values()))
+                    def split_asset(value):
+                        if not value:
+                            return None
+                        return local(str(split.parent.relative_to(root) / value))
+                    selected = split_asset(scene.get('selected_indices_path'))
+                    targets = split_asset(scene.get('target_indices_path'))
+                    refs = read_json(selected, []) if selected else []
+                    target_ids = read_json(targets, []) if targets else None
+                    if isinstance(refs, list) and refs:
+                        gallery['reference_count'] = len(refs)
+                        allowed = set(target_ids) if isinstance(target_ids, list) else set(range(int(result.get('frame_count', 0))))
+                        allowed -= set(refs)
+                        gallery['verified_inputs'] = True
+        if prediction and prediction.is_dir():
+            frames = [p for p in prediction.glob('*.png') if p.stem.isdigit()
+                      and p.resolve().is_relative_to(root.resolve())]
+            for frame in sorted(frames, key=lambda p: int(p.stem)):
+                index = int(frame.stem)
+                if allowed is None or index in allowed:
+                    gallery['frames'].append({'index': index, 'name': frame.name,
+                                              'url': self.studio.file_url(frame)})
+        gallery['count'] = len(gallery['frames'])
+        gallery['expected_count'] = len(allowed) if allowed is not None else None
+        return row
 
     def review_views(self, key):
         from .review_cameras import checkpoint_views, benchmark_views, historical_views

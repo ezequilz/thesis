@@ -259,7 +259,7 @@ class _FakeVisor:
             "error": None,
         }
 
-    def show(self, run_id, which=None, toggle=False, client=None):
+    def show(self, run_id, which=None, toggle=False, client=None, highlight=False):
         requested = str(which or "").strip().lower() or None
         if toggle:
             requested = "original" if self.which == "repaired" else "repaired"

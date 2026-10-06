@@ -38,13 +38,16 @@ class _FakeSceneApi:
     def __init__(self):
         self.removed = []
         self.splats = []
+        self.active = {}
         self.world_axes = SimpleNamespace(visible=True)
 
     def remove_by_name(self, name):
         self.removed.append(name)
+        self.active.pop(name, None)
 
     def add_gaussian_splats(self, name, **_kwargs):
         self.splats.append(name)
+        self.active[name] = _kwargs
         return SimpleNamespace(name=name, visible=_kwargs.get("visible", True))
 
 
@@ -146,25 +149,22 @@ def test_show_defaults_to_repaired_and_toggle_flips(tmp_path):
     assert first["status"] == "ready"
     assert first["viewer_url"] == "http://localhost:8082"
     assert loaded == [str(run_dir / "scene_repaired.ply"), str(run_dir / "scene_original.ply")]
-    assert visor._server.scene.splats == ["/review/repaired", "/review/original", "/review/highlight"]
-    handles = dict(visor._handles)
-    assert handles["repaired"].visible
-    assert not handles["original"].visible
+    assert visor._server.scene.splats == ["/review/repaired"]
+    assert set(visor._server.scene.active) == {"/review/repaired"}
 
     flipped = visor.show("run_20260915_200000", toggle=True)
     assert flipped["which"] == "original"
     assert flipped["status"] == "ready"
-    assert handles["original"].visible
-    assert not handles["repaired"].visible
+    assert set(visor._server.scene.active) == {"/review/original"}
     assert loaded[-1] == str(run_dir / "scene_original.ply")
 
     back = visor.show("run_20260915_200000", toggle=True)
     assert back["which"] == "repaired"
     assert len(loaded) == 2
     assert len(visor._server.scene.splats) == 3
-    assert visor._handles == handles
-    assert handles["repaired"].visible
-    assert not handles["original"].visible
+    assert set(visor._server.scene.active) == {"/review/repaired"}
+    visor.show("run_20260915_200000", which="repaired")
+    assert len(visor._server.scene.splats) == 3  # same selection is a no-op
     snap = visor.snapshot("run_20260915_200000")
     assert snap["which"] == "repaired"
     assert snap["original"] is True
@@ -188,6 +188,42 @@ def test_show_missing_ply_is_an_error(tmp_path):
     fallback = visor.show("run_20260915_200000")
     assert fallback["ok"] is True
     assert fallback["which"] == "original"
+
+
+def test_result_viewer_hidden_outliers_cannot_change_original_depth_range(tmp_path):
+    from splat_explorer.web.splatfix_results import ResultViser
+
+    studio, run_dir = _studio(tmp_path)
+    original, repaired = _tiny_scene(), _tiny_scene()
+    original.means[:, 2] = [-2., -1., 0., 1.]
+    repaired.means[:, 2] = [-20000., -1., 0., 40000.]
+    paths = {name: run_dir / f"scene_{name}.ply" for name in ("original", "repaired")}
+    catalog = SimpleNamespace(cfg=studio.cfg, detail=lambda _: {"_paths": paths,
+        "scene": "room", "run_id": "test", "config": {}}, review_views=lambda _: [])
+    loaded = []
+
+    def loader(path, **kwargs):
+        loaded.append(path)
+        return original if path == paths["original"] else repaired
+
+    viewer = ResultViser(catalog, background=False, server_factory=_FakeServer,
+                         load_scene=loader, idle_timeout=None)
+    viewer.show("result", which="original")
+    api = viewer._server.scene
+    # Viser bins all registered groups, including invisible ones. Merely
+    # setting visible=False would make this range 60,000 instead of 3.
+    def registered_depth_range():
+        return np.ptp(np.concatenate([p["centers"][:, 2] for p in api.active.values()]))
+
+    assert registered_depth_range() == 3
+    viewer.show("result", toggle=True)
+    assert registered_depth_range() == 60000  # actual reconstruction is unchanged
+    viewer.show("result", toggle=True)
+    assert registered_depth_range() == 3
+    assert len(loaded) == 2
+    assert np.max(repaired.means[:, 2]) == 40000
+    viewer.release("result")
+    assert viewer._scenes == {}
 
 
 def test_snapshot_and_heartbeat_do_not_start_server(tmp_path):
@@ -255,6 +291,7 @@ def test_one_server_is_reused_then_stopped_when_released(tmp_path):
     assert visor._server is None
     assert created[0].stopped is True
     assert visor._handles == {}
+    assert visor._scenes == {}
     assert visor.snapshot("run_20260915_200000")["status"] == "idle"
 
 
@@ -273,7 +310,7 @@ def test_close_during_load_cannot_repopulate_stopped_session(tmp_path):
     assert len(loaded) == 1
 
 
-def test_highlight_toggle_reuses_payloads(tmp_path):
+def test_highlight_toggle_uses_only_selected_payload(tmp_path):
     studio, _ = _studio(tmp_path)
     visor = SceneRunViser(studio, background=False, server_factory=_FakeServer,
                           load_scene=lambda *a, **kw: _tiny_scene(), idle_timeout=None)
@@ -281,12 +318,13 @@ def test_highlight_toggle_reuses_payloads(tmp_path):
     highlighted = visor.show("run_20260915_200000", highlight=True)
     assert highlighted["highlight"] and highlighted["which"] == "repaired"
     assert visor._handles["highlight"].visible
-    assert not visor._handles["repaired"].visible
+    assert set(visor._server.scene.active) == {"/review/highlight"}
     assert not visor.show("run_20260915_200000", toggle=True)["highlight"]
     assert visor._handles["original"].visible
     visor.show("run_20260915_200000", which="repaired")
     assert visor._handles["repaired"].visible
-    assert len(visor._server.scene.splats) == 3
+    assert set(visor._server.scene.active) == {"/review/repaired"}
+    assert len(visor._server.scene.splats) == 4
 
 
 def test_difference_strength_and_reordered_pruned_splats():

@@ -93,3 +93,67 @@ def test_catalog_handles_relative_output_root(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     studio.root = Path('scene-runs')
     assert len(studio.results.entries()) == 1
+
+
+def test_detail_excludes_generated_anchor_predictions_and_preserves_indices(tmp_path):
+    studio, _, root = setup(tmp_path)
+    pred = root / 'inference/splatfix/frames/batch_0000/pred'
+    pred.mkdir(parents=True)
+    for i in (0, 2, 10):
+        (pred / f'{i:05}.png').write_bytes(b'png')
+    (root / 'supervision.json').write_text(json.dumps({'groups': [
+        {'source_index': 0, 'reference': '/saved/original.png'},
+        {'source_index': 2, 'reference': None}, {'source_index': 10, 'reference': None}]}))
+    row = studio.results.run_detail(studio.results.entries()[0]['id'])
+    assert [f['index'] for f in row['gallery']['frames']] == [2, 10]
+    assert row['gallery']['reference_count'] == 1
+    assert row['gallery']['verified_inputs'] is True
+    assert row['gallery']['expected_count'] == 2
+    assert '_manifest' not in row and '_paths' not in row
+    assert row['detail_url'].startswith('/splatfix/results/run?id=')
+
+
+def test_detail_maps_benchmark_predictions_and_split(tmp_path):
+    studio, _, root = setup(tmp_path)
+    pred = root / 'inference/model/frames/batch_0000/pred'
+    pred.mkdir(parents=True)
+    for i in (0, 1, 2):
+        (pred / f'{i:05}.png').write_bytes(b'png')
+    prep = root / 'prepared/bicycle'
+    prep.mkdir(parents=True)
+    (prep / 'refs.json').write_text('[1]')
+    (prep / 'targets.json').write_text('[0,2]')
+    (prep / 'split_trajectory.json').write_text(json.dumps({'test': {'bicycle': {'selected_indices_path': 'refs.json', 'target_indices_path': 'targets.json'}}}))
+    p = root / 'result.json'
+    data = json.loads(p.read_text())
+    data.update(prediction_frames=f'/remote/{root.name}/inference/model/frames/batch_0000/pred', inference_split='prepared/bicycle/split_trajectory.json')
+    p.write_text(json.dumps(data))
+    row = studio.results.run_detail(studio.results.entries()[0]['id'])
+    assert [f['index'] for f in row['gallery']['frames']] == [0, 2]
+    assert row['gallery']['reference_count'] == 1
+    assert studio.results.run_detail('unknown') is None
+
+
+def test_detail_rejects_escaping_images_and_does_not_use_plus(tmp_path):
+    studio, _, root = setup(tmp_path)
+    pred = root / 'inference/splatfix/frames/batch_0000/pred'
+    pred.mkdir(parents=True)
+    secret = tmp_path / 'secret.png'
+    secret.write_bytes(b'png')
+    (pred / '00001.png').symlink_to(secret)
+    plus = root / 'plus'
+    plus.mkdir()
+    (plus / '00001.png').write_bytes(b'png')
+    p = root / 'result.json'
+    data = json.loads(p.read_text())
+    data.update(prediction_frames='../escape', plus_frames='plus')
+    p.write_text(json.dumps(data))
+    assert studio.results.run_detail(studio.results.entries()[0]['id'])['gallery']['frames'] == []
+
+
+def test_detail_page_has_accessible_fullsize_navigation():
+    html = Path('src/splat_explorer/web/static/splatfix_result_detail.html').read_text()
+    assert 'loading="lazy"' in html and 'showModal()' in html
+    assert "e.key==='ArrowLeft'" in html and "e.key==='ArrowRight'" in html
+    assert 'requestFullscreen' in html and 'aria-label="Close image"' in html
+    assert 'g.verified_inputs' in html

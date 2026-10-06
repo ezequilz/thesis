@@ -86,6 +86,7 @@ class SceneRunViser:
         self._saved_views: list[dict] = []
         self._view_index: int | None = None
         self._handles: dict[str, Any] = {}
+        self._scenes: dict[str, Any] = {}
         self._clients: dict[str, float] = {}
         self._watchdog_started = False
 
@@ -162,6 +163,7 @@ class SceneRunViser:
         self._saved_views = []
         self._view_index = None
         self._handles.clear()
+        self._scenes.clear()
         self._clients.clear()
         if server is None:
             return
@@ -267,12 +269,19 @@ class SceneRunViser:
                 snap.update(ok=False, message=self._error, error=self._error)
                 return snap
 
-            if self._run_id == run_id and requested in self._handles and self._status == "ready":
-                # Both payloads already live in the browser. Only send visibility.
-                atomic = getattr(self._server, "atomic", nullcontext)
-                with atomic():
-                    for name, handle in self._handles.items():
-                        handle.visible = name == requested
+            if self._run_id == run_id and requested in self._scenes and self._status == "ready":
+                # Hidden splat groups still enter Viser's global depth sort.
+                # Keep alternatives in Python, never in the browser sorter:
+                # distant reconstruction outliers otherwise corrupt even the
+                # original's 16-bit depth precision while they are hidden.
+                if requested != self._which:
+                    try:
+                        self._install_review_scene(self._scenes[requested], requested)
+                    except Exception as exc:
+                        self._status = "error"
+                        self._error = f"{type(exc).__name__}: {exc}"
+                        snap = self._snapshot_locked(run_id, paths, showing=True)
+                        return {**snap, "ok": False, "message": self._error}
                 self._which = requested
                 return self._snapshot_locked(run_id, paths, showing=True)
 
@@ -301,6 +310,7 @@ class SceneRunViser:
             if self._run_id != run_id:
                 self._saved_views = []
                 self._view_index = None
+                self._scenes.clear()
             self._run_id = run_id
             self._which = requested
             self._status = "loading"
@@ -457,6 +467,24 @@ class SceneRunViser:
         if callable(on_connect):
             on_connect(_on_connect)
 
+    def _install_review_scene(self, scene: Any, which: str) -> None:
+        """Install exactly one comparison payload without moving the camera.
+
+        Call with ``_lock`` held. Toggling resends the selected payload, but
+        avoids disk reloads and prevents hidden scenes affecting depth bins.
+        """
+        from ..rendering.viser_viewer import _install_splats
+
+        max_splats = int(_cfg_get(self.cfg, "viewer.max_splats", 0) or 0)
+        atomic = getattr(self._server, "atomic", nullcontext)
+        with atomic():
+            for name in self._handles:
+                self._server.scene.remove_by_name(f"/review/{name}")
+            self._handles.clear()
+            self._handles[which] = _install_splats(
+                self._server, scene, max_splats, name=f"/review/{which}",
+            )
+
     def _load(
         self,
         run_id: str,
@@ -469,7 +497,6 @@ class SceneRunViser:
         from ..rendering.viser_viewer import (
             _apply_up,
             _apply_view,
-            _install_splats,
             _restore_client_cameras,
             _snapshot_client_cameras,
             _view_pose,
@@ -507,23 +534,14 @@ class SceneRunViser:
             return
 
         fov_deg = float(_cfg_get(self.cfg, "camera.fov_deg", 75.0) or 75.0)
-        max_splats = int(_cfg_get(self.cfg, "viewer.max_splats", 0) or 0)
         with self._lock:
             if generation != self._generation or self._server is None:
                 return
             server = self._server
             saved = _snapshot_client_cameras(server) if keep_camera else []
             try:
-                atomic = getattr(server, "atomic", nullcontext)
-                with atomic():
-                    for name in self._handles:
-                        server.scene.remove_by_name(f"/review/{name}")
-                    self._handles.clear()
-                    for name, scene in scenes.items():
-                        self._handles[name] = _install_splats(
-                            server, scene, max_splats,
-                            name=f"/review/{name}", visible=name == which,
-                        )
+                self._install_review_scene(scenes[which], which)
+                self._scenes = scenes
             except Exception as exc:
                 self._status = "error"
                 self._error = f"{type(exc).__name__}: {exc}"

@@ -281,6 +281,22 @@ It queues the authors' photographic/COLMAP baseline pipeline without VLM view
 finding or GPT-image calls. This is a published Bicycle 3-view pipeline test;
 the website's exact orbit and settings have not been confirmed.
 
+Benchmark manifests record the pinned release inference defaults explicitly:
+`kv_cache`, four denoising steps, seven latent frames per block, local attention
+size 21, sink size 7, and one context-parallel process. Both diffusion passes
+receive these arguments. These are verified release defaults, not recovered
+settings from the unpublished website run. The 1.3B model remains the default.
+
+For resolution diagnosis, `scripts/benchmarks/prepare_bicycle_resolution_control.py`
+creates separate inference inputs from a completed 1.3B benchmark. It keeps the
+full target order, poses, metric scale, caption, and initial fitted scene; it
+resizes target renders, opacity maps, and references together and scales all
+camera intrinsics. It verifies normalized calibration and records input/output
+hashes. Its default 1088×720 is an experimental control, not a new baseline
+default or a verified website resolution. Compare it separately from the
+short-history control: changing both would confound their effects. Historical
+random noise is unavailable, so neither comparison establishes causality alone.
+
 A dataset appears after import registers
 `outputs/benchmarks/<name>/input/benchmark.json`. The same input directory must
 contain `colmap/images`, `colmap/sparse/0`, and `selected_images.txt`. Incomplete
@@ -379,3 +395,24 @@ evaluation/provenance records. Dense depth maps under the prepared benchmark
 tree remain on LRZ; they are regenerable diagnostics and are not used by
 inference or evaluation. `artifact-download-policy.json` records this policy.
 Saved-view repair downloads keep their anchor depth because scale replay needs it.
+
+
+### Source-render fidelity correction (2026-10-06)
+
+Saved-view selection images can come from the approximate `cpu_splats` renderer.
+They are navigation previews, not faithful baseline supervision. Previously,
+repair preparation discarded GPU-rendered anchor RGB and reused those previews,
+while keeping GPU alpha/depth and surrounding frames. Both Venetian orbit runs
+therefore used six approximate CPU images as their reference supervision.
+
+Repair now saves source-scene RGB from `BundleRenderer` at every selected camera
+and uses it for baseline references, scale alignment, captioning and trajectory
+frames. The same change applies to legacy local loops. Trajectory recipe version
+4 prevents reuse of old mixed-renderer caches. `selection_rgb` preserves preview
+provenance; existing checkpoint images and past results are not modified. Edited
+mode still intentionally uses its explicit saved edits as references. Published
+photographic Bicycle benchmarks use their separate preparation pipeline.
+
+This fixes the reference-source mismatch; it does not establish pixel equivalence
+between CUDA gsplat and the interactive viewer. Verify fresh source renders before
+launching another full reconstruction.

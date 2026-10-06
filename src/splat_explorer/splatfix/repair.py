@@ -129,7 +129,7 @@ def prepare_trajectory(checkpoint, *, frames=25, span_fraction=.04,
         raise ValueError('frames must be 1 + 4*n and at least 9')
     if not np.isfinite(span_fraction) or not 0 < span_fraction <= .15:
         raise ValueError('span_fraction must be in (0, .15]')
-    signature = hashlib.sha256(json.dumps({'trajectory_version': 2, 'views': [{k: v for k, v in view.items() if k in ('id', 'camera', 'original_rgb')} for view in cp.views],
+    signature = hashlib.sha256(json.dumps({'trajectory_version': 4, 'anchor_rgb_policy': 'source_scene_bundle_renderer', 'views': [{k: v for k, v in view.items() if k in ('id', 'camera', 'original_rgb')} for view in cp.views],
         'source': cp.manifest.get('source_fingerprint', cp.manifest['scene_path']), 'scene_load': cp.manifest.get('metadata', {}).get('scene_load', {}),
         'rgb': [digest_file(cp.image_path(view)) for view in cp.views], 'frames': frames, 'span_fraction': span_fraction}, sort_keys=True).encode()).hexdigest()
     cache = cp.root / 'trajectories'
@@ -164,7 +164,11 @@ def prepare_trajectory(checkpoint, *, frames=25, span_fraction=.04,
             np.save(depth_path, np.asarray(depth, dtype=np.float32))
             cameras = camera_bundle(camera, depth, frames=frames, span_fraction=span_fraction)
             segments.append({'start': start, 'count': len(cameras)})
-            anchors.append({'view_id': view['id'], 'frame_index': start, 'original_rgb': view['original_rgb'],
+            anchor_rgb_path = root / f'{start:05d}.png'
+            Image.fromarray(anchor_render[0]).save(anchor_rgb_path)
+            anchors.append({'view_id': view['id'], 'frame_index': start,
+                            'original_rgb': str(anchor_rgb_path.relative_to(cp.root)),
+                            'selection_rgb': view['original_rgb'],
                             'depth': str(depth_path.relative_to(cp.root)),
                             'opacity': str((root / f'{start:05d}.npy').relative_to(cp.root))})
             for local, cam in enumerate(cameras):
@@ -172,7 +176,7 @@ def prepare_trajectory(checkpoint, *, frames=25, span_fraction=.04,
                     raise InterruptedError('Trajectory rendering stopped')
                 index = len(all_cameras)
                 rgb, alpha, _ = anchor_render if local in (0, frames - 1) else renderer.render(cam)
-                rgb_path = cp.image_path(view) if local in (0, frames - 1) else root / f'{index:05d}.png'
+                rgb_path = anchor_rgb_path if local in (0, frames - 1) else root / f'{index:05d}.png'
                 if local not in (0, frames - 1):
                     Image.fromarray(rgb).save(rgb_path)
                 alpha_path = root / f'{index:05d}.npy'
@@ -233,7 +237,7 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
                 raise ValueError('Authored orbit must contain every saved anchor exactly once')
             anchor_indices.append(matches[0])
     source_path = str(Path(scene_path).resolve()) if scene_path else cp.manifest['scene_path']
-    recipe = {'trajectory_version': 3, 'kind': 'authors_orbit' if orbit else 'scale_anchors',
+    recipe = {'trajectory_version': 4, 'anchor_rgb_policy': 'source_scene_bundle_renderer', 'kind': 'authors_orbit' if orbit else 'scale_anchors',
               'views': [{k: v for k, v in view.items() if k in ('id', 'camera', 'original_rgb')} for view in cp.views],
               'source': cp.manifest.get('source_fingerprint', cp.manifest['scene_path']),
               'scene_load': cp.manifest.get('metadata', {}).get('scene_load', {}),
@@ -263,18 +267,17 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
             rgb, alpha, depth = renderer.render(camera)
             alpha_path = root / f'{index:05d}.npy'
             np.save(alpha_path, np.asarray(alpha, dtype=np.float32))
+            rgb_path = root / f'{index:05d}.png'
+            Image.fromarray(rgb).save(rgb_path)
             if index in lookup:
                 anchor_index = lookup[index]
                 view = cp.views[anchor_index]
-                rgb_path = cp.image_path(view)
                 depth_path = root / f'anchor-{view["id"]}-depth.npy'
                 np.save(depth_path, np.asarray(depth, dtype=np.float32))
                 anchor_records[anchor_index] = {'view_id': view['id'], 'frame_index': index,
-                    'original_rgb': view['original_rgb'], 'depth': str(depth_path.relative_to(cp.root)),
+                    'original_rgb': str(rgb_path.relative_to(cp.root)),
+                    'selection_rgb': view['original_rgb'], 'depth': str(depth_path.relative_to(cp.root)),
                     'opacity': str(alpha_path.relative_to(cp.root))}
-            else:
-                rgb_path = root / f'{index:05d}.png'
-                Image.fromarray(rgb).save(rgb_path)
             records.append({'rgb': str(rgb_path.relative_to(cp.root)), 'opacity': str(alpha_path.relative_to(cp.root))})
         write_seed_points(root / 'points3D.bin', scene)
         manifest = {'schema_version': 3, 'depth_convention': 'expected_camera_z',
@@ -350,6 +353,8 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         trajectory_root, trajectory = prepare_saved_path(cp, should_stop=should_stop, scene_path=cfg.get('scene_path'))
     else:
         trajectory_root, trajectory = prepare_trajectory(cp, frames=frames, span_fraction=span_fraction, should_stop=should_stop, scene_path=cfg.get('scene_path'))
+    if mode == 'baseline':
+        references = [str(cp.root / anchor['original_rgb']) for anchor in trajectory['anchors']]
     root = Path(output_dir).resolve() / f'{mode}_{uuid.uuid4().hex[:12]}'
     root.mkdir(parents=True, exist_ok=False)
     points = cfg.get('source_points3d') or str(cp.root / trajectory['points3d'])
@@ -363,7 +368,8 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                'source_points3d': str(Path(points).resolve()),
                'initialization': 'source_colmap_points' if cfg.get('source_points3d') else 'original_splat_positions_and_rgb',
                'upstream_revision': UPSTREAM_REVISION, 'fit_iterations': 30000,
-               'input_adaptation': 'Saved selected renders replace photographic anchors; edited mode uses cached GPT-image RGB; cached authors local Qwen/UMT5 caption of originals.',
+               'input_adaptation': 'Source splat re-rendered at saved cameras with the trajectory renderer replaces photographic anchors; selection previews are not baseline supervision. Edited mode uses cached GPT-image RGB.',
+               'anchor_rgb_policy': 'source_scene_bundle_renderer',
                'trajectory_mode': trajectory_mode,
                'inference_target_policy': ('exclude_saved_anchor_indices' if trajectory_mode == 'authors_orbit'
                                            else 'all_segment_frames'),
@@ -395,6 +401,9 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                 poses = np.asarray([frame['transform_matrix'] for frame in full['frames']]) @ np.diag([1., -1., -1., 1.])
                 orbit = {'poses': poses.tolist(), 'provenance': {key: value for key, value in orbit_provenance.items() if key != 'source_transforms'}}
                 trajectory_root, trajectory = prepare_saved_path(cp, orbit=orbit, should_stop=should_stop, scene_path=cfg.get('scene_path'))
+                if mode == 'baseline':
+                    references = [str(cp.root / anchor['original_rgb']) for anchor in trajectory['anchors']]
+                    request.update(references=references, reference_sha256=[digest_file(path) for path in references])
                 request.update(trajectory=str(trajectory_root / 'trajectory.json'), trajectory_signature=trajectory['signature'],
                                orbit_provenance=orbit_provenance)
                 atomic_json(root / 'request.json', request)

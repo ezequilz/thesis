@@ -16,6 +16,17 @@ import uuid
 
 MODEL_IDS = {'1.3b': 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers',
              '14b': 'Wan-AI/Wan2.1-T2V-14B-Diffusers'}
+# Explicit defaults from the pinned release's add_inference_args. Record these
+# in the run and pass them to both diffusion stages so the recipe is auditable.
+# These are release defaults, not a claim about the unpublished website run.
+INFERENCE_DEFAULTS = {
+    'inference_pipeline': 'kv_cache',
+    'num_inference_steps': 4,
+    'frames_per_block': 7,
+    'local_attn_size': 21,
+    'sink_size': 7,
+    'context_parallel_size': 1,
+}
 LIMITATION = ('Uses the authors orbit interpolation with published reference and test cameras. The exact project-page Bicycle '
               'orbit and original random state are unavailable; this is an authors-code '
               'reproduction with the published reference photographs, not pixel-identical video reproduction. '
@@ -353,6 +364,7 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
                 'limitation': limitation, 'stages': [],
                 'input_sha256': input_hashes,
                 'base_reconstruction_steps': 10000, 'artifixer3d_steps': 30000,
+                'inference_settings': dict(INFERENCE_DEFAULTS),
                 'reference_kind': 'original photographs', 'initialization': 'original COLMAP sparse points',
                 'text_conditioning': 'official generated Qwen caption encoded by Wan UMT5',
                 'metric_scale': 'official MoGe alignment (no override)',
@@ -415,7 +427,9 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
                 '--checkpoint_pt', cfg['checkpoint'], '--model_id', cfg['model_id'],
                 '--save_dir', str(destination), '--split_path', str(split),
                 '--num_views', '3', '--render_trajectory',
-                'trajectory' if trajectory_mode == 'author_orbit' else 'all_frames', '--save_frame_outputs_only']
+                'trajectory' if trajectory_mode == 'author_orbit' else 'all_frames', '--save_frame_outputs_only',
+                *[part for key, value in INFERENCE_DEFAULTS.items()
+                  for part in ('--' + key, str(value))]]
     try:
         if resume:
             on_progress({'phase': 'copy_preparation', 'output_dir': str(root), 'resume_from': resume['root']})
