@@ -9,6 +9,19 @@ from splat_explorer.splatfix.repair import UPSTREAM_REVISION
 from splat_explorer.splatfix.repeat_benchmark import prepare_repeat
 
 
+def test_repeat_rebases_segment_provenance_for_both_passes(tmp_path):
+    from splat_explorer.splatfix.repeat_benchmark import inherited_inference_command
+    old = {'stages': [{'phase': phase, 'status': 'complete', 'command': [
+        'python', '/old/segmented_inference.py', '--repo', '/authors',
+        '--trajectory-provenance', '/old/provenance.json', '--render_trajectory', 'trajectory',
+        '--num_views', '3', '--split_path', '/old/split.json', '--save_dir', '/old/output']}
+        for phase in ('inference', 'plus')]}
+    for phase in ('inference', 'plus'):
+        command = inherited_inference_command(old, phase, tmp_path / 'split.json', tmp_path / phase)
+        assert command[command.index('--trajectory-provenance') + 1] == str(tmp_path / 'author-orbit-provenance.json')
+        assert command[command.index('--save_dir') + 1] == str(tmp_path / phase)
+
+
 def fixture(tmp_path):
     prior = tmp_path / 'prior'
     p = prior / 'prepared/bicycle'

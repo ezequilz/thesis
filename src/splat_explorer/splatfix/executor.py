@@ -186,6 +186,8 @@ class SplatfixExecutor:
         from ..scene_runs.lrz_transport import LrzSceneRunTransport
         benchmark = options['stage'] == 'benchmark'
         cp = None if benchmark else Checkpoint.load(options['checkpoint'])
+        if cp is not None and options['mode'] == 'edited':
+            cp.require_viser_images()
         if cp is not None and (not cp.complete or (options['mode'] == 'edited' and any(not v.get('repaired_rgb') for v in cp.views))):
             raise ValueError('Checkpoint is not ready for the requested reconstruction mode')
         cfg = lrz.load_lrz_config()
@@ -218,6 +220,8 @@ class SplatfixExecutor:
             from .repair import DEFAULT_RUNTIME
             runtime = {**DEFAULT_RUNTIME, **dict(self.cfg.get('splatfix', {}).get('runtime', {}))}
             runtime['resolution_profile'] = options['resolution_profile']
+            runtime['regularization_profile'] = options.get('regularization_profile', 'artifixer')
+            runtime['split_mode'] = options.get('split_mode', 'double-split')
             if benchmark:
                 from .jobs import registered_benchmark
                 source, _ = registered_benchmark(Path(self.cfg.output.dir) / 'benchmarks', options['source'])
@@ -259,6 +263,13 @@ class SplatfixExecutor:
                 runtime['scene_path'] = remote_scene
                 request = {'checkpoint': container_dir + '/checkpoint', 'output': container_dir + '/results',
                            'runtime': runtime, **{k: options[k] for k in ('mode', 'frames', 'span_fraction')}}
+            request['stop_at_epoch'] = self.store.get_run(run_id).state.details.get('effective_deadline')
+            safety = self.cfg.get('splatfix', {})
+            buffer = float(safety.get('stop_before_gpu_end_seconds', 300))
+            timeout = float(safety.get('save_stop_timeout_seconds', 240))
+            if not 0 < timeout < buffer:
+                raise ValueError('save_stop_timeout_seconds must be positive and below stop_before_gpu_end_seconds')
+            request['save_stop_timeout_seconds'] = timeout
             atomic_json(root / 'worker-request.json', request)
             sync(str(root / 'worker-request.json'), endpoint + ':' + remote_dir + '/worker-request.json')
             inner = lrz._remote_pythonpath_exports(cfg) + shlex.join(['python', '-u', '-m', 'splat_explorer.splatfix.job_worker', '--run-dir', container_dir])
@@ -274,15 +285,36 @@ class SplatfixExecutor:
             ssh(launcher)
         from .live_logs import PhaseLogMirror
         log_mirror = PhaseLogMirror(root, container_dir, remote_dir, ssh)
+        from .inference_preview import InferencePreviewMirror
+        preview_mirror = InferencePreviewMirror(root, container_dir, remote_dir, endpoint,
+                                                lrz.rsync_ssh_cmd(cfg), lrz._mux_run)
         last = None
         started = time.monotonic()
+        from .viser_capture import CaptureMirror
+        def capture_stop():
+            deadline = self.store.get_run(run_id).state.details.get('effective_deadline')
+            if deadline and time.time() >= float(deadline):
+                self.store.request_stop(run_id)
+                return True
+            return stop()
+        capture_mirror = None if benchmark else CaptureMirror(
+            root, remote_dir, container_dir, cp, endpoint, ssh, sync,
+            url=self.cfg.get('renderer', {}).get('viser_url') or None, should_stop=capture_stop, progress=update)
         try:
             while True:
+                deadline = self.store.get_run(run_id).state.details.get('effective_deadline')
+                if deadline and time.time() >= float(deadline) and not stop():
+                    self.store.request_stop(run_id)
+                    update(status='stopping', message='GPU deadline approaching; saving current reconstruction before stopping',
+                           stop_reason='gpu_deadline')
                 if stop():
                     ssh('touch ' + shlex.quote(remote_dir + '/STOP'))
+                elif capture_mirror is not None:
+                    capture_mirror.poll()
                 raw = ssh('if [ -f ' + shlex.quote(remote_dir + '/worker-status.json') + ' ]; then cat ' + shlex.quote(remote_dir + '/worker-status.json') + '; fi')
                 state = json.loads(raw) if raw.strip() else {}
                 log_mirror.poll(state)
+                preview_mirror.poll(state)
                 if state != last and state:
                     last = state
                     update(phase=state.get('phase', 'reconstruction'), message=state.get('message') or state.get('phase', 'Running'))
@@ -311,6 +343,7 @@ class SplatfixExecutor:
             ssh('touch ' + shlex.quote(remote_dir + '/STOP'))
             raise
         finally:
+            preview_mirror.finish()
             # Pull partial results/logs as well; checkpoint trajectories are reusable by both arms.
             try:
                 # Dense benchmark depth is a regenerable rendering diagnostic,

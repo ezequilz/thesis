@@ -179,6 +179,15 @@ class Checkpoint:
     def save(self):
         atomic_json(self.root / 'checkpoint.json', self.manifest)
 
+    def require_viser_images(self):
+        """Reject legacy proxy images before editing or reusing edited anchors."""
+        backend = self.manifest.get('metadata', {}).get('renderer', {}).get('backend')
+        if backend != 'viser':
+            raise ValueError(
+                f'Splatfix requires Viser captures; checkpoint renderer is {backend!r}. '
+                'Select new views with Viser and regenerate edits. Baseline repair can '
+                'reuse these camera poses because it captures the source scene through Viser.')
+
     def image_path(self, view, repaired=False):
         key = 'repaired_rgb' if repaired else 'original_rgb'
         relative = Path(view[key])

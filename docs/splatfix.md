@@ -6,6 +6,47 @@ Both reconstruction modes use the authors' fresh ArtiFixer3D reconstruction
 implementation, with its sparse MCMC/LPIPS recipe and 30,000 training steps.
 Neither mode uses the extended pipeline's fixed-topology fitter.
 
+The single reconstruction default is `apps/colmap_3dgut_sparse_mcmc_lpips`
+from the pinned ArtiFixer checkout and its matching 3DGRUT submodule. Saved-view
+repairs, photographic benchmarks, and repeat repairs all select this recipe
+explicitly for fresh 30,000-step training. New run manifests record its identity
+as `reconstruction_recipe`.
+
+At the pinned revision this uses opacity-based birth and relocation sampling,
+5% growth every 100 steps after warmup up to one million Gaussians, relocation
+through the upstream 25,000-step cutoff, and perturbation through the 27,500-step
+cutoff. Opacity/scale regularizers remain disabled in this sparse recipe;
+generated targets use its LPIPS loss settings. The authors' pinned sparse recipe
+inherits `base_gs_sparse -> base_gs` and switches the strategy to MCMC. Both
+`base_gs` and the separate regularized `base_mcmc` are upstream configurations;
+SplatFix does not replace that inheritance with `base_mcmc`. No custom loss
+adapter or error-based allocation is used. Exact recipe replication does not
+remove the documented SplatFix input adaptations (rendered or edited anchors
+and splat positions/RGB as initialization).
+
+### Reconstruction regularization comparison
+
+The dashboard's **Reconstruction regularization** selector applies to new repair
+and benchmark runs (including scheduled runs). **ArtiFixer sparse — off** is the
+default described above. **MCMC regularization — on** inherits the authors'
+`base_mcmc` opacity and scale penalties, both weighted 0.01 at the pinned revision.
+Only those four enable/weight settings are inherited; initialization, opacity-based
+allocation, image losses, and training schedules remain fixed for comparison.
+
+The on option is a comparison variant, not the exact sparse ArtiFixer recipe.
+The pinned generated-view LPIPS branch omits regularization from its total loss;
+a scoped adapter adds the already-computed weighted terms for generated views.
+Anchors already include them, so they are not added twice. Upstream files remain
+unchanged. The penalties encourage lower opacity and smaller scales, which may
+reduce unnecessary or oversized Gaussians but can also suppress useful detail.
+
+The queue, staged worker request, and run recipe record `regularization_profile`
+(`artifixer` or `base_mcmc`). The trainer's `parsed.yaml` records effective weights.
+Historical runs without a selection retain the off behavior. To reuse benchmark
+preparation, choose the option and use **Compare settings using this preparation**;
+resume preserves the original run's option. This comparison regenerates inference
+and is not a strict identical-target or identical-randomness ablation.
+
 ## Select views and save edits
 
 Run from the repository root with the project installed. `splatfix` is also
@@ -20,8 +61,18 @@ python -m splat_explorer.splatfix.cli --config configs/splatfix.yaml select \
 The example config uses the existing CliRelay credentials and model settings.
 `.env` is loaded without overwriting environment variables. The default project
 config alone uses a scripted sweep for offline smoke tests; it does not perform
-semantic VLM selection. `--renderer gsplat` selects CUDA rendering;
-`cpu_splats` is the headless default. `viser` needs its existing viewer service.
+semantic VLM selection. Selection and saved-view ArtiFixer RGB inputs use the
+harness Viser capture service. Keep the Splatfix dashboard's capture visor visible.
+The manager loads the source scene and captures the requested calibrated poses;
+no VLM is involved during reconstruction. CPU and CUDA RGB fallbacks are disabled.
+CUDA still produces trajectory opacity/depth, not the RGB supplied to inference.
+The reconstructed splat is also captured through Viser before the ArtiFixer+ pass.
+
+Editing and edited reconstruction reject checkpoints whose selection renderer is
+not Viser or is unrecorded; regenerate those selections and edits. Baseline repair
+can reuse old camera poses, but captures fresh anchors and trajectories in Viser.
+Renderer provenance versions invalidate old trajectory, scale and caption caches.
+Published photographic benchmarks retain their separate authors' pipeline.
 
 The single loop selects six views by default; use `--views 8`, `10`, or `12` to
 change that. Each VLM turn receives current RGB, a tiled selection image, and a
@@ -164,7 +215,7 @@ allows normal model metadata access; the remaining worker phases retain their
 configured offline policy. These local caption and encoding calls do not send
 images to an external VLM/GPT service.
 
-Selected cameras now define one continuous path through the authors' unchanged
+Selected cameras define camera legs through the authors' unchanged
 `Renderer.interpolate_orbit_poses`: PCA orbit ordering, linear camera positions,
 SLERP rotations, and the authors' default spacing `0.1 / metric_scale`, with
 `loop=False`. Original anchor depth is prepared first for scale measurement;
@@ -177,6 +228,70 @@ If the default spacing produces only anchors and no generated viewpoints,
 the adapter retries the same authors' interpolator with smaller spacing.
 The requested and effective spacing, and the reason for the adjustment, are
 recorded in trajectory provenance.
+
+Both diffusion passes support `split_mode` in the runtime/job settings and
+`--split-mode` on `splatfix repair` and the trajectory adapter. The dashboard's
+**Trajectory splitting** selector exposes both modes:
+
+- **single-split** preserves the previous behavior: one forward series per
+  adjacent pair in the authors' ordered input waypoints.
+- **double-split** is the default: each reference-to-reference leg's generated
+  positions are divided into two halves. The first half runs forward from the
+  first reference; the second runs in reverse from the next reference toward
+  the midpoint. With five target positions, generation orders are
+  `reference A → 0 → 1 → 2` and `reference B → 4 → 3`.
+
+An odd target count assigns the extra position to the first half. Empty halves
+are skipped (a one-target leg needs only one series). There is no duplicated
+midpoint. Every nonempty half begins with its trusted endpoint RGB as rendered
+conditioning, opacity 1, and the matching camera. This frame is excluded from
+PNG export and generated supervision: reconstruction uses the trusted anchor
+image directly. The upstream denoiser is unchanged; this supplies a clean input
+image rather than clamping the first generated latent to an exact image.
+
+The benchmark's held-out test cameras are never trusted seed images. Double-split
+groups the existing path between its photographic reference cameras; test
+waypoints remain targets inside those spans. A non-looping path's open tail
+beyond its last reference is one forward series from that reference. Its
+geometry is preserved rather than inventing a reference at the final test view.
+
+The adapter obtains camera ordering from the authors' helper without
+interpolation and does not re-sort individual pairs. The full camera catalogue
+and global PNG indices stay fixed for reconstruction and evaluation, even when
+inference order runs backward. Provenance records mode, directions, target
+indices and seed cameras; these also distinguish trajectory caches. Historical
+repeat-benchmark jobs retain their recorded inference mode. Geometry and the
+authors' PCA ordering are unchanged, so this change does not flatten a
+zigzagging camera path.
+
+There is no fixed intermediate-frame-count option in this helper. For each leg,
+the number of intervals is `max(1, ceil(hypot(translation_distance,
+rotation_distance) / (spacing / metric_scale)))`, with default spacing 0.1.
+Rotations use the authors' default weight of 1. Endpoint ownership and reference
+exclusion determine the final generated-frame count. Short series still use
+upstream temporal padding, which is trimmed before saving PNGs.
+
+The saved-view worker explicitly selects `--render_trajectory trajectory` and
+clears caches before each leg. Every leg receives **all saved GPT-repaired
+images** in edited mode (six for a six-view run); the saved-view baseline uses
+all corresponding original renders. The photographic benchmark supplies its
+three original photographs to every leg through `segmented_inference.py` and
+the authors' dataset-factory entry point. Model weights load once per diffusion
+pass; each leg gets a separate upstream inference call and fresh caches. Both
+the first inference and the ArtiFixer3D+ pass use this policy. Trajectory cache
+recipe v5 prevents reuse of the old single-series manifest.
+
+History was already bounded in these SplatFix paths. The pinned authors'
+[KV pipeline](https://github.com/nv-tlabs/ArtiFixer/blob/a392c4dfe17459ef9952407accdb9fcdcdddba98/model_training/pipeline/kv_cache_pipeline.py)
+and [attention processor](https://github.com/nv-tlabs/ArtiFixer/blob/a392c4dfe17459ef9952407accdb9fcdcdddba98/model_training/net/transformer.py)
+use 7 latent frames per block and 21 attention-cache positions: a permanent
+initial 7-frame sink plus 14 rolling positions, including the current block.
+These are latent frames, not RGB frames. The retained KV entries come from the
+last transformer call of each block; this release does not perform an additional
+clean-latent timestep-zero cache write after the final scheduler step. Reference images are separate neighbor
+conditioning, not the sink. New items initialize KV/text/neighbor caches;
+decoding clears them. Splitting limits autoregressive error propagation even
+though the previous long series did not attend to its entire generated history.
 
 Legacy `--frames` and `--span-fraction` are retained for CLI compatibility but
 do not control the new path. Existing caches remain unchanged; the Python API
@@ -513,3 +628,62 @@ Existing downloaded results can be backfilled without rerunning inference:
 ```sh
 python -m splat_explorer.splatfix.evaluation_chart /absolute/path/to/result
 ```
+
+### Graceful stop before GPU expiry
+
+Splatfix reconstruction workers save the current Gaussian model when stopped,
+without adding periodic checkpoints. A process-local wrapper around the pinned
+trainer checks a stop marker after each completed optimizer iteration, invokes
+the authors' checkpoint writer and PLY exporter, flushes diagnostics, then exits.
+The upstream checkout, optimization recipe and normal checkpoint schedule remain
+unchanged. `*.lifecycle.json` records this runtime adaptation.
+
+The queue manager passes its effective deadline to the remote worker. Both the
+manager and remote worker request a stop **300 seconds before GPU expiry** by
+default, so a disconnected desktop does not disable the worker's deadline.
+Manual dashboard Stop uses the same save path. The defaults in
+`configs/default.yaml` are `splatfix.stop_before_gpu_end_seconds: 300` and
+`splatfix.save_stop_timeout_seconds: 240`; the save timeout must be shorter than
+the deadline buffer. Slurm end times without an offset use Europe/Berlin.
+
+During training, cancellation waits for the iteration-boundary save instead of
+immediately sending SIGTERM. A hung save is terminated after the bounded grace
+period, with an explicit timeout diagnostic. Sudden GPU loss, OOM or forced
+external termination still cannot guarantee recovery. Other phases preserve
+available files but have no trainable splat to save.
+
+`<phase>.interrupted/stop-state.json` records the actual saved iteration,
+checkpoint path, PLY path and any save/export error. The model checkpoint is the
+authors' format; exact optimizer/RNG continuation is not guaranteed. The
+`partial-result.json` record exposes saved intermediate geometry in Results as
+**Interrupted · incomplete**, alongside available inference images and logs.
+A checkpoint can remain recoverable even if PLY export fails. No completed
+`result.json` is fabricated for an interrupted reconstruction.
+
+### Cache the connected allocation deadline at setup
+
+**Load GPU setup** on `/gpu` reads Slurm's end time in its existing setup check
+and, after successful setup, atomically saves `outputs/gpu-allocation.json`.
+This local record is bound to the job ID, host, user and workspace. It includes
+an absolute UTC deadline and survives dashboard/manager restarts. The manager
+and launch validation use this record instead of polling Slurm for readiness
+or deadlines. No deadline countdown is extended by rereading the cache.
+
+For each newly selected GPU job, load setup once. Missing, mismatched or expired
+records leave runs waiting for setup; they never reuse another allocation's
+remaining time. Reloading setup explicitly refreshes the saved deadline if an
+allocation was extended. The existing five-minute save-and-stop buffer is
+applied to this deadline and passed to the remote worker. Explicit dashboard
+GPU probes remain available, but do not replace the setup-owned deadline.
+
+After first-pass autoregressive inference finishes, benchmark, repeat and saved-view
+repair workers publish `inference-preview.json` with the exact generated
+reconstruction-input indices. The manager downloads those images once in a
+background transfer (capped at 10 MiB/s), while reconstruction continues on the GPU.
+The gallery becomes visible only after that transfer succeeds. Its result URL stays
+stable when the final PLY, evaluation and other artifacts arrive through the normal
+end-of-run download. Both result pages refresh every 15 seconds; detail refreshes
+pause while the image lightbox is open. Early-transfer failures are recorded in
+`inference-preview-transfer.log` and do not stop reconstruction; the final download
+still retrieves the outputs. A successful preview is reused after manager restart.
+Workers launched before this change do not publish the early-preview marker.

@@ -37,6 +37,7 @@ class ViserCaptureError(RuntimeError):
 
 class ViserCaptureRenderer:
     """RGB from the dashboard visor WebGL view at the selected VLM size."""
+    rgb_backend = 'viser'
 
     def __init__(
         self,
@@ -46,6 +47,7 @@ class ViserCaptureRenderer:
         timeout_s: float = 180.0,
         client_wait_s: float = 90.0,
         max_splat_radius_px: int = 120,
+        any_client: bool = False,
     ):
         self.url = (url or os.environ.get("VISER_RENDER_URL") or _DEFAULT_URL).rstrip("/")
         self.viewer_url = (
@@ -54,7 +56,10 @@ class ViserCaptureRenderer:
         self.timeout_s = float(timeout_s)
         self.client_wait_s = float(client_wait_s)
         # Same EWA pipeline as cpu_splats, but render_depth() skips RGB.
-        self._cpu = CpuSplatRenderer(scene, max_splat_radius_px=max_splat_radius_px)
+        self._scene = scene
+        self._max_splat_radius_px = max_splat_radius_px
+        self._cpu = None
+        self.any_client = any_client
         self.last_backend: str | None = None
         self._visor_settled = False
         logger.info(
@@ -71,6 +76,8 @@ class ViserCaptureRenderer:
 
     def render_depth(self, camera: Camera) -> np.ndarray:
         """CPU front-surface depth only (used lazily by move_toward)."""
+        if self._cpu is None:
+            self._cpu = CpuSplatRenderer(self._scene, max_splat_radius_px=self._max_splat_radius_px)
         return self._cpu.render_depth(camera)
 
     def render_with_depth(self, camera: Camera) -> tuple[np.ndarray, np.ndarray]:
@@ -96,6 +103,10 @@ class ViserCaptureRenderer:
                 and int(v.get("width") or 0) >= width * 0.9
                 and int(v.get("height") or 0) >= height * 0.9
             ]
+            if self.any_client:
+                from .viser_viewer import _VisorCapture
+                sized = [v for v in viewports if int(v.get('width') or 0) >= _VisorCapture.MIN_VIEW_W
+                         and int(v.get('height') or 0) >= _VisorCapture.MIN_VIEW_H]
             if sized:
                 if not self._visor_settled:
                     time.sleep(0.8)
@@ -119,6 +130,7 @@ class ViserCaptureRenderer:
             "fov": camera.vertical_fov_rad(),
             "width": int(camera.width),
             "height": int(camera.height),
+            "any_client": self.any_client,
         }).encode()
         t0 = time.perf_counter()
         last_exc: Exception | None = None

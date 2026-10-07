@@ -72,7 +72,8 @@ def test_remote_caption_returns_to_checkpoint_and_is_staged_for_other_mode(tmp_p
     studio = SplatfixStudio(SimpleNamespace(cfg=cfg), store)
     scene = tmp_path / 'scene.ply'
     scene.write_text('source fixture')
-    cp = Checkpoint.create(studio.checkpoint_root, scene, target_views=2)
+    cp = Checkpoint.create(studio.checkpoint_root, scene, target_views=2,
+                           metadata={'renderer': {'backend': 'viser'}})
     for index in range(2):
         cp.add_view(Image.new('RGB', (16, 16)), Camera(np.array([float(index), 0., 0.]), np.eye(3), width=16, height=16, fov_deg=60))
         edit = cp.image_path(cp.views[index]).with_name('repaired.png')

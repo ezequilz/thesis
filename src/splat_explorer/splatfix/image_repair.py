@@ -29,6 +29,7 @@ def repair_images(checkpoint, *, backend=None, cfg=None, prompt=DEFAULT_PROMPT):
         checkpoint = Checkpoint.load(checkpoint)
     if not checkpoint.complete:
         raise ValueError('Finish selecting all requested views before image repair')
+    checkpoint.require_viser_images()
     pending = [v for v in checkpoint.views if not v.get('repaired_rgb')]
     for view in checkpoint.views:
         if view.get('repaired_rgb'):

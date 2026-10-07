@@ -1862,6 +1862,8 @@ def test_setup_continues_after_wipe_if_vram_still_busy(monkeypatch):
         lambda cfg, timeout=None: {"ok": True, "gpu": "NVIDIA A100-SXM4-80GB"},
     )
     monkeypatch.setattr("splat_explorer.repair_lrz._set_setup_message", lambda msg: None)
+    monkeypatch.setattr('splat_explorer.scene_runs.allocation_cache.save_loaded_allocation',
+                        lambda *a: {'deadline_epoch': 9999999999, 'expected_end': '2286-11-20T17:46:39+00:00'})
     out = setup_lrz_gpu(cfg, overwrite=True)
     assert out["ok"] is True
     assert out["gpu"] == "NVIDIA A100-SXM4-80GB"
@@ -1923,6 +1925,8 @@ def test_setup_reuses_our_worker_without_wipe(monkeypatch):
         lambda cfg=None: {"ok": True, "job_id": "5786047", "gpu": "NVIDIA A100-SXM4-80GB"},
     )
     monkeypatch.setattr("splat_explorer.repair_lrz._set_setup_message", lambda msg: None)
+    monkeypatch.setattr('splat_explorer.scene_runs.allocation_cache.save_loaded_allocation',
+                        lambda *a: {'deadline_epoch': 9999999999, 'expected_end': '2286-11-20T17:46:39+00:00'})
     out = setup_lrz_gpu(cfg)
     assert out["ok"] is True
     assert out.get("reused") is True

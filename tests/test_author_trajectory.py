@@ -19,6 +19,9 @@ class RecordingRenderer:
     def interpolate_orbit_poses(self, poses, **kwargs):
         self.poses, self.kwargs = poses, kwargs
         training = kwargs['training_poses']
+        if kwargs['interp_distance'] > 1e100:
+            nodes = np.concatenate([training, poses]) if training is not None else poses
+            return nodes, np.full(len(nodes), -1)
         # Known output sequence including an anchor, generated view, supplied
         # nodes and a repeated pose exercises filtering independently of math.
         start = training[0] if training is not None else poses[0]
@@ -193,4 +196,66 @@ def test_refinement_is_bounded_for_helper_that_returns_only_anchors():
     renderer = AnchorsOnly()
     with pytest.raises(ValueError, match='bounded spacing refinement'):
         author_trajectory.build_author_orbit([pose(0), pose(.05)], K, 1, renderer=renderer)
-    assert renderer.attempts == 3
+    assert renderer.attempts == 4  # node ordering plus three bounded refinements
+
+
+@pytest.mark.parametrize('loop', [False, True])
+def test_original_waypoint_legs_cover_targets_once(original_orbit_renderer, loop):
+    result = author_trajectory.build_author_orbit(
+        [pose(0), pose(.5), pose(1)], K, 1, target_poses=[pose(.2), pose(.7)],
+        renderer=original_orbit_renderer, loop=loop, split_mode='single-split')
+    provenance = result['provenance']
+    segments = provenance['segments']
+    assert len(segments) == (5 if loop else 4)
+    assert [i for s in segments for i in s['target_indices']] == list(range(len(result['trajectory']['frames'])))
+    assert [i for s in segments for i in s['full_frame_indices']] == [m['full_frame_index'] for m in provenance['frames']]
+    assert not set(provenance['reference_frame_indices']) & {i for s in segments for i in s['full_frame_indices']}
+    for s in segments:
+        for index in s['target_indices']:
+            assert s['author_start'] <= provenance['frames'][index]['author_frame_index'] < s['author_end_exclusive']
+    assert [m['requested_target_indices'] for m in provenance['frames'] if m['requested_target_indices']] == [[0], [1]]
+
+
+def test_empty_anchor_only_legs_are_skipped(original_orbit_renderer):
+    result = author_trajectory.build_author_orbit(
+        [pose(0), pose(.001), pose(.5)], K, 1, renderer=original_orbit_renderer, split_mode='single-split')
+    assert len(result['provenance']['segments']) == 1
+    assert result['provenance']['segments'][0]['target_indices'] == list(range(len(result['trajectory']['frames'])))
+
+
+@pytest.mark.parametrize('spacing,count', [(.1, 9), (.2, 4), (.25, 3), (.5, 1)])
+def test_double_split_defaults_to_inward_halves_without_duplicate_midpoint(original_orbit_renderer, spacing, count):
+    result = author_trajectory.build_author_orbit([pose(0), pose(1)], K, 1,
+                                                spacing=spacing, renderer=original_orbit_renderer)
+    provenance = result['provenance']
+    assert provenance['split_mode'] == 'double-split'
+    groups = provenance['segments']
+    middle = (count + 1) // 2
+    assert groups[0]['target_indices'] == list(range(middle))
+    assert groups[0]['seed_transform_matrix'] == result['full_trajectory']['frames'][0]['transform_matrix']
+    if count > 1:
+        assert groups[1]['target_indices'] == list(range(count - 1, middle - 1, -1))
+        assert groups[1]['seed_transform_matrix'] == result['full_trajectory']['frames'][-1]['transform_matrix']
+        assert groups[1]['direction'] == 'reverse'
+    else:
+        assert len(groups) == 1
+    assert sorted(i for s in groups for i in s['target_indices']) == list(range(count))
+
+
+@pytest.mark.parametrize('loop', [False, True])
+def test_double_split_never_uses_heldout_camera_as_seed(original_orbit_renderer, loop):
+    references = [pose(0), pose(.5), pose(1)]
+    result = author_trajectory.build_author_orbit(references, K, 1, target_poses=[pose(.2), pose(.7)],
+                                                renderer=original_orbit_renderer, loop=loop)
+    provenance = result['provenance']
+    for segment in provenance['segments']:
+        assert segment['seed_transform_matrix'] in [p.tolist() for p in references]
+        assert segment['seed_full_frame_index'] in provenance['reference_frame_indices']
+        if segment['open_tail']:
+            assert segment['direction'] == 'forward' and not loop
+    assert sorted(i for s in provenance['segments'] for i in s['target_indices']) == list(range(len(result['trajectory']['frames'])))
+
+
+def test_invalid_split_mode_fails_before_upstream_import():
+    with pytest.raises(ValueError, match='split_mode'):
+        author_trajectory.build_author_orbit([pose(0), pose(1)], K, 1, split_mode='invalid')

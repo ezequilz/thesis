@@ -131,6 +131,9 @@ def remember_live_allocation(
     mem: str = "",
     partition: str = "",
     node: str = "",
+    expected_end: str = "",
+    time_left: str = "",
+    timelimit: str = "",
 ) -> None:
     with _LIVE_ALLOC["lock"]:
         _LIVE_ALLOC["job_id"] = str(job_id or "")
@@ -138,10 +141,13 @@ def remember_live_allocation(
         _LIVE_ALLOC["mem"] = str(mem or "")
         _LIVE_ALLOC["partition"] = str(partition or "")
         _LIVE_ALLOC["node"] = str(node or "")
+        _LIVE_ALLOC["expected_end"] = str(expected_end or "")
+        _LIVE_ALLOC["time_left"] = str(time_left or "")
+        _LIVE_ALLOC["timelimit"] = str(timelimit or "")
         _LIVE_ALLOC["at"] = time.time()
 
 
-def live_allocation(job_id: str | None = None) -> dict[str, str]:
+def live_allocation(job_id: str | None = None) -> dict[str, Any]:
     with _LIVE_ALLOC["lock"]:
         body = {
             "job_id": str(_LIVE_ALLOC.get("job_id") or ""),
@@ -149,6 +155,10 @@ def live_allocation(job_id: str | None = None) -> dict[str, str]:
             "mem": str(_LIVE_ALLOC.get("mem") or ""),
             "partition": str(_LIVE_ALLOC.get("partition") or ""),
             "node": str(_LIVE_ALLOC.get("node") or ""),
+            "expected_end": str(_LIVE_ALLOC.get("expected_end") or ""),
+            "time_left": str(_LIVE_ALLOC.get("time_left") or ""),
+            "timelimit": str(_LIVE_ALLOC.get("timelimit") or ""),
+            "observed_at_epoch": _LIVE_ALLOC.get("at"),
         }
     wanted = str(job_id or "").strip()
     if wanted and body["job_id"] and body["job_id"] != wanted:
@@ -4782,8 +4792,13 @@ def setup_lrz_gpu(
             "A CUDA repair is using this GPU. Stop it on /repair before reloading setup."
         )
     probe_job(cfg)
+    allocation = live_allocation(str(cfg['job_id']))
     with _gpu_exclusive("setup", timeout=8.0):
-        return _setup_lrz_gpu_locked(cfg, overwrite=overwrite, qwen_required=qwen_required)
+        detail = _setup_lrz_gpu_locked(cfg, overwrite=overwrite, qwen_required=qwen_required)
+        from .scene_runs.allocation_cache import save_loaded_allocation
+        cached = save_loaded_allocation(cfg, allocation)
+        return {**detail, 'allocation_deadline_epoch': cached['deadline_epoch'],
+                'allocation_expected_end': cached['expected_end']}
 
 
 def _setup_lrz_gpu_locked(
@@ -5007,10 +5022,8 @@ def _run_setup_thread(
             _SETUP["message"] = message
             _SETUP["at"] = time.time()
             _SETUP["inflight"] = False
-        try:
-            request_gpu_probe(force=True)
-        except Exception:
-            logger.warning("post-setup GPU probe failed", exc_info=True)
+        # Setup already queried and cached this allocation's deadline. Further
+        # scheduler refreshes are explicit dashboard actions, not required here.
     except Exception as exc:
         logger.warning("LRZ GPU setup failed: %s", exc)
         message = f"GPU setup failed: {exc}"
@@ -5052,7 +5065,7 @@ def probe_job(cfg: dict | None = None, *, password: str | None = None) -> str:
     if not mux and not password:
         raise RuntimeError(session_required_message())
     argv = ssh_argv(cfg, multiplex=mux) + [
-        f"squeue --me --job={cfg['job_id']} -h -o '%t|%m|%P|%N'"
+        f"squeue --me --job={cfg['job_id']} -h -o '%t|%m|%P|%N|%e|%L|%l'"
     ]
     env = os.environ.copy()
     helper = None
@@ -5089,6 +5102,9 @@ def probe_job(cfg: dict | None = None, *, password: str | None = None) -> str:
         mem=parts[1] if len(parts) > 1 else "",
         partition=parts[2] if len(parts) > 2 else "",
         node=parts[3] if len(parts) > 3 else "",
+        expected_end=parts[4] if len(parts) > 4 else "",
+        time_left=parts[5] if len(parts) > 5 else "",
+        timelimit=parts[6] if len(parts) > 6 else "",
     )
     if state != "R":
         raise RuntimeError(

@@ -28,6 +28,11 @@ class ResultCatalog:
             root = Path(run.path)
             config = record.get('config', {})
             candidates = sorted((root / 'gpu/results').glob('*/result.json'))
+            candidates += sorted(p for p in (root / 'gpu/results').glob('*/partial-result.json')
+                                 if not (p.parent / 'result.json').is_file())
+            candidates += sorted(p for p in (root / 'gpu/results').glob('*/inference-preview.json')
+                                 if not (p.parent / 'result.json').is_file()
+                                 and not (p.parent / 'partial-result.json').is_file())
             for manifest in candidates:
                 if not manifest.resolve().is_relative_to(self.studio.root.resolve()):
                     continue
@@ -38,7 +43,10 @@ class ResultCatalog:
                 if repaired is None:
                     repaired = manifest.parent / 'artifixer3d.ply'
                 if not repaired.resolve().is_relative_to(manifest.parent.resolve()) or not repaired.is_file():
-                    continue
+                    if not ((manifest.name == 'partial-result.json' and result.get('incomplete') is True)
+                            or (manifest.name == 'inference-preview.json' and result.get('inference_ready') is True)):
+                        continue
+                    repaired = None
                 original = manifest.parent / 'original.ply'
                 options = config.get('splatfix', {})
                 if not original.resolve().is_relative_to(manifest.parent.resolve()) or not original.is_file():
@@ -53,7 +61,7 @@ class ResultCatalog:
                             allowed = {str(Path(s['path']).resolve()) for s in self.studio.scenes() if s.get('path')}
                             if str(source.resolve()) in allowed and source.exists():
                                 original = source
-                key = hashlib.sha256(str(manifest.resolve().relative_to(self.studio.root.resolve())).encode()).hexdigest()[:20]
+                key = hashlib.sha256(str(manifest.with_name('result.json').resolve().relative_to(self.studio.root.resolve())).encode()).hexdigest()[:20]
                 metrics_file = manifest.parent / 'published-test-metrics.json'
                 metrics = read_json(metrics_file, {})
                 if not isinstance(metrics, dict):
@@ -87,6 +95,11 @@ class ResultCatalog:
         if manifest:
             preview = self.studio.plus_previews(manifest, result)
         return {'id': key, 'run_id': record['run_id'], 'scene': config.get('scene_id', ''),
+                'incomplete': result.get('incomplete', False),
+                'inference_ready': result.get('inference_ready', False),
+                'phase': record.get('state', {}).get('details', {}).get('phase'),
+                'interruption': result.get('interruption'),
+                'diagnostics_url': self.studio.file_url(manifest.parent / 'benchmark-run.json') if manifest and (manifest.parent / 'benchmark-run.json').is_file() else None,
                 'created_at': record.get('created_at'), 'status': record.get('state', {}).get('status'),
                 'mode': options.get('mode') or config.get('repair_type', ''),
                 'model': result.get('model_variant') or options.get('model'),
@@ -154,6 +167,10 @@ class ResultCatalog:
             # Saved-view worker uses this fixed first-pass location (not plus/).
             prediction = local('inference/splatfix/frames/batch_0000/pred')
         allowed = None
+        if result.get('inference_ready') and isinstance(result.get('reconstruction_inputs'), list):
+            allowed = set(result['reconstruction_inputs'])
+            gallery['reference_count'] = result.get('reference_count')
+            gallery['verified_inputs'] = True
         supervision = local(result.get('supervision_manifest') or 'supervision.json')
         if supervision and supervision.is_file():
             data = read_json(supervision, {})
@@ -248,7 +265,15 @@ class ResultCatalog:
         return historical_views(self.studio.root / row['run_id'])
 
     def detail(self, key):
-        return next((r for r in self.entries(private=True) if r['id'] == key), None)
+        for row in self.entries(private=True):
+            if row['id'] == key:
+                return row
+            manifest = row['_manifest']
+            if manifest:
+                legacy = manifest.with_name('partial-result.json').resolve().relative_to(self.studio.root.resolve())
+                if hashlib.sha256(str(legacy).encode()).hexdigest()[:20] == key:
+                    return row
+        return None
 
 
 class ResultViser(SceneRunViser):

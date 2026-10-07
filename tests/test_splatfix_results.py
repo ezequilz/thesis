@@ -206,3 +206,56 @@ def test_saved_references_recover_remote_links_only_when_run_hash_matches(tmp_pa
     assert studio.results.run_detail(key)['reference_images'][0]['url'] == studio.file_url(image)
     image.write_bytes(b'a newer edit must not be shown for the historical run')
     assert studio.results.run_detail(key)['reference_images'] == []
+
+
+def test_interrupted_result_visible_without_reconstructed_ply(tmp_path):
+    studio, root, result = setup(tmp_path)
+    (result / 'result.json').unlink()
+    (result / 'artifixer3d.ply').unlink()
+    (result / 'original.ply').unlink()
+    (result / 'partial-result.json').write_text(json.dumps({'incomplete': True, 'interruption': {'reason': 'Stopped before expiry'}, 'frame_count': 346}))
+    (result / 'benchmark-run.json').write_text('{}')
+    rows = studio.results.entries()
+    assert len(rows) == 1
+    assert rows[0]['incomplete'] is True
+    assert rows[0]['repaired'] is False
+    assert rows[0]['ply_url'] is None
+    assert rows[0]['diagnostics_url']
+    detail = studio.results.run_detail(rows[0]['id'])
+    assert detail['interruption']['reason'] == 'Stopped before expiry'
+    assert detail['gallery']['count'] == 0
+
+
+def test_completed_result_supersedes_partial_record(tmp_path):
+    studio, root, result = setup(tmp_path)
+    (result / 'partial-result.json').write_text(json.dumps({'incomplete': True}))
+    rows = studio.results.entries()
+    assert len(rows) == 1
+    assert not rows[0]['incomplete']
+
+
+def test_running_inference_preview_becomes_completed_result_at_same_url(tmp_path):
+    from splat_explorer.splatfix.inference_preview import publish_preview
+    studio, run, root = setup(tmp_path)
+    (root / 'result.json').unlink()
+    (root / 'artifixer3d.ply').unlink()
+    (root / 'original.ply').unlink()
+    studio.store.update_status(run.name, status='running', phase='artifixer3d')
+    pred = root / 'inference/model/frames/batch_0000/pred'
+    pred.mkdir(parents=True)
+    for i in (0, 1, 2):
+        (pred / f'{i:05d}.png').write_bytes(b'png')
+    publish_preview(root, pred, [0, 2], 1, frame_count=3)
+    row, = studio.results.entries()
+    key = row['id']
+    detail = studio.results.run_detail(key)
+    assert row['status'] == 'running' and not row['incomplete']
+    assert row['inference_ready'] and not row['repaired'] and not row['ply_url']
+    assert [f['index'] for f in detail['gallery']['frames']] == [0, 2]
+    assert detail['gallery']['verified_inputs'] and detail['gallery']['reference_count'] == 1
+    (root / 'artifixer3d.ply').write_bytes(b'ply')
+    (root / 'result.json').write_text(json.dumps({'splat_path': 'artifixer3d.ply'}))
+    studio.store.update_status(run.name, status='completed')
+    finished, = studio.results.entries()
+    assert finished['id'] == key and finished['repaired']
+    assert not finished['inference_ready']

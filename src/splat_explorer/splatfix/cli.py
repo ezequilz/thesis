@@ -18,12 +18,14 @@ def select_views(cfg, args):
     from ..agent.camera_rig import CameraRig
     from ..cli import _build_navigation, _resolve_start
     from ..config import Config
-    from ..rendering import make_renderer
+    from .viser_capture import CaptureSession
     from ..rendering.birdseye import ExplorationMap
     from ..scene import load_scene
     from .checkpoint import Checkpoint
     from .view_loop import make_view_policy, run_view_finding
 
+    if args.renderer != 'viser':
+        raise ValueError('Splatfix view selection requires Viser captures')
     scene_path = Path(args.scene or cfg.scene.path).expanduser().resolve()
     renderer_cfg = Config(dict(cfg.renderer))
     renderer_cfg["backend"] = args.renderer
@@ -32,7 +34,9 @@ def select_views(cfg, args):
         cfg.get("splatfix", {}).get("resolution_profile", "training"))
     scene = load_scene(scene_path, min_opacity=cfg.scene.min_opacity,
                        lod_level=int(cfg.scene.get("lod_level", 0)))
-    renderer = make_renderer(scene, renderer_cfg)
+    renderer = CaptureSession(scene_path, up_axis=cfg.camera.up_axis,
+                              lod_level=int(cfg.scene.get('lod_level', 0)),
+                              url=renderer_cfg.get('viser_url') or None)
     world, spawn = _build_navigation(cfg, scene)
     start = spawn.points[0].position if spawn else _resolve_start(cfg, scene)
     rig = CameraRig(start, up_axis=cfg.camera.up_axis,
@@ -83,6 +87,7 @@ def repair_splat(cfg, args):
     from .repair import run_repair
     runtime = dict(cfg.get("splatfix", {}).get("runtime", {}))
     runtime["resolution_profile"] = cfg.get("splatfix", {}).get("resolution_profile", "training")
+    runtime['split_mode'] = getattr(args, 'split_mode', 'double-split')
     for key in ("repo", "python", "checkpoint", "model_id", "hf_home", "source_points3d"):
         value = getattr(args, "artifixer_" + key, None)
         if value is not None:
@@ -111,7 +116,8 @@ def _add_stages(parser):
     select.add_argument("--output", type=Path, default=Path("outputs/splatfix"))
     select.add_argument("--views", type=positive_int, default=6)
     select.add_argument("--max-steps", type=positive_int, default=40, help="Maximum VLM actions per selected view")
-    select.add_argument("--renderer", choices=("cpu_splats", "gsplat", "viser", "cpu_points"), default="cpu_splats")
+    select.add_argument("--renderer", choices=("viser",), default="viser",
+                        help="Viser capture is required; no CPU or CUDA RGB fallback")
     select.add_argument("--select-only", action="store_true", help="Save original views without GPT-image calls")
     select.set_defaults(func=select_views)
     edit = stages.add_parser("edit", help="Create missing GPT-image repairs in an existing checkpoint")
@@ -122,6 +128,8 @@ def _add_stages(parser):
     repair.add_argument("--scene", type=Path, help="Relocated source asset on the GPU host (same content)")
     repair.add_argument("--output", required=True, type=Path, help="Parent directory for isolated reconstruction runs")
     repair.add_argument("--mode", choices=("edited", "baseline"), default="edited")
+    repair.add_argument('--split-mode', choices=('single-split', 'double-split'), default='double-split',
+                        help='Generate whole legs or inward from both reference endpoints (default)')
     repair.add_argument("--frames", type=positive_int, default=25,
                         help="Legacy compatibility only; authored orbit spacing determines frame count")
     repair.add_argument("--span-fraction", type=float, default=.04,

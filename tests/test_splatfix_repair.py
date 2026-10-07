@@ -16,7 +16,8 @@ def make_checkpoint(tmp_path):
     scene_path = tmp_path / 'scene.ply'
     scene_path.write_text('fixture')
     cp = Checkpoint.create(tmp_path / 'runs', scene_path, target_views=1,
-                           metadata={'scene_load': {'min_opacity': .05, 'lod_level': 2}})
+                           metadata={'scene_load': {'min_opacity': .05, 'lod_level': 2},
+                                     'renderer': {'backend': 'viser'}})
     camera = Camera.look_at(np.array([0., 0., -2.]), np.zeros(3), np.array([0., -1., 0.]), width=32, height=32)
     cp.add_view(np.full((32, 32, 3), 90, np.uint8), camera)
     return cp
@@ -32,6 +33,8 @@ class FakeRenderer:
 def mock_scene(monkeypatch):
     import splat_explorer.scene
     calls = []
+    monkeypatch.setattr(repair, 'capture_rgb', lambda *a, **kw: None)
+    monkeypatch.setattr(repair, 'capture_plus_rgb', lambda *a, **kw: None)
     def load(path, **kwargs):
         calls.append(kwargs)
         return SimpleNamespace(means=np.zeros((2, 3)), colors=np.full((2, 3), .5))
@@ -102,6 +105,7 @@ def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, 
         assert req['references'] == ([str(cp.image_path(cp.views[0], repaired=True))] if mode == 'edited'
                                      else [str(cp.root / trajectory['anchors'][0]['original_rgb'])])
         assert req['fit_iterations'] == 30000
+        assert req['reconstruction_recipe']['custom_reconstruction_overrides'] is False
         if phase == 'caption':
             assert kwargs['env']['HF_HUB_OFFLINE'] == '0'
             caption = write_caption_fixture(root / 'caption.h5')
@@ -339,7 +343,9 @@ def test_conditioning_matches_official_preparation_pose_contract_without_double_
 
 @pytest.mark.parametrize('plus', [False, True])
 @pytest.mark.parametrize('trajectory_mode', ['authors_orbit', 'legacy_local_loops'])
-def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeypatch, plus, trajectory_mode):
+@pytest.mark.parametrize('reference_count', [1, 3, 6])
+@pytest.mark.parametrize('split_mode', ['single-split', 'double-split'])
+def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeypatch, plus, trajectory_mode, reference_count, split_mode):
     import contextlib
     import sys
     import types
@@ -347,6 +353,7 @@ def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeyp
     cp = make_checkpoint(tmp_path)
     mock_scene(monkeypatch)
     _, trajectory = repair.prepare_trajectory(cp, frames=9, renderer_factory=FakeRenderer)
+    trajectory['anchors'] = [{**trajectory['anchors'][0], 'frame_index': i} for i in range(reference_count)]
     root = tmp_path / 'repair'
     root.mkdir()
     if plus:
@@ -357,11 +364,16 @@ def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeyp
                 Image.fromarray(np.full((32, 32, 3), 128, np.uint8)).save(rendered / kind / f'{index:05d}.png')
         (root / 'distillation.json').write_text(json.dumps({'render_dir': str(rendered)}))
     request = {'runtime': {'checkpoint': 'weights.pt', 'model_id': 'wan'}, 'seed': 42,
-               'checkpoint_root': str(cp.root), 'references': [str(cp.image_path(cp.views[0]))],
+               'checkpoint_root': str(cp.root), 'references': [str(cp.image_path(cp.views[0]))] * reference_count,
                'camera_scale': 1., 'mode': 'baseline', 'upstream_revision': 'pinned',
                'initialization': 'fixture', 'input_adaptation': 'fixture',
                'trajectory_mode': trajectory_mode}
     caption = write_caption_fixture(root / 'caption.h5')
+    request['references'] = []
+    for index in range(reference_count):
+        path = root / f'edited-{index}.png'
+        Image.new('RGB', (32, 32), (20 + index,) * 3).save(path)
+        request['references'].append(str(path))
     request.update(caption_path=caption['caption_path'], caption_sha256=caption['sha256'])
     class Tensor(np.ndarray):
         def permute(self, *axes): return self.transpose(axes)
@@ -387,7 +399,8 @@ def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeyp
         context_indices.extend(neighbors)
         return {}
     module('model_eval')
-    module('model_eval.run_inference', build_parser=lambda: SimpleNamespace(parse_args=lambda args: SimpleNamespace()),
+    parsed = []
+    module('model_eval.run_inference', build_parser=lambda: SimpleNamespace(parse_args=lambda args: parsed.extend(args) or SimpleNamespace()),
            get_eval_pipe=lambda *args: pipe, process_item=lambda pipe, item, *args: items.append(item))
     module('model_eval.checkpoint_loading', load_transformer_checkpoint=lambda *args: None)
     module('model_training')
@@ -397,16 +410,35 @@ def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeyp
         loaded_prompts.append(paths)
         return [None, 'fixture caption']
     module('model_training.data.utils', compute_camera_rays=conditioning, load_encoded_prompt=load_prompt)
+    if trajectory_mode == 'authors_orbit':
+        trajectory['segments'] = [{'indices': [0, 1, 2, 3, 4, 5, 6]}, {'indices': [7, 8]}]
+        if split_mode == 'double-split':
+            trajectory['segments'][0]['seed_index'] = 0
+            trajectory['segments'][1].update(seed_index=reference_count - 1, indices=[8, 7])
+    resets = []
+    pipe.clear_inference_caches = lambda: resets.append(len(items))
     inference(root, request, trajectory, plus=plus)
+    assert parsed[parsed.index('--render_trajectory') + 1] == 'trajectory'
     assert loaded_prompts == [[Path(request['caption_path'])]]
-    assert len(seen) == 1
+    assert len(seen) == (2 if trajectory_mode == 'authors_orbit' else 1)
+    assert resets == list(range(len(seen)))
     anchors = [anchor['frame_index'] for anchor in trajectory['anchors']]
     expected = [i for i in range(9) if trajectory_mode != 'authors_orbit' or i not in anchors]
-    assert target_indices == expected
-    assert context_indices == anchors
-    assert items[0]['frame_indices'].tolist() == expected
-    assert len(items[0]['rgb_rendered']) == len(items[0]['opacity']) == len(expected)
-    assert len(items[0]['rgb_neighbors']) == len(anchors)
+    seeded = trajectory_mode == 'authors_orbit' and split_mode == 'double-split'
+    if seeded:
+        assert target_indices == [0, *[i for i in range(7) if i not in anchors], reference_count - 1, 8, 7]
+        for item, seed in zip(items, [0, reference_count - 1]):
+            assert item['frame_indices'][0] == seed
+            assert not item['valid_frames_mask'][0]
+            np.testing.assert_allclose(item['rgb_rendered'][0], (20 + seed) / 255)
+            assert (item['opacity'][0] == 1).all()
+    else:
+        assert target_indices == expected
+    assert context_indices == anchors * len(seen)
+    assert sorted(i for item in items for i in item['frame_indices'][item['valid_frames_mask']].tolist()) == expected
+    for item in items:
+        assert len(item['rgb_rendered']) == len(item['opacity']) == len(item['frame_indices'])
+        assert len(item['rgb_neighbors']) == len(anchors)
     cv = np.asarray(trajectory['transforms']['frames'][0]['transform_matrix'])
     np.testing.assert_allclose(seen[0]['frames'][0]['transform_matrix'], cv @ np.diag([1, -1, -1, 1]))
     assert seen[0]['camera_convention'] == 'opengl_c2w'
@@ -838,6 +870,7 @@ def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypa
     def worker(command, **kwargs):
         if '--full-output' in command:
             events.append('orbit')
+            assert command[command.index('--split-mode') + 1] == 'double-split'
             assert float(command[command.index('--metric-scale') + 1]) == 2.5
             source = json.loads(Path(command[command.index('--transforms') + 1]).read_text())
             poses = np.array([frame['transform_matrix'] for frame in source['frames']])
@@ -845,7 +878,7 @@ def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypa
             middle[:3, 3] = (poses[0, :3, 3] + poses[1, :3, 3]) / 2
             full = [pose @ np.diag([1., -1., -1., 1.]) for pose in [poses[0], middle, poses[1]]]
             Path(command[command.index('--full-output') + 1]).write_text(json.dumps({'frames': [{'transform_matrix': pose.tolist()} for pose in full]}))
-            Path(command[command.index('--provenance') + 1]).write_text(json.dumps({'implementation': 'authors fixture', 'source_transforms': str(source)}))
+            Path(command[command.index('--provenance') + 1]).write_text(json.dumps({'implementation': 'authors fixture', 'source_transforms': str(source), 'segments': [{'target_indices': [0], 'full_frame_indices': [1], 'seed_full_frame_index': 0}]}))
             return
         phase = command[-1]
         events.append(phase)
@@ -861,7 +894,7 @@ def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypa
             (path.parent / 'scale-result.json').write_text(json.dumps({'metric_scale': 2.5}))
             return
         assert len(trajectory['frames']) == 3
-        assert trajectory['segments'] == [{'start': 0, 'count': 3}]
+        assert trajectory['segments'] == [{'indices': [1], 'seed_index': 0}]
         assert [anchor['frame_index'] for anchor in trajectory['anchors']] == [0, 2]
         assert req['legacy_trajectory_parameters']['used'] is False
         assert req['camera_scale'] == .025
@@ -885,7 +918,7 @@ def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize('kind', ['legacy', 'saved'])
-def test_repair_rerenders_source_anchors_instead_of_selection_preview(tmp_path, monkeypatch, kind):
+def test_repair_captures_viser_rgb_instead_of_selection_or_cuda_rgb(tmp_path, monkeypatch, kind):
     cp = make_checkpoint(tmp_path)
     mock_scene(monkeypatch)
     preview = cp.image_path(cp.views[0])
@@ -894,6 +927,10 @@ def test_repair_rerenders_source_anchors_instead_of_selection_preview(tmp_path, 
         def render(self, camera):
             rgb, alpha, depth = super().render(camera)
             return np.full_like(rgb, 210), alpha, depth
+    def capture(scene, cameras, destinations, **kwargs):
+        for camera, path in zip(cameras, destinations):
+            Image.new('RGB', (camera.width, camera.height), (217, 217, 217)).save(path)
+    monkeypatch.setattr(repair, 'capture_rgb', capture)
     if kind == 'legacy':
         _, trajectory = repair.prepare_trajectory(cp, frames=9, renderer_factory=SourceRenderer)
     else:
@@ -901,7 +938,10 @@ def test_repair_rerenders_source_anchors_instead_of_selection_preview(tmp_path, 
     anchor = trajectory['anchors'][0]
     assert anchor['selection_rgb'] == cp.views[0]['original_rgb']
     assert preview.read_bytes() == before
-    assert np.all(np.asarray(Image.open(cp.root / anchor['original_rgb'])) == 210)
+    assert np.all(np.asarray(Image.open(cp.root / anchor['original_rgb'])) == 217)
+    assert all(np.all(np.asarray(Image.open(cp.root / frame['rgb'])) == 217)
+               for frame in trajectory['frames'])
+    assert trajectory['recipe']['anchor_rgb_policy'] == 'viser'
     assert trajectory['frames'][anchor['frame_index']]['rgb'] == anchor['original_rgb']
     # Changing the generated anchor is detected on cache reuse, not silently accepted.
     (cp.root / anchor['original_rgb']).write_bytes(b'bad')

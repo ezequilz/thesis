@@ -299,6 +299,7 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
     """Run fresh official prep, inference, reconstruction/export and plus pass."""
     from .checkpoint import atomic_json, utc_now
     from .repair import UPSTREAM_REVISION, RUNTIME_COMPATIBILITY, digest_file, run_worker, runtime_environment
+    from .official_worker import ARTIFIXER3D_STEPS, reconstruction_recipe, reconstruction_cli_args, reconstruction_command
     source = Path(source_dir).expanduser().resolve()
     metadata = json.loads((source / 'benchmark.json').read_text())
     if not isinstance(metadata, dict):
@@ -340,6 +341,8 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
         raise InterruptedError('Benchmark stopped')
     cfg = benchmark_runtime(runtime)
     trajectory_mode = cfg.get('trajectory_mode', 'author_orbit')
+    from .author_trajectory import validate_split_mode
+    cfg['split_mode'] = validate_split_mode(cfg.get('split_mode', 'double-split'))
     if trajectory_mode not in ('author_orbit', 'source_cameras'):
         raise ValueError('trajectory_mode must be author_orbit or source_cameras')
     if trajectory_mode == 'author_orbit' and not published_test_names:
@@ -367,7 +370,8 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
                 'native_library_path_active': bool(cfg.get('native_library_dir') and Path(cfg['native_library_dir']).is_dir()), 'trajectory': trajectory_mode,
                 'limitation': limitation, 'stages': [],
                 'input_sha256': input_hashes,
-                'base_reconstruction_steps': 10000, 'artifixer3d_steps': 30000,
+                'base_reconstruction_steps': 10000, 'artifixer3d_steps': ARTIFIXER3D_STEPS,
+                'reconstruction_recipe': reconstruction_recipe(cfg.get('regularization_profile', 'artifixer')),
                 'inference_settings': dict(INFERENCE_DEFAULTS),
                 'reference_kind': 'original photographs', 'initialization': 'original COLMAP sparse points',
                 'text_conditioning': 'official generated Qwen caption encoded by Wan UMT5',
@@ -429,7 +433,10 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
             '--colmap_dir', str(colmap), '--output_root', str(prepared),
             '--selected_image_names_file', str(selection), '--text_encoder_model_id', cfg['model_id']]
     def inference(split, destination):
-        return [cfg['python'], '-m', 'model_eval.run_inference', '--evalset', 'reconstructed_colmap',
+        entrypoint = (['-m', 'model_eval.run_inference'] if trajectory_mode != 'author_orbit' else
+                      [str(Path(__file__).with_name('segmented_inference.py').resolve()),
+                       '--repo', cfg['repo'], '--trajectory-provenance', str(provenance_path)])
+        return [cfg['python'], *entrypoint, '--evalset', 'reconstructed_colmap',
                 '--checkpoint_pt', cfg['checkpoint'], '--model_id', cfg['model_id'],
                 '--save_dir', str(destination), '--split_path', str(split),
                 '--num_views', '3', '--render_trajectory',
@@ -466,6 +473,7 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
             trajectory_path = root / 'author-orbit.json'
             provenance_path = root / 'author-orbit-provenance.json'
             stage('orbit_path', [cfg['python'], str(Path(__file__).with_name('author_trajectory.py').resolve()),
+                '--split-mode', cfg['split_mode'],
                 '--repo', cfg['repo'], '--transforms', str(_metadata_path(split, entry, 'transforms_path')),
                 '--selected-indices', str(_metadata_path(split, entry, 'selected_indices_path')),
                 '--target-names', str(target_names_path), '--metric-scale', str(entry['metric_scale']),
@@ -485,6 +493,7 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
             if targets != [i for i in range(frame_count) if i not in selected]:
                 raise ValueError('Official orbit target indices overlap or omit photographic contexts')
             manifest['orbit_provenance'] = json.loads(provenance_path.read_text())
+            manifest['inference_series_policy'] = manifest['orbit_provenance'].get('series_policy')
             manifest['inference_split'] = str(split.relative_to(root))
         required = [i for i in range(frame_count) if i not in selected]
         if not required:
@@ -510,9 +519,13 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
         atomic_json(root / 'benchmark-run.json', manifest)
         stage('inference', inference(split, root / 'inference'))
         predictions = _prediction_frames(root / 'inference', scene_id, required)
-        stage('artifixer3d', [cfg['python'], '-m', 'data_processing.run_artifixer3d',
+        from .inference_preview import publish_preview
+        publish_preview(root, predictions, required, len(selected), frame_count=frame_count,
+                        model_variant=cfg['model_variant'], trajectory_mode=trajectory_mode,
+                        resolution_policy=manifest['resolution_policy'])
+        stage('artifixer3d', [*reconstruction_command(cfg['python'], cfg['repo'], cfg.get('regularization_profile', 'artifixer')),
                              '--scene_root', str(prepared), '--artifixer_frames_dir', str(predictions),
-                             '--split_path', str(split)])
+                             '--split_path', str(split), *reconstruction_cli_args()])
         plus_split = prepared / 'split_artifixer3d_plus.json'
         plus_scene, plus_entry = _split_entry(plus_split)
         if plus_scene != scene_id:

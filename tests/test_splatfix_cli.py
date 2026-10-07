@@ -16,6 +16,8 @@ from splat_explorer.splatfix.cli import add_parser, repair_splat
 
 @pytest.mark.parametrize("profile, dimensions", [("training", (960, 544)), ("720p", (1280, 720))])
 def test_public_select_command_without_api(tmp_path, profile, dimensions):
+    if not os.environ.get('SPLATFIX_LIVE_VISER_TESTS'):
+        pytest.skip('Requires a connected harness Viser; enable SPLATFIX_LIVE_VISER_TESTS')
     random = np.random.default_rng(8)
     count = 60
     scene = GaussianScene(
@@ -57,6 +59,10 @@ def test_cli_defaults_and_invalid_view_count():
     add_parser(parser.add_subparsers())
     args = parser.parse_args(["splatfix", "select"])
     assert args.views == 6
+    assert args.renderer == 'viser'
+    for backend in ('cpu_splats', 'cpu_points', 'gsplat'):
+        with pytest.raises(SystemExit):
+            parser.parse_args(['splatfix', 'select', '--renderer', backend])
     with pytest.raises(SystemExit):
         parser.parse_args(["splatfix", "select", "--views", "0"])
 
@@ -77,5 +83,5 @@ def test_repair_command_passes_only_saved_run_and_runtime(monkeypatch, tmp_path)
                              "--artifixer-repo", "/gpu/official"])
     repair_splat(Config({"splatfix": {"runtime": {"python": "/gpu/python"}}}), args)
     assert received["mode"] == "baseline"
-    assert received["runtime"] == {"repo": "/gpu/official", "python": "/gpu/python", "resolution_profile": "training"}
+    assert received["runtime"] == {"repo": "/gpu/official", "python": "/gpu/python", "resolution_profile": "training", "split_mode": "double-split"}
     assert received["checkpoint"] == tmp_path / "saved"

@@ -214,6 +214,13 @@ def run_view_finding(renderer, rig, policy, checkpoint, *, width=960, height=720
         raise ValueError("views and max_steps_per_view must be positive")
     if checkpoint.target_views != views:
         raise ValueError("Requested views must match the checkpoint target_views")
+    if getattr(renderer, 'rgb_backend', None) != 'viser':
+        raise ValueError('Splatfix view selection requires Viser captures; other RGB renderers are disabled')
+    if checkpoint.views:
+        checkpoint.require_gpu_images()
+    else:
+        checkpoint.manifest.setdefault('metadata', {}).setdefault('renderer', {})['backend'] = 'viser'
+        checkpoint.save()
     if len(checkpoint.views) >= views:
         return checkpoint.views
     if exploration_map is None:

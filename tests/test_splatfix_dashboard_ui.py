@@ -22,12 +22,17 @@ const context=vm.createContext({document:{getElementById:get},fetch:()=>new Prom
 vm.runInContext(source,context);
 Promise.resolve(vm.runInContext(`(async()=>{
   state={scenes:[],jobs:[],checkpoints:[{id:'/saved/cp',name:'Saved camera checkpoint',scene:'Original scene',complete:true,
-    target_views:7,edited:7,trajectory_caches:1,reconstruction_ready:true,views:[]}]};
+    target_views:7,edited:7,rgb_renderer:'viser',trajectory_caches:1,reconstruction_ready:true,views:[]}]};
   selected='/saved/cp';$('scene').value='unrelated-current-scene';$('views').value='7';$('mode').value='edited';
   assert.equal(payload('select').views,7);
   assert.equal(payload('select').scene_id,'unrelated-current-scene');
   assert.equal(payload('repair').checkpoint,'/saved/cp');
   assert.equal(payload('repair').mode,'edited');
+  assert.equal(payload('repair').split_mode,'double-split');
+  $('split-mode').value='single-split';
+  assert.equal(payload('repair').split_mode,'single-split');
+  $('regularization-profile').value='base_mcmc';
+  assert.equal(payload('repair').regularization_profile,'base_mcmc');
   assert.equal(payload('repair').scene_id,undefined);
   assert.equal(payload('edit').scene_id,undefined);
   schedule('repair');
@@ -35,12 +40,14 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.match($('schedule-context').textContent,/Saved camera checkpoint/);
   assert.match($('schedule-context').textContent,/GPT-image improved/);
   const saved=pendingPayload;
-  selected='/different-checkpoint';$('mode').value='baseline';
+  selected='/different-checkpoint';$('mode').value='baseline';$('regularization-profile').value='artifixer';
   let submitted;
   api=async(path,body)=>{submitted=body;return {}};refresh=async()=>{};
   await queue('repair','2099-01-01T00:00:00Z',saved);
   assert.equal(submitted.checkpoint,'/saved/cp');
   assert.equal(submitted.mode,'edited');
+  assert.equal(submitted.regularization_profile,'base_mcmc');
+  assert.equal(submitted.split_mode,'single-split');
   assert.equal(submitted.scheduled_at,'2099-01-01T00:00:00Z');
   $('views').valid=false;$('schedule-dialog').opened=false;
   schedule('select');
@@ -58,6 +65,11 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal($('edit-now').disabled,false);
   cp.edited=cp.target_views;renderCheckpoint();
   assert.equal($('repair-now').disabled,false);
+  cp.rgb_renderer='cpu_splats';renderCheckpoint();
+  assert.equal($('edit-now').disabled,true);assert.equal($('repair-now').disabled,true);
+  assert.match($('edit-readiness').textContent,/Recapture.*Viser/);
+  $('mode').value='baseline';renderCheckpoint();assert.equal($('repair-now').disabled,false);
+  cp.rgb_renderer='viser';$('mode').value='edited';renderCheckpoint();
   cp.reconstruction_ready=false;cp.reconstruction_readiness='Need two distinct cameras';renderCheckpoint();
   assert.equal($('repair-now').disabled,true);assert.equal($('edit-now').disabled,false);
   assert.match($('repair-readiness').textContent,/two distinct cameras/);

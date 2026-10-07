@@ -87,10 +87,11 @@ def install_worker(monkeypatch, missing_scale=False, fail_phase=None, trajectory
     return calls
 
 
-def test_original_photographic_recipe_and_final_export(tmp_path, monkeypatch):
+@pytest.mark.parametrize('regularization', ['artifixer', 'base_mcmc'])
+def test_original_photographic_recipe_and_final_export(tmp_path, monkeypatch, regularization):
     source = source_fixture(tmp_path)
     calls = install_worker(monkeypatch)
-    result = benchmark.run_benchmark(source, tmp_path / 'runs')
+    result = benchmark.run_benchmark(source, tmp_path / 'runs', runtime={'regularization_profile': regularization})
     assert [p for p, _, _ in calls] == ['prepare', 'reconstruct', 'render', 'scale', 'caption', 'inference', 'artifixer3d', 'export', 'plus']
     for phase, command, kwargs in calls:
         assert '--metric_scale' not in command
@@ -102,12 +103,20 @@ def test_original_photographic_recipe_and_final_export(tmp_path, monkeypatch):
             assert command[command.index('--render_trajectory') + 1] == 'all_frames'
             assert command[command.index('--num_views') + 1] == '3'
         if phase == 'artifixer3d':
-            assert command[2:4] == ['data_processing.run_artifixer3d', '--scene_root']
+            if regularization == 'artifixer':
+                assert command[2:4] == ['data_processing.run_artifixer3d', '--scene_root']
+            else:
+                assert Path(command[1]).name == 'official_worker.py'
+                assert command[2] == '--reconstruct'
+            assert command[command.index('--config_name') + 1] == 'apps/colmap_3dgut_sparse_mcmc_lpips'
+            assert command[command.index('--artifixer3d_steps') + 1] == '30000'
     assert Path(result['splat_path']).read_bytes() == b'fresh PLY only'
     assert result['metric_scale'] == 2.5 and result['merged'] is False
     assert 'orbit' in result['limitation']
     manifest = json.loads((Path(result['output_dir']) / 'benchmark-run.json').read_text())
     assert manifest['status'] == 'complete'
+    assert manifest['reconstruction_recipe']['regularization_profile'] == regularization
+    assert manifest['reconstruction_recipe']['custom_reconstruction_overrides'] == (regularization == 'base_mcmc')
     assert all(stage['status'] == 'complete' for stage in manifest['stages'])
     assert manifest['source_metadata']['name'] == 'bicycle'
     evaluation = manifest['evaluation']
@@ -427,10 +436,11 @@ def test_resume_remains_same_model_and_options_are_exclusive(tmp_path, monkeypat
     assert not calls
 
 
-def test_default_uses_author_orbit_and_preserves_source_preparation(tmp_path, monkeypatch):
+@pytest.mark.parametrize('split_mode', [None, 'single-split', 'double-split'])
+def test_default_uses_author_orbit_and_preserves_source_preparation(tmp_path, monkeypatch, split_mode):
     source = source_fixture(tmp_path)
     calls = install_worker(monkeypatch, trajectory_mode=None)
-    result = benchmark.run_benchmark(source, tmp_path / 'runs')
+    result = benchmark.run_benchmark(source, tmp_path / 'runs', runtime={'split_mode': split_mode} if split_mode else {})
     root = Path(result['output_dir'])
     assert result['trajectory_mode'] == 'author_orbit'
     assert result['inference_split'] == 'prepared/bicycle/split_trajectory.json'
@@ -443,9 +453,12 @@ def test_default_uses_author_orbit_and_preserves_source_preparation(tmp_path, mo
     for phase, command, _ in calls:
         if phase in ('inference', 'plus'):
             assert command[command.index('--render_trajectory') + 1] == 'trajectory'
+            assert Path(command[1]).name == 'segmented_inference.py'
+            assert command[command.index('--trajectory-provenance') + 1] == str(root / 'author-orbit-provenance.json')
         if phase == 'artifixer3d':
             assert command[command.index('--split_path') + 1].endswith('/split_trajectory.json')
         if phase == 'orbit_path':
+            assert command[command.index('--split-mode') + 1] == (split_mode or 'double-split')
             assert command[command.index('--metric-scale') + 1] == '2.5'
             assert command[command.index('--interp-distance') + 1] == '0.1'
 

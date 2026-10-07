@@ -204,17 +204,8 @@ class LrzSceneRunTransport:
         """Validate one selected running allocation and its setup marker."""
         self._require_session()
         job_id = str(self.cfg.get("job_id") or "").strip()
-        result = repair_lrz._ssh_run(
-            self.cfg, active_job_squeue_command(job_id), timeout=25,
-        )
-        row = repair_lrz.parse_squeue_line(result.stdout or "")
-        if result.returncode != 0 or row is None:
-            detail = (result.stderr or result.stdout or "empty squeue").strip()
-            raise RuntimeError(f"Could not query selected LRZ job {job_id}: {detail}")
-        if row.get("state") != "R":
-            raise RuntimeError(
-                f"Selected LRZ job {job_id} is {row.get('state') or 'missing'}, not R"
-            )
+        from .allocation_cache import loaded_allocation
+        row = loaded_allocation(self.cfg)
         repair_lrz.remember_live_allocation(
             job_id=job_id,
             state=str(row.get("state") or ""),

@@ -17,6 +17,11 @@ def validate_job(raw):
     profile = raw.get('resolution_profile', 'training')
     profile_size(profile)
     result = {'stage': stage, 'resolution_profile': profile}
+    if stage in ('repair', 'benchmark'):
+        from .official_worker import validate_regularization
+        from .author_trajectory import validate_split_mode
+        result['split_mode'] = validate_split_mode(raw.get('split_mode', 'double-split'))
+        result['regularization_profile'] = validate_regularization(raw.get('regularization_profile', 'artifixer'))
     scheduled = raw.get('scheduled_at')
     if scheduled:
         instant = datetime.fromisoformat(str(scheduled).replace('Z', '+00:00'))
@@ -28,9 +33,9 @@ def validate_job(raw):
         if type(views) is not int or not 1 <= views <= 24:
             raise ValueError('views must be an integer between 1 and 24')
         result['views'] = views
-        renderer = raw.get('renderer', 'cpu_splats')
-        if renderer not in ('cpu_splats', 'cpu_points'):
-            raise ValueError('Dashboard view selection uses a local CPU renderer')
+        renderer = raw.get('renderer', 'viser')
+        if renderer != 'viser':
+            raise ValueError('Splatfix view selection requires Viser captures; other RGB renderers are disabled')
         result['renderer'] = renderer
     elif stage == 'benchmark':
         source = str(raw.get('source') or '')

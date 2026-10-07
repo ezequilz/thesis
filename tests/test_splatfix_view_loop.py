@@ -15,6 +15,8 @@ from splat_explorer.splatfix.view_loop import (
 
 
 class Renderer:
+    rgb_backend = 'viser'
+
     def render(self, camera):
         return np.full((camera.height, camera.width, 3), int(camera.position[0]) + 20, np.uint8)
 

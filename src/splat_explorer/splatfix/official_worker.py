@@ -1,15 +1,94 @@
-"""GPU-only data adapter. Calls authors' inference and reconstruction unchanged.
+"""GPU adapter with exact ArtiFixer defaults and optional MCMC regularization.
 
 Executed in a clean pinned ArtiFixer environment, independently of splatfix's
 Python environment. This file intentionally imports no scene_runs_ext patches.
 """
 from __future__ import annotations
 import argparse
+from contextlib import contextmanager
 import gc
 import json
 from pathlib import Path
 import shutil
 import sys
+
+
+# One reconstruction recipe for saved-view repairs and photographic benchmarks.
+# Keep this module standalone: it also runs inside the authors' GPU environment.
+# Allocation and schedules stay upstream. The optional regularization profile
+# inherits only the author base_mcmc loss penalties, not its initialization.
+ARTIFIXER3D_CONFIG = 'apps/colmap_3dgut_sparse_mcmc_lpips'
+ARTIFIXER3D_STEPS = 30000
+
+
+REGULARIZATION_PROFILES = ('artifixer', 'base_mcmc')
+
+
+def validate_regularization(profile):
+    if profile not in REGULARIZATION_PROFILES:
+        raise ValueError('regularization_profile must be artifixer or base_mcmc')
+    return profile
+
+
+def reconstruction_recipe(profile='artifixer'):
+    """Record recipe identity without duplicating upstream hyperparameters."""
+    validate_regularization(profile)
+    return {'version': 'artifixer3d-regularization-choice-v1',
+            'config_name': ARTIFIXER3D_CONFIG, 'steps': ARTIFIXER3D_STEPS,
+            'initialization': 'fresh', 'parameter_source': 'pinned_upstream',
+            'regularization_profile': profile,
+            'custom_reconstruction_overrides': profile != 'artifixer',
+            'regularization_source': 'base_mcmc' if profile == 'base_mcmc' else 'base_gs_sparse -> base_gs',
+            'loss_adaptation': 'include regularizers in generated-view total' if profile == 'base_mcmc' else None}
+
+
+def reconstruction_cli_args():
+    return ['--config_name', ARTIFIXER3D_CONFIG,
+            '--artifixer3d_steps', str(ARTIFIXER3D_STEPS)]
+
+
+def reconstruction_command(python, repo, profile='artifixer'):
+    validate_regularization(profile)
+    if profile == 'artifixer':
+        return [python, '-m', 'data_processing.run_artifixer3d']
+    return [python, str(Path(__file__).resolve()), '--reconstruct', '--repo', str(repo)]
+
+
+def regularized_trainer_class(base):
+    class RegularizedTrainer(base):
+        def get_losses(self, gpu_batch, outputs):
+            losses = super().get_losses(gpu_batch, outputs)
+            if self.conf.loss.get('use_lpips_override', False) and getattr(gpu_batch, 'is_override', False):
+                # Upstream computes these weighted tensors but omits them from
+                # its LPIPS total. Anchor losses already include them.
+                losses['total_loss'] = losses['total_loss'] + losses['opacity_loss'] + losses['scale_loss']
+            return losses
+    return RegularizedTrainer
+
+
+@contextmanager
+def reconstruction_settings(profile='artifixer'):
+    validate_regularization(profile)
+    if profile == 'artifixer':
+        yield
+        return
+    from data_processing import threedgrut_training as training
+    original_compose, original_trainer = training.compose_3dgrut_config, training.Trainer3DGRUT
+
+    def compose(config_name, overrides, config_dir):
+        config = original_compose(config_name, overrides, config_dir)
+        regularized = original_compose('base_mcmc', [], config_dir)
+        # Inherit only regularization; keep the same initialization and schedules.
+        for key in ('use_opacity', 'lambda_opacity', 'use_scale', 'lambda_scale'):
+            config.loss[key] = regularized.loss[key]
+        return config
+
+    training.compose_3dgrut_config = compose
+    training.Trainer3DGRUT = regularized_trainer_class(original_trainer)
+    try:
+        yield
+    finally:
+        training.compose_3dgrut_config, training.Trainer3DGRUT = original_compose, original_trainer
 
 
 def opengl_transforms(trajectory):
@@ -408,6 +487,7 @@ def inference(root, request, trajectory, plus=False):
     args = build_parser().parse_args([
         '--checkpoint_pt', cfg['checkpoint'], '--model_id', cfg['model_id'],
         '--save_dir', str(output), '--save_frame_outputs_only',
+        '--evalset', 'reconstructed_colmap', '--render_trajectory', 'trajectory',
     ])  # All inference algorithm/scheduler/cache settings are authors defaults.
     torch.manual_seed(request['seed'])
     device = torch.device('cuda:0')
@@ -424,23 +504,34 @@ def inference(root, request, trajectory, plus=False):
     render_dir = Path(json.loads((root / 'distillation.json').read_text())['render_dir']) if plus else None
     with torch.inference_mode():
         for segment in trajectory['segments']:
-            indices = list(range(segment['start'], segment['start'] + segment['count']))
+            indices = (list(segment['indices']) if 'indices' in segment else
+                       list(range(segment['start'], segment['start'] + segment['count'])))
             if request.get('trajectory_mode') == 'authors_orbit':
                 # Match ReconstructedColmapDataset's explicit-trajectory contract:
                 # saved anchors condition inference and supervise fitting directly.
                 indices = [index for index in indices if index not in neighbors]
             if not indices:
                 continue
+            seed_index = segment.get('seed_index')
+            if seed_index is not None:
+                if seed_index not in neighbors:
+                    raise ValueError('Series seed must be a trusted reference camera')
+                indices = [seed_index, *indices]
             if plus:
                 renders = torch.stack([rgb(render_dir / 'renders' / f'{i:05d}.png') for i in indices])
                 opacity = torch.stack([torch.from_numpy(np.array(Image.open(render_dir / 'opacity' / f'{i:05d}.png').convert('L'), dtype=np.float32) / 255) for i in indices])
             else:
                 renders = torch.stack([rgb(cp / trajectory['frames'][i]['rgb']) for i in indices])
                 opacity = torch.stack([torch.from_numpy(np.load(cp / trajectory['frames'][i]['opacity'], allow_pickle=False)) for i in indices])
+            valid = torch.ones(len(indices), dtype=torch.bool)
+            if seed_index is not None:
+                renders[0] = references[neighbors.index(seed_index)]
+                opacity[0] = 1
+                valid[0] = False  # Trusted anchors supervise reconstruction directly.
             item = {'scene_id': 'splatfix', 'rgb_rendered': renders, 'rgb_neighbors': references,
                     'opacity': opacity, 'encoded_prompt': encoded_prompt,
                     'frame_indices': torch.tensor(indices),
-                    'valid_frames_mask': torch.ones(len(indices), dtype=torch.bool)}
+                    'valid_frames_mask': valid}
             item.update(compute_camera_rays(cameras, indices, neighbors,
                         scale=request['camera_scale'], image_shape=renders.shape[-2:], skip_vae_check=True))
             # Independent smooth camera trajectories must not become video cuts.
@@ -449,6 +540,8 @@ def inference(root, request, trajectory, plus=False):
     if plus:
         result = json.loads((root / 'distillation.json').read_text())
         result.update(plus_frames=str(output / 'splatfix/frames/batch_0000/pred'),
+                      rgb_renderer=request.get('anchor_rgb_policy'),
+                      plus_rgb_renderer=request.get('plus_rgb_renderer'),
                       mode=request['mode'], upstream_revision=request['upstream_revision'],
                       inference_target_policy=request.get('inference_target_policy', 'all_segment_frames'),
                       camera_scale=request['camera_scale'],
@@ -456,7 +549,8 @@ def inference(root, request, trajectory, plus=False):
                       scale_estimate=request.get('scale_estimate'),
                       caption_path=request['caption_path'], caption_sha256=request['caption_sha256'],
                       initialization=request['initialization'], input_adaptation=request['input_adaptation'],
-                      reconstruction='authors fresh ArtiFixer3D; 30000 steps; sparse MCMC LPIPS',
+                      reconstruction='fresh ArtiFixer3D; 30000 steps; sparse MCMC LPIPS; regularization recorded in reconstruction_recipe',
+                      reconstruction_recipe=reconstruction_recipe(request.get('runtime', {}).get('regularization_profile', 'artifixer')),
                       ply_stage='ArtiFixer3D; the + pass produces images, not another splat', merged=False)
         (root / 'result.json').write_text(json.dumps(result, indent=2))
 
@@ -566,13 +660,15 @@ def distill(root, request, trajectory):
         colmap_dir=source, prompt_path=root / 'request.json', camera_scale=request['camera_scale'],
         has_gt=False, selected_indices=selected, target_indices_path=None,
         reconstruction_checkpoint=None, frame_count=len(transforms['frames']))
-    paths = official.artifixer3d_paths(scene, root / 'artifixer3d', None, 30000)
-    # This is the exact authors reconstruction entry point, shared by both arms.
+    paths = official.artifixer3d_paths(scene, root / 'artifixer3d', None, ARTIFIXER3D_STEPS)
+    # Authors entry point, with the selected loss policy shared by both arms.
     # No resume checkpoint, custom fitter, SH truncation, or compositing.
-    checkpoint, reused = official.train_artifixer3d(
-        scene, paths, artifixer_frames_dir=predictions,
-        base_checkpoint=None, config_name='apps/colmap_3dgut_sparse_mcmc_lpips',
-        steps=30000, use_wandb=False, replace=False)
+    profile = request.get('runtime', {}).get('regularization_profile', 'artifixer')
+    with reconstruction_settings(profile):
+        checkpoint, reused = official.train_artifixer3d(
+            scene, paths, artifixer_frames_dir=predictions,
+            base_checkpoint=None, config_name=ARTIFIXER3D_CONFIG,
+            steps=ARTIFIXER3D_STEPS, use_wandb=False, replace=False)
     gc.collect()
     torch.cuda.empty_cache()
     render_dir = official.render_artifixer3d(
@@ -587,12 +683,39 @@ def distill(root, request, trajectory):
     PLYExporter().export(renderer.model, splat_path)
     (root / 'distillation.json').write_text(json.dumps({
         'splat_path': str(splat_path), 'reconstruction_checkpoint': str(checkpoint),
+        'reconstruction_recipe': reconstruction_recipe(profile),
         'render_dir': str(render_dir), 'supervision_manifest': str(root / 'supervision.json'),
         'original_frame_count': len(render_transforms['frames']),
         'distillation_frame_count': len(transforms['frames'])}, indent=2))
 
 
+def validate_render_sources(request, trajectory):
+    """Do not replay pre-GPU-anchor requests through the worker entry point."""
+    if trajectory.get('recipe', {}).get('anchor_rgb_policy') != 'viser':
+        raise ValueError('Unverified trajectory renderer: regenerate this request with Viser captures')
+    cp = Path(request['checkpoint_root'])
+    if request['mode'] == 'baseline':
+        expected = [(cp / anchor['original_rgb']).resolve() for anchor in trajectory['anchors']]
+        if [Path(path).resolve() for path in request['references']] != expected:
+            raise ValueError('Baseline references must be Viser trajectory captures, not selection previews')
+    else:
+        checkpoint = json.loads((cp / 'checkpoint.json').read_text())
+        if checkpoint.get('metadata', {}).get('renderer', {}).get('backend') != 'viser':
+            raise ValueError('Edited references must originate from Viser captures')
+
+
 def main():
+    if sys.argv[1:2] == ['--reconstruct']:
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument('--reconstruct', action='store_true')
+        parser.add_argument('--repo', required=True)
+        adapter, remaining = parser.parse_known_args()
+        sys.path.insert(0, adapter.repo)
+        from data_processing import run_artifixer3d as official_cli
+        args = official_cli.build_parser().parse_args(remaining)
+        with reconstruction_settings('base_mcmc'):
+            official_cli.artifixer3d.run_artifixer3d(args)
+        return
     parser = argparse.ArgumentParser()
     parser.add_argument('--request', type=Path, required=True)
     parser.add_argument('--phase', choices=('scale', 'caption', 'infer', 'distill', 'plus'), required=True)
@@ -600,6 +723,9 @@ def main():
     request = json.loads(args.request.read_text())
     sys.path.insert(0, request['runtime']['repo'])
     trajectory = json.loads(Path(request['trajectory']).read_text())
+    validate_render_sources(request, trajectory)
+    if args.phase == 'plus' and request.get('plus_rgb_renderer') != 'viser':
+        raise ValueError('ArtiFixer+ requires Viser captures of the reconstructed splat')
     if args.phase == 'scale':
         measure_scale(args.request.parent, request, trajectory)
     elif args.phase == 'caption':

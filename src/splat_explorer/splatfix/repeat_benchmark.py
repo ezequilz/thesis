@@ -11,6 +11,7 @@ import uuid
 from .checkpoint import atomic_json, utc_now
 from . import benchmark as b
 from .repair import UPSTREAM_REVISION, digest_file, run_worker, runtime_environment
+from .official_worker import ARTIFIXER3D_STEPS, reconstruction_recipe, reconstruction_cli_args, reconstruction_command
 
 
 def inherited_inference_command(old, phase, split, destination):
@@ -19,8 +20,13 @@ def inherited_inference_command(old, phase, split, destination):
     if len(records) != 1:
         raise ValueError(f'Repeat requires one completed original {phase} command')
     command = list(records[0]['command'])
-    if command[1:3] != ['-m', 'model_eval.run_inference']:
+    segmented = Path(command[1]).name == 'segmented_inference.py'
+    if command[1:3] != ['-m', 'model_eval.run_inference'] and not segmented:
         raise ValueError('Unexpected original inference entry point')
+    if segmented:
+        command[1] = str(Path(__file__).with_name('segmented_inference.py').resolve())
+        command[command.index('--trajectory-provenance') + 1] = str(
+            Path(destination).parent / 'author-orbit-provenance.json')
     for flag, value in (('--render_trajectory', 'trajectory'), ('--num_views', '3')):
         if flag not in command or command[command.index(flag) + 1] != value:
             raise ValueError(f'Original inference requires {flag} {value}')
@@ -118,12 +124,13 @@ def align_repeat_inputs(split, profile):
     return policy
 
 
-def run_repeat_benchmark(prior, output_dir, *, resolution_profile='training', should_stop=lambda: False, on_progress=lambda event: None):
+def run_repeat_benchmark(prior, output_dir, *, resolution_profile='training', regularization_profile='artifixer', should_stop=lambda: False, on_progress=lambda event: None):
     prior = Path(prior).resolve()
     old = json.loads((prior / 'benchmark-run.json').read_text())
     # Preserve historical dimensions by copying preparation, never re-preprocessing.
     runtime = {k: v for k, v in old['runtime'].items() if k not in ('resume_from', 'preparation_from', 'repeat_from')}
     runtime['resolution_profile'] = resolution_profile
+    runtime['regularization_profile'] = regularization_profile
     cfg = b.benchmark_runtime(runtime)
     root = Path(output_dir).resolve() / f'benchmark_{cfg["model_variant"]}_{uuid.uuid4().hex[:12]}'
     if root.is_relative_to(prior):
@@ -133,6 +140,7 @@ def run_repeat_benchmark(prior, output_dir, *, resolution_profile='training', sh
     for key in ('result', 'resume_source', 'comparison_limitations', 'error', 'resolution_policy'):
         manifest.pop(key, None)
     manifest.update(status='running', created_at=utc_now(), runtime=runtime, stages=[],
+                    artifixer3d_steps=ARTIFIXER3D_STEPS, reconstruction_recipe=reconstruction_recipe(regularization_profile),
                     resume_supported=False, preparation_supported=False,
                     historical_resolution_preserved=resolution_profile == 'early_original')
     if 'resolution_policy' in old:
@@ -177,9 +185,15 @@ def run_repeat_benchmark(prior, output_dir, *, resolution_profile='training', sh
                 raise ValueError(f'Incomplete repaired {key}: expected {count} PNGs')
         stage('inference', inference(split, root / 'inference'))
         predictions = b._prediction_frames(root / 'inference', scene, required)
+        from .inference_preview import publish_preview
+        publish_preview(root, predictions, required, len(selected), frame_count=count,
+                        model_variant=old['result'].get('model_variant'),
+                        trajectory_mode=old['result'].get('trajectory_mode'),
+                        resolution_policy=manifest.get('resolution_policy', {}))
         prepared = split.parent
-        stage('artifixer3d', [cfg['python'], '-m', 'data_processing.run_artifixer3d', '--scene_root', str(prepared),
-                            '--artifixer_frames_dir', str(predictions), '--split_path', str(split)])
+        stage('artifixer3d', [*reconstruction_command(cfg['python'], cfg['repo'], regularization_profile), '--scene_root', str(prepared),
+                            '--artifixer_frames_dir', str(predictions), '--split_path', str(split),
+                            *reconstruction_cli_args()])
         plus = prepared / 'split_artifixer3d_plus.json'
         plus_scene, plus_entry = b._split_entry(plus)
         if plus_scene != scene:

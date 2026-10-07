@@ -1,7 +1,8 @@
 """Offline replay through unmodified ArtiFixer inference and fresh 3DGRUT.
 
 The no-editor baseline uses rendered anchors, not captured photographs. This
-input adaptation is recorded; the authors' algorithm and optimizer stay intact.
+Input adaptation and the selected regularization profile are recorded. The
+default reconstruction is unchanged; base_mcmc is an opt-in loss comparison.
 """
 from __future__ import annotations
 import hashlib
@@ -18,10 +19,13 @@ import uuid
 import numpy as np
 from PIL import Image
 from .checkpoint import Checkpoint, atomic_json, camera_from_record
+from .viser_capture import capture_rgb, capture_plus_rgb
+from .official_worker import ARTIFIXER3D_CONFIG, ARTIFIXER3D_STEPS, reconstruction_recipe, validate_regularization
 
 UPSTREAM_REVISION = 'a392c4dfe17459ef9952407accdb9fcdcdddba98'
 DEFAULT_RUNTIME = {
     'resolution_profile': 'training',
+    'regularization_profile': 'artifixer',
     'repo': '/workspace/third_party/ArtiFixer',
     'python': '/workspace/artifixer-venv/bin/python',
     'checkpoint': '/workspace/models/artifixer/artifixer-1.3b.pt',
@@ -78,10 +82,11 @@ def validate_runtime(runtime=None):
     cfg = {**DEFAULT_RUNTIME, **(runtime or {})}
     from .resolution import profile_size
     profile_size(cfg['resolution_profile'])
+    validate_regularization(cfg['regularization_profile'])
     repo = Path(cfg['repo']).resolve()
     for relative in ('model_eval/run_inference.py', 'data_processing/artifixer3d.py',
                      'thirdparty/3DGRUT-ArtiFixer/threedgrut/trainer.py',
-                     'thirdparty/3DGRUT-ArtiFixer/configs/apps/colmap_3dgut_sparse_mcmc_lpips.yaml'):
+                     f'thirdparty/3DGRUT-ArtiFixer/configs/{ARTIFIXER3D_CONFIG}.yaml'):
         if not (repo / relative).is_file():
             raise FileNotFoundError(f'Missing official ArtiFixer source: {repo / relative}; initialize the pinned 3DGRUT submodule and GPU environment')
     revision = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
@@ -132,7 +137,7 @@ def prepare_trajectory(checkpoint, *, frames=25, span_fraction=.04,
         raise ValueError('frames must be 1 + 4*n and at least 9')
     if not np.isfinite(span_fraction) or not 0 < span_fraction <= .15:
         raise ValueError('span_fraction must be in (0, .15]')
-    signature = hashlib.sha256(json.dumps({'trajectory_version': 4, 'anchor_rgb_policy': 'source_scene_bundle_renderer', 'views': [{k: v for k, v in view.items() if k in ('id', 'camera', 'original_rgb')} for view in cp.views],
+    signature = hashlib.sha256(json.dumps({'trajectory_version': 5, 'anchor_rgb_policy': 'viser', 'views': [{k: v for k, v in view.items() if k in ('id', 'camera', 'original_rgb')} for view in cp.views],
         'source': cp.manifest.get('source_fingerprint', cp.manifest['scene_path']), 'scene_load': cp.manifest.get('metadata', {}).get('scene_load', {}),
         'rgb': [digest_file(cp.image_path(view)) for view in cp.views], 'frames': frames, 'span_fraction': span_fraction}, sort_keys=True).encode()).hexdigest()
     cache = cp.root / 'trajectories'
@@ -193,7 +198,11 @@ def prepare_trajectory(checkpoint, *, frames=25, span_fraction=.04,
     finally:
         del renderer
         release_cuda()
-    manifest = {'schema_version': 2, 'depth_convention': 'expected_camera_z', 'camera_convention': 'opencv_c2w', 'signature': signature, 'transforms': {'camera_model': 'OPENCV', **transforms(all_cameras)},
+    capture_rgb(source_path, all_cameras, [cp.root / frame['rgb'] for frame in records],
+                up_axis=cp.manifest.get('metadata', {}).get('up_axis', '-y'),
+                lod_level=cp.manifest.get('metadata', {}).get('scene_load', {}).get('lod_level', 0),
+                should_stop=should_stop)
+    manifest = {'schema_version': 2, 'recipe': {'anchor_rgb_policy': 'viser'}, 'depth_convention': 'expected_camera_z', 'camera_convention': 'opencv_c2w', 'signature': signature, 'transforms': {'camera_model': 'OPENCV', **transforms(all_cameras)},
                 'segments': segments, 'anchors': anchors, 'frames': records,
                 'points3d': str((root / 'points3D.bin').relative_to(cp.root)),
                 'source_scene': source_path}
@@ -240,7 +249,15 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
                 raise ValueError('Authored orbit must contain every saved anchor exactly once')
             anchor_indices.append(matches[0])
     source_path = str(Path(scene_path).resolve()) if scene_path else cp.manifest['scene_path']
-    recipe = {'trajectory_version': 4, 'anchor_rgb_policy': 'source_scene_bundle_renderer', 'kind': 'authors_orbit' if orbit else 'scale_anchors',
+    segments = [{'start': 0, 'count': len(cameras)}]
+    if orbit:
+        segments = [{'indices': s['full_frame_indices'],
+                     **({'seed_index': s['seed_full_frame_index']} if 'seed_full_frame_index' in s else {})}
+                    for s in orbit['provenance']['segments']]
+        generated = [i for s in segments for i in s['indices']]
+        if sorted(generated) != [i for i in range(len(cameras)) if i not in anchor_indices]:
+            raise ValueError('Trajectory legs must cover each non-reference camera exactly once')
+    recipe = {'trajectory_version': 6, 'anchor_rgb_policy': 'viser', 'kind': 'authors_orbit' if orbit else 'scale_anchors',
               'views': [{k: v for k, v in view.items() if k in ('id', 'camera', 'original_rgb')} for view in cp.views],
               'source': cp.manifest.get('source_fingerprint', cp.manifest['scene_path']),
               'scene_load': cp.manifest.get('metadata', {}).get('scene_load', {}),
@@ -283,10 +300,14 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
                     'opacity': str(alpha_path.relative_to(cp.root))}
             records.append({'rgb': str(rgb_path.relative_to(cp.root)), 'opacity': str(alpha_path.relative_to(cp.root))})
         write_seed_points(root / 'points3D.bin', scene)
+        capture_rgb(source_path, cameras, [cp.root / frame['rgb'] for frame in records],
+                    up_axis=cp.manifest.get('metadata', {}).get('up_axis', '-y'),
+                    lod_level=cp.manifest.get('metadata', {}).get('scene_load', {}).get('lod_level', 0),
+                    should_stop=should_stop)
         manifest = {'schema_version': 3, 'depth_convention': 'expected_camera_z',
                     'camera_convention': 'opencv_c2w', 'signature': signature, 'recipe': recipe,
                     'transforms': {'camera_model': 'OPENCV', **transforms(cameras)},
-                    'segments': [{'start': 0, 'count': len(cameras)}], 'anchors': anchor_records,
+                    'segments': segments, 'anchors': anchor_records,
                     'frames': records, 'points3d': str((root / 'points3D.bin').relative_to(cp.root)),
                     'source_scene': source_path}
         paths = {entry[key] for entry in records for key in ('rgb', 'opacity')} | {manifest['points3d']} | {anchor['depth'] for anchor in anchor_records}
@@ -302,13 +323,45 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
 
 
 def run_worker(command, *, cwd, env, log_path, should_stop):
+    log_path = Path(log_path)
+    # Only reconstruction subprocesses own trainable Gaussian state. Other
+    # phases retain ordinary cancellation and do not import the CUDA trainer.
+    training = log_path.stem in ('artifixer3d', 'distill', 'reconstruct')
+    control = log_path.with_suffix('.save-stop')
+    snapshot = log_path.parent / (log_path.stem + '.interrupted')
+    if should_stop():
+        raise InterruptedError('Splatfix repair stopped before worker launch')
+    if training:
+        control.unlink(missing_ok=True)
+        original_command = list(command)
+        command = [command[0], '-u', str(Path(__file__).with_name('graceful_worker.py')),
+                   '--control', str(control.resolve()), '--snapshot', str(snapshot.resolve()), '--', *command[1:]]
+        from .checkpoint import atomic_json
+        atomic_json(log_path.with_suffix('.lifecycle.json'), {
+            'policy': 'Iteration-boundary checkpoint and PLY on stop; no added periodic checkpoints',
+            'original_command': original_command, 'worker_command': command,
+            'upstream_source_modified': False})
+    stop_started = None
+    save_timeout = float(env.get('SPLATFIX_SAVE_STOP_TIMEOUT_SECONDS', '240'))
     with Path(log_path).open('w') as log:
         process = subprocess.Popen(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             while process.poll() is None:
                 if should_stop():
-                    raise InterruptedError('Splatfix repair stopped')
+                    if not training:
+                        raise InterruptedError('Splatfix repair stopped')
+                    if stop_started is None:
+                        stop_started = time.monotonic()
+                        control.write_text('Save checkpoint and PLY at the next completed iteration, then exit.\n')
+                    if time.monotonic() - stop_started >= save_timeout:
+                        from .checkpoint import atomic_json
+                        atomic_json(log_path.with_suffix('.stop-timeout.json'), {
+                            'status': 'save_timeout', 'seconds': save_timeout,
+                            'message': 'Graceful save did not finish before timeout; inspect interrupted/stop-state.json before trusting outputs'})
+                        raise InterruptedError('Graceful save timed out; preserving available files before termination')
                 time.sleep(.25)
+            if stop_started is not None or should_stop():
+                raise InterruptedError('Splatfix repair stopped; available checkpoint/PLY and diagnostics preserved')
             if process.returncode:
                 raise RuntimeError(f'ArtiFixer worker failed: {Path(log_path).read_text(errors="replace")[-3000:]}')
         finally:
@@ -327,6 +380,8 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
     """Run independently with cached authors local captioning; never merge PLYs."""
     if mode not in ('edited', 'baseline'):
         raise ValueError('mode must be edited or baseline')
+    from .author_trajectory import validate_split_mode
+    split_mode = validate_split_mode((runtime or {}).get('split_mode', 'double-split'))
     if (type(seed) is not int or not 0 <= seed < 2**31
             or (camera_scale is not None and (isinstance(camera_scale, bool)
                 or not np.isfinite(camera_scale) or camera_scale <= 0))):
@@ -334,6 +389,8 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
     cp = Checkpoint.load(checkpoint_dir)
     if not cp.complete:
         raise ValueError('Finish selecting all requested views before repair')
+    if mode == 'edited':
+        cp.require_viser_images()
     if mode == 'edited' and any(not view.get('repaired_rgb') for view in cp.views):
         raise ValueError('Edited reconstruction requires saved GPT-image repairs; run splatfix edit first')
     references = [str(cp.image_path(view, repaired=mode == 'edited')) for view in cp.views]
@@ -351,6 +408,7 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         if len(pose_keys) != len(cp.views):
             raise ValueError('Saved anchor poses must be distinct for authors smooth orbit')
     cfg = validate_runtime(runtime)
+    cfg = {**cfg, 'split_mode': split_mode}
     from .resolution import prepare_checkpoint
     root = Path(output_dir).resolve() / f'{mode}_{uuid.uuid4().hex[:12]}'
     root.mkdir(parents=True, exist_ok=False)
@@ -375,9 +433,10 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                'supervision_policy': 'one target per exact calibrated camera; original index mapping retained; saved anchors take priority',
                'source_points3d': str(Path(points).resolve()),
                'initialization': 'source_colmap_points' if cfg.get('source_points3d') else 'original_splat_positions_and_rgb',
-               'upstream_revision': UPSTREAM_REVISION, 'fit_iterations': 30000,
-               'input_adaptation': 'Source splat re-rendered at saved cameras with the trajectory renderer replaces photographic anchors; selection previews are not baseline supervision. Edited mode uses cached GPT-image RGB.',
-               'anchor_rgb_policy': 'source_scene_bundle_renderer',
+               'upstream_revision': UPSTREAM_REVISION, 'fit_iterations': ARTIFIXER3D_STEPS,
+               'reconstruction_recipe': reconstruction_recipe(cfg.get('regularization_profile', 'artifixer')),
+               'input_adaptation': 'Source splat RGB captured through the harness Viser at every calibrated camera. CUDA supplies only opacity/depth. Edited mode uses edits of Viser captures.',
+               'anchor_rgb_policy': 'viser',
                'trajectory_mode': trajectory_mode,
                'inference_target_policy': ('exclude_saved_anchor_indices' if trajectory_mode == 'authors_orbit'
                                            else 'all_segment_frames'),
@@ -398,6 +457,7 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                 atomic_json(root / 'anchor-transforms.json', {**trajectory['transforms'], 'camera_convention': 'opencv_c2w'})
                 atomic_json(root / 'anchor-indices.json', list(range(len(cp.views))))
                 command = [cfg['python'], str(Path(__file__).with_name('author_trajectory.py')),
+                    '--split-mode', split_mode,
                     '--repo', cfg['repo'], '--transforms', str(root / 'anchor-transforms.json'),
                     '--selected-indices', str(root / 'anchor-indices.json'),
                     '--metric-scale', str(request['camera_scale'] / .01),
@@ -416,8 +476,22 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                                orbit_provenance=orbit_provenance)
                 atomic_json(root / 'request.json', request)
                 continue
+            if phase == 'plus':
+                capture_plus_rgb(root, trajectory, up_axis=cp.manifest.get('metadata', {}).get('up_axis', '-y'),
+                                 should_stop=should_stop)
+                request['plus_rgb_renderer'] = 'viser'
+                atomic_json(root / 'request.json', request)
             run_worker([cfg['python'], str(Path(__file__).with_name('official_worker.py')), '--request', str(root / 'request.json'), '--phase', phase],
                        cwd=cfg['repo'], env=(runtime_environment({**cfg, 'model_hub_offline': False}) if phase == 'caption' else env), log_path=root / f'{phase}.log', should_stop=should_stop)
+            if phase == 'infer':
+                from .official_worker import unique_supervision
+                from .inference_preview import publish_preview
+                _, supervision = unique_supervision(trajectory, request['references'])
+                groups = supervision['groups']
+                publish_preview(root, root / 'inference/splatfix/frames/batch_0000/pred',
+                                [g['source_index'] for g in groups if not g.get('reference')],
+                                sum(bool(g.get('reference')) for g in groups),
+                                trajectory_mode=trajectory_mode, resolution_policy={'profile': request['resolution_profile']})
             if phase == 'caption':
                 caption = json.loads((root / 'caption-result.json').read_text())
                 request.update(caption_path=caption['caption_path'], caption_sha256=caption['sha256'],

@@ -39,6 +39,7 @@ class SplatfixStudio(SceneRunStudio):
                     else 'Saved cameras are ready for authors smooth orbit')
                 reconstruction_ready = cp.complete and distinct >= 2 and distinct == len(cp.views)
                 result.append({'id': str(cp.root), 'name': cp.root.name, 'scene': Path(cp.manifest['scene_path']).name,
+                               'rgb_renderer': cp.manifest.get('metadata', {}).get('renderer', {}).get('backend'),
                                'scene_path': cp.manifest['scene_path'],
                                'created_at': cp.manifest.get('created_at'), 'views': views, 'target_views': cp.target_views,
                                'complete': cp.complete, 'reconstruction_ready': reconstruction_ready,
@@ -151,6 +152,7 @@ class SplatfixStudio(SceneRunStudio):
         return {'scenes': self.scenes(), 'checkpoints': self.checkpoints(), 'jobs': self.jobs(), 'benchmarks': self.benchmarks(),
                 'manager': {'active': manager.get('status') == 'running' and alive, 'updated_at': manager.get('updated_at')},
                 'compute': {'configured': repair_lrz.lrz_configured(), 'label': 'Configured LRZ allocation'},
+                'capture_viewer_port': self.cfg.get('viewer', {}).get('port', 8080),
                 'resolution_profiles': [{'id': key, 'label': PROFILE_LABELS[key], 'width': size[0], 'height': size[1]} for key, size in PROFILES.items()],
                 'defaults': {'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', 'training'), 'views': 6, 'frames': 25, 'span_fraction': .04,
                              'width': self.defaults()['width'], 'height': self.defaults()['height']}}
@@ -194,6 +196,8 @@ class SplatfixStudio(SceneRunStudio):
             cp = checkpoints[checkpoint]
             if not cp['complete']:
                 raise ValueError('Finish selecting all views before starting this stage')
+            if (options['stage'] == 'edit' or options.get('mode') == 'edited') and cp['rgb_renderer'] != 'viser':
+                raise ValueError('Recapture these views in Viser before image editing or edited reconstruction')
             if options['stage'] == 'repair' and not cp['reconstruction_ready']:
                 raise ValueError(cp['reconstruction_readiness'])
             if options['stage'] == 'repair' and options['mode'] == 'edited' and cp['edited'] != cp['target_views']:

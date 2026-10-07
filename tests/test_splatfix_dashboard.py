@@ -27,7 +27,8 @@ def studio(tmp_path):
 
 
 def checkpoint(studio, count=1, complete=True):
-    cp = Checkpoint.create(studio.checkpoint_root, '/fake/scene.ply', target_views=count)
+    cp = Checkpoint.create(studio.checkpoint_root, '/fake/scene.ply', target_views=count,
+                           metadata={'renderer': {'backend': 'viser'}})
     if complete:
         camera = Camera(np.zeros(3), np.eye(3), width=16, height=16, fov_deg=60)
         for index in range(count):
@@ -38,6 +39,10 @@ def checkpoint(studio, count=1, complete=True):
 
 def test_stage_validation():
     assert validate_job({'stage': 'select'})['views'] == 6
+    assert validate_job({'stage': 'select'})['renderer'] == 'viser'
+    for backend in ('cpu_splats', 'cpu_points', 'gsplat'):
+        with pytest.raises(ValueError, match='Viser captures'):
+            validate_job({'stage': 'select', 'renderer': backend})
     for value in (True, 0, 25, 3.5):
         with pytest.raises(ValueError):
             validate_job({'stage': 'select', 'views': value})
@@ -264,7 +269,7 @@ def test_registered_benchmark_queues_without_checkpoint(studio):
     source = benchmark_input(studio)
     job = studio.create({'stage': 'benchmark', 'source': str(source)})
     options = job['config']['splatfix']
-    assert options == {'stage': 'benchmark', 'source': str(source), 'mode': 'baseline', 'model': '1.3b', 'resolution_profile': 'training'}
+    assert options == {'stage': 'benchmark', 'source': str(source), 'mode': 'baseline', 'model': '1.3b', 'resolution_profile': 'training', 'regularization_profile': 'artifixer', 'split_mode': 'double-split'}
     assert studio.benchmarks()[0]['ready']
     assert 'not confirmed' in studio.benchmarks()[0]['provenance_note']
     from splat_explorer.splatfix.jobs import requires_gpu

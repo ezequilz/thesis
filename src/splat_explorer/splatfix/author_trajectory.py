@@ -8,8 +8,17 @@ from __future__ import annotations
 import math
 
 
+SPLIT_MODES = ('single-split', 'double-split')
+
+
+def validate_split_mode(value):
+    if value not in SPLIT_MODES:
+        raise ValueError('split_mode must be single-split or double-split')
+    return value
+
+
 def build_author_orbit(reference_poses, intrinsics, metric_scale, *, target_poses=None,
-                       loop=False, spacing=0.1, renderer=None):
+                       loop=False, spacing=0.1, renderer=None, split_mode='double-split'):
     """Return target-only OpenGL C2W ``trajectory`` and auditable ``provenance``.
 
     ``reference_poses`` and optional ``target_poses`` are OpenGL C2W matrices.
@@ -21,6 +30,10 @@ def build_author_orbit(reference_poses, intrinsics, metric_scale, *, target_pose
     If spacing yields only anchors, bounded refinement through the same helper
     creates intermediate targets; provenance records requested/effective spacing.
 
+    ``split_mode`` defaults to double-split: disjoint inward halves between
+    trusted references, each with its endpoint image as initial conditioning.
+    Single-split retains one forward series per original waypoint leg.
+
     Exact references are context cameras, never generated supervision. Input
     and output deduplication is exact, so nearby genuine cameras stay distinct.
     ``renderer`` is an optional instance for tests; production needs no model
@@ -28,6 +41,7 @@ def build_author_orbit(reference_poses, intrinsics, metric_scale, *, target_pose
     """
     import numpy as np
 
+    validate_split_mode(split_mode)
     if not isinstance(loop, bool):
         raise ValueError('loop must be a bool')
     metric_scale, spacing = float(metric_scale), float(spacing)
@@ -107,6 +121,13 @@ def build_author_orbit(reference_poses, intrinsics, metric_scale, *, target_pose
         training_nodes = []
         node_roles = 'two_node_authors_sort'
     starts_at_reference = bool(training_nodes)
+    # Ask the same helper for its ordered nodes without intermediate samples.
+    # Pose equality alone cannot identify boundaries: a leg may pass through a
+    # different input camera on its way to its actual endpoint.
+    waypoint_cv, _ = renderer.interpolate_orbit_poses(
+        cv_nodes[input_nodes], loop=loop, interp_distance=np.finfo(np.float64).max,
+        training_poses=cv_nodes[training_nodes] if training_nodes else None)
+    waypoint_keys = [key(pose) for pose in np.asarray(waypoint_cv) @ flip]
     effective_distance = spacing / metric_scale
     fallback_reason = None
     attempted_distances = []
@@ -139,6 +160,28 @@ def build_author_orbit(reference_poses, intrinsics, metric_scale, *, target_pose
             effective_distance /= 2
         if not math.isfinite(effective_distance) or effective_distance <= 0:
             raise ValueError('Distinct cameras have no measurable distance for authors interpolation')
+    # Split at original waypoints, before filtering references. Re-running the
+    # orbit sorter on each pair could reverse legs (its PCA is pair-dependent).
+    # Keeping the original interpolation preserves exact benchmark cameras.
+    boundaries, cursor = [], 0
+    for waypoint_key in waypoint_keys:
+        while cursor < len(interpolated) and key(interpolated[cursor]) != waypoint_key:
+            cursor += 1
+        if cursor == len(interpolated):
+            raise ValueError('Authors interpolation omitted an ordered waypoint')
+        boundaries.append(cursor)
+        cursor += 1
+    legs = []
+    for left, right in zip(boundaries, boundaries[1:]):
+        legs.append((left, right))
+    if loop and boundaries:
+        legs.append((boundaries[-1], len(interpolated)))
+    elif legs:
+        legs[-1] = (legs[-1][0], len(interpolated))
+    segments = []
+    for start, end in legs:
+        segments.append({'author_start': start, 'author_end_exclusive': end,
+                         'target_indices': [], 'full_frame_indices': []})
     frames, mapping, removed, seen = [], [], [], {}
     full_frames, full_lookup = [], {}
     for raw_index, (pose, original_index) in enumerate(zip(interpolated, original_indices)):
@@ -157,13 +200,53 @@ def build_author_orbit(reference_poses, intrinsics, metric_scale, *, target_pose
         frame_index = len(frames)
         seen[pose_key] = frame_index
         frames.append({'transform_matrix': pose.tolist()})
-        node_index = input_nodes[int(original_index)] if int(original_index) >= 0 else None
+        # A previous leg may already have passed exactly through this node;
+        # retain its named-camera mapping even if upstream labels it interpolated.
+        node_index = node_lookup.get(pose_key)
         mapping.append({'target_index': frame_index, 'author_frame_index': raw_index,
                         'full_frame_index': full_lookup[pose_key],
                         'input_node_index': node_index,
                         'requested_target_indices': [i for i, n in enumerate(target_nodes) if n == node_index]})
+        segment = next((s for s in segments if s['author_start'] <= raw_index < s['author_end_exclusive']), None)
+        if segment is None:
+            raise ValueError('Authors interpolation target is outside original waypoint legs')
+        segment['target_indices'].append(frame_index)
+        segment['full_frame_indices'].append(full_lookup[pose_key])
     if not frames:
         raise ValueError('Authors interpolation produced no non-reference targets; use smaller spacing')
+    segments = [s for s in segments if s['target_indices']]
+    if split_mode == 'double-split':
+        # Only trusted reference cameras may seed a half-series. Benchmark
+        # test cameras remain targets, including when they are orbit waypoints.
+        anchors = [i for i in boundaries if key(interpolated[i]) in reference_keys]
+        spans = list(zip(anchors, anchors[1:]))
+        if loop:
+            spans.append((anchors[-1], len(interpolated)))
+        elif anchors[-1] < len(interpolated) - 1:
+            spans.append((anchors[-1], len(interpolated)))
+        segments = []
+        for leg, (left, right) in enumerate(spans):
+            entries = [m for m in mapping if left <= m['author_frame_index'] < right]
+            end = (0 if loop else None) if right == len(interpolated) else right
+            midpoint = (len(entries) + 1) // 2 if end is not None else len(entries)
+            halves = [(entries[:midpoint], left, 'forward')]
+            if end is not None:
+                halves.append((entries[midpoint:][::-1], end, 'reverse'))
+            for half, seed, direction in halves:
+                if not half:
+                    continue
+                seed_key = key(interpolated[seed])
+                segments.append({
+                    'leg_index': leg, 'direction': direction,
+                    'open_tail': end is None,
+                    'author_start': left, 'author_end_exclusive': right,
+                    'seed_full_frame_index': full_lookup[seed_key],
+                    'seed_transform_matrix': interpolated[seed].tolist(),
+                    'target_indices': [m['target_index'] for m in half],
+                    'full_frame_indices': [m['full_frame_index'] for m in half],
+                })
+        if sorted(i for s in segments for i in s['target_indices']) != list(range(len(frames))):
+            raise ValueError('Reference-anchored splits must cover every target exactly once')
     # Use the trusted cameras' up estimate for both paths. Interpolation is
     # continuous within each leg, but azimuth sorting need not produce a flat
     # or globally smooth path when the inputs span multiple capture heights.
@@ -197,6 +280,10 @@ def build_author_orbit(reference_poses, intrinsics, metric_scale, *, target_pose
             'reference_node_indices': reference_nodes, 'requested_target_node_indices': target_nodes,
             'unique_input_nodes': len(nodes), 'author_frame_count': len(interpolated),
             'target_frame_count': len(frames), 'frames': mapping, 'removed_frames': removed,
+            'split_mode': split_mode,
+            'series_policy': ('independent_original_waypoint_legs_v1' if split_mode == 'single-split'
+                              else 'reference_anchored_bidirectional_halves_v1'),
+            'segments': segments,
             'motion_diagnostics': motion,
         },
     }
@@ -217,6 +304,7 @@ def main(argv=None):
     parser.add_argument('--target-names', type=Path)
     parser.add_argument('--metric-scale', type=float, required=True)
     parser.add_argument('--interp-distance', type=float, default=0.1)
+    parser.add_argument('--split-mode', choices=SPLIT_MODES, default='double-split')
     parser.add_argument('--loop', action='store_true')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--provenance', type=Path, required=True)
@@ -259,7 +347,7 @@ def main(argv=None):
     sys.path.insert(0, str(args.repo / 'thirdparty' / '3DGRUT-ArtiFixer'))
     sys.path.insert(0, str(args.repo))
     result = build_author_orbit(references, intrinsics, args.metric_scale, target_poses=targets,
-                                loop=args.loop, spacing=args.interp_distance)
+                                loop=args.loop, spacing=args.interp_distance, split_mode=args.split_mode)
     name_to_index = {}
     for mapping in result['provenance']['frames']:
         requested = mapping['requested_target_indices']

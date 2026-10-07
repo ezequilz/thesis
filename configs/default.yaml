@@ -229,3 +229,8 @@ dashboard:
 
 output:
   dir: outputs
+
+# Save at an iteration boundary before allocation expiry; no extra periodic saves.
+splatfix:
+  stop_before_gpu_end_seconds: 300
+  save_stop_timeout_seconds: 240

@@ -13,7 +13,8 @@ from splat_explorer.splatfix.image_repair import repair_images
 
 
 def make_checkpoint(tmp_path, count=2):
-    checkpoint = Checkpoint.create(tmp_path, tmp_path / 'scene.ply', target_views=count)
+    checkpoint = Checkpoint.create(tmp_path, tmp_path / 'scene.ply', target_views=count,
+                                   metadata={'renderer': {'backend': 'viser'}})
     for index in range(count):
         camera = Camera(np.array([index, 1., 2.]), np.eye(3), width=16, height=12)
         checkpoint.add_view(np.full((12, 16, 3), index, np.uint8), camera,

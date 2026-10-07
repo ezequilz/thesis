@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import signal
 import threading
@@ -225,48 +226,17 @@ class SceneRunManager:
             )
 
     def _gpu_ready(self, force: bool = False) -> dict[str, Any]:
-        now = time.time()
-        if (
-            not force
-            and self._last_probe is not None
-            and now - self._last_probe_at < self.gpu_probe_seconds
-        ):
-            return dict(self._last_probe)
-        body: dict[str, Any]
+        # Setup publishes a durable, job-bound deadline. Read it locally on
+        # every decision so job switches/expiry never use an old probe's TTL.
+        from .. import repair_lrz
+        from .allocation_cache import loaded_allocation
+        cfg = repair_lrz.load_lrz_config()
         try:
-            from .. import repair_lrz
-            from .lrz_transport import active_job_squeue_command
-
-            cfg = repair_lrz.load_lrz_config()
-            job_id = str(cfg.get("job_id") or "")
-            result = repair_lrz._ssh_run(
-                cfg, active_job_squeue_command(job_id), timeout=25,
-            )
-            slurm = repair_lrz.parse_squeue_line(result.stdout or "") or {}
-            ready = str(slurm.get("state") or "").upper() == "R"
-            body = {
-                "ready": ready,
-                "job_id": str(slurm.get("job_id") or cfg.get("job_id") or ""),
-                "state": slurm.get("state"),
-                "partition": slurm.get("partition"),
-                "node": slurm.get("node"),
-                "expected_end": slurm.get("expected_end"),
-                "time_left": slurm.get("time_left"),
-                "timelimit": slurm.get("timelimit"),
-                "message": (
-                    f"LRZ job {slurm.get('job_id')} is ready"
-                    if ready
-                    else f"LRZ job is {slurm.get('state') or 'unavailable'}, waiting for ST=R"
-                ),
-            }
-        except Exception as exc:
-            body = {
-                "ready": False,
-                "message": f"{type(exc).__name__}: {exc}",
-            }
-        self._last_probe = body
-        self._last_probe_at = now
-        return dict(body)
+            allocation = loaded_allocation(cfg)
+            return {**allocation, 'ready': True,
+                    'message': f"LRZ job {allocation['job_id']} loaded; using cached allocation deadline"}
+        except ValueError as exc:
+            return {'ready': False, 'job_id': str(cfg.get('job_id') or ''), 'message': str(exc)}
 
     def _apply_gpu_deadline(self, run_id: str, gpu: dict[str, Any]) -> None:
         detail = None
@@ -287,21 +257,36 @@ class SceneRunManager:
             or config.get("requested_deadline")
             or (started + float(config.get("duration_seconds") or 3600))
         )
-        effective = requested
+        effective = min(requested, float(status.get('effective_deadline') or requested))
         expected = gpu.get("expected_end")
+        stop_buffer = float(self.cfg.get('splatfix', {}).get('stop_before_gpu_end_seconds', 300))
+        if not math.isfinite(stop_buffer) or stop_buffer < 60:
+            raise ValueError('stop_before_gpu_end_seconds must be at least 60')
+        gpu_end = None
         if expected:
             try:
-                from .store import parse_slurm_end
+                from .models import parse_slurm_end
+                from zoneinfo import ZoneInfo
 
                 parsed = parse_slurm_end(expected)
                 if parsed is not None:
-                    effective = min(effective, float(parsed.timestamp()) - 120.0)
-            except (ImportError, TypeError, ValueError):
-                pass
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=ZoneInfo('Europe/Berlin'))
+                    gpu_end = float(parsed.timestamp())
+            except (TypeError, ValueError):
+                logger.warning('Could not parse GPU deadline %r', expected)
+        if gpu_end is None and gpu.get('time_left'):
+            from .models import parse_slurm_duration
+            remaining = parse_slurm_duration(gpu['time_left'])
+            if remaining is not None:
+                gpu_end = float(gpu.get('observed_at_epoch') or started) + remaining.total_seconds()
+        if gpu_end is not None:
+            effective = min(effective, gpu_end - stop_buffer)
         self._update(
             run_id,
             requested_deadline=requested,
             effective_deadline=effective,
+            stop_before_gpu_end_seconds=stop_buffer,
             gpu=gpu,
         )
 
