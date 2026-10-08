@@ -180,6 +180,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
     capture_mirror = None if benchmark else CaptureMirror(
         root, remote_dir, container_dir, cp, endpoint, ssh, sync,
         url=executor.cfg.get('renderer', {}).get('viser_url') or None, should_stop=capture_stop, progress=update)
+    state = {}
+    primary_error = None
     try:
         while True:
             deadline = executor.store.get_run(run_id).state.details.get('effective_deadline')
@@ -193,6 +195,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 capture_mirror.poll()
             raw = ssh('if [ -f ' + shlex.quote(remote_dir + '/worker-status.json') + ' ]; then cat ' + shlex.quote(remote_dir + '/worker-status.json') + '; fi')
             state = json.loads(raw) if raw.strip() else {}
+            if state:
+                atomic_json(root / 'worker-status.json', state)
             log_mirror.poll(state)
             preview_mirror.poll(state)
             if state != last and state:
@@ -208,6 +212,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 # status is authoritative; exit code zero alone is not.
                 raw = ssh('if [ -f ' + shlex.quote(remote_dir + '/worker-status.json') + ' ]; then cat ' + shlex.quote(remote_dir + '/worker-status.json') + '; fi')
                 state = json.loads(raw) if raw.strip() else {}
+                if state:
+                    atomic_json(root / 'worker-status.json', state)
                 log_mirror.poll(state)
                 if state != last and state:
                     last = state
@@ -219,8 +225,12 @@ def execute_remote(executor, run_id, options, root, stop, update):
             if time.monotonic() - started > 24 * 3600:
                 raise TimeoutError('GPU stage exceeded 24 hours; inspect remote stage.log')
             time.sleep(2)
-    except BaseException:
-        ssh('touch ' + shlex.quote(remote_dir + '/STOP'))
+    except BaseException as exc:
+        primary_error = exc
+        try:
+            ssh('touch ' + shlex.quote(remote_dir + '/STOP'))
+        except Exception as stop_error:
+            update(stop_signal_error=str(stop_error))
         raise
     finally:
         preview_mirror.finish()
@@ -244,9 +254,16 @@ def execute_remote(executor, run_id, options, root, stop, update):
             temporary.write_text(f'Artifact transfer exited with code {exc.returncode}\n'
                                  f'\nSTDERR\n{exc.stderr}\nSTDOUT\n{exc.stdout}')
             os.replace(temporary, diagnostic)
-            raise
-        if cp is not None:
-            persist_checkpoint_caches(root / 'gpu' / 'checkpoint', cp.root)
+            update(artifact_transfer_error=str(exc))
+            if primary_error is None:
+                if state.get('status') == 'error':
+                    raise RuntimeError(state.get('message') or 'GPU reconstruction failed') from exc
+                if state.get('status') == 'stopped':
+                    raise InterruptedError('GPU reconstruction cancelled; artifact download also failed') from exc
+                raise
+        else:
+            if cp is not None and primary_error is None:
+                persist_checkpoint_caches(root / 'gpu' / 'checkpoint', cp.root)
     if state['status'] == 'stopped' or stop():
         raise InterruptedError('GPU reconstruction cancelled')
     if state['status'] != 'completed':

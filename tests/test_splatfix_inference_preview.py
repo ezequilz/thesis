@@ -112,3 +112,55 @@ def test_worker_advertises_preview_through_later_phases(tmp_path, monkeypatch):
     assert 'inference_preview' not in states[0]
     assert states[1]['inference_preview'] == states[2]['inference_preview'] == str(root / 'inference-preview.json')
     assert states[1]['status'] == 'running'
+
+
+def test_transient_transfer_failure_retries(tmp_path):
+    remote = tmp_path / 'remote/results/run'
+    preview(remote)
+    calls = []
+    def transfer(argv):
+        calls.append(argv)
+        if len(calls) == 1:
+            raise RuntimeError('temporary disconnect')
+        shutil.copytree(remote, Path(argv[-1]), dirs_exist_ok=True)
+    worker = InferencePreviewMirror(tmp_path / 'local', '/workspace/job', '/dss/job', 'host', 'ssh', transfer)
+    state = {'inference_preview': '/workspace/job/results/run/inference-preview.json'}
+    worker.poll(state)
+    worker.finish()
+    worker.retry_after = 0
+    worker.poll(state)
+    worker.finish()
+    assert len(calls) == 2
+    assert (tmp_path / 'local/gpu/results/run/inference-preview.json').is_file()
+
+
+def test_preview_syncs_camera_metadata_and_builds_chart_without_gpu(tmp_path):
+    import numpy as np
+    remote = tmp_path / 'remote/results/run'
+    pred = preview(remote)
+    prepared = remote / 'prepared/bicycle'
+    prepared.mkdir(parents=True)
+    poses = np.tile(np.eye(4), (3, 1, 1))
+    poses[:, 1, 3] = [0, 1, 2]
+    (prepared / 'poses.json').write_text(json.dumps({'frames': [{'transform_matrix': p.tolist()} for p in poses]}))
+    (prepared / 'refs.json').write_text('[1]')
+    (prepared / 'targets.json').write_text('[0,2]')
+    (prepared / 'split.json').write_text(json.dumps({'test': {'bicycle': {
+        'transforms_path': '/workspace/job/results/run/prepared/bicycle/poses.json',
+        'selected_indices_path': 'refs.json', 'target_indices_path': 'targets.json'}}}))
+    (prepared / 'depth').mkdir()
+    (prepared / 'depth/large.npy').write_bytes(b'not needed')
+    local = tmp_path / 'local'
+    def transfer(argv):
+        command = argv[:]
+        i = command.index('-e')
+        del command[i:i+2]
+        command[-2] = str(remote) + '/'
+        subprocess.run(command, check=True, capture_output=True)
+    worker = InferencePreviewMirror(local, '/workspace/job', '/dss/job', 'host', 'ssh', transfer)
+    worker.poll({'inference_preview': '/workspace/job/results/run/inference-preview.json'})
+    worker.finish()
+    saved = local / 'gpu/results/run'
+    assert (saved / 'trajectory-quality.png').is_file()
+    assert json.loads((saved / 'trajectory-quality.json').read_text())['target_count'] == 2
+    assert not list(saved.rglob('*.npy'))

@@ -7,6 +7,7 @@ The pipeline initializes fresh caches for each item and clears them on decode.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 from pathlib import Path
 import sys
@@ -24,13 +25,35 @@ class SeededDataset:
         return len(self.dataset)
 
     def __getitem__(self, index):
-        item = self.dataset[index]
         seed = self.seeds[index]
-        if seed is not None:
-            neighbors = self.dataset.inference_items[index][1].neighbor_indices
-            item['rgb_rendered'][0] = item['rgb_neighbors'][neighbors.index(seed)]
-            item['opacity'][0] = 1
-            item['valid_frames_mask'][0] = False
+        if seed is None:
+            return self.dataset[index]
+        scene_id, pair = self.dataset.inference_items[index]
+        # Explicit trajectories render targets only. Load a target in the seed
+        # slot, then replace it before inference; never request a nonexistent
+        # reference render. A private view keeps repeated/concurrent reads safe.
+        loader = copy.copy(self.dataset)
+        loader.inference_items = list(self.dataset.inference_items)
+        load_pair = copy.copy(pair)
+        load_pair.test_indices = [pair.test_indices[1], *pair.test_indices[1:]]
+        loader.inference_items[index] = (scene_id, load_pair)
+        item = loader[index]
+        neighbors = pair.neighbor_indices
+        trusted_rgb = item['rgb_neighbors'][neighbors.index(seed)]
+        item['rgb_rendered'][0] = trusted_rgb
+        if 'rgb_gt' in item:
+            item['rgb_gt'][0] = trusted_rgb
+        item['opacity'][0] = 1
+        item['valid_frames_mask'][0] = False
+        item['frame_indices'][0] = seed
+        # Recompute all conditioning: temporal rays depend on groups of poses,
+        # so replacing just the first ray would retain the placeholder camera.
+        from model_training.data.utils import compute_camera_rays
+        item.update(compute_camera_rays(
+            transforms=self.dataset.transforms_by_scene_id[scene_id],
+            frame_indices=list(pair.test_indices), neighbor_indices=neighbors,
+            scale=self.dataset.scenes_by_scene_id[scene_id].camera_scale,
+            image_shape=item['rgb_rendered'].shape[-2:], skip_vae_check=True))
         return item
 
 

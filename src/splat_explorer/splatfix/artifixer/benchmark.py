@@ -522,6 +522,7 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
         from .inference_preview import publish_preview
         publish_preview(root, predictions, required, len(selected), frame_count=frame_count,
                         model_variant=cfg['model_variant'], trajectory_mode=trajectory_mode,
+                        inference_split=str(split.relative_to(root)), output_dir=str(root),
                         resolution_policy=manifest['resolution_policy'])
         stage('artifixer3d', [*reconstruction_command(cfg['python'], cfg['repo'], cfg.get('regularization_profile', 'artifixer')),
                              '--scene_root', str(prepared), '--artifixer_frames_dir', str(predictions),

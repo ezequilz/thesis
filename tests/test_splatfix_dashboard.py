@@ -692,7 +692,8 @@ def test_shared_preparation_requires_caption_and_supports_completed_manifest(stu
     assert not studio.jobs()[0]['preparation_supported']
 
 
-def test_completed_remote_transfer_failure_retains_diagnostics_and_artifacts(studio, monkeypatch):
+@pytest.mark.parametrize('worker_status', ['completed', 'error', 'stopped'])
+def test_completed_remote_transfer_failure_retains_diagnostics_and_artifacts(studio, monkeypatch, worker_status):
     import subprocess
     from splat_explorer import repair_lrz as lrz
     from splat_explorer.scene_runs.lrz_transport import LrzSceneRunTransport
@@ -713,7 +714,10 @@ def test_completed_remote_transfer_failure_retains_diagnostics_and_artifacts(stu
     commands = []
     def ssh(cfg, command, **kwargs):
         commands.append(command)
-        return SimpleNamespace(returncode=0, stderr='', stdout=json.dumps({'status': 'completed', 'phase': 'finished'}) if 'worker-status.json' in command else '')
+        return SimpleNamespace(returncode=0, stderr='', stdout=json.dumps({
+            'status': worker_status, 'phase': 'finished',
+            'message': 'Missing frame: trajectory/renders/00344.png',
+        }) if 'worker-status.json' in command else '')
     monkeypatch.setattr(lrz, '_ssh_run', ssh)
     diagnostic = 'initial SSH failure\n' + 'x' * 900 + '\nrsync code 12'
     def transfer(argv):
@@ -722,7 +726,11 @@ def test_completed_remote_transfer_failure_retains_diagnostics_and_artifacts(stu
     monkeypatch.setattr(lrz, '_mux_run', transfer)
     assert SplatfixExecutor(studio.cfg, studio.store).execute(job['run_id']) == {}
     run = studio.store.get_run(job['run_id'])
-    assert run.state.status.value == 'error'
+    assert run.state.status.value == ('stopped' if worker_status == 'stopped' else 'error')
+    if worker_status == 'error':
+        assert run.state.message == 'Missing frame: trajectory/renders/00344.png'
+    assert 'command failed (255)' in run.state.details['artifact_transfer_error']
+    assert json.loads((root / 'worker-status.json').read_text())['status'] == worker_status
     assert run.state.details['remote_finished'] is True
     assert diagnostic in (root / 'artifact-transfer.log').read_text()
     assert 'partial transfer' in (root / 'artifact-transfer.log').read_text()

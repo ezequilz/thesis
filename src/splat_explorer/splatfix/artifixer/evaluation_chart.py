@@ -23,7 +23,9 @@ def _read(path):
 
 def chart_data(run_dir, metrics=None):
     root = Path(run_dir).resolve()
-    result = _read(root / 'result.json')
+    result = _read(next(p for p in (root / 'result.json', root / 'inference-preview.json', root / 'partial-result.json') if p.is_file()))
+    if not result.get('inference_split') and (root / 'benchmark-run.json').is_file():
+        result['inference_split'] = _read(root / 'benchmark-run.json').get('inference_split', 'prepared/bicycle/split.json')
     remote = Path(result.get('output_dir', str(root)))
 
     def resolve(raw, base=root):
@@ -51,6 +53,8 @@ def chart_data(run_dir, metrics=None):
         segments = [sorted(targets)]
     else:
         request = _read(root / 'request.json')
+        if (root / 'preview-trajectory.json').is_file():
+            request['trajectory'] = 'preview-trajectory.json'
         try:
             trajectory_path = resolve(request['trajectory'])
         except ValueError:

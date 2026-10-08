@@ -56,17 +56,31 @@ def test_cli_passes_segmented_dataset_to_original_inference(tmp_path, monkeypatc
     assert [pair.test_indices for _, pair in dataset.inference_items] == [[0], [1, 2]]
 
 
-def test_seeded_halves_keep_rgb_pose_and_reverse_output_indices_together():
+def test_seeded_halves_keep_rgb_pose_and_reverse_output_indices_together(monkeypatch):
     import numpy as np
+    import sys
+    from types import ModuleType
+    calls = []
+    def camera_rays(**kwargs):
+        calls.append(kwargs)
+        return {'camera_rays': np.array(kwargs['frame_indices'])}
+    utils = ModuleType('model_training.data.utils')
+    utils.compute_camera_rays = camera_rays
+    monkeypatch.setitem(sys.modules, 'model_training.data.utils', utils)
     class Dataset:
         scene_ids = ['scene']
         target_ids_by_scene_id = {'scene': {0, 1, 2, 3}}
         train_ids_by_scene_id = {'scene': {4, 5, 6}}
         transforms_by_scene_id = {'scene': {'frames': [{'transform_matrix': [[i]]} for i in range(7)]}}
+        scenes_by_scene_id = {'scene': SimpleNamespace(camera_scale=2.5)}
         def __len__(self):
             return len(self.inference_items)
         def __getitem__(self, index):
             pair = self.inference_items[index][1]
+            # Match upstream: reference images exist only as neighbors, not
+            # numbered trajectory renders or opacity files.
+            if any(i not in self.target_ids_by_scene_id['scene'] for i in pair.test_indices):
+                raise FileNotFoundError('Reference has no trajectory render')
             return {'rgb_rendered': np.zeros((len(pair.test_indices), 3, 2, 2)),
                     'rgb_neighbors': np.stack([np.full((3, 2, 2), n) for n in pair.neighbor_indices]),
                     'opacity': np.zeros((len(pair.test_indices), 2, 2)),
@@ -81,11 +95,17 @@ def test_seeded_halves_keep_rgb_pose_and_reverse_output_indices_together():
     for index, (seed, targets) in enumerate([(4, [0, 1]), (5, [3, 2])]):
         item = dataset[index]
         assert item['frame_indices'].tolist() == [seed, *targets]
+        assert item['camera_rays'].tolist() == [seed, *targets]
+        assert calls[-1]['scale'] == 2.5
+        assert calls[-1]['image_shape'] == (2, 2)
+        assert calls[-1]['skip_vae_check'] is True
         assert item['frame_indices'][item['valid_frames_mask']].tolist() == targets
         assert (item['rgb_rendered'][0] == seed).all()
         assert (item['rgb_rendered'][1:] == 0).all()
         assert (item['opacity'][0] == 1).all()
         assert dataset.inference_items[index][1].neighbor_indices == [4, 5, 6]
+        assert original.inference_items[index][1].test_indices == [seed, *targets]
+        assert dataset[index]['frame_indices'].tolist() == [seed, *targets]
     with pytest.raises(ValueError, match='trusted reference'):
         segment_dataset(original, {'segments': [
             {'target_indices': [0, 1, 2, 3], 'seed_transform_matrix': [[0]]}]}, SimpleNamespace)

@@ -748,14 +748,24 @@ allocation was extended. The existing five-minute save-and-stop buffer is
 applied to this deadline and passed to the remote worker. Explicit dashboard
 GPU probes remain available, but do not replace the setup-owned deadline.
 
+The results dashboard lists benchmark and repair jobs immediately, including queued
+and failed jobs without outputs. Run visibility is independent of artifact detection
+or file arrival. The initial details link continues to work after outputs arrive.
+Live run details offer **Stop gracefully & download**, using the existing cooperative
+stop contract to save and download available reconstruction outputs.
+
 After first-pass autoregressive inference finishes, benchmark, repeat and saved-view
 repair workers publish `inference-preview.json` with the exact generated
 reconstruction-input indices. The manager downloads those images once in a
 background transfer (capped at 10 MiB/s), while reconstruction continues on the GPU.
+Small camera JSON records accompany the images so the desktop can draw the trajectory
+chart immediately. No early image-quality scoring is performed; those scores remain
+part of the existing end-of-run evaluation.
 The gallery becomes visible only after that transfer succeeds. Its result URL stays
 stable when the final PLY, evaluation and other artifacts arrive through the normal
 end-of-run download. Both result pages refresh every 15 seconds; detail refreshes
 pause while the image lightbox is open. Early-transfer failures are recorded in
-`inference-preview-transfer.log` and do not stop reconstruction; the final download
+`inference-preview-transfer.log` and retried after 30 seconds without stopping
+reconstruction; the final download
 still retrieves the outputs. A successful preview is reused after manager restart.
 Workers launched before this change do not publish the early-preview marker.

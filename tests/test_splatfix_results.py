@@ -259,3 +259,34 @@ def test_running_inference_preview_becomes_completed_result_at_same_url(tmp_path
     finished, = studio.results.entries()
     assert finished['id'] == key and finished['repaired']
     assert not finished['inference_ready']
+
+
+def test_reconstruction_job_appears_before_outputs_and_keeps_detail_link(tmp_path):
+    studio, root, result = setup(tmp_path)
+    import shutil
+    shutil.rmtree(result)
+    config_path = root / 'config.json'
+    config = json.loads(config_path.read_text())
+    config['splatfix'].update(stage='benchmark', model='1.3b', source=str(tmp_path / 'benchmark'))
+    config_path.write_text(json.dumps(config))
+    row, = studio.results.entries()
+    assert row['id'] == root.name
+    assert row['can_stop'] and not row['repaired']
+    assert studio.results.run_detail(row['id'])['gallery']['frames'] == []
+    result.mkdir()
+    (result / 'inference-preview.json').write_text(json.dumps({'inference_ready': True}))
+    preview, = studio.results.entries()
+    assert studio.results.run_detail(row['id'])['inference_ready']
+    studio.store.update_status(root.name, status='stopping')
+    assert not studio.results.run_detail(row['id'])['can_stop']
+    (result / 'result.json').write_text('{}')
+    (result / 'artifixer3d.ply').write_bytes(b'ply')
+    assert studio.results.run_detail(row['id'])['repaired']
+    assert studio.results.entries()[0]['id'] == preview['id']
+
+
+def test_live_detail_exposes_graceful_stop_action():
+    html = Path('src/splat_explorer/web/static/splatfix_result_detail.html').read_text()
+    assert 'Stop gracefully &amp; download' in html
+    assert "fetch('/api/splatfix/cancel'" in html
+    assert 'run_id:liveRun' in html and 'r.can_stop' in html

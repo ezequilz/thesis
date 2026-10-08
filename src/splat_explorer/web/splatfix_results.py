@@ -1,4 +1,4 @@
-"""Read-only catalog of saved reconstructions and their evaluation records."""
+"""Catalog of reconstruction jobs, live inputs and completed outputs."""
 from __future__ import annotations
 
 import hashlib
@@ -33,6 +33,7 @@ class ResultCatalog:
             candidates += sorted(p for p in (root / 'gpu/results').glob('*/inference-preview.json')
                                  if not (p.parent / 'result.json').is_file()
                                  and not (p.parent / 'partial-result.json').is_file())
+            first_row = len(rows)
             for manifest in candidates:
                 if not manifest.resolve().is_relative_to(self.studio.root.resolve()):
                     continue
@@ -43,7 +44,7 @@ class ResultCatalog:
                 if repaired is None:
                     repaired = manifest.parent / 'artifixer3d.ply'
                 if not repaired.resolve().is_relative_to(manifest.parent.resolve()) or not repaired.is_file():
-                    if not ((manifest.name == 'partial-result.json' and result.get('incomplete') is True)
+                    if config.get('splatfix', {}).get('stage') not in ('repair', 'benchmark') and not ((manifest.name == 'partial-result.json' and result.get('incomplete') is True)
                             or (manifest.name == 'inference-preview.json' and result.get('inference_ready') is True)):
                         continue
                     repaired = None
@@ -76,6 +77,8 @@ class ResultCatalog:
                             metrics, metrics_file = data, candidate
                             break
                 rows.append(self._row(key, record, original, repaired, result, metrics, metrics_file, manifest))
+            if len(rows) == first_row and config.get('pipeline') == 'splatfix' and config.get('splatfix', {}).get('stage') in ('benchmark', 'repair'):
+                rows.append(self._row(record['run_id'], record, None, None, {}, {}, None, None))
             original, repaired = root / 'scene_original.ply', root / 'scene_repaired.ply'
             if any(p.is_file() and not p.resolve().is_relative_to(self.studio.root.resolve()) for p in (original, repaired)):
                 continue
@@ -95,16 +98,18 @@ class ResultCatalog:
         if manifest:
             preview = self.studio.plus_previews(manifest, result)
         return {'id': key, 'run_id': record['run_id'], 'scene': config.get('scene_id', ''),
+                'can_stop': config.get('pipeline') == 'splatfix' and record.get('state', {}).get('status') in ('queued', 'waiting_gpu', 'starting', 'running'),
+                'message': record.get('state', {}).get('message'),
                 'incomplete': result.get('incomplete', False),
                 'inference_ready': result.get('inference_ready', False),
                 'phase': record.get('state', {}).get('details', {}).get('phase'),
                 'interruption': result.get('interruption'),
                 'diagnostics_url': self.studio.file_url(manifest.parent / 'benchmark-run.json') if manifest and (manifest.parent / 'benchmark-run.json').is_file() else None,
-                'created_at': record.get('created_at'), 'status': record.get('state', {}).get('status'),
+                'created_at': record.get('state', {}).get('created_at'), 'status': record.get('state', {}).get('status'),
                 'mode': options.get('mode') or config.get('repair_type', ''),
                 'model': result.get('model_variant') or options.get('model'),
                 'trajectory': result.get('trajectory_mode'), 'frames': result.get('frame_count'),
-                'kind': 'ArtiFixer3D' if manifest else 'Scene repair',
+                'kind': 'ArtiFixer3D' if manifest or options.get('stage') in ('repair', 'benchmark') else 'Scene repair',
                 'result_name': manifest.parent.name if manifest else record['run_id'],
                 'original': original is not None, 'repaired': repaired is not None,
                 'viser_url': '/splatfix/results/viser?id=' + quote(key),
@@ -152,6 +157,7 @@ class ResultCatalog:
             row['comparison_gallery'].append({'url': self.studio.file_url(chart),
                 'title': 'Trajectory and image quality',
                 'caption': metadata.get('caption', 'Camera motion and available per-view evaluation scores.')})
+        row['preview_evaluation_status'] = read_json(root / 'preview-evaluation-status.json', {})
         row['evaluation_status'] = read_json(root / 'evaluation-status.json', {})
         def add_reference(path, index, name=None):
             if path is None or path.suffix.lower() not in ('.png', '.jpg', '.jpeg'):
@@ -266,7 +272,7 @@ class ResultCatalog:
 
     def detail(self, key):
         for row in self.entries(private=True):
-            if row['id'] == key:
+            if row['id'] == key or row['run_id'] == key:
                 return row
             manifest = row['_manifest']
             if manifest:

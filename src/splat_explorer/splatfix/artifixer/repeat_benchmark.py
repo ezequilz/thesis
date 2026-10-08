@@ -190,6 +190,7 @@ def run_repeat_benchmark(prior, output_dir, *, resolution_profile='training', re
         publish_preview(root, predictions, required, len(selected), frame_count=count,
                         model_variant=old['result'].get('model_variant'),
                         trajectory_mode=old['result'].get('trajectory_mode'),
+                        inference_split=str(split.relative_to(root)), output_dir=str(root),
                         resolution_policy=manifest.get('resolution_policy', {}))
         prepared = split.parent
         stage('artifixer3d', [*reconstruction_command(cfg['python'], cfg['repo'], regularization_profile), '--scene_root', str(prepared),
