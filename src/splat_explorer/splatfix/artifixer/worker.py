@@ -32,9 +32,10 @@ def execute(root):
         preview = {}
         def progress(event):
             if event.get('output_dir'):
-                marker = Path(event['output_dir']) / 'inference-preview.json'
-                if marker.is_file():
-                    preview['inference_preview'] = str(marker)
+                for name in ('input', 'inference'):
+                    marker = Path(event['output_dir']) / f'{name}-preview.json'
+                    if marker.is_file():
+                        preview[f'{name}_preview'] = str(marker)
             publish(status='running', **preview, **event)
         if request.get('stage') == 'benchmark':
             if request['runtime'].get('repeat_from'):

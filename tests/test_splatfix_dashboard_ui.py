@@ -29,6 +29,10 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('select').scene_id,'unrelated-current-scene');
   assert.equal(payload('repair').checkpoint,'/saved/cp');
   assert.equal(payload('repair').mode,'edited');
+  assert.equal(payload('repair').image_cache_insertion,false);
+  $('image-cache-insertion').value='on';
+  assert.equal(payload('repair').image_cache_insertion,true);
+  assert.equal(payload('benchmark').image_cache_insertion,undefined);
   assert.equal(payload('repair').reconstruction_method,'artifixer');
   assert.equal(payload('repair').split_mode,'double-split');
   $('split-mode').value='single-split';
@@ -49,6 +53,7 @@ Promise.resolve(vm.runInContext(`(async()=>{
   await queue('repair','2099-01-01T00:00:00Z',saved);
   assert.equal(submitted.checkpoint,'/saved/cp');
   assert.equal(submitted.mode,'edited');
+  assert.equal(submitted.image_cache_insertion,true);
   assert.equal(submitted.reconstruction_method,'artifixer');
   $('reconstruction-method').value='artifixer';
   assert.equal(submitted.regularization_profile,'base_mcmc');

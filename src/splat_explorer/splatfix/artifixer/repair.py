@@ -1,4 +1,4 @@
-"""Offline replay through unmodified ArtiFixer inference and fresh 3DGRUT.
+"""Offline replay through ArtiFixer inference and fresh 3DGRUT.
 
 The no-editor baseline uses rendered anchors, not captured photographs. This
 Input adaptation and the selected regularization profile are recorded. The
@@ -27,6 +27,7 @@ UPSTREAM_REVISION = 'a392c4dfe17459ef9952407accdb9fcdcdddba98'
 DEFAULT_RUNTIME = {
     'resolution_profile': 'training',
     'regularization_profile': 'artifixer',
+    'image_cache_insertion': False,
     'repo': '/workspace/third_party/ArtiFixer',
     'python': '/workspace/artifixer-venv/bin/python',
     'checkpoint': '/workspace/models/artifixer/artifixer-1.3b.pt',
@@ -84,6 +85,8 @@ def validate_runtime(runtime=None):
     from ..resolution import profile_size
     profile_size(cfg['resolution_profile'])
     validate_regularization(cfg['regularization_profile'])
+    if type(cfg['image_cache_insertion']) is not bool:
+        raise ValueError('image_cache_insertion must be a boolean')
     repo = Path(cfg['repo']).resolve()
     for relative in ('model_eval/run_inference.py', 'data_processing/artifixer3d.py',
                      'thirdparty/3DGRUT-ArtiFixer/threedgrut/trainer.py',
@@ -253,6 +256,7 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
     segments = [{'start': 0, 'count': len(cameras)}]
     if orbit:
         segments = [{'indices': s['full_frame_indices'],
+                     **({'cache_seed_index': s['cache_seed_full_frame_index']} if 'cache_seed_full_frame_index' in s else {}),
                      **({'seed_index': s['seed_full_frame_index']} if 'seed_full_frame_index' in s else {})}
                     for s in orbit['provenance']['segments']]
         generated = [i for s in segments for i in s['indices']]
@@ -410,10 +414,11 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
             raise ValueError('Saved anchor poses must be distinct for authors smooth orbit')
     cfg = validate_runtime(runtime)
     cfg = {**cfg, 'split_mode': split_mode}
-    from ..resolution import prepare_checkpoint
+    from ..resolution import prepare_repair_checkpoint
     root = Path(output_dir).resolve() / f'{mode}_{uuid.uuid4().hex[:12]}'
     root.mkdir(parents=True, exist_ok=False)
-    cp = prepare_checkpoint(cp, root / 'checkpoint', cfg['resolution_profile'])
+    cp = prepare_repair_checkpoint(cp, root / 'checkpoint', cfg['resolution_profile'],
+                                   scene_path=cfg.get('scene_path'), should_stop=should_stop)
     references = [str(cp.image_path(view, repaired=mode == 'edited')) for view in cp.views]
     on_progress({'phase': 'anchor_geometry' if trajectory_mode == 'authors_orbit' else 'trajectory'})
     if trajectory_mode == 'authors_orbit':
@@ -453,6 +458,9 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         for phase in phases:
             if should_stop():
                 raise InterruptedError('Splatfix repair stopped')
+            if phase == 'infer':
+                from .inference_preview import publish_inputs
+                publish_inputs(root)
             on_progress({'phase': phase, 'output_dir': str(root)})
             if phase == 'orbit':
                 atomic_json(root / 'anchor-transforms.json', {**trajectory['transforms'], 'camera_convention': 'opencv_c2w'})

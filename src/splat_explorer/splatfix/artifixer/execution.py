@@ -101,6 +101,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
         runtime['resolution_profile'] = options['resolution_profile']
         runtime['regularization_profile'] = options.get('regularization_profile', 'artifixer')
         runtime['split_mode'] = options.get('split_mode', 'double-split')
+        runtime['image_cache_insertion'] = options.get('image_cache_insertion', False) if not benchmark else False
         if benchmark:
             from ..jobs import registered_benchmark
             source, _ = registered_benchmark(Path(executor.cfg.output.dir) / 'benchmarks', options['source'])

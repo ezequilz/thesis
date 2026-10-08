@@ -98,7 +98,9 @@ class SplatfixExecutor:
     def _local(self, run, root, stop, update):
         import yaml
         from ..scene.catalog import apply_spec, spec_by_id
+        from ..image_edit import overlay_image_edit_cfg
         cfg = copy.deepcopy(self.cfg)
+        cfg = overlay_image_edit_cfg(cfg, backend=run.config.image_edit_backend)
         cfg['agent']['vlm_backend'] = 'cli_relay'
         cfg.setdefault('splatfix', {})['resolution_profile'] = run.config.splatfix['resolution_profile']
         if run.config.splatfix['stage'] == 'select':

@@ -347,3 +347,86 @@ def test_visibility_endpoint_saves_and_reports_write_failure(tmp_path, monkeypat
     DashboardHandler._serve_splatfix(handler, endpoint, {'run_id': root.name, 'hidden': False})
     assert responses[-1][1] == 500
     assert studio.results.entries()[0]['hidden'] is True
+
+
+def test_result_viewer_loads_partial_run_cameras_and_navigates(tmp_path):
+    import numpy as np
+    from test_scene_run_viser import _FakeServer, _tiny_scene
+    studio, _, root = setup(tmp_path)
+    (root / 'result.json').rename(root / 'partial-result.json')
+    (root / 'partial-result.json').write_text(json.dumps({
+        'incomplete': True, 'splat_path': 'artifixer3d.ply',
+        'inference_split': 'prepared/scene/split_trajectory.json'}))
+    prep = root / 'prepared/scene'
+    prep.mkdir(parents=True)
+    (prep / 'split_trajectory.json').write_text(json.dumps({'test': {'scene': {
+        'transforms_path': 'transforms.json', 'selected_indices_path': 'selected.json'}}}))
+    (prep / 'selected.json').write_text('[1, 0]')
+    poses = [np.eye(4), np.eye(4)]
+    poses[1][:3, 3] = [3, 4, 5]
+    (prep / 'transforms.json').write_text(json.dumps({'fl_y': 700, 'h': 800, 'frames': [
+        {'transform_matrix': pose.tolist()} for pose in poses]}))
+    # An empty copied checkpoint must not suppress valid split cameras.
+    (root / 'checkpoint').mkdir()
+    (root / 'checkpoint/checkpoint.json').write_text('{}')
+    key = studio.results.entries()[0]['id']
+    viewer = ResultViser(studio.results, background=False, server_factory=_FakeServer,
+                         load_scene=lambda *a, **k: _tiny_scene(), idle_timeout=None)
+    state = viewer.show(key)
+    assert state['status'] == 'ready' and state['view_count'] == 2 and state['view_index'] == 0
+    client = SimpleNamespace(camera=SimpleNamespace())
+    viewer._server._clients['test'] = client
+    viewer._server._connect(client)
+    np.testing.assert_array_equal(client.camera.position, [3, 4, 5])
+    np.testing.assert_array_equal(client.camera.look_at, [3, 4, 4])
+    np.testing.assert_array_equal(client.camera.up_direction, [0, 1, 0])
+    assert viewer.move_view(key, 1)['view_index'] == 1
+    np.testing.assert_array_equal(client.camera.position, [0, 0, 0])
+    assert viewer.move_view(key, -1)['view_index'] == 0
+    viewer.show(key, toggle=True)
+    np.testing.assert_array_equal(client.camera.position, [3, 4, 5])
+
+
+def test_input_only_detail_shows_references_and_original_captures(tmp_path):
+    studio, run, root = setup(tmp_path)
+    (root / 'result.json').unlink()
+    (root / 'artifixer3d.ply').unlink()
+    images = root / 'input-images'
+    images.mkdir()
+    (images / 'ref.png').write_bytes(b'edited')
+    (images / 'rgb.png').write_bytes(b'original')
+    (root / 'input-preview.json').write_text(json.dumps({'inputs_ready': True,
+        'reference_images': [{'index': 0, 'name': 'ref.png', 'path': 'input-images/ref.png'}],
+        'original_rgb_images': [{'index': 7, 'name': 'rgb.png', 'path': 'input-images/rgb.png'}]}))
+    row, = studio.results.entries()
+    detail = studio.results.run_detail(run.name)
+    assert not detail['inference_ready'] and not detail['gallery']['frames']
+    assert detail['reference_images'][0]['url'] == studio.file_url(images / 'ref.png')
+    assert detail['original_rgb_images'][0]['index'] == 7
+    (root / 'inference-preview.json').write_text(json.dumps({'inference_ready': True}))
+    assert studio.results.entries()[0]['id'] == row['id']
+    assert len(studio.results.entries()) == 1
+    assert studio.results.run_detail(row['id'])['reference_images'] == detail['reference_images']
+    (images / 'rgb.png').unlink()
+    secret = tmp_path / 'secret.png'
+    secret.write_bytes(b'private')
+    (images / 'rgb.png').symlink_to(secret)
+    assert studio.results.run_detail(row['id'])['original_rgb_images'] == []
+
+
+def test_preview_split_references_load_even_with_verified_prediction_indices(tmp_path):
+    studio, _, root = setup(tmp_path)
+    (root / 'result.json').unlink()
+    prep = root / 'prepared/bicycle'
+    prep.mkdir(parents=True)
+    (prep / 'ref.jpg').write_bytes(b'reference')
+    (prep / 'selected.json').write_text('[1]')
+    (prep / 'targets.json').write_text('[0]')
+    (prep / 'transforms.json').write_text(json.dumps({'frames': [{}, {'file_path': 'ref.jpg'}]}))
+    (prep / 'split.json').write_text(json.dumps({'test': {'scene': {'image_root': '.',
+        'transforms_path': 'transforms.json', 'selected_indices_path': 'selected.json',
+        'target_indices_path': 'targets.json'}}}))
+    (root / 'inference-preview.json').write_text(json.dumps({'inference_ready': True,
+        'reconstruction_inputs': [0], 'reference_count': 1}))
+    detail = studio.results.run_detail(studio.results.entries()[0]['id'])
+    assert detail['reference_images'][0]['url'] == studio.file_url(prep / 'ref.jpg')

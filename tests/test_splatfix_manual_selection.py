@@ -103,3 +103,27 @@ def test_target_limit(selection):
         session.save_current(event)
     assert session.save_button.disabled
     assert session.checkpoint.complete
+
+
+@pytest.mark.parametrize('size', [(832, 480), (1280, 720)])
+def test_selected_size_used_for_capture_and_gpt_crop(selection, size):
+    from splat_explorer.image_edit import ImageEditResult
+    from splat_explorer.splatfix.image_repair import repair_images
+    session, event, captures = selection
+    session.width, session.height = size
+    session.checkpoint.manifest['target_views'] = 1
+    session.save_current(event)
+    cp = Checkpoint.load(session.checkpoint.root)
+    assert (captures[0]['width'], captures[0]['height']) == size
+    assert (cp.views[0]['camera']['width'], cp.views[0]['camera']['height']) == size
+    with Image.open(cp.image_path(cp.views[0])) as image:
+        assert image.size == size
+    response = io.BytesIO()
+    Image.new('RGB', (1024, 1024), 'red').save(response, format='PNG')
+    backend = SimpleNamespace(name='fake-gpt', edit=lambda *_: ImageEditResult(images=[response.getvalue()]))
+    repair_images(cp, backend=backend)
+    with Image.open(cp.image_path(cp.views[0], repaired=True)) as image:
+        assert image.size == size
+        assert image.getpixel((0, 0)) == (255, 0, 0)
+        assert image.getpixel((size[0]-1, size[1]-1)) == (255, 0, 0)
+    assert cp.views[0]['image_repair']['resize']['method'] == 'cover_center_crop'

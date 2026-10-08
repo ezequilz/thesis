@@ -14,7 +14,7 @@ from splat_explorer.splatfix.checkpoint import Checkpoint
 from splat_explorer.splatfix.cli import add_parser, repair_splat
 
 
-@pytest.mark.parametrize("profile, dimensions", [("training", (960, 544)), ("720p", (1280, 720))])
+@pytest.mark.parametrize("profile, dimensions", [("training", (832, 480)), ("720p", (1280, 720))])
 def test_public_select_command_without_api(tmp_path, profile, dimensions):
     if not os.environ.get('SPLATFIX_LIVE_VISER_TESTS'):
         pytest.skip('Requires a connected harness Viser; enable SPLATFIX_LIVE_VISER_TESTS')
@@ -85,3 +85,19 @@ def test_repair_command_passes_only_saved_run_and_runtime(monkeypatch, tmp_path)
     assert received["mode"] == "baseline"
     assert received["runtime"] == {"repo": "/gpu/official", "python": "/gpu/python", "resolution_profile": "training", "split_mode": "double-split"}
     assert received["checkpoint"] == tmp_path / "saved"
+
+
+@pytest.mark.parametrize('flag,expected', [('--image-cache-insertion', True), ('--no-image-cache-insertion', False), (None, True)])
+def test_repair_cache_insertion_cli_overrides_config(monkeypatch, tmp_path, flag, expected):
+    from splat_explorer.config import Config
+    from splat_explorer.splatfix import repair
+    received = {}
+    def run(*args, **kwargs):
+        received.update(kwargs)
+        return {}
+    monkeypatch.setattr(repair, 'run_repair', run)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    args = parser.parse_args(['splatfix', 'repair', str(tmp_path / 'saved'), '--output', str(tmp_path / 'out'), *([flag] if flag else [])])
+    repair_splat(Config({'splatfix': {'runtime': {'image_cache_insertion': True}}}), args)
+    assert received['runtime']['image_cache_insertion'] is expected

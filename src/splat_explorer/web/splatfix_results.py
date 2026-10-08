@@ -61,6 +61,9 @@ class ResultCatalog:
             candidates += sorted(p for p in (root / 'gpu/results').glob('*/inference-preview.json')
                                  if not (p.parent / 'result.json').is_file()
                                  and not (p.parent / 'partial-result.json').is_file())
+            candidates += sorted(p for p in (root / 'gpu/results').glob('*/input-preview.json')
+                                 if not any((p.parent / name).is_file() for name in
+                                            ('result.json', 'partial-result.json', 'inference-preview.json')))
             first_row = len(rows)
             for manifest in candidates:
                 if not manifest.resolve().is_relative_to(self.studio.root.resolve()):
@@ -73,7 +76,8 @@ class ResultCatalog:
                     repaired = manifest.parent / 'artifixer3d.ply'
                 if not repaired.resolve().is_relative_to(manifest.parent.resolve()) or not repaired.is_file():
                     if config.get('splatfix', {}).get('stage') not in ('repair', 'benchmark') and not ((manifest.name == 'partial-result.json' and result.get('incomplete') is True)
-                            or (manifest.name == 'inference-preview.json' and result.get('inference_ready') is True)):
+                            or (manifest.name == 'inference-preview.json' and result.get('inference_ready') is True)
+                            or (manifest.name == 'input-preview.json' and result.get('inputs_ready') is True)):
                         continue
                     repaired = None
                 original = manifest.parent / 'original.ply'
@@ -164,6 +168,7 @@ class ResultCatalog:
                    'stage': 'ArtiFixer · reconstruction inputs'}
         row['gallery'] = gallery
         row['reference_images'] = []
+        row['original_rgb_images'] = []
         row['stage_comparison'] = None
         row['comparison_gallery'] = []
         if manifest is None:
@@ -199,6 +204,14 @@ class ResultCatalog:
                 return
             row['reference_images'].append({'index': index, 'name': name or path.name,
                                              'url': self.studio.file_url(path)})
+        inputs = read_json(root / 'input-preview.json', {})
+        for key in ('reference_images', 'original_rgb_images'):
+            for item in inputs.get(key, []):
+                path = local(item.get('path'))
+                if path and path.is_file() and path.suffix.lower() in ('.png', '.jpg', '.jpeg'):
+                    row[key].append({'index': item['index'], 'name': item['name'],
+                                     'url': self.studio.file_url(path)})
+        snapshot_references = list(row['reference_images'])
         prediction = local(result.get('prediction_frames'))
         if prediction is None:
             # Saved-view worker uses this fixed first-pass location (not plus/).
@@ -243,7 +256,7 @@ class ResultCatalog:
                                     pass
                         add_reference(path, group['source_index'], f'Reference {reference_index + 1}')
                         reference_index += 1
-        if allowed is None:
+        if allowed is None or not row['reference_images']:
             split = local(result.get('inference_split') or 'prepared/bicycle/split.json')
             if split and split.is_file():
                 scenes = read_json(split, {}).get('test', {})
@@ -274,6 +287,35 @@ class ResultCatalog:
                                         if path is None and result.get('resolution_policy'):
                                             path = local(str(Path('conditioning-colmap/images') / Path(raw).name))
                                         add_reference(path, index, Path(raw).name)
+        if not row['original_rgb_images']:
+            trajectory_path = local(recorded_request.get('trajectory'))
+            checkpoint = local(recorded_request.get('checkpoint_root'))
+            if trajectory_path and checkpoint:
+                for index, frame in enumerate(read_json(trajectory_path, {}).get('frames', [])):
+                    path = local(str(checkpoint / frame['rgb'])) if frame.get('rgb') else None
+                    if path and path.is_file():
+                        row['original_rgb_images'].append({'index': index, 'name': path.name,
+                                                          'url': self.studio.file_url(path)})
+            split = local(result.get('inference_split') or 'prepared/bicycle/split.json')
+            scenes = read_json(split, {}).get('test', {}) if split else {}
+            if len(scenes) == 1:
+                entry = next(iter(scenes.values()))
+                render_root = local(str(split.parent / entry['render_dir'])) if entry.get('render_dir') else None
+                if render_root:
+                    for path in sorted(render_root.glob('*.png')):
+                        safe = local(str(path))
+                        if safe and safe.is_file() and path.stem.isdigit():
+                            row['original_rgb_images'].append({'index': int(path.stem), 'name': path.name,
+                                                              'url': self.studio.file_url(safe)})
+        if snapshot_references:
+            row['reference_images'] = snapshot_references
+            gallery['reference_count'] = len(snapshot_references)
+        if not row['reference_images']:
+            # References are already known before supervision is written.
+            for index, raw in enumerate(recorded_request.get('references', [])):
+                add_reference(local(raw), index, f'Reference {index + 1}')
+            if row['reference_images']:
+                gallery['reference_count'] = len(row['reference_images'])
         if prediction and prediction.is_dir():
             frames = [p for p in prediction.glob('*.png') if p.stem.isdigit()
                       and p.resolve().is_relative_to(root.resolve())]
@@ -294,10 +336,14 @@ class ResultCatalog:
         if row['_manifest']:
             derivative = row['_manifest'].parent / 'checkpoint'
             if (derivative / 'checkpoint.json').is_file():
-                return checkpoint_views(derivative)
+                views = checkpoint_views(derivative)
+                if views:
+                    return views
             checkpoint = row['config'].get('splatfix', {}).get('checkpoint')
             if checkpoint and Path(checkpoint).resolve().is_relative_to(Path(self.cfg.output.dir).resolve()):
-                return checkpoint_views(checkpoint)
+                views = checkpoint_views(checkpoint)
+                if views:
+                    return views
             return benchmark_views(row['_manifest'])
         return historical_views(self.studio.root / row['run_id'])
 

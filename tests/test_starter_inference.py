@@ -68,7 +68,11 @@ def test_clean_starter_drives_future_frames_and_cache_resets(cache_policy, sourc
             prepared.append(condition.clone())
             return condition * source_alpha + torch.randn_like(condition) * (1-source_alpha)
     pipe = Pipe()
-    install_starter_inference(pipe, generated_cache=cache_policy)
+    if cache_policy == 'clean':
+        from splat_explorer.splatfix.artifixer.official_worker import install_image_cache_insertion
+        install_image_cache_insertion(pipe)
+    else:
+        install_starter_inference(pipe, generated_cache=cache_policy)
     outputs = []
     with torch.inference_mode():
         for starter in [2., 5.]:

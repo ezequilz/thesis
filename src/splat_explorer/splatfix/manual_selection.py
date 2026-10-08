@@ -57,9 +57,7 @@ class ManualSelection:
 
     def progress(self):
         cp = self.checkpoint
-        return (f'**{len(cp.views)} / {cp.target_views} views saved** · {self.width} × {self.height}\n\n'
-                'Navigate to each view, then save its current position. '
-                'Save selection finishes with the views collected so far. Return to /splatfix for the next stage.')
+        return f'**{len(cp.views)} / {cp.target_views} views saved** · {self.width} × {self.height}'
 
     def require_scene(self):
         state = self.scene_state

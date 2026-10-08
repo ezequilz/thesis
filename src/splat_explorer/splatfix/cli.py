@@ -89,6 +89,8 @@ def repair_splat(cfg, args):
     runtime = dict(cfg.get("splatfix", {}).get("runtime", {}))
     runtime["resolution_profile"] = cfg.get("splatfix", {}).get("resolution_profile", "training")
     runtime['split_mode'] = getattr(args, 'split_mode', 'double-split')
+    if getattr(args, 'image_cache_insertion', None) is not None:
+        runtime['image_cache_insertion'] = args.image_cache_insertion
     for key in ("repo", "python", "checkpoint", "model_id", "hf_home", "source_points3d"):
         value = getattr(args, "artifixer_" + key, None)
         if value is not None:
@@ -133,6 +135,8 @@ def _add_stages(parser):
     repair.add_argument("--mode", choices=("edited", "baseline"), default="edited")
     repair.add_argument('--split-mode', choices=('single-split', 'double-split'), default='double-split',
                         help='Generate whole legs or inward from both reference endpoints (default)')
+    repair.add_argument('--image-cache-insertion', action=argparse.BooleanOptionalAction, default=None,
+                        help='Insert the clean endpoint latent into KV memory before generation (default: off)')
     repair.add_argument("--frames", type=positive_int, default=25,
                         help="Legacy compatibility only; authored orbit spacing determines frame count")
     repair.add_argument("--span-fraction", type=float, default=.04,

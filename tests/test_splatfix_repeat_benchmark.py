@@ -106,7 +106,7 @@ def test_training_alignment_preserves_camera_poses(tmp_path, monkeypatch):
     assert align_repeat_inputs(split,'training')['profile']=='training'
     _,entry=b._split_entry(split)
     result=json.loads((root/entry['transforms_path']).read_text())
-    assert (result['w'], result['h'])==(816,544)
+    assert (result['w'], result['h'])==(720,480)
     assert all(f['transform_matrix']==pose for f in result['frames'])
-    assert all((f['w'],f['h'])==(816,544) for f in result['frames'])
+    assert all((f['w'],f['h'])==(720,480) for f in result['frames'])
     assert result['frames'][1]['file_path']=='images/a.jpg'

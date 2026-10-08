@@ -770,13 +770,13 @@ def serve_viewer(
     # --- live agent overlay (fed by the episode dashboard) -------------------
     server.gui.configure_theme(
         control_layout="floating",
-        control_width="small",
+        control_width="medium",
         show_logo=False,
         show_share_button=False,
         dark_mode=True,
     )
     server.gui.set_panel_label("Visor")
-    # Collapse the floating panel on load and keep it compact. <script> inside
+    # Collapse the floating panel on load. Let Viser size its controls. <script> inside
     # dangerouslySetInnerHTML does not run; an iframe srcdoc does.
     server.gui.add_html(
         '<iframe title="" style="width:0;height:0;border:0;position:absolute" srcdoc="'
@@ -787,11 +787,6 @@ def serve_viewer(
         "if(!h){setTimeout(go,50);return;}"
         "if(parent.__splatVisorChrome)return;"
         "parent.__splatVisorChrome=1;"
-        "var s=d.createElement('style');"
-        "s.textContent='[data-testid=floating-panel]{width:9.5em!important;max-width:9.5em!important;"
-        "font-size:12px!important}[data-testid=floating-panel-handle]{height:1.7em!important;"
-        "padding:0 .4em!important;font-size:11px!important}';"
-        "d.head.appendChild(s);"
         "setTimeout(function(){h.dispatchEvent(new MouseEvent('click',{bubbles:true}));},150);"
         "}go();})();"
         "&lt;/script&gt;"

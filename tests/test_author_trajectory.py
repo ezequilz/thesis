@@ -259,3 +259,14 @@ def test_double_split_never_uses_heldout_camera_as_seed(original_orbit_renderer,
 def test_invalid_split_mode_fails_before_upstream_import():
     with pytest.raises(ValueError, match='split_mode'):
         author_trajectory.build_author_orbit([pose(0), pose(1)], K, 1, split_mode='invalid')
+
+
+@pytest.mark.parametrize('count', [2, 3, 6])
+def test_single_split_records_trusted_cache_endpoint(original_orbit_renderer, count):
+    result = author_trajectory.build_author_orbit(
+        [pose(i * .5) for i in range(count)], K, 1,
+        renderer=original_orbit_renderer, split_mode='single-split')
+    provenance = result['provenance']
+    for segment in provenance['segments']:
+        assert segment['cache_seed_full_frame_index'] in provenance['reference_frame_indices']
+        assert 'seed_full_frame_index' not in segment  # Off keeps reference-only inference.

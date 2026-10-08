@@ -79,16 +79,83 @@ def test_retry_skips_success_and_originals_remain_baseline(tmp_path):
     repair_images(restored)
 
 
-def test_image_calibration_and_failed_edit_retry(tmp_path):
+@pytest.mark.parametrize('response_size,crop_box', [
+    ((16, 16), (0, 2, 16, 14)),
+    ((32, 24), (0, 0, 32, 24)),
+    ((32, 12), (8, 0, 24, 12)),
+    ((8, 6), (0, 0, 8, 6)),
+])
+def test_response_saved_and_resized_without_stretching(tmp_path, response_size, crop_box):
     checkpoint = make_checkpoint(tmp_path, count=1)
-    with pytest.raises(ValueError, match='aspect ratio'):
-        repair_images(checkpoint, backend=Backend(size=(16, 16)))
-    assert 'repaired_rgb' not in checkpoint.views[0]
-    repair_images(Checkpoint.load(checkpoint.root), backend=Backend(size=(32, 24)))
+    original_camera = json.loads(json.dumps(checkpoint.views[0]['camera']))
+    repair_images(checkpoint, backend=Backend(size=response_size))
     checkpoint = Checkpoint.load(checkpoint.root)
+    metadata = checkpoint.views[0]['image_repair']
+    assert metadata['status'] == 'complete'
+    assert metadata['response_size'] == list(response_size)
+    assert (checkpoint.root / metadata['response_image']).read_bytes() == png_bytes(response_size)
+    assert checkpoint.views[0]['camera'] == original_camera
     with Image.open(checkpoint.image_path(checkpoint.views[0], repaired=True)) as image:
         assert image.size == (16, 12)
-    assert checkpoint.views[0]['image_repair']['response_size'] == [32, 24]
+        expected = np.empty((12, 16, 3), dtype=np.uint8)
+        expected[:] = [100, 120, 140]
+        np.testing.assert_array_equal(np.asarray(image), expected)
+    assert metadata['resize']['method'] == 'cover_center_crop'
+    assert metadata['resize']['source_crop_box'] == list(crop_box)
+
+
+def test_center_crop_preserves_pixels_instead_of_stretching(tmp_path):
+    checkpoint = make_checkpoint(tmp_path, count=1)
+    pixels = np.arange(16 * 16 * 3, dtype=np.uint8).reshape(16, 16, 3)
+    stream = io.BytesIO()
+    Image.fromarray(pixels).save(stream, format='PNG')
+    backend = Backend()
+    backend.edit = lambda *_: ImageEditResult(images=[stream.getvalue()])
+    repair_images(checkpoint, backend=backend)
+    with Image.open(checkpoint.image_path(checkpoint.views[0], repaired=True)) as image:
+        np.testing.assert_array_equal(np.asarray(image), pixels[2:14])
+
+
+@pytest.mark.parametrize('model', ['gpt-image-2.5-sunburst', 'gpt-image-2.5-flare', 'gpt-image-2'])
+def test_queued_edit_routes_selected_model_through_worker_config(tmp_path, monkeypatch, model):
+    from types import SimpleNamespace
+    from splat_explorer.config import Config, load_config
+    from splat_explorer.splatfix import executor, cli
+    from splat_explorer.image_edit_gpt import GptImageEditBackend
+
+    checkpoint = make_checkpoint(tmp_path, count=1)
+    root = tmp_path / 'job'
+    root.mkdir()
+    cfg = Config({'agent': {'vlm_backend': 'cli_relay'},
+                  'image_edit': {'backend': 'gpt-image-2', 'model': 'gpt-image-2',
+                                 'timeout_s': 123}})
+    run = SimpleNamespace(run_id='job', config=SimpleNamespace(
+        image_edit_backend=model,
+        splatfix={'stage': 'edit', 'checkpoint': str(checkpoint.root),
+                  'resolution_profile': 'training'}))
+    seen = []
+
+    def edit(self, image_path, prompt):
+        seen.append((self.model, self.timeout_s, image_path, prompt))
+        return ImageEditResult(images=[png_bytes()])
+
+    monkeypatch.setattr('splat_explorer.image_edit_gpt._cli_relay_client', lambda cfg: object())
+    monkeypatch.setattr(GptImageEditBackend, 'edit', edit)
+
+    def run_process(argv, log_path, stop, progress):
+        worker_cfg = load_config(argv[argv.index('--config') + 1])
+        cli.edit_views(worker_cfg, SimpleNamespace(checkpoint=argv[-1]))
+
+    monkeypatch.setattr(executor, 'run_process', run_process)
+    store = SimpleNamespace(get_run=lambda _: SimpleNamespace(state=SimpleNamespace(details={})))
+    executor.SplatfixExecutor(cfg, store)._local(run, root, lambda: False, lambda **kw: None)
+    assert len(seen) == 1
+    assert seen[0][:2] == (model, 123)
+    assert seen[0][2] == checkpoint.image_path(checkpoint.views[0])
+    from splat_explorer.splatfix.image_repair import DEFAULT_PROMPT
+    assert seen[0][3] == DEFAULT_PROMPT
+    assert cfg['image_edit']['model'] == 'gpt-image-2'
+    assert Checkpoint.load(checkpoint.root).views[0]['image_repair']['model'] == model
 
 
 def test_checkpoint_rejects_escaped_paths_and_invalid_counts(tmp_path):

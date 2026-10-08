@@ -21,7 +21,10 @@ def validate_options(raw):
         span = float(raw.get('span_fraction', .04))
         if not math.isfinite(span) or not 0 < span <= .15:
             raise ValueError('span_fraction must be in (0, .15]')
-        result.update(frames=frames, span_fraction=span)
+        insertion = raw.get('image_cache_insertion', False)
+        if type(insertion) is not bool:
+            raise ValueError('image_cache_insertion must be a boolean')
+        result.update(frames=frames, span_fraction=span, image_cache_insertion=insertion)
     return result
 
 

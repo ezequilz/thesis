@@ -472,6 +472,16 @@ def prepare_caption(root, request, trajectory):
     (root / 'caption-result.json').write_text(json.dumps(result, indent=2))
 
 
+def install_image_cache_insertion(pipe):
+    """Reuse the exact starter implementation, including in standalone GPU workers."""
+    import importlib.util
+    path = Path(__file__).resolve().parents[2] / 'scene_runs_ext' / 'starter_inference.py'
+    spec = importlib.util.spec_from_file_location('splatfix_starter_inference', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.install_starter_inference(pipe, generated_cache='clean')
+
+
 def inference(root, request, trajectory, plus=False):
     import numpy as np
     import torch
@@ -494,6 +504,11 @@ def inference(root, request, trajectory, plus=False):
     pipe = get_eval_pipe(args, device)
     load_transformer_checkpoint(pipe.transformer, args)
     pipe.transformer.eval().requires_grad_(False)
+    insertion = cfg.get('image_cache_insertion', False)
+    if type(insertion) is not bool:
+        raise ValueError('image_cache_insertion must be a boolean')
+    if insertion:
+        install_image_cache_insertion(pipe)
     cp = Path(request['checkpoint_root'])
     cameras = opengl_transforms(trajectory)
     def rgb(path):
@@ -513,6 +528,13 @@ def inference(root, request, trajectory, plus=False):
             if not indices:
                 continue
             seed_index = segment.get('seed_index')
+            if insertion and seed_index is None:
+                seed_index = segment.get('cache_seed_index')
+                if seed_index is None and indices[0] in neighbors:
+                    seed_index = indices[0]
+                    indices = indices[1:]
+                if seed_index is None:
+                    raise ValueError('Image cache insertion requires a trusted endpoint for each series; rebuild the trajectory')
             if seed_index is not None:
                 if seed_index not in neighbors:
                     raise ValueError('Series seed must be a trusted reference camera')
@@ -543,6 +565,7 @@ def inference(root, request, trajectory, plus=False):
                       rgb_renderer=request.get('anchor_rgb_policy'),
                       plus_rgb_renderer=request.get('plus_rgb_renderer'),
                       mode=request['mode'], upstream_revision=request['upstream_revision'],
+                      image_cache_insertion=insertion,
                       inference_target_policy=request.get('inference_target_policy', 'all_segment_frames'),
                       camera_scale=request['camera_scale'],
                       camera_scale_provenance=request.get('camera_scale_provenance'),

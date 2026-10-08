@@ -184,6 +184,8 @@ def run_repeat_benchmark(prior, output_dir, *, resolution_profile='training', re
             directory = b._metadata_path(split, entry, key)
             if len(list(directory.glob('*.png'))) != count:
                 raise ValueError(f'Incomplete repaired {key}: expected {count} PNGs')
+        from .inference_preview import publish_inputs
+        publish_inputs(root, split=split)
         stage('inference', inference(split, root / 'inference'))
         predictions = b._prediction_frames(root / 'inference', scene, required)
         from .inference_preview import publish_preview

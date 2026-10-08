@@ -4,11 +4,13 @@ agent:
   vlm_backend: cli_relay
 
 splatfix:
-  # Typical released DL3DV training preprocessing: 960x540 -> 960x544.
+  # Default 832x480 follows Wan2.1 1.3B; both dimensions are divisible by 16.
+  # Render directly at this size; existing images use calibrated scale/crop.
   # Set 720p explicitly for 1280x720 novel camera renders.
   # early_original: v0, original 960x720 captures and uncapped source inputs.
   resolution_profile: training
   runtime:
+    image_cache_insertion: false
     repo: /workspace/third_party/ArtiFixer
     python: /workspace/artifixer-venv/bin/python
     checkpoint: /workspace/models/artifixer/artifixer-1.3b.pt

@@ -32,6 +32,10 @@ class FakeRenderer:
 
 def mock_scene(monkeypatch):
     import splat_explorer.scene
+    # These worker/orbit tests use fixed 32px fixtures. Exact-size preparation
+    # and its run_repair wiring are exercised in test_splatfix_resolution.py.
+    monkeypatch.setattr('splat_explorer.splatfix.resolution.prepare_repair_checkpoint',
+                        lambda checkpoint, *args, **kwargs: checkpoint)
     calls = []
     monkeypatch.setattr(repair, 'capture_rgb', lambda *a, **kw: None)
     monkeypatch.setattr(repair, 'capture_plus_rgb', lambda *a, **kw: None)
@@ -344,8 +348,11 @@ def test_conditioning_matches_official_preparation_pose_contract_without_double_
 @pytest.mark.parametrize('plus', [False, True])
 @pytest.mark.parametrize('trajectory_mode', ['authors_orbit', 'legacy_local_loops'])
 @pytest.mark.parametrize('reference_count', [1, 3, 6])
+@pytest.mark.parametrize('insertion', [False, True])
 @pytest.mark.parametrize('split_mode', ['single-split', 'double-split'])
-def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeypatch, plus, trajectory_mode, reference_count, split_mode):
+def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeypatch, plus, trajectory_mode, reference_count, split_mode, insertion):
+    if insertion and trajectory_mode != 'authors_orbit':
+        pytest.skip('Cache insertion coverage uses the dashboard authored orbit')
     import contextlib
     import sys
     import types
@@ -415,16 +422,23 @@ def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeyp
         if split_mode == 'double-split':
             trajectory['segments'][0]['seed_index'] = 0
             trajectory['segments'][1].update(seed_index=reference_count - 1, indices=[8, 7])
+    request['runtime']['image_cache_insertion'] = insertion
+    installed = []
+    monkeypatch.setattr('splat_explorer.splatfix.artifixer.official_worker.install_image_cache_insertion', lambda value: installed.append(value))
+    if insertion and split_mode == 'single-split':
+        trajectory['segments'][0]['cache_seed_index'] = 0
+        trajectory['segments'][1].update(cache_seed_index=reference_count - 1, indices=[8, 7])
     resets = []
     pipe.clear_inference_caches = lambda: resets.append(len(items))
     inference(root, request, trajectory, plus=plus)
+    assert installed == ([pipe] if insertion else [])
     assert parsed[parsed.index('--render_trajectory') + 1] == 'trajectory'
     assert loaded_prompts == [[Path(request['caption_path'])]]
     assert len(seen) == (2 if trajectory_mode == 'authors_orbit' else 1)
     assert resets == list(range(len(seen)))
     anchors = [anchor['frame_index'] for anchor in trajectory['anchors']]
     expected = [i for i in range(9) if trajectory_mode != 'authors_orbit' or i not in anchors]
-    seeded = trajectory_mode == 'authors_orbit' and split_mode == 'double-split'
+    seeded = trajectory_mode == 'authors_orbit' and (split_mode == 'double-split' or insertion)
     if seeded:
         assert target_indices == [0, *[i for i in range(7) if i not in anchors], reference_count - 1, 8, 7]
         for item, seed in zip(items, [0, reference_count - 1]):

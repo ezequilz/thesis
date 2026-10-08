@@ -67,3 +67,17 @@ def test_worker_dispatch_preserves_legacy_requests(tmp_path, monkeypatch, select
     (tmp_path / 'worker-request.json').write_text(json.dumps(selection))
     execute(tmp_path)
     assert calls == [tmp_path]
+
+
+@pytest.mark.parametrize('value', [False, True])
+def test_image_cache_insertion_setting(value):
+    from splat_explorer.splatfix.artifixer.backend import validate_options
+    assert validate_options({'stage': 'repair'})['image_cache_insertion'] is False
+    assert validate_options({'stage': 'repair', 'image_cache_insertion': value})['image_cache_insertion'] is value
+
+
+@pytest.mark.parametrize('value', ['false', 'on', 1, None])
+def test_image_cache_insertion_rejects_non_boolean(value):
+    from splat_explorer.splatfix.artifixer.backend import validate_options
+    with pytest.raises(ValueError, match='image_cache_insertion'):
+        validate_options({'stage': 'repair', 'image_cache_insertion': value})

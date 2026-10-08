@@ -215,6 +215,11 @@ def build_author_orbit(reference_poses, intrinsics, metric_scale, *, target_pose
     if not frames:
         raise ValueError('Authors interpolation produced no non-reference targets; use smaller spacing')
     segments = [s for s in segments if s['target_indices']]
+    if split_mode == 'single-split':
+        for segment in segments:
+            seed_key = key(interpolated[segment['author_start']])
+            if seed_key in reference_keys:
+                segment['cache_seed_full_frame_index'] = full_lookup[seed_key]
     if split_mode == 'double-split':
         # Only trusted reference cameras may seed a half-series. Benchmark
         # test cameras remain targets, including when they are orbit waypoints.

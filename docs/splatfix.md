@@ -187,29 +187,38 @@ This is the early Splatfix resolution setting, not an authors-endorsed preset.
 Only resolution behavior is versioned; other current pipeline settings remain
 in effect. Historical unversioned runs are labelled separately in run details.
 
-**v1 · Training-aligned resolution** (`training`) remains the default.
-**v1 · 720p resolution** (`720p`) is the capped alternative.
+**v1 832 x 480 (default)** (`training`) is the default.
+**v1 1280 x 720** (`720p`) is the larger alternative.
 
-New Splatfix captures use **960 × 544** for VLM camera observations, saved
-cameras, trajectory renders and both diffusion passes. The `training` profile
-is the default even when the general explorer configuration uses 960 × 720.
-The released [training loader](https://github.com/nv-tlabs/ArtiFixer/blob/a392c4dfe17459ef9952407accdb9fcdcdddba98/model_training/data/dl3dv_base.py)
-reads DL3DV `images_4`; typical 960 × 540 frames become 960 × 544 under its
-[nearest-multiple-of-16 preprocessing](https://github.com/nv-tlabs/ArtiFixer/blob/a392c4dfe17459ef9952407accdb9fcdcdddba98/model_training/data/utils.py).
-This motivates the default; an exact training-size histogram for the released
-checkpoints is unavailable, and optimal quality at this size is not established.
+New Splatfix camera captures render directly at **832 × 480** by default, or
+**1280 × 720** with `splatfix.resolution_profile: 720p`. Both dimensions in each
+profile are divisible by 16, so upstream alignment does not resize these frames.
+832 × 480 is 26:15, not exact 16:9; 1280 × 720 is exact 16:9.
+The smaller size follows the [official Wan2.1 T2V-1.3B size configuration](https://github.com/Wan-Video/Wan2.1/blob/main/wan/configs/__init__.py),
+not a demonstrated optimal ArtiFixer training resolution or required aspect ratio.
 
-Set `splatfix.resolution_profile: 720p` in configuration for **1280 × 720** new
-camera renders. Dashboard job requests can override `resolution_profile` with
-`training`, `720p` or `early_original`; direct Python repair/benchmark calls use that runtime key.
-The chosen profile is captured in the queued job and passed to GPU inference.
+The former 960 × 544 default was inspired by rounding typical 960 × 540 DL3DV
+frames to multiples of 16. Existing saved captures remain at their recorded size.
+The internal resolution-policy revision is now 2 to prevent reuse of prepared
+inputs under the old bounds; the user-facing profile labels remain v1.
+Dashboard job requests can select `training`, `720p` or `early_original` through
+`resolution_profile`; direct Python repair/benchmark calls use that runtime key.
 Other explorer pipelines retain their own resolution settings.
 
-Existing photographs and saved cameras keep their calibrated aspect: fit within
+Step 4 creates an isolated checkpoint at the exact selected profile size, even
+when the saved selection used a smaller resolution. Original RGBs are recaptured
+through Viser at the saved poses with a uniformly scaled, center-cropped camera
+frustum. Subsequent trajectory captures use these same dimensions and intrinsics.
+Edited references are generated from the saved full GPT response using uniform
+scaling and center cropping, without padding or stretching. Legacy checkpoints
+without a saved response use their repaired PNG as a fallback. Source checkpoints
+and full responses remain unchanged; no additional GPT call is needed.
+
+Photographic benchmark inputs use a separate bounds-based policy: fit within
 the profile without upscaling, uniformly scale, then symmetrically crop fewer
 than 16 output pixels per dimension for alignment. Intrinsics and COLMAP image
 observations receive the same transform; world poses and points stay unchanged.
-Bicycle's 1237 × 822 photographs therefore become **816 × 544** (`training`) or
+Bicycle's 1237 × 822 photographs therefore become **720 × 480** (`training`) or
 **1072 × 720** (`720p`). Forcing those photographs into a widescreen aspect would
 change their framing substantially. Derived COLMAP images use lossless PNG
 payloads under the published filenames to retain split identity.
@@ -318,8 +327,16 @@ are skipped (a one-target leg needs only one series). There is no duplicated
 midpoint. Every nonempty half begins with its trusted endpoint RGB as rendered
 conditioning, opacity 1, and the matching camera. This frame is excluded from
 PNG export and generated supervision: reconstruction uses the trusted anchor
-image directly. The upstream denoiser is unchanged; this supplies a clean input
-image rather than clamping the first generated latent to an exact image.
+image directly. With **Image cache insertion** off (the default), the upstream denoiser is unchanged;
+this supplies a clean input image rather than clamping the first generated latent.
+Turn it on in the repair dashboard, or pass `--image-cache-insertion`
+(`--no-image-cache-insertion` disables it; runtime key: `image_cache_insertion`).
+Both repair diffusion passes then reuse `starter_inference`: preserve the VAE-encoded
+endpoint as the first latent, insert it into KV memory at timestep zero, and
+generate subsequent blocks with clean timestep-zero cache refreshes. This works
+with either split mode; single-split also prepends its trusted starting endpoint
+when enabled. References and direct anchor supervision are retained. The setting
+applies to baseline as well as GPT-repaired inputs; published benchmarks are unchanged.
 
 The benchmark's held-out test cameras are never trusted seed images. Double-split
 groups the existing path between its photographic reference cameras; test
@@ -413,11 +430,13 @@ Gaussian positions and RGB become a point-cloud initialization for fresh
 3DGRUT training. Original Gaussian scales, opacities, and appearance parameters
 are not continued. This input adaptation is recorded in each run.
 
-Both arms call unmodified upstream diffusion inference, followed by
+By default, both arms call unmodified upstream diffusion inference, followed by
 `data_processing.artifixer3d.train_artifixer3d` and `render_artifixer3d`—the
 implementations behind the [authors' reconstruction entry point](https://github.com/nv-tlabs/ArtiFixer/blob/a392c4dfe17459ef9952407accdb9fcdcdddba98/data_processing/run_artifixer3d.py).
-There are no exact-starter patches, periodic GPT refreshes, custom fitting
-safeguards, or resumed source-splat checkpoints. The distinction between arms
+By default there are no exact-starter patches. Repair's optional image cache
+insertion enables the existing exact-starter adaptation on the inference instance.
+There are no periodic GPT refreshes, custom fitting safeguards, or resumed
+source-splat checkpoints. The distinction between arms
 is the saved anchor RGBs used as reference and reconstruction supervision.
 
 ## Outputs and verification
@@ -673,7 +692,7 @@ manifest records parent hashes and repair pass number. Authors' stochastic
 inference/training behavior is retained; this is not a deterministic paired trial.
 Legacy manifests without `inference_settings` replay the recorded completed
 inference/plus commands, preserving defaults from the pinned upstream revision.
-The `training` profile uses v1 sizing (816 × 544 for Bicycle); it does not reuse
+The `training` profile uses v1 sizing (720 × 480 for Bicycle); it does not reuse
 old full-resolution RGB/opacity as inference inputs.
 
 ### Per-run trajectory and quality chart

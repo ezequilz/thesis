@@ -517,6 +517,8 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
                                       generated_supervision_count=len(required),
                                       published_test_prepared_indices=test_indices)
         atomic_json(root / 'benchmark-run.json', manifest)
+        from .inference_preview import publish_inputs
+        publish_inputs(root, split=split)
         stage('inference', inference(split, root / 'inference'))
         predictions = _prediction_frames(root / 'inference', scene_id, required)
         from .inference_preview import publish_preview
