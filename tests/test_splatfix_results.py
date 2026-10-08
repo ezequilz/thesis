@@ -290,3 +290,60 @@ def test_live_detail_exposes_graceful_stop_action():
     assert 'Stop gracefully &amp; download' in html
     assert "fetch('/api/splatfix/cancel'" in html
     assert 'run_id:liveRun' in html and 'r.can_stop' in html
+
+
+def test_hidden_run_persists_across_catalog_reload_and_output_changes(tmp_path):
+    from splat_explorer.web.splatfix_results import ResultCatalog
+    studio, root, result = setup(tmp_path)
+    key = studio.results.entries()[0]['id']
+    studio.results.set_hidden(root.name, True)
+    studio.results = ResultCatalog(studio)
+    assert studio.results.entries()[0]['hidden'] is True
+    assert studio.results.run_detail(key)['hidden'] is True
+    (root / 'scene_original.ply').write_bytes(b'ply')
+    assert all(row['hidden'] for row in studio.results.entries())
+    (result / 'result.json').rename(result / 'partial-result.json')
+    assert all(row['hidden'] for row in studio.results.entries())
+    studio.results.set_hidden(root.name, False)
+    assert all(not row['hidden'] for row in studio.results.entries())
+    saved = json.loads((studio.root / 'result-visibility.json').read_text())
+    assert saved[root.name]['hidden'] is False
+    assert saved[root.name]['updated_at']
+    assert (result / 'artifixer3d.ply').read_bytes() == b'ply'
+
+
+def test_visibility_rejects_invalid_updates_and_preserves_other_records(tmp_path):
+    import pytest
+    studio, root, _ = setup(tmp_path)
+    second = studio.create({'stage': 'select', 'scene_id': 'room'})
+    studio.results.set_hidden(root.name, True)
+    studio.results.set_hidden(second['run_id'], True)
+    studio.results.set_hidden(root.name, False)
+    assert studio.results.visibility_records()[second['run_id']]['hidden'] is True
+    for run_id, hidden in [('missing', True), ('../escape', True), (root.name, 'false'), (None, False)]:
+        with pytest.raises(ValueError):
+            studio.results.set_hidden(run_id, hidden)
+    path = studio.root / 'result-visibility.json'
+    path.write_text('{broken')
+    with pytest.raises(ValueError):
+        studio.results.set_hidden(root.name, True)
+    assert path.read_text() == '{broken'
+
+
+def test_visibility_endpoint_saves_and_reports_write_failure(tmp_path, monkeypatch):
+    from splat_explorer.web.server import DashboardHandler
+    studio, root, _ = setup(tmp_path)
+    responses = []
+    handler = SimpleNamespace(app=SimpleNamespace(splatfix=studio), command='POST',
+                              _send_json=lambda body, code=200: responses.append((body, code)))
+    endpoint = '/api/splatfix/results/visibility'
+    DashboardHandler._serve_splatfix(handler, endpoint, {'run_id': root.name, 'hidden': True})
+    assert responses[-1][1] == 200 and responses[-1][0]['hidden'] is True
+    DashboardHandler._serve_splatfix(handler, endpoint, {'run_id': root.name, 'hidden': 'false'})
+    assert responses[-1][1] == 400
+    def fail(*args):
+        raise OSError('disk full')
+    monkeypatch.setattr('splat_explorer.web.splatfix_results._atomic_write_json', fail)
+    DashboardHandler._serve_splatfix(handler, endpoint, {'run_id': root.name, 'hidden': False})
+    assert responses[-1][1] == 500
+    assert studio.results.entries()[0]['hidden'] is True

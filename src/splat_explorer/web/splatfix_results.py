@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
 from ..splatfix.jobs import read_json
+from ..scene_runs.store import _atomic_write_json
 from .scene_run_viser import SceneRunViser
 
 
@@ -14,6 +18,30 @@ class ResultCatalog:
         self.studio = studio
         self.cfg = studio.cfg
         self._visor = None
+        self._visibility_lock = threading.Lock()
+
+    def visibility_records(self):
+        path = self.studio.root / 'result-visibility.json'
+        try:
+            records = json.loads(path.read_text())
+        except FileNotFoundError:
+            return {}
+        if not isinstance(records, dict) or any(
+                not isinstance(record, dict) or type(record.get('hidden')) is not bool
+                for record in records.values()):
+            raise ValueError('Invalid result visibility records')
+        return records
+
+    def set_hidden(self, run_id, hidden):
+        if not isinstance(run_id, str) or type(hidden) is not bool:
+            raise ValueError('run_id and a boolean hidden value are required')
+        if not any(run.run_id == run_id for run in self.studio.store.list_runs()):
+            raise ValueError('Run not found')
+        with self._visibility_lock:
+            records = self.visibility_records()
+            records[run_id] = {'hidden': hidden, 'updated_at': datetime.now(timezone.utc).isoformat()}
+            _atomic_write_json(self.studio.root / 'result-visibility.json', records)
+        return {'run_id': run_id, **records[run_id]}
 
     @property
     def visor(self):
@@ -85,6 +113,9 @@ class ResultCatalog:
             if original.is_file() or repaired.is_file():
                 rows.append(self._row(record['run_id'], record, original if original.is_file() else None,
                     repaired if repaired.is_file() else None, {}, {}, None, None))
+        visibility = self.visibility_records()
+        for row in rows:
+            row['hidden'] = visibility.get(row['run_id'], {}).get('hidden', False)
         if not private:
             for row in rows:
                 row.pop('_paths', None)

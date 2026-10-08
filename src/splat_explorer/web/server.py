@@ -1238,6 +1238,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json(studio.snapshot())
             elif self.command == "GET" and path == "/api/splatfix/results":
                 self._send_json({"results": studio.results.entries()})
+            elif self.command == "POST" and path == "/api/splatfix/results/visibility":
+                if not isinstance(body, dict):
+                    raise ValueError("Request must be an object")
+                try:
+                    result = studio.results.set_hidden(body.get("run_id"), body.get("hidden"))
+                except OSError:
+                    self._send_json({"ok": False, "error": "Could not save run visibility. Please try again."}, 500)
+                    return
+                self._send_json({"ok": True, **result})
             elif self.command == "GET" and path == "/api/splatfix/results/run":
                 key = parse_qs(urlsplit(self.path).query).get("id", [""])[0]
                 result = studio.results.run_detail(key)
@@ -1267,6 +1276,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 query = parse_qs(urlsplit(self.path).query)
                 target = studio.allowed_file(query.get("path", [""])[0])
                 self._send(200, target.read_bytes(), mimetypes.guess_type(target.name)[0] or "application/octet-stream")
+            elif self.command == "POST" and path == "/api/splatfix/custom":
+                self._send_json(studio.start_custom(body))
             elif self.command == "POST" and path == "/api/splatfix/jobs":
                 self._send_json({"ok": True, "job": studio.create(body)}, 201)
             elif self.command == "POST" and path == "/api/splatfix/cancel":

@@ -769,3 +769,21 @@ pause while the image lightbox is open. Early-transfer failures are recorded in
 reconstruction; the final download
 still retrieves the outputs. A successful preview is reused after manager restart.
 Workers launched before this change do not publish the early-preview marker.
+
+
+### Manual view finding
+
+On `/splatfix`, choose the source scene, capture resolution, and view count, then
+click **Custom** beside **Schedule**. The shared Viser loads that scene and opens
+an ephemeral **Custom view finding** panel. Navigate in the viewer and click
+**Save current position** for each view. Each click saves the rendered RGB and
+its calibrated OpenCV camera pose to a normal checkpoint; no VLM job is queued.
+The clicked Viser tab supplies both the pose and capture, even with other tabs open.
+
+Click **Save selection** to finish and remove the panel. You can finish early;
+the checkpoint then uses the number of views actually saved. The dashboard
+selects this checkpoint and refreshes its images and downstream readiness.
+Duplicate positions are rejected. If the shared viewer switches scenes, captures
+are refused until the requested scene is ready again. **Close (keep saved views)**
+removes the controls without deleting an incomplete selection. This feature
+requires both the dashboard and Viser processes to run the updated code.

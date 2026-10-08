@@ -158,6 +158,45 @@ class SplatfixStudio(SceneRunStudio):
                 'defaults': {'reconstruction_method': DEFAULT_METHOD, 'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', 'training'), 'views': 6, 'frames': 25, 'span_fraction': .04,
                              'width': self.defaults()['width'], 'height': self.defaults()['height']}}
 
+    def start_custom(self, body):
+        """Create a normal checkpoint and install controls in the shared Viser."""
+        import json
+        import time
+        import uuid
+        from ..rendering.viser_renderer import ViserCaptureRenderer, ViserCaptureError
+        from ..scene.catalog import SceneSpec, publish_live_scene, portable_scene_path
+        from ..splatfix.resolution import profile_size
+        if not isinstance(body, dict):
+            raise ValueError('Request must be an object')
+        options = validate_job({
+            'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', 'training'),
+            **body, 'stage': 'select'})
+        scene = next((s for s in self.scenes() if s['id'] == body.get('scene_id')), None)
+        if scene is None or not scene.get('path'):
+            raise ValueError('Choose an available scene')
+        width, height = profile_size(options['resolution_profile'])
+        ident, generation = 'splatfix-manual-' + uuid.uuid4().hex, time.time_ns() // 1000000
+        spec = SceneSpec(ident, scene['label'], Path(scene['path']),
+                         up_axis=scene.get('up_axis', '+y'), lod_level=scene.get('lod_level', 0))
+        cp = Checkpoint.create(self.checkpoint_root, spec.path, target_views=options['views'], metadata={
+            'selection': 'manual', 'renderer': {'backend': 'viser'},
+            'width': width, 'height': height, 'resolution_profile': options['resolution_profile'],
+            'up_axis': spec.up_axis,
+            'scene_load': {'lod_level': spec.lod_level,
+                           'min_opacity': self.cfg.get('scene', {}).get('min_opacity', 0.0)},
+            'manual_scene': {'id': ident, 'generation': generation}})
+        renderer = ViserCaptureRenderer(None, url='http://localhost:' + str(
+            self.cfg.get('viewer', {}).get('render_port', 8081)))
+        try:
+            renderer._request('POST', '/manual-selection',
+                              body=json.dumps({'checkpoint': portable_scene_path(cp.root)}).encode(),
+                              content_type='application/json', timeout=10)
+        except ViserCaptureError as exc:
+            # Keep the empty checkpoint: a timeout may have installed the controls.
+            raise ValueError('Could not start Custom selection. Ensure the updated Viser is running. ' + str(exc)) from exc
+        publish_live_scene(spec, generation, reload=True, catalog_id=scene['id'])
+        return {'ok': True, 'checkpoint': str(cp.root)}
+
     def create(self, body):
         if not isinstance(body, dict):
             raise ValueError('Request must be an object')

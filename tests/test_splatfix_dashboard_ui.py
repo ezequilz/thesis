@@ -57,6 +57,16 @@ Promise.resolve(vm.runInContext(`(async()=>{
   $('views').valid=false;$('schedule-dialog').opened=false;
   schedule('select');
   assert.equal($('schedule-dialog').opened,false);
+  // Custom uses the selected scene and dimensions without queueing a VLM job.
+  $('views').valid=true;$('views').value='4';$('resolution-profile').value='training';
+  $('scene-capture').scrollIntoView=()=>{};
+  let customPath;
+  api=async(path,body)=>{customPath=path;submitted=body;return {checkpoint:'/custom/saved'}};
+  await startCustom();
+  assert.equal(customPath,'/custom');assert.equal(submitted.views,4);
+  assert.equal(submitted.scene_id,'unrelated-current-scene');
+  assert.equal(submitted.resolution_profile,'training');assert.equal(selected,'/custom/saved');
+  api=async(path,body)=>{submitted=body;return {}};
   // Baseline is available before editing, while improved waits for every repair.
   selected='/saved/cp';const cp=state.checkpoints[0];cp.views=[{camera:{width:16,height:16},original_url:'/original.png',metadata:{selected:true},image_repair:{status:'failed',error:'retry me'}}];cp.edited=0;
   $('mode').value='baseline';renderCheckpoint();

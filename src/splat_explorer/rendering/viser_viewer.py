@@ -331,6 +331,7 @@ def _start_render_api(
     capture,
     viewer_url: str,
     health_extra=None,
+    manual_selection=None,
 ) -> ThreadingHTTPServer:
     """HTTP API the harness uses to grab a visor frame.
 
@@ -386,7 +387,8 @@ def _start_render_api(
             self._send_json(payload)
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path.split("?", 1)[0] != "/render":
+            route = self.path.split("?", 1)[0]
+            if route not in ("/render", "/manual-selection"):
                 self._send_json({"error": "not found"}, 404)
                 return
             length = int(self.headers.get("Content-Length") or 0)
@@ -394,6 +396,14 @@ def _start_render_api(
                 params = json.loads(self.rfile.read(length) or b"{}")
             except json.JSONDecodeError:
                 self._send_json({"error": "invalid JSON"}, 400)
+                return
+            if route == "/manual-selection":
+                try:
+                    if manual_selection is None:
+                        raise ValueError("Manual selection is unavailable")
+                    self._send_json(manual_selection.start(params))
+                except (ValueError, KeyError, TypeError, OSError) as exc:
+                    self._send_json({"error": str(exc)}, 400)
                 return
             try:
                 jpeg = capture.render(params, any_client=bool(params.get("any_client")))
@@ -620,6 +630,8 @@ class _VisorCapture:
                     "No visor connected. Keep the repair dashboard open so its "
                     "3D visor can answer, or keep the episode dashboard tab visible."
                 )
+            if "client_id" in params:
+                clients = {cid: client for cid, client in clients.items() if cid == params["client_id"]}
             order = self._pick_clients(clients, width, height, any_client=any_client)
             if not order:
                 sizes = [
@@ -736,11 +748,12 @@ def serve_viewer(
     # switches scenes (outputs/live/scene.json).
     view = _view_pose(scene, up_axis, fov_deg)
     live: dict = {"state": _load_live_state(LIVE_STATE_PATH)}
+    manual_selection = None
 
     @server.on_client_connect
     def _(client: "viser.ClientHandle") -> None:
         state = live["state"]
-        if state is not None and state.get("position") is not None:
+        if (manual_selection is None or manual_selection.folder is None) and state is not None and state.get("position") is not None:
             try:
                 _set_client_step_camera(client, state, view["forward"], view)
                 return
@@ -816,11 +829,15 @@ def serve_viewer(
     def health_extra() -> dict:
         return {"scene": dict(scene_state)}
 
+    from ..splatfix.manual_selection import ManualSelection
+    capture = _VisorCapture(server, overlay_lock, overlay_handles)
+    manual_selection = ManualSelection(server, capture, scene_state)
     _start_render_api(
         host, render_port,
-        _VisorCapture(server, overlay_lock, overlay_handles),
+        capture,
         viewer_url,
         health_extra=health_extra,
+        manual_selection=manual_selection,
     )
 
     logger.info(
@@ -898,7 +915,7 @@ def serve_viewer(
             _apply_up(server, view)
         else:
             state = live["state"]
-            if state is not None and state.get("position") is not None:
+            if manual_selection.folder is None and state is not None and state.get("position") is not None:
                 _snap_clients_to_step(server, state, view["forward"], view)
             else:
                 _apply_view(server, view)
@@ -963,5 +980,5 @@ def serve_viewer(
             f"**Agent**: episode `{state.get('episode', '?')}` step {state.get('step', '?')}  \n"
             f"{state.get('pose', '')}"
         )
-        if follow_agent.value or (state.get("snap_camera") and key_changed):
+        if manual_selection.folder is None and (follow_agent.value or (state.get("snap_camera") and key_changed)):
             _snap_clients_to_step(server, state, view["forward"], view)
