@@ -407,8 +407,17 @@ def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeyp
         return {}
     module('model_eval')
     parsed = []
+    def get_pipe(args, device):
+        # These settings must reach construction, not just the installed sampler:
+        # upstream copies them into the transformer attention layers here.
+        if insertion:
+            assert parsed[parsed.index('--sink_size') + 1] == '1'
+            assert parsed[parsed.index('--local_attn_size') + 1] == '21'
+        else:
+            assert '--sink_size' not in parsed and '--local_attn_size' not in parsed
+        return pipe
     module('model_eval.run_inference', build_parser=lambda: SimpleNamespace(parse_args=lambda args: parsed.extend(args) or SimpleNamespace()),
-           get_eval_pipe=lambda *args: pipe, process_item=lambda pipe, item, *args: items.append(item))
+           get_eval_pipe=get_pipe, process_item=lambda pipe, item, *args: items.append(item))
     module('model_eval.checkpoint_loading', load_transformer_checkpoint=lambda *args: None)
     module('model_training')
     module('model_training.data')

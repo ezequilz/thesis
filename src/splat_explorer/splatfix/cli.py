@@ -86,7 +86,8 @@ def inspect_checkpoint(cfg, args):
 def repair_splat(cfg, args):
     from .methods import get_method
     run_repair = get_method(getattr(args, 'reconstruction_method', None)).run_repair
-    runtime = dict(cfg.get("splatfix", {}).get("runtime", {}))
+    method = getattr(args, "reconstruction_method", "artifixer")
+    runtime = dict(cfg.get("splatfix", {}).get("g4splat_runtime" if method == "g4splat" else "runtime", {}))
     runtime["resolution_profile"] = cfg.get("splatfix", {}).get("resolution_profile", "training")
     runtime['split_mode'] = getattr(args, 'split_mode', 'double-split')
     if getattr(args, 'image_cache_insertion', None) is not None:
@@ -95,6 +96,11 @@ def repair_splat(cfg, args):
         value = getattr(args, "artifixer_" + key, None)
         if value is not None:
             runtime[key] = str(value)
+    if method == "g4splat":
+        for key in ("repo", "python"):
+            value = getattr(args, "g4splat_" + key, None)
+            if value is not None:
+                runtime[key] = str(value)
     if args.scene is not None:
         runtime["scene_path"] = str(args.scene.resolve())
     result = run_repair(
@@ -128,6 +134,8 @@ def _add_stages(parser):
     edit.set_defaults(func=edit_views)
     repair = stages.add_parser("repair", help="Run fresh ArtiFixer3D/3D+ locally on a GPU from saved views")
     from .methods import METHODS, DEFAULT_METHOD
+    repair.add_argument("--g4splat-repo", type=Path)
+    repair.add_argument("--g4splat-python", type=Path)
     repair.add_argument("--reconstruction-method", choices=tuple(METHODS), default=DEFAULT_METHOD)
     repair.add_argument("checkpoint", type=Path)
     repair.add_argument("--scene", type=Path, help="Relocated source asset on the GPU host (same content)")

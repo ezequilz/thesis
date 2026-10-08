@@ -493,20 +493,25 @@ def inference(root, request, trajectory, plus=False):
     validate_caption(request['caption_path'], request['caption_sha256'])
     encoded_prompt, _ = load_encoded_prompt([Path(request['caption_path'])])
     cfg = request['runtime']
+    insertion = cfg.get('image_cache_insertion', False)
+    if type(insertion) is not bool:
+        raise ValueError('image_cache_insertion must be a boolean')
     output = root / ('plus' if plus else 'inference')
     args = build_parser().parse_args([
         '--checkpoint_pt', cfg['checkpoint'], '--model_id', cfg['model_id'],
         '--save_dir', str(output), '--save_frame_outputs_only',
         '--evalset', 'reconstructed_colmap', '--render_trajectory', 'trajectory',
-    ])  # All inference algorithm/scheduler/cache settings are authors defaults.
+        # Configure before construction: the transformer attention layers also
+        # capture these settings. Changing only pipe.sink_size is insufficient.
+        # Match the tested scene-runs-ext starter window and retain latent zero
+        # when later generated blocks roll through the cache.
+        *(['--sink_size', '1', '--local_attn_size', '21'] if insertion else []),
+    ])  # Insertion off retains the authors' inference defaults.
     torch.manual_seed(request['seed'])
     device = torch.device('cuda:0')
     pipe = get_eval_pipe(args, device)
     load_transformer_checkpoint(pipe.transformer, args)
     pipe.transformer.eval().requires_grad_(False)
-    insertion = cfg.get('image_cache_insertion', False)
-    if type(insertion) is not bool:
-        raise ValueError('image_cache_insertion must be a boolean')
     if insertion:
         install_image_cache_insertion(pipe)
     cp = Path(request['checkpoint_root'])
@@ -547,6 +552,9 @@ def inference(root, request, trajectory, plus=False):
                 opacity = torch.stack([torch.from_numpy(np.load(cp / trajectory['frames'][i]['opacity'], allow_pickle=False)) for i in indices])
             valid = torch.ones(len(indices), dtype=torch.bool)
             if seed_index is not None:
+                # References are the run-local, resolution-prepared GPT images.
+                # Upstream denoise_to_latents applies VAE preprocessing/scaling;
+                # the causal first latent encodes only this endpoint image.
                 renders[0] = references[neighbors.index(seed_index)]
                 opacity[0] = 1
                 valid[0] = False  # Trusted anchors supervise reconstruction directly.

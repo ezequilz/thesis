@@ -11,6 +11,12 @@ from importlib import import_module
 DEFAULT_METHOD = 'artifixer'
 # Explicit allowlist: request values must never become arbitrary import paths.
 METHODS = {
+    'g4splat': {
+        'module': 'splat_explorer.splatfix.g4splat.backend',
+        'label': 'G4Splat',
+        'stages': ['repair'],
+        'description': 'Reconstruct geometry from calibrated views with plane guidance and three See3D rounds. Native surfels plus a viewer PLY.',
+    },
     'artifixer': {
         'module': 'splat_explorer.splatfix.artifixer.backend',
         'label': 'ArtiFixer',

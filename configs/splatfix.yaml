@@ -9,6 +9,9 @@ splatfix:
   # Set 720p explicitly for 1280x720 novel camera renders.
   # early_original: v0, original 960x720 captures and uncapped source inputs.
   resolution_profile: training
+  g4splat_runtime:
+    repo: /workspace/third_party/G4Splat
+    python: /workspace/g4splat-env/bin/python
   runtime:
     image_cache_insertion: false
     repo: /workspace/third_party/ArtiFixer

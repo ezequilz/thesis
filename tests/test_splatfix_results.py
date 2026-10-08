@@ -430,3 +430,35 @@ def test_preview_split_references_load_even_with_verified_prediction_indices(tmp
         'reconstruction_inputs': [0], 'reference_count': 1}))
     detail = studio.results.run_detail(studio.results.entries()[0]['id'])
     assert detail['reference_images'][0]['url'] == studio.file_url(prep / 'ref.jpg')
+
+
+def test_interrupted_gallery_handles_null_resolution_metadata(tmp_path):
+    studio, _, root = setup(tmp_path)
+    (root / 'result.json').unlink()
+    (root / 'partial-result.json').write_text(json.dumps({
+        'incomplete': True, 'resolution_policy': None, 'frame_count': None,
+        'prediction_frames': 'inference/splatfix/frames/batch_0000/pred'}))
+    pred = root / 'inference/splatfix/frames/batch_0000/pred'
+    pred.mkdir(parents=True)
+    (pred / '00007.png').write_bytes(b'prediction')
+    detail = studio.results.run_detail(studio.results.entries()[0]['id'])
+    assert [frame['index'] for frame in detail['gallery']['frames']] == [7]
+
+
+def test_loading_references_preserves_verified_prediction_indices(tmp_path):
+    studio, _, root = setup(tmp_path)
+    (root / 'result.json').unlink()
+    (root / 'inference-preview.json').write_text(json.dumps({
+        'inference_ready': True, 'reconstruction_inputs': [7], 'reference_count': 1,
+        'frame_count': None, 'prediction_frames': 'inference/splatfix/frames/batch_0000/pred'}))
+    pred = root / 'inference/splatfix/frames/batch_0000/pred'
+    pred.mkdir(parents=True)
+    (pred / '00007.png').write_bytes(b'prediction')
+    prep = root / 'prepared/bicycle'
+    prep.mkdir(parents=True)
+    (prep / 'selected.json').write_text('[0]')
+    (prep / 'split.json').write_text(json.dumps({'test': {'scene': {
+        'selected_indices_path': 'selected.json'}}}))
+    detail = studio.results.run_detail(studio.results.entries()[0]['id'])
+    assert [frame['index'] for frame in detail['gallery']['frames']] == [7]
+    assert detail['gallery']['expected_count'] == 1

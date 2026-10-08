@@ -144,12 +144,13 @@ class ResultCatalog:
                 'mode': options.get('mode') or config.get('repair_type', ''),
                 'model': result.get('model_variant') or options.get('model'),
                 'trajectory': result.get('trajectory_mode'), 'frames': result.get('frame_count'),
-                'kind': 'ArtiFixer3D' if manifest or options.get('stage') in ('repair', 'benchmark') else 'Scene repair',
+                'kind': 'G4Splat · viewer approximation' if options.get('reconstruction_method') == 'g4splat' else 'ArtiFixer3D' if manifest or options.get('stage') in ('repair', 'benchmark') else 'Scene repair',
                 'result_name': manifest.parent.name if manifest else record['run_id'],
                 'original': original is not None, 'repaired': repaired is not None,
                 'viser_url': '/splatfix/results/viser?id=' + quote(key),
                 'detail_url': '/splatfix/results/run?id=' + quote(key),
                 'ply_url': self.studio.file_url(repaired) if repaired else None,
+                'native_ply_url': self.studio.file_url(native) if manifest and (native := self.studio.result_artifact(manifest, result.get('native_splat_path'))) else None,
                 'provenance_url': self.studio.file_url(manifest) if manifest else None,
                 'preview_url': preview[0] if preview else None,
                 'metrics': metrics.get('aggregate', {}), 'test_count': metrics.get('published_test_count'),
@@ -177,7 +178,7 @@ class ResultCatalog:
         root = manifest.parent
         from ..splatfix.resolution import PROFILE_LABELS
         recorded_request = read_json(root / 'request.json', {})
-        profile = result.get('resolution_policy', {}).get('profile') or recorded_request.get('resolution_profile')
+        profile = (result.get('resolution_policy') or {}).get('profile') or recorded_request.get('resolution_profile')
         row['resolution_setting'] = PROFILE_LABELS.get(profile, 'Early original resolution · unversioned run')
         def local(raw):
             return self.studio.result_artifact(manifest, raw)
@@ -272,9 +273,16 @@ class ResultCatalog:
                     target_ids = read_json(targets, []) if targets else None
                     if isinstance(refs, list) and refs:
                         gallery['reference_count'] = len(refs)
-                        allowed = set(target_ids) if isinstance(target_ids, list) else set(range(int(result.get('frame_count', 0))))
-                        allowed -= set(refs)
-                        gallery['verified_inputs'] = True
+                        # Loading references must not replace indices already verified
+                        # by the inference preview or supervision manifest.
+                        if allowed is None:
+                            if isinstance(target_ids, list):
+                                allowed = set(target_ids)
+                            elif result.get('frame_count') is not None:
+                                allowed = set(range(int(result['frame_count'])))
+                            if allowed is not None:
+                                allowed -= set(refs)
+                                gallery['verified_inputs'] = True
                         transforms = split_asset(scene.get('transforms_path'))
                         image_root = split_asset(scene.get('image_root'))
                         cameras = read_json(transforms, {}).get('frames', []) if transforms else []

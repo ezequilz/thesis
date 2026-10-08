@@ -26,10 +26,13 @@ def test_single_starter_then_complete_nonoverlapping_chunks(total):
 
 @pytest.mark.parametrize('cache_policy', ['clean', 'last_denoising'])
 @pytest.mark.parametrize('source_alpha', [0., .5])
-def test_clean_starter_drives_future_frames_and_cache_resets(cache_policy, source_alpha):
+@pytest.mark.parametrize('window', [-1, 21])
+@pytest.mark.parametrize('total', [14, 35])
+def test_clean_starter_drives_future_frames_and_cache_resets(cache_policy, source_alpha, window, total):
     torch = pytest.importorskip('torch')
     calls = []
     prepared = []
+    allocations = []
     fixed_reference = torch.tensor([17.])
     class Transformer:
         patch_size = (1, 1, 1)
@@ -54,13 +57,16 @@ def test_clean_starter_drives_future_frames_and_cache_resets(cache_policy, sourc
             return (torch.ones_like(value) * cache['starter'].mean(),)
     class Pipe:
         frames_per_block = 7
-        local_attn_size = -1
+        local_attn_size = window
+        sink_size = 1
         vae = SimpleNamespace(device='cpu', config=SimpleNamespace(scale_factor_temporal=4))
         transformer = Transformer()
         def generate_samples_from_batch(self): return "upstream"
         scheduler = SimpleNamespace(step=lambda noise, *a, **kw: noise,
                                     add_noise=lambda clean, noise, t: clean + noise)
-        def _initialize_kv_cache(self, *args): self.kv_cache1 = {}
+        def _initialize_kv_cache(self, batch, tokens, frames):
+            allocations.append((batch, tokens, frames))
+            self.kv_cache1 = {}
         def _initialize_crossattn_cache(self, name): setattr(self, name, {})
         def create_denoising_step_list(self, steps): return torch.tensor([1000., 500.])
         def prepare_latents(self, condition, opacity, first):
@@ -77,24 +83,25 @@ def test_clean_starter_drives_future_frames_and_cache_resets(cache_policy, sourc
     with torch.inference_mode():
         for starter in [2., 5.]:
             # Later condition values deliberately differ: they must be ignored.
-            condition = torch.full((1, 1, 14, 2, 2), 99.)
+            condition = torch.full((1, 1, total, 2, 2), 99.)
             condition[:, :, 0] = starter
-            opacity = torch.zeros(1, 53, 2, 2); opacity[:, 0] = 1
+            opacity = torch.zeros(1, 1 + (total - 1) * 4, 2, 2); opacity[:, 0] = 1
             opacity[:, 1:] = source_alpha
-            poses = torch.arange(14).reshape(1, 14, 1)
+            poses = torch.arange(total).reshape(1, total, 1)
             outputs.append(pipe.generate_samples_from_batch(condition, opacity,
                 fixed_reference, poses, poses, torch.ones(1), poses, torch.ones(1),
                 torch.ones(1), 2, False))
     assert torch.all(outputs[0] == 2.) and torch.all(outputs[1] == 5.)
-    assert len(prepared) == 8, 'Initial and intermediate samples must both use opacity mixing'
+    chunks = list(latent_chunks(total, 7))
+    assert allocations == [(1, 4, total if window == -1 else min(total, window))] * 2
+    assert len(prepared) == 4 * (len(chunks) - 1), 'Initial and intermediate samples must both use opacity mixing'
     assert all(torch.all(value == 99.) for value in prepared)
-    if cache_policy == 'clean':
-        assert [c[0] for c in calls[:7]] == [0, 1, 1, 1, 8, 8, 8]
-        assert [c[3] for c in calls[:7]] == [1, 28, 28, 28, 24, 24, 24]
-        assert all(calls[i][2].count_nonzero() == 0 for i in [0, 3, 6, 7, 10, 13])
-    else:
-        assert [c[0] for c in calls[:5]] == [0, 1, 1, 8, 8]
-        assert sum(c[2].count_nonzero() == 0 for c in calls) == 2
+    repeats = 3 if cache_policy == 'clean' else 2
+    expected_offsets = [0] + [start for start, end in chunks[1:] for _ in range(repeats)]
+    expected_rgb_counts = [1] + [(end - start) * 4 for start, end in chunks[1:] for _ in range(repeats)]
+    assert [c[0] for c in calls] == expected_offsets * 2
+    assert [c[3] for c in calls] == expected_rgb_counts * 2
+    assert sum(c[2].count_nonzero() == 0 for c in calls) == (2 * len(chunks) if cache_policy == 'clean' else 2)
 
 
 def test_only_gpt_starter_has_rgb_and_observation_opacity():

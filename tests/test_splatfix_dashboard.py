@@ -842,7 +842,7 @@ def test_method_discovery_and_checkpoint_requirements_are_backend_owned(studio, 
         'module': 'single_view_backend', 'label': 'Single view', 'stages': ['repair']})
     cp = checkpoint(studio, count=1)
     snapshot = studio.snapshot()
-    assert {m['id'] for m in snapshot['reconstruction_methods']} == {'artifixer', 'single_view'}
+    assert {m['id'] for m in snapshot['reconstruction_methods']} == {'artifixer', 'g4splat', 'single_view'}
     assert all('module' not in m for m in snapshot['reconstruction_methods'])
     assert snapshot['checkpoints'][0]['reconstruction_methods']['single_view']['ready']
     with pytest.raises(ValueError, match='two distinct'):

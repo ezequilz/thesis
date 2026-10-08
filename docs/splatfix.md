@@ -2,9 +2,8 @@
 
 `src/splat_explorer/splatfix/` separates view selection, GPT-image editing, and
 GPU reconstruction. It is independent of the old artifact-hunting loop.
-Step 4 selects a reconstruction method. ArtiFixer is currently the only
-registered method; a different reconstruction algorithm can be added as a sibling
-package without changing view selection or GPT-image editing.
+Step 4 selects a reconstruction method. ArtiFixer and G4Splat are registered as independent sibling backends.
+See [G4Splat setup and output semantics](g4splat.md).
 
 ### Reconstruction module boundary
 
@@ -333,8 +332,12 @@ Turn it on in the repair dashboard, or pass `--image-cache-insertion`
 (`--no-image-cache-insertion` disables it; runtime key: `image_cache_insertion`).
 Both repair diffusion passes then reuse `starter_inference`: preserve the VAE-encoded
 endpoint as the first latent, insert it into KV memory at timestep zero, and
-generate subsequent blocks with clean timestep-zero cache refreshes. This works
-with either split mode; single-split also prepends its trusted starting endpoint
+generate subsequent blocks with clean timestep-zero cache refreshes, using
+a 21-latent rolling window and one persistent starter sink, configured on
+both the pipeline and transformer at construction. Each cut clears the caches
+and uses its own resolution-prepared endpoint image. The encoded starter is
+preserved exactly; decoding it still has the VAE's normal reconstruction loss.
+This works with either split mode; single-split also prepends its trusted starting endpoint
 when enabled. References and direct anchor supervision are retained. The setting
 applies to baseline as well as GPT-repaired inputs; published benchmarks are unchanged.
 
