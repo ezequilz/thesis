@@ -126,6 +126,7 @@ def test_artifacts_cannot_escape_output_roots(studio, tmp_path):
 
 def test_gpu_worker_passes_only_saved_inputs_and_cooperative_stop(tmp_path, monkeypatch):
     from splat_explorer.splatfix import job_worker
+    from splat_explorer.splatfix.artifixer import worker as artifixer_worker
     request = {'checkpoint': 'saved', 'output': 'out', 'mode': 'baseline', 'frames': 25,
                'span_fraction': .04, 'runtime': {'repo': 'official'}}
     (tmp_path / 'worker-request.json').write_text(json.dumps(request))
@@ -137,7 +138,7 @@ def test_gpu_worker_passes_only_saved_inputs_and_cooperative_stop(tmp_path, monk
         (tmp_path / 'STOP').touch()
         assert kwargs['should_stop']()
         raise InterruptedError('cancelled')
-    monkeypatch.setattr(job_worker, 'run_repair', fake_repair)
+    monkeypatch.setattr(artifixer_worker, 'run_repair', fake_repair)
     job_worker.execute(tmp_path)
     assert json.loads((tmp_path / 'worker-status.json').read_text())['status'] == 'stopped'
 
@@ -269,7 +270,7 @@ def test_registered_benchmark_queues_without_checkpoint(studio):
     source = benchmark_input(studio)
     job = studio.create({'stage': 'benchmark', 'source': str(source)})
     options = job['config']['splatfix']
-    assert options == {'stage': 'benchmark', 'source': str(source), 'mode': 'baseline', 'model': '1.3b', 'resolution_profile': 'training', 'regularization_profile': 'artifixer', 'split_mode': 'double-split'}
+    assert options == {'stage': 'benchmark', 'source': str(source), 'mode': 'baseline', 'model': '1.3b', 'resolution_profile': 'training', 'regularization_profile': 'artifixer', 'split_mode': 'double-split', 'reconstruction_method': 'artifixer'}
     assert studio.benchmarks()[0]['ready']
     assert 'not confirmed' in studio.benchmarks()[0]['provenance_note']
     from splat_explorer.splatfix.jobs import requires_gpu
@@ -306,14 +307,15 @@ def test_benchmark_registration_rejects_incomplete_and_escaping_sources(studio, 
 def test_benchmark_worker_uses_official_dataset_entrypoint(tmp_path, monkeypatch):
     import sys
     from splat_explorer.splatfix import job_worker
+    from splat_explorer.splatfix.artifixer import worker as artifixer_worker
     calls = []
     def benchmark(source, output, **kwargs):
         calls.append((source, output, kwargs['runtime']))
         kwargs['on_progress']({'phase': 'colmap_preparation'})
         assert not kwargs['should_stop']()
         return {'splat_path': 'official.ply', 'output_dir': '/results/completed'}
-    monkeypatch.setitem(sys.modules, 'splat_explorer.splatfix.benchmark', SimpleNamespace(run_benchmark=benchmark))
-    monkeypatch.setattr(job_worker, 'run_repair', lambda *a, **kw: pytest.fail('Benchmark must not use saved-view repair'))
+    monkeypatch.setitem(sys.modules, 'splat_explorer.splatfix.artifixer.benchmark', SimpleNamespace(run_benchmark=benchmark))
+    monkeypatch.setattr(artifixer_worker, 'run_repair', lambda *a, **kw: pytest.fail('Benchmark must not use saved-view repair'))
     monkeypatch.setattr('splat_explorer.splatfix.run_evaluation.finalize_run_evaluation', lambda *a, **kw: None)
     (tmp_path / 'worker-request.json').write_text(json.dumps({'stage': 'benchmark', 'source': '/benchmark-input',
         'output': '/results', 'runtime': {'model_variant': '14b'}}))
@@ -531,11 +533,12 @@ def test_benchmark_resume_discovery_rejects_multiple_results_and_symlinks(tmp_pa
 def test_benchmark_worker_passes_validated_resume_runtime(tmp_path, monkeypatch):
     import sys
     from splat_explorer.splatfix import job_worker
+    from splat_explorer.splatfix.artifixer import worker as artifixer_worker
     calls = []
     def benchmark(source, output, **kwargs):
         calls.append(kwargs['runtime'])
         return {}
-    monkeypatch.setitem(sys.modules, 'splat_explorer.splatfix.benchmark', SimpleNamespace(run_benchmark=benchmark))
+    monkeypatch.setitem(sys.modules, 'splat_explorer.splatfix.artifixer.benchmark', SimpleNamespace(run_benchmark=benchmark))
     resume = '/workspace/splatfix-jobs/run_20261004_155421/results/benchmark_1.3b_abc'
     (tmp_path / 'worker-request.json').write_text(json.dumps({'stage': 'benchmark', 'source': '/new/input',
         'output': '/new/results', 'runtime': {'resume_from': resume}}))
@@ -819,3 +822,25 @@ def test_executor_rereads_worker_status_after_launcher_exit(studio, monkeypatch,
         assert 'GPU launcher exited before stage completion' in state.details['error']
     if terminal in ('completed', 'error', 'stopped'):
         assert not any('/STOP' in command for command in commands)
+
+
+def test_method_discovery_and_checkpoint_requirements_are_backend_owned(studio, monkeypatch):
+    from splat_explorer.splatfix import methods
+    import sys
+    backend = SimpleNamespace(validate_options=lambda raw: {},
+                              readiness=lambda cp: {'ready': cp.complete, 'reason': 'Saved inputs ready'})
+    monkeypatch.setitem(sys.modules, 'single_view_backend', backend)
+    monkeypatch.setitem(methods.METHODS, 'single_view', {
+        'module': 'single_view_backend', 'label': 'Single view', 'stages': ['repair']})
+    cp = checkpoint(studio, count=1)
+    snapshot = studio.snapshot()
+    assert {m['id'] for m in snapshot['reconstruction_methods']} == {'artifixer', 'single_view'}
+    assert all('module' not in m for m in snapshot['reconstruction_methods'])
+    assert snapshot['checkpoints'][0]['reconstruction_methods']['single_view']['ready']
+    with pytest.raises(ValueError, match='two distinct'):
+        studio.create({'stage': 'repair', 'mode': 'baseline', 'checkpoint': str(cp.root)})
+    job = studio.create({'stage': 'repair', 'mode': 'baseline', 'checkpoint': str(cp.root),
+                         'reconstruction_method': 'single_view'})
+    options = studio.store.get_run(job['run_id']).config.splatfix
+    assert options['reconstruction_method'] == 'single_view'
+    assert 'split_mode' not in options

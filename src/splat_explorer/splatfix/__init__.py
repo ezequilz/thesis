@@ -1,1 +1,1 @@
-"""Checkpointed view selection and independent ArtiFixer reconstruction."""
+"""Checkpointed view selection, image repair, and selectable reconstruction methods."""

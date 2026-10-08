@@ -84,7 +84,8 @@ def inspect_checkpoint(cfg, args):
 
 
 def repair_splat(cfg, args):
-    from .repair import run_repair
+    from .methods import get_method
+    run_repair = get_method(getattr(args, 'reconstruction_method', None)).run_repair
     runtime = dict(cfg.get("splatfix", {}).get("runtime", {}))
     runtime["resolution_profile"] = cfg.get("splatfix", {}).get("resolution_profile", "training")
     runtime['split_mode'] = getattr(args, 'split_mode', 'double-split')
@@ -124,6 +125,8 @@ def _add_stages(parser):
     edit.add_argument("checkpoint", type=Path)
     edit.set_defaults(func=edit_views)
     repair = stages.add_parser("repair", help="Run fresh ArtiFixer3D/3D+ locally on a GPU from saved views")
+    from .methods import METHODS, DEFAULT_METHOD
+    repair.add_argument("--reconstruction-method", choices=tuple(METHODS), default=DEFAULT_METHOD)
     repair.add_argument("checkpoint", type=Path)
     repair.add_argument("--scene", type=Path, help="Relocated source asset on the GPU host (same content)")
     repair.add_argument("--output", required=True, type=Path, help="Parent directory for isolated reconstruction runs")

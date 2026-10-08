@@ -2,6 +2,78 @@
 
 `src/splat_explorer/splatfix/` separates view selection, GPT-image editing, and
 GPU reconstruction. It is independent of the old artifact-hunting loop.
+Step 4 selects a reconstruction method. ArtiFixer is currently the only
+registered method; a different reconstruction algorithm can be added as a sibling
+package without changing view selection or GPT-image editing.
+
+### Reconstruction module boundary
+
+`methods.py` is an explicit, lazy-loaded registry. The dashboard lists its public
+metadata, validates checkpoint readiness through the selected backend, and saves
+`reconstruction_method` in the queued job. `executor.py` dispatches GPU execution;
+`job_worker.py` independently resolves the same method on the GPU host. Unknown
+method IDs are rejected. Jobs and worker requests predating this field default to
+`artifixer`. Scheduled jobs retain the selection made when they were queued.
+
+The implementation lives in `src/splat_explorer/splatfix/artifixer/`:
+
+- `backend.py`: public adapter and method-specific option/readiness validation.
+- `execution.py`, `worker.py`: LRZ staging, reattachment, cancellation, downloads,
+  and ArtiFixer stage orchestration.
+- `repair.py`, `author_trajectory.py`, `segmented_inference.py`,
+  `official_worker.py`: saved-view adaptation, trajectory generation, autoregressive
+  inference, fresh reconstruction and the subsequent 3D+ pass.
+- `benchmark.py`, `repeat_benchmark.py`, `repeat_render.py`, `resume.py`: published
+  dataset comparisons and reuse of prior preparations.
+- Evaluation, trajectory diagnostics, preview/log mirroring, interrupted-result
+  preservation, graceful trainer shutdown, 3D+ captures and `python_compat/` also
+  belong to this backend.
+
+Checkpoints, view finding, image editing, resolution transforms, rendering and
+Viser capture transport remain shared. Existing top-level module names are thin
+compatibility entry points, preserving imports and persisted executable paths;
+there is no second copy of the implementation. Existing output directories and
+trajectory/caption caches keep their layout and signatures. The application-wide
+LRZ transport and legacy scene-run integrations outside `splatfix/` are reused.
+
+### Adding another method
+
+Create `splatfix/<method>/backend.py` and register its fixed module path, ID, label,
+description and supported `stages` in `methods.METHODS`. Its adapter implements:
+
+- `validate_options(raw) -> dict`: validate and return only its own settings.
+- `readiness(checkpoint) -> {ready, reason}`: requirements for saved cameras.
+- `execute_remote(executor, run_id, options, root, stop, update)`: stage inputs and
+  runtime, persist the chosen method in `worker-request.json`, execute/reconnect,
+  publish progress, and download results. The shared executor supplies `cfg` and
+  `store`; the queue supplies scheduling and the exclusive GPU lease.
+- `execute_worker(root)`: read the staged request, honor STOP/deadline handling,
+  execute its algorithm and publish `worker-status.json` (running/completed/error/
+  stopped). Evaluation and partial-result preservation belong to the backend.
+- `run_repair(checkpoint_dir, output_dir, **kwargs)`: local CLI entry point.
+
+Use `Checkpoint.load()` and `camera_from_record()` for the common input contract:
+OpenCV camera-to-world poses, calibrated intrinsics, and
+`checkpoint.image_path(view, repaired=mode == 'edited')` for RGBs. Source splat,
+depth, opacity and generated trajectories are optional backend inputs; another
+method does not have to use ArtiFixer's orbit or inference pipeline. Keep new
+method caches separate from the legacy ArtiFixer trajectory/caption caches.
+
+Return isolated outputs under `gpu/results/<run>/result.json` with `splat_path`
+and `output_dir`; record the method ID and input provenance. The existing result
+catalog supports this common PLY contract and retains legacy ArtiFixer artifact
+fallbacks and optional inference/3D+ galleries. Add method-specific controls or
+additional result galleries when the new algorithm needs them. The advanced
+published-dataset benchmark UI remains ArtiFixer-specific. The local CLI accepts
+`--reconstruction-method`; its current tuning flags describe ArtiFixer and should
+be extended alongside a future method's runtime options.
+
+After updating a running installation, restart the dashboard and queue manager
+so their Python processes load the registry and dispatcher. Refreshing the page
+alone updates HTML but cannot reload an already-imported Python backend.
+
+### ArtiFixer reconstruction
+
 Both reconstruction modes use the authors' fresh ArtiFixer3D reconstruction
 implementation, with its sparse MCMC/LPIPS recipe and 30,000 training steps.
 Neither mode uses the extended pipeline's fixed-topology fitter.

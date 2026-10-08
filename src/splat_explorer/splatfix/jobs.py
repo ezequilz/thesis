@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import math
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,10 +17,12 @@ def validate_job(raw):
     profile_size(profile)
     result = {'stage': stage, 'resolution_profile': profile}
     if stage in ('repair', 'benchmark'):
-        from .official_worker import validate_regularization
-        from .author_trajectory import validate_split_mode
-        result['split_mode'] = validate_split_mode(raw.get('split_mode', 'double-split'))
-        result['regularization_profile'] = validate_regularization(raw.get('regularization_profile', 'artifixer'))
+        from .methods import DEFAULT_METHOD, get_method
+        method = raw.get('reconstruction_method')
+        method = DEFAULT_METHOD if method is None else method
+        backend = get_method(method, stage=stage)
+        result['reconstruction_method'] = method
+        result.update(backend.validate_options(raw))
     scheduled = raw.get('scheduled_at')
     if scheduled:
         instant = datetime.fromisoformat(str(scheduled).replace('Z', '+00:00'))
@@ -43,10 +44,7 @@ def validate_job(raw):
             raise ValueError('Choose a registered benchmark source')
         if raw.get('mode', 'baseline') != 'baseline':
             raise ValueError('Published-dataset benchmark uses baseline mode only')
-        model = raw.get('model', '1.3b')
-        if model not in ('1.3b', '14b'):
-            raise ValueError('model must be 1.3b or 14b')
-        result.update(source=source, mode='baseline', model=model)
+        result.update(source=source, mode='baseline')
         if raw.get('resume_from') is not None and raw.get('preparation_from') is not None:
             raise ValueError('resume_from and preparation_from are mutually exclusive')
         if raw.get('repeat_from') and (raw.get('resume_from') or raw.get('preparation_from')):
@@ -67,13 +65,7 @@ def validate_job(raw):
         mode = raw.get('mode', 'edited')
         if mode not in ('baseline', 'edited'):
             raise ValueError('mode must be baseline or edited')
-        frames = raw.get('frames', 25)
-        if type(frames) is not int or frames < 9 or frames > 101 or (frames - 1) % 4:
-            raise ValueError('frames must be 1 + 4*n, between 9 and 101')
-        span = float(raw.get('span_fraction', .04))
-        if not math.isfinite(span) or not 0 < span <= .15:
-            raise ValueError('span_fraction must be in (0, .15]')
-        result.update(mode=mode, frames=frames, span_fraction=span)
+        result['mode'] = mode
     return result
 
 

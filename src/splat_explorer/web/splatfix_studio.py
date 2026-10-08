@@ -5,6 +5,7 @@ from urllib.parse import quote
 from ..splatfix.checkpoint import Checkpoint, camera_from_record
 from ..splatfix.jobs import read_json, validate_job, registered_benchmark
 from .scene_run_studio import SceneRunStudio
+from ..splatfix.methods import DEFAULT_METHOD, available_methods, get_method
 
 
 class SplatfixStudio(SceneRunStudio):
@@ -33,15 +34,15 @@ class SplatfixStudio(SceneRunStudio):
                           'repaired_url': self.file_url(cp.image_path(v, True)) if v.get('repaired_rgb') else None}
                          for v in cp.views]
                 distinct = len({tuple(camera_from_record(view).c2w.ravel()) for view in cp.views})
-                reconstruction_reason = ('Finish selecting all views before reconstruction' if not cp.complete
-                    else 'Authors smooth orbit requires at least two distinct saved camera poses' if distinct < 2
-                    else 'Saved anchor poses must be distinct for authors smooth orbit' if distinct != len(cp.views)
-                    else 'Saved cameras are ready for authors smooth orbit')
-                reconstruction_ready = cp.complete and distinct >= 2 and distinct == len(cp.views)
+                method_readiness = {method['id']: get_method(method['id']).readiness(cp)
+                                    for method in available_methods()}
+                reconstruction_ready = method_readiness[DEFAULT_METHOD]['ready']
+                reconstruction_reason = method_readiness[DEFAULT_METHOD]['reason']
                 result.append({'id': str(cp.root), 'name': cp.root.name, 'scene': Path(cp.manifest['scene_path']).name,
                                'rgb_renderer': cp.manifest.get('metadata', {}).get('renderer', {}).get('backend'),
                                'scene_path': cp.manifest['scene_path'],
                                'created_at': cp.manifest.get('created_at'), 'views': views, 'target_views': cp.target_views,
+                               'reconstruction_methods': method_readiness,
                                'complete': cp.complete, 'reconstruction_ready': reconstruction_ready,
                                'reconstruction_readiness': reconstruction_reason, 'distinct_camera_poses': distinct, 'edited': sum(bool(v.get('repaired_rgb')) for v in views),
                                'trajectory_caches': len(list((cp.root / 'trajectories').glob('*/trajectory.json'))),
@@ -90,7 +91,7 @@ class SplatfixStudio(SceneRunStudio):
             if run.config.pipeline != 'splatfix':
                 continue
             row = run.to_dict()
-            from ..splatfix.resume import resume_available, preparation_available
+            from ..splatfix.artifixer.resume import resume_available, preparation_available
             row['resume_supported'] = resume_available(run)
             row['preparation_supported'] = preparation_available(run)
             row['state']['status'] = {'stopped': 'cancelled', 'error': 'failed'}.get(run.state.status.value, run.state.status.value)
@@ -149,12 +150,12 @@ class SplatfixStudio(SceneRunStudio):
         alive = _pid_alive(int(manager.get("pid") or 0))
         from .. import repair_lrz
         from ..splatfix.resolution import PROFILES, PROFILE_LABELS
-        return {'scenes': self.scenes(), 'checkpoints': self.checkpoints(), 'jobs': self.jobs(), 'benchmarks': self.benchmarks(),
+        return {'reconstruction_methods': available_methods(), 'scenes': self.scenes(), 'checkpoints': self.checkpoints(), 'jobs': self.jobs(), 'benchmarks': self.benchmarks(),
                 'manager': {'active': manager.get('status') == 'running' and alive, 'updated_at': manager.get('updated_at')},
                 'compute': {'configured': repair_lrz.lrz_configured(), 'label': 'Configured LRZ allocation'},
                 'capture_viewer_port': self.cfg.get('viewer', {}).get('port', 8080),
                 'resolution_profiles': [{'id': key, 'label': PROFILE_LABELS[key], 'width': size[0], 'height': size[1]} for key, size in PROFILES.items()],
-                'defaults': {'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', 'training'), 'views': 6, 'frames': 25, 'span_fraction': .04,
+                'defaults': {'reconstruction_method': DEFAULT_METHOD, 'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', 'training'), 'views': 6, 'frames': 25, 'span_fraction': .04,
                              'width': self.defaults()['width'], 'height': self.defaults()['height']}}
 
     def create(self, body):
@@ -170,14 +171,14 @@ class SplatfixStudio(SceneRunStudio):
             source, metadata = registered_benchmark(self.benchmark_root, options['source'])
             options['source'] = str(source)
             if options.get('resume_from'):
-                from ..splatfix.resume import validate_resume
+                from ..splatfix.artifixer.resume import validate_resume
                 validate_resume(self.store, options)
             if options.get('preparation_from'):
-                from ..splatfix.resume import validate_preparation
+                from ..splatfix.artifixer.resume import validate_preparation
                 validate_preparation(self.store, options)
             if options.get('repeat_from'):
-                from ..splatfix.resume import validate_preparation
-                from ..splatfix.repeat_benchmark import inherited_inference_command
+                from ..splatfix.artifixer.resume import validate_preparation
+                from ..splatfix.artifixer.repeat_benchmark import inherited_inference_command
                 prior = validate_preparation(self.store, {**options, 'preparation_from': options['repeat_from']})
                 if prior.state.status.value != 'completed' or prior.config.splatfix['model'] != options['model']:
                     raise ValueError('Repeat requires a completed benchmark with the same model')
@@ -198,8 +199,10 @@ class SplatfixStudio(SceneRunStudio):
                 raise ValueError('Finish selecting all views before starting this stage')
             if (options['stage'] == 'edit' or options.get('mode') == 'edited') and cp['rgb_renderer'] != 'viser':
                 raise ValueError('Recapture these views in Viser before image editing or edited reconstruction')
-            if options['stage'] == 'repair' and not cp['reconstruction_ready']:
-                raise ValueError(cp['reconstruction_readiness'])
+            if options['stage'] == 'repair':
+                readiness = cp['reconstruction_methods'][options['reconstruction_method']]
+                if not readiness['ready']:
+                    raise ValueError(readiness['reason'])
             if options['stage'] == 'repair' and options['mode'] == 'edited' and cp['edited'] != cp['target_views']:
                 raise ValueError('Repair all checkpoint images before GPT-image improved reconstruction')
             options['checkpoint'] = checkpoint

@@ -81,7 +81,7 @@ def test_completed_benchmark_attempts_metrics_then_chart_without_hiding_failure(
         raise RuntimeError('metric weights missing')
     monkeypatch.setattr(run_evaluation,'run_worker',worker)
     status=run_evaluation.finalize_run_evaluation(root,{'python':'python','repo':str(tmp_path)})
-    assert calls[0][2]=='splat_explorer.splatfix.benchmark_evaluation'
+    assert calls[0][2]=='splat_explorer.splatfix.artifixer.benchmark_evaluation'
     assert status['status']=='partial' and 'metric weights missing' in status['errors'][0]
     assert (root/'trajectory-quality.png').is_file()
     assert (root/'evaluation-status.json').is_file()

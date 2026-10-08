@@ -107,7 +107,8 @@ def test_plus_uses_reconstructed_scene_and_original_opencv_poses(tmp_path, monke
     (tmp_path / 'distillation.json').write_text(json.dumps({
         'splat_path': '/job/results/artifixer3d.ply', 'render_dir': str(tmp_path / 'renders')}))
     calls = []
-    monkeypatch.setattr(capture, 'capture_rgb', lambda *a, **kw: calls.append((a, kw)))
+    from splat_explorer.splatfix.artifixer import capture as artifixer_capture
+    monkeypatch.setattr(artifixer_capture, 'capture_rgb', lambda *a, **kw: calls.append((a, kw)))
     capture.capture_plus_rgb(tmp_path, {'transforms': tf})
     args, _ = calls[0]
     assert args[0] == '/job/results/artifixer3d.ply'

@@ -85,16 +85,17 @@ def test_export_failure_preserves_checkpoint_and_reports_failure(tmp_path, monke
 
 def test_remote_worker_stops_at_deadline_without_local_manager(tmp_path, monkeypatch):
     from splat_explorer.splatfix import job_worker
+    from splat_explorer.splatfix.artifixer import worker as artifixer_worker
     (tmp_path/'worker-request.json').write_text(json.dumps(dict(checkpoint='saved', output=str(tmp_path/'out'),
         mode='baseline',frames=25,span_fraction=.04,runtime={},stop_at_epoch=100)))
     now=[99]
-    monkeypatch.setattr(job_worker.time,'time',lambda:now[0])
+    monkeypatch.setattr(artifixer_worker.time,'time',lambda:now[0])
     def run(*args,**kwargs):
         assert not kwargs['should_stop']()
         now[0]=100
         assert kwargs['should_stop']()
         raise InterruptedError('deadline save completed')
-    monkeypatch.setattr(job_worker,'run_repair',run)
+    monkeypatch.setattr(artifixer_worker,'run_repair',run)
     job_worker.execute(tmp_path)
     assert (tmp_path/'STOP').exists()
     assert json.loads((tmp_path/'worker-status.json').read_text())['status']=='stopped'

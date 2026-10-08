@@ -91,6 +91,7 @@ def test_preview_rejects_paths_outside_current_run(tmp_path):
 
 def test_worker_advertises_preview_through_later_phases(tmp_path, monkeypatch):
     from splat_explorer.splatfix import job_worker
+    from splat_explorer.splatfix.artifixer import worker as artifixer_worker
     root = tmp_path / 'results/run'
     states = []
     def repair(*args, on_progress, **kwargs):
@@ -102,7 +103,7 @@ def test_worker_advertises_preview_through_later_phases(tmp_path, monkeypatch):
         on_progress({'phase': 'plus'})
         states.append(json.loads((tmp_path / 'worker-status.json').read_text()))
         return {'output_dir': str(root)}
-    monkeypatch.setattr(job_worker, 'run_repair', repair)
+    monkeypatch.setattr(artifixer_worker, 'run_repair', repair)
     monkeypatch.setattr('splat_explorer.splatfix.run_evaluation.finalize_run_evaluation', lambda *a, **k: None)
     (tmp_path / 'worker-request.json').write_text(json.dumps({
         'checkpoint': 'checkpoint', 'output': str(root.parent), 'mode': 'baseline',
