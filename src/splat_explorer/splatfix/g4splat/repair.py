@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import uuid
 from ..checkpoint import Checkpoint, atomic_json
@@ -12,7 +13,7 @@ from .inputs import export_inputs
 
 REVISION = 'ec0736126707a42bb2c26ed8ba2c314909edc7a9'
 DEFAULT_RUNTIME = {'repo': '/workspace/third_party/G4Splat',
-                   'python': '/workspace/g4splat-env/bin/python', 'resolution_profile': 'training'}
+                   'python': '/workspace/g4splat-env/bin/python', 'resolution_profile': 'training', 'auto_setup': True}
 
 
 def validate_runtime(runtime):
@@ -23,18 +24,31 @@ def validate_runtime(runtime):
         if not re.fullmatch(r'[A-Za-z0-9_./-]+', str(path)):
             raise ValueError('G4Splat upstream runtime paths must not contain spaces or shell metacharacters')
     if not (repo / 'train.py').is_file() or not python.is_file():
-        raise FileNotFoundError('Provision the official G4Splat checkout and CUDA environment; see docs/g4splat.md')
+        raise FileNotFoundError(f'G4Splat runtime missing: repo={repo}, python={python}. '
+                                'Enable splatfix.g4splat_runtime.auto_setup on the CUDA worker; see docs/g4splat.md')
     head = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
     if head != REVISION:
         raise ValueError(f'G4Splat requires pinned revision {REVISION}, found {head}')
-    if subprocess.check_output(['git', '-C', str(repo), 'status', '--porcelain', '--untracked-files=no'], text=True).strip():
+    # DSS can strip executable bits; still reject every tracked content change.
+    if subprocess.check_output(['git', '-c', 'core.fileMode=false', '-C', str(repo), 'status', '--porcelain', '--untracked-files=no'], text=True).strip():
         raise ValueError('G4Splat tracked source must be unmodified')
     required = ['Depth-Anything-V2/checkpoints/depth_anything_v2_vitl.pth',
                 'mast3r/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth',
                 'mast3r/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth',
                 'mast3r/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl',
-                'checkpoint/segment-anything/sam_vit_h_4b8939.pth', 'checkpoint/MVD_weights']
-    missing = [p for p in required if not (repo / p).exists()]
+                'checkpoint/segment-anything/sam_vit_h_4b8939.pth']
+    see3d = 'checkpoint/MVD_weights/'
+    required += [see3d + name for name in (
+        'model_index.json', 'scheduler/scheduler_config.json',
+        'tokenizer/vocab.json', 'tokenizer/merges.txt', 'tokenizer/tokenizer_config.json',
+        'text_encoder/config.json', 'text_encoder/model.safetensors',
+        'vae/config.json', 'vae/diffusion_pytorch_model.safetensors',
+        'unet/sparse/ema-checkpoint/config.json',
+        'unet/sparse/ema-checkpoint/diffusion_pytorch_model.safetensors',
+        'CLIP-ViT-H-14-laion2B-s32B-b79K/config.json',
+        'CLIP-ViT-H-14-laion2B-s32B-b79K/preprocessor_config.json',
+        'CLIP-ViT-H-14-laion2B-s32B-b79K/model.safetensors')]
+    missing = [p for p in required if not (repo / p).is_file() or (repo / p).stat().st_size == 0]
     if missing:
         raise FileNotFoundError('Missing official G4Splat weights: ' + ', '.join(missing))
     return repo, python
@@ -42,6 +56,25 @@ def validate_runtime(runtime):
 
 def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda: False, on_progress=lambda event: None):
     runtime = {**DEFAULT_RUNTIME, **(runtime or {})}
+    output = Path(output_dir).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    if runtime.get('auto_setup'):
+        # Provision only missing installations; never overwrite incompatible source.
+        try:
+            validate_runtime(runtime)
+        except FileNotFoundError:
+            python_path = Path(runtime['python']).absolute()
+            repo_path = Path(runtime['repo']).absolute()
+            for path in (python_path, repo_path):
+                if not re.fullmatch(r'[A-Za-z0-9_./-]+', str(path)):
+                    raise ValueError('G4Splat runtime paths contain unsafe characters')
+            if python_path.name != 'python' or python_path.parent.name != 'bin':
+                raise ValueError('Automatic setup requires a PREFIX/bin/python interpreter path')
+            on_progress({'phase': 'setup', 'message': 'Installing official G4Splat CUDA dependencies and weights'})
+            run_process(['bash', str(Path(__file__).with_name('provision.sh')),
+                         str(repo_path), str(python_path.parent.parent), REVISION],
+                        output / 'g4splat.log', should_stop)
+            shutil.copyfile(output / 'g4splat.log', output / 'provision.log')
     repo, python = validate_runtime(runtime)
     source = Path(inputs).resolve()
     output = Path(output_dir).resolve()
@@ -65,9 +98,16 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda: False,
     # configured interpreter even if its executable is named python3.9.
     shim = output / 'bin'
     shim.mkdir(exist_ok=True)
+    if (shim / 'python').is_symlink():
+        (shim / 'python').unlink()
     (shim / 'python').symlink_to(python)
-    command = ['env', '-u', 'PYTHONPATH', 'PATH=' + str(shim) + os.pathsep + os.environ.get('PATH', ''),
-               str(python), '-u', str(runner), str(repo), str(source), str(output / 'official'),
+    env = ['env', '-u', 'PYTHONPATH', '-u', 'PYTHONHOME', 'PYTHONNOUSERSITE=1',
+           'PATH=' + str(shim) + os.pathsep + str(python.parent) + os.pathsep + os.environ.get('PATH', ''),
+           'LD_LIBRARY_PATH=' + str(python.parent.parent / 'lib') + ':/usr/local/nvidia/lib:/usr/local/nvidia/lib64']
+    on_progress({'phase': 'preflight', 'message': 'Checking G4Splat CUDA kernels and compiled dependencies'})
+    run_process(env + [str(python), str(Path(__file__).with_name('runtime_probe.py')), str(repo)],
+                output / 'preflight.log', should_stop)
+    command = env + [str(python), '-u', str(runner), str(repo), str(source), str(output / 'official'),
                str(len(provenance['views']))]
     atomic_json(output / 'launch.json', {'argv': command})
     last_command = None
@@ -102,7 +142,8 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda: False,
 def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None,
                should_stop=lambda: False, on_progress=lambda event: None, **unused):
     runtime = {**DEFAULT_RUNTIME, **(runtime or {})}
-    validate_runtime(runtime)  # Fail before requesting any captures.
+    if not runtime.get('auto_setup'):
+        validate_runtime(runtime)  # Fail before requesting any captures.
     checkpoint = Checkpoint.load(checkpoint_dir)
     from .backend import readiness
     if not readiness(checkpoint)['ready']:

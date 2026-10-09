@@ -117,3 +117,42 @@ Promise.resolve(vm.runInContext(`(async()=>{
 '''
     result = subprocess.run([node, '-e', code, str(page)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_result_gallery_polling_stops_after_images_or_terminal_state():
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Node is required for the dashboard JavaScript logic check')
+    page = Path(__file__).resolve().parents[1] / 'src/splat_explorer/web/static/splatfix_result_detail.html'
+    code = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0];
+const elements=new Map();
+const get=id=>{if(!elements.has(id))elements.set(id,{addEventListener(){},querySelector(){return{}},setAttribute(){},open:false});return elements.get(id)};
+let calls=0,timer=null;
+let result={run_id:'run',status:'running',kind:'ArtiFixer3D',metrics:{},gallery:{frames:[]}};
+const document={getElementById:get,querySelectorAll:()=>[],hidden:false};
+const context=vm.createContext({document,location:{search:'?id=run'},URLSearchParams,
+ fetch:async()=>{calls++;return{ok:true,json:async()=>result}},
+ setTimeout:(fn,ms)=>{assert.equal(ms,30000);timer=fn;return 1},clearTimeout:()=>{timer=null}});
+const flush=()=>new Promise(resolve=>setImmediate(resolve));
+(async()=>{
+ vm.runInContext(source,context);await flush();
+ assert.equal(calls,1);assert.equal(typeof timer,'function');
+ document.hidden=true;timer();await flush();assert.equal(calls,1);
+ document.hidden=false;
+ result={...result,inference_ready:true};timer();await flush();
+ assert.equal(calls,2);assert.equal(timer,null);
+ assert.match(get('refreshStatus').textContent,/Auto-refresh off/);
+ // Manual refresh still retrieves the eventual reconstruction.
+ await get('refresh').onclick();assert.equal(calls,3);assert.equal(timer,null);
+ for(const status of ['completed','error','stopped']){
+   result={...result,status,inference_ready:false};await get('refresh').onclick();assert.equal(timer,null);
+ }
+ result={...result,status:'running',kind:'G4Splat · viewer approximation'};
+ await get('refresh').onclick();assert.equal(timer,null);
+ result={...result,kind:'ArtiFixer3D',gallery:{frames:[],verified_inputs:true,expected_count:0}};
+ await get('refresh').onclick();assert.equal(timer,null);
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+    subprocess.run([node, '-e', code, str(page)], check=True, capture_output=True, text=True)

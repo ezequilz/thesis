@@ -177,6 +177,14 @@ def test_inputs_transfer_before_inference_and_remain_with_predictions(tmp_path):
     (remote / 'request.json').write_text(json.dumps({'references': [str(checkpoint / 'reference.png')],
         'checkpoint_root': str(checkpoint), 'trajectory': str(checkpoint / 'trajectory.json')}))
     publish_inputs(remote)
+    # Caption-cache links target container paths that do not exist on the
+    # rsync host. They are not dashboard inputs and must not block publication.
+    captions = checkpoint / 'captions/cache/source/images'
+    captions.mkdir(parents=True)
+    (captions / 'anchor_00000.png').symlink_to('/workspace/missing/anchor.png')
+    alignment = checkpoint / 'trajectories/path/metric_alignment/measurement/images'
+    alignment.mkdir(parents=True)
+    (alignment / 'anchor_00000.png').symlink_to('/workspace/missing/anchor.png')
     local = tmp_path / 'local'
     def transfer(argv):
         command = argv[:]
@@ -191,6 +199,7 @@ def test_inputs_transfer_before_inference_and_remain_with_predictions(tmp_path):
     saved = local / 'gpu/results/run'
     assert (saved / 'input-images/reference_images/00000.png').read_bytes() == b'edited reference'
     assert (saved / 'input-images/original_rgb_images/00000.png').read_bytes() == b'original capture'
+    assert not (saved / 'checkpoint').exists()
     assert not (saved / 'inference-preview.json').exists()
     preview(remote)
     state['inference_preview'] = '/workspace/job/results/run/inference-preview.json'

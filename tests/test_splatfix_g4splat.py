@@ -176,3 +176,89 @@ def test_remote_reattach_downloads_before_releasing_lease(tmp_path, monkeypatch)
                             {'mode': 'baseline', 'checkpoint': 'saved'}, tmp_path, lambda: False, update)
     assert result['reconstruction_method'] == 'g4splat'
     assert updates[-1]['remote_finished']
+
+
+def test_auto_setup_runs_before_preflight_and_training(tmp_path, monkeypatch):
+    monkeypatch.setenv('LD_LIBRARY_PATH', '/foreign/torch/lib')
+    cp = checkpoint(tmp_path)
+    export_inputs(cp, tmp_path / 'inputs', 'baseline')
+    validations = []
+    def validate(runtime):
+        validations.append(runtime)
+        if len(validations) == 1:
+            raise FileNotFoundError('not installed')
+        return tmp_path / 'repo', tmp_path / 'env/bin/python'
+    monkeypatch.setattr(repair, 'validate_runtime', validate)
+    commands = []
+    def run(argv, log, *args):
+        commands.append(argv)
+        Path(log).touch()
+    monkeypatch.setattr(repair, 'run_process', run)
+    events = []
+    with pytest.raises(RuntimeError, match='did not produce'):
+        repair.run_prepared(tmp_path / 'inputs', tmp_path / 'result',
+                            runtime={'auto_setup': True, 'python': str(tmp_path / 'env/bin/python'),
+                                     'repo': str(tmp_path / 'repo')}, on_progress=events.append)
+    assert len(validations) == 2
+    assert commands[0][0] == 'bash' and commands[0][1].endswith('provision.sh')
+    assert commands[0][-1] == repair.REVISION
+    assert any(x.endswith('runtime_probe.py') for x in commands[1])
+    assert any(x.endswith('official_runner.py') for x in commands[2])
+    assert events[0]['phase'] == 'setup'
+    assert 'PYTHONNOUSERSITE=1' in commands[2]
+    assert not any('/foreign/torch/lib' in arg for arg in commands[2])
+
+
+def test_auto_setup_preserves_incompatible_checkout(tmp_path, monkeypatch):
+    def validate(runtime):
+        raise ValueError('tracked source must be unmodified')
+    monkeypatch.setattr(repair, 'validate_runtime', validate)
+    monkeypatch.setattr(repair, 'run_process', lambda *args: pytest.fail('must not overwrite source'))
+    with pytest.raises(ValueError, match='unmodified'):
+        repair.run_prepared('unused', tmp_path / 'result', runtime={'auto_setup': True})
+
+
+def test_empty_see3d_directory_is_not_a_checkpoint(tmp_path, monkeypatch):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'train.py').touch()
+    (repo / 'checkpoint/MVD_weights').mkdir(parents=True)
+    monkeypatch.setattr(repair.subprocess, 'check_output',
+                        lambda argv, **kwargs: repair.REVISION if 'rev-parse' in argv else '')
+    with pytest.raises(FileNotFoundError, match='unet/sparse/ema-checkpoint/diffusion_pytorch_model.safetensors'):
+        repair.validate_runtime({'repo': str(repo), 'python': sys.executable})
+
+
+def test_preflight_failure_never_launches_training(tmp_path, monkeypatch):
+    cp = checkpoint(tmp_path)
+    export_inputs(cp, tmp_path / 'inputs', 'baseline')
+    monkeypatch.setattr(repair, 'validate_runtime', lambda rt: (tmp_path, Path(sys.executable)))
+    def run(argv, *args):
+        assert any(x.endswith('runtime_probe.py') for x in argv)
+        raise RuntimeError('CUDA unavailable')
+    monkeypatch.setattr(repair, 'run_process', run)
+    with pytest.raises(RuntimeError, match='CUDA unavailable'):
+        repair.run_prepared(tmp_path / 'inputs', tmp_path / 'result')
+    assert not (tmp_path / 'result/launch.json').exists()
+    assert not (tmp_path / 'result/result.json').exists()
+
+
+def test_runtime_ignores_only_mode_changes_not_source_edits(tmp_path, monkeypatch):
+    import subprocess
+    repo = tmp_path / 'upstream'
+    repo.mkdir()
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+    git('init', '-q')
+    (repo / 'train.py').write_text('# official source\n')
+    (repo / 'train.py').chmod(0o755)
+    git('add', 'train.py')
+    git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'upstream')
+    monkeypatch.setattr(repair, 'REVISION', git('rev-parse', 'HEAD'))
+    (repo / 'train.py').chmod(0o644)
+    runtime = {'repo': str(repo), 'python': sys.executable}
+    with pytest.raises(FileNotFoundError, match='weights'):
+        repair.validate_runtime(runtime)
+    (repo / 'train.py').write_text('# changed algorithm\n')
+    with pytest.raises(ValueError, match='unmodified'):
+        repair.validate_runtime(runtime)

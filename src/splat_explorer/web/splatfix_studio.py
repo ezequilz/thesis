@@ -2,7 +2,7 @@
 from __future__ import annotations
 from pathlib import Path
 from urllib.parse import quote
-from ..splatfix.checkpoint import Checkpoint, camera_from_record
+from ..splatfix.checkpoint import Checkpoint, camera_from_record, atomic_json
 from ..splatfix.jobs import read_json, validate_job, registered_benchmark
 from .scene_run_studio import SceneRunStudio
 from ..splatfix.methods import DEFAULT_METHOD, available_methods, get_method
@@ -38,7 +38,7 @@ class SplatfixStudio(SceneRunStudio):
                                     for method in available_methods()}
                 reconstruction_ready = method_readiness[DEFAULT_METHOD]['ready']
                 reconstruction_reason = method_readiness[DEFAULT_METHOD]['reason']
-                result.append({'id': str(cp.root), 'name': cp.root.name, 'scene': Path(cp.manifest['scene_path']).name,
+                result.append({'id': str(cp.root), 'name': self.checkpoint_name(cp.root), 'storage_name': cp.root.name, 'scene': Path(cp.manifest['scene_path']).name,
                                'rgb_renderer': cp.manifest.get('metadata', {}).get('renderer', {}).get('backend'),
                                'scene_path': cp.manifest['scene_path'],
                                'created_at': cp.manifest.get('created_at'), 'views': views, 'target_views': cp.target_views,
@@ -50,6 +50,62 @@ class SplatfixStudio(SceneRunStudio):
             except (OSError, ValueError, KeyError):
                 continue
         return result
+
+    @staticmethod
+    def checkpoint_name(root):
+        # Keep UI labels separate from manifests written by running stages.
+        label = read_json(root / 'display-name.json', {})
+        name = label.get('name') if isinstance(label, dict) else None
+        return name if isinstance(name, str) and name.strip() else root.name
+
+    def rename_checkpoint(self, body):
+        if not isinstance(body, dict):
+            raise ValueError('Request must be an object')
+        name, ident = body.get('name'), body.get('checkpoint')
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 120:
+            raise ValueError('Enter a checkpoint name between 1 and 120 characters')
+        if not isinstance(ident, str):
+            raise ValueError('Choose an existing splatfix checkpoint')
+        root = Path(ident).resolve()
+        manifests = list(self.checkpoint_root.glob('*/checkpoint.json'))
+        manifests += list(self.root.glob('run_*/checkpoints/*/checkpoint.json'))
+        roots = (self.checkpoint_root.resolve(), self.root.resolve())
+        if (not any(root.is_relative_to(base) for base in roots)
+                or not any(p.parent.resolve() == root for p in manifests)):
+            raise ValueError('Choose an existing splatfix checkpoint')
+        Checkpoint.load(root)
+        atomic_json(root / 'display-name.json', {'name': name.strip()})
+        return {'ok': True, 'checkpoint': str(root), 'name': name.strip()}
+
+    def delete_checkpoint(self, body):
+        import shutil
+        if not isinstance(body, dict) or not isinstance(body.get('checkpoint'), str):
+            raise ValueError('Choose an existing splatfix checkpoint')
+        raw = Path(body['checkpoint'])
+        root = raw.resolve()
+        # Only delete whole registered checkpoint directories, never a run or an alias.
+        standalone = root.parent == self.checkpoint_root.resolve()
+        nested = (root.parent.name == 'checkpoints'
+                  and root.parent.parent.name.startswith('run_')
+                  and root.parent.parent.parent == self.root.resolve())
+        if (raw.is_symlink() or not (standalone or nested)
+                or not (root / 'checkpoint.json').is_file()
+                or (root / 'checkpoint.json').is_symlink()):
+            raise ValueError('Choose an existing splatfix checkpoint')
+        cp = Checkpoint.load(root)
+        for run in self.store.list_runs():
+            if run.config.pipeline != 'splatfix' or run.state.status.value in ('completed', 'error', 'stopped'):
+                continue
+            refs = [run.config.splatfix.get('checkpoint'), run.state.details.get('checkpoint')]
+            if (any(ref and Path(ref).resolve() == root for ref in refs)
+                    or root.is_relative_to(Path(run.path).resolve())):
+                raise ValueError('This checkpoint is used by an active or queued run. Cancel or finish that run before deleting it.')
+        repaired = sum(bool(view.get('repaired_rgb')) for view in cp.views)
+        if repaired and body.get('confirm_repaired') is not True:
+            return {'ok': False, 'requires_confirmation': True, 'repaired': repaired,
+                    'checkpoint': str(root), 'name': self.checkpoint_name(root)}
+        shutil.rmtree(root)
+        return {'ok': True, 'checkpoint': str(root)}
 
     def benchmarks(self):
         rows = []

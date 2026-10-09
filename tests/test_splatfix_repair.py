@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 import json
 import struct
 from types import SimpleNamespace
@@ -416,8 +417,11 @@ def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeyp
         else:
             assert '--sink_size' not in parsed and '--local_attn_size' not in parsed
         return pipe
+    def process_item(pipe, item, *args):
+        items.append(item)
+        pipe.starter_inference_audit = {'encoded_starter_preserved': True}
     module('model_eval.run_inference', build_parser=lambda: SimpleNamespace(parse_args=lambda args: parsed.extend(args) or SimpleNamespace()),
-           get_eval_pipe=get_pipe, process_item=lambda pipe, item, *args: items.append(item))
+           get_eval_pipe=get_pipe, process_item=process_item)
     module('model_eval.checkpoint_loading', load_transformer_checkpoint=lambda *args: None)
     module('model_training')
     module('model_training.data')
@@ -445,6 +449,17 @@ def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeyp
     assert loaded_prompts == [[Path(request['caption_path'])]]
     assert len(seen) == (2 if trajectory_mode == 'authors_orbit' else 1)
     assert resets == list(range(len(seen)))
+    audit_path = root / ('plus-insertion-audit.json' if plus else 'inference-insertion-audit.json')
+    assert audit_path.exists() is insertion
+    if insertion:
+        records = json.loads(audit_path.read_text())['series']
+        assert len(records) == len(items)
+        for record, item in zip(records, items):
+            assert record['encoded_starter_preserved'] is True
+            assert record['generation_global_indices'] == item['frame_indices'].tolist()
+            assert record['export_global_indices'] == item['frame_indices'][1:].tolist()
+            assert record['starter_exported'] is False
+            assert record['reference_sha256'] == hashlib.sha256(Path(record['reference_path']).read_bytes()).hexdigest()
     anchors = [anchor['frame_index'] for anchor in trajectory['anchors']]
     expected = [i for i in range(9) if trajectory_mode != 'authors_orbit' or i not in anchors]
     seeded = trajectory_mode == 'authors_orbit' and (split_mode == 'double-split' or insertion)
@@ -465,6 +480,11 @@ def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeyp
     cv = np.asarray(trajectory['transforms']['frames'][0]['transform_matrix'])
     np.testing.assert_allclose(seen[0]['frames'][0]['transform_matrix'], cv @ np.diag([1, -1, -1, 1]))
     assert seen[0]['camera_convention'] == 'opengl_c2w'
+    if insertion:
+        # A stale success must not certify dispatch bypassing the sampler.
+        monkeypatch.setattr(sys.modules['model_eval.run_inference'], 'process_item', lambda *args: None)
+        with pytest.raises(RuntimeError, match='starter preservation was not verified'):
+            inference(root, request, trajectory, plus=plus)
 
 
 def test_scale_backprojection_uses_z_not_ray_distance_and_masks_invalid_geometry():

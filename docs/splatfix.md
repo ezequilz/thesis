@@ -337,6 +337,13 @@ a 21-latent rolling window and one persistent starter sink, configured on
 both the pipeline and transformer at construction. Each cut clears the caches
 and uses its own resolution-prepared endpoint image. The encoded starter is
 preserved exactly; decoding it still has the VAE's normal reconstruction loss.
+Each new insertion run also checks exact latent equality after sampling and writes
+`inference-insertion-audit.json` (or `plus-insertion-audit.json`) plus
+`SPLATFIX_STARTER_VERIFIED` log records. These record the repaired input hash,
+seed camera, generation/export indices, and first generated latent/RGB offset.
+Missing runtime confirmation fails inference. The starter is not an exported
+prediction: subsequent generated views and the fitted splat are not constrained
+to reproduce its pixels exactly.
 This works with either split mode; single-split also prepends its trusted starting endpoint
 when enabled. References and direct anchor supervision are retained. The setting
 applies to baseline as well as GPT-repaired inputs; published benchmarks are unchanged.

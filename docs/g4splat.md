@@ -47,24 +47,45 @@ Use the native PLY and official renderer for method-quality comparisons.
 
 ## GPU environment
 
-Provision a separate CUDA environment using the pinned repository's README,
-including its rasterizer, KNN, tetrahedralization, MASt3R/ASMK, DepthAnythingV2,
-SAM and See3D dependencies and weights. The authors specify Python 3.9,
-PyTorch 2.0.1/CUDA 11.8 and report A100 80GB testing. Do not install these into
-the application or ArtiFixer environments. The application worker uses its own
-Python; it launches the official scripts by absolute path in the authors'
-environment, including their child `python` commands.
+The default runtime and dashboard configuration enable `splatfix.g4splat_runtime.auto_setup`.
+On the CUDA worker, missing installations are provisioned by the packaged
+`g4splat/provision.sh` script under a filesystem lock. It clones the pinned
+upstream source, creates a separate Python 3.9 / PyTorch 2.0.1 / CUDA 11.8 prefix,
+pins the CUDA compiler to 11.8 and CMake below 4 for the upstream build files,
+builds the official rasterizer, KNN, tetrahedralization and MASt3R extensions,
+and downloads DepthAnythingV2, MASt3R, SAM and the official See3D sparse-view
+weights. It does not replace any depth estimates, losses, training stages or
+model code. The See3D model snapshot is pinned to
+`cbf13b6f813137134907408e40d3f2a17d6f0a80` in `bruiiii/See3D`.
+
+Installation requires Linux x86_64, access to the public package/model hosts,
+and an NVIDIA GPU. The authors report A100 80GB testing. Downloads and build
+products persist on the mounted workspace across allocations. Installation
+uses its own environment; application and ArtiFixer packages are not changed.
+The first run can take substantially longer while dependencies and weights
+are installed. STOP and the job deadline also apply during automatic setup.
+
+For manual provisioning inside the GPU container:
 
 ```sh
-git clone --recursive https://github.com/DaLi-Jack/G4Splat.git /workspace/third_party/G4Splat
-git -C /workspace/third_party/G4Splat checkout ec0736126707a42bb2c26ed8ba2c314909edc7a9
-git -C /workspace/third_party/G4Splat submodule update --init --recursive
+bash /workspace/code/src/splat_explorer/splatfix/g4splat/provision.sh \
+  /workspace/third_party/G4Splat /workspace/g4splat-env \
+  ec0736126707a42bb2c26ed8ba2c314909edc7a9
 ```
 
-Complete the upstream installation and model downloads before running. Configure
-`splatfix.g4splat_runtime.repo` and `.python` (defaults shown in
-`configs/splatfix.yaml`). Runtime validation rejects a different revision,
-modified tracked source, missing primary weights or absent environment.
+Configure `splatfix.g4splat_runtime.repo` and `.python` to use an existing
+installation; set `auto_setup: false` to prohibit automatic installation.
+Runtime validation rejects a different revision, modified tracked source,
+missing or empty primary weights, and incomplete See3D checkpoints. Executable-bit
+changes introduced by the DSS filesystem are ignored; tracked file content is
+still checked. Before
+training, `runtime_probe.py` checks CUDA execution and compiled dependencies;
+its output is saved in `preflight.log`. Child `python` commands use the official
+interpreter with application `PYTHONPATH` and user-site packages disabled.
+The container's PyTorch/TensorRT library paths are excluded from
+`LD_LIBRARY_PATH`, preventing the NGC image's libraries from loading into the
+separate G4Splat environment. Temporary dependency builds use node-local `/tmp`
+to avoid DSS executable-bit changes during Git checkouts.
 The upstream scripts concatenate shell commands, so runtime and run paths must
 contain only letters, digits, underscores, slashes, dots and hyphens.
 

@@ -48,6 +48,8 @@ def generate_from_starter(self, condition, rendered_opacity, neighbors_condition
     retains the last denoising input; the original adaptation refreshes at t=0.
     """
     import torch
+    # Reset before validation so a failed call cannot leave a previous success.
+    self.starter_inference_audit = None
     if torch.is_grad_enabled() or use_exit_flag or ignore_neighbors:
         raise ValueError('Starter inference requires no-grad inference with edited references')
     if getattr(self.transformer, '_cp_world_size', 1) != 1:
@@ -104,6 +106,21 @@ def generate_from_starter(self, condition, rendered_opacity, neighbors_condition
         if start == 0 or getattr(self, 'starter_generated_cache', 'clean') == 'clean':
             self.transformer(hidden_states=latents,
                              timestep=torch.zeros(batch, device=device, dtype=latents.dtype), **kwargs)
+    preserved = torch.equal(output[:, :, :1], condition[:, :, :1].to(device))
+    if not preserved:
+        raise RuntimeError('Encoded starter changed during autoregressive generation')
+    self.starter_inference_audit = {
+        'encoded_starter_preserved': preserved,
+        'starter_cache_timestep': 0,
+        'first_generated_latent_index': 1 if total > 1 else None,
+        'first_generated_rgb_index': 1 if total > 1 else None,
+        'latent_frames': total,
+        'rgb_frames_per_generated_latent': temporal,
+        'generated_latent_ranges': [list(pair) for pair in latent_chunks(total, self.frames_per_block) if pair[0]],
+        'generated_cache': getattr(self, 'starter_generated_cache', 'clean'),
+        'sink_size': self.sink_size,
+        'local_attn_size': window,
+    }
     return output
 
 

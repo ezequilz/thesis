@@ -47,3 +47,5 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "splat_explorer.web" = ["static/*"]
+
+"splat_explorer.splatfix.g4splat" = ["*.sh"]

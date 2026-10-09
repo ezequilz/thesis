@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path, PurePosixPath
@@ -88,18 +89,19 @@ class InferencePreviewMirror:
         self.thread.start()
 
     def _download(self, relative):
-        staging = self.root / '.inference-preview-transfer'
-        staging.mkdir(parents=True, exist_ok=True)
+        self.root.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix='.inference-preview-transfer-', dir=self.root))
         try:
             # No GPU process or model weights. Bound DSS/network bandwidth;
             # timeout also bounds the join before the final ordinary download.
             self.transfer(['rsync', '-azL', '--timeout=60', '--bwlimit=10240',
+                # Inputs and camera metadata have standalone preview copies.
+                # Checkpoint caches contain container-absolute symlinks (both
+                # captions and metric alignment) that cannot resolve on DSS.
                 '--include=/inference/', '--include=/inference/**/', f'--include=/{relative.name}',
                 '--include=/inference/**/pred/*.png',
                 '--include=/prepared/', '--include=/prepared/**/', '--include=/prepared/**/*.json',
                 '--include=/prepared/**/*.png', '--include=/prepared/**/*.jpg', '--include=/prepared/**/*.jpeg',
-                '--include=/checkpoint/', '--include=/checkpoint/**/', '--include=/checkpoint/**/*.json',
-                '--include=/checkpoint/**/*.png', '--include=/checkpoint/**/*.jpg', '--include=/checkpoint/**/*.jpeg',
                 '--include=/conditioning-colmap/images/***', '--include=/conditioning-colmap/',
                 '--include=/request.json', '--include=/preview-trajectory.json',
                 '--include=/input-preview.json', '--include=/input-images/***',

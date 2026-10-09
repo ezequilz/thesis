@@ -522,6 +522,7 @@ def inference(root, request, trajectory, plus=False):
     references = torch.stack([rgb(path) for path in request['references']])
     neighbors = [a['frame_index'] for a in trajectory['anchors']]
     render_dir = Path(json.loads((root / 'distillation.json').read_text())['render_dir']) if plus else None
+    insertion_audits = []
     with torch.inference_mode():
         for segment in trajectory['segments']:
             indices = (list(segment['indices']) if 'indices' in segment else
@@ -566,7 +567,23 @@ def inference(root, request, trajectory, plus=False):
                         scale=request['camera_scale'], image_shape=renders.shape[-2:], skip_vae_check=True))
             # Independent smooth camera trajectories must not become video cuts.
             pipe.clear_inference_caches()
+            if insertion:
+                pipe.starter_inference_audit = None
             process_item(pipe, item, args, output, 0, device, pipe.vae.config.scale_factor_temporal)
+            if insertion:
+                audit = pipe.starter_inference_audit
+                if not audit or not audit.get('encoded_starter_preserved'):
+                    raise RuntimeError('Image cache insertion was requested but starter preservation was not verified')
+                reference = request['references'][neighbors.index(seed_index)]
+                record = {**audit, 'seed_global_index': seed_index,
+                          'reference_path': reference, 'reference_sha256': caption_digest(Path(reference)),
+                          'generation_global_indices': indices,
+                          'export_global_indices': indices[1:],
+                          'starter_exported': False}
+                insertion_audits.append(record)
+                (root / ('plus-insertion-audit.json' if plus else 'inference-insertion-audit.json')).write_text(
+                    json.dumps({'series': insertion_audits}, indent=2))
+                print('SPLATFIX_STARTER_VERIFIED: ' + json.dumps(record), flush=True)
     if plus:
         result = json.loads((root / 'distillation.json').read_text())
         result.update(reconstruction_method='artifixer', plus_frames=str(output / 'splatfix/frames/batch_0000/pred'),

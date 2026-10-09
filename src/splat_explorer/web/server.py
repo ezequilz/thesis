@@ -1276,6 +1276,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 query = parse_qs(urlsplit(self.path).query)
                 target = studio.allowed_file(query.get("path", [""])[0])
                 self._send(200, target.read_bytes(), mimetypes.guess_type(target.name)[0] or "application/octet-stream")
+            elif self.command == "POST" and path == "/api/splatfix/checkpoints/delete":
+                try:
+                    self._send_json(studio.delete_checkpoint(body))
+                except OSError:
+                    self._send_json({"ok": False, "error": "Could not delete checkpoint. Please try again."}, 500)
+            elif self.command == "POST" and path == "/api/splatfix/checkpoints/rename":
+                try:
+                    self._send_json(studio.rename_checkpoint(body))
+                except OSError:
+                    self._send_json({"ok": False, "error": "Could not save checkpoint name. Please try again."}, 500)
             elif self.command == "POST" and path == "/api/splatfix/custom":
                 self._send_json(studio.start_custom(body))
             elif self.command == "POST" and path == "/api/splatfix/jobs":

@@ -92,6 +92,11 @@ def test_clean_starter_drives_future_frames_and_cache_resets(cache_policy, sourc
                 fixed_reference, poses, poses, torch.ones(1), poses, torch.ones(1),
                 torch.ones(1), 2, False))
     assert torch.all(outputs[0] == 2.) and torch.all(outputs[1] == 5.)
+    audit = pipe.starter_inference_audit
+    assert audit['encoded_starter_preserved'] is True
+    assert audit['starter_cache_timestep'] == 0
+    assert audit['first_generated_latent_index'] == audit['first_generated_rgb_index'] == 1
+    assert audit['generated_latent_ranges'] == [list(pair) for pair in latent_chunks(total, 7) if pair[0]]
     chunks = list(latent_chunks(total, 7))
     assert allocations == [(1, 4, total if window == -1 else min(total, window))] * 2
     assert len(prepared) == 4 * (len(chunks) - 1), 'Initial and intermediate samples must both use opacity mixing'

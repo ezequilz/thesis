@@ -130,8 +130,13 @@ class ResultCatalog:
         config = record.get('config', {})
         options = config.get('splatfix', {})
         preview = []
+        preview_label = '3D+ image preview'
         if manifest:
             preview = self.studio.plus_previews(manifest, result)
+            if not preview:
+                gallery, _ = self._reconstruction_gallery(manifest, result)
+                preview = [frame['url'] for frame in gallery['frames'][:1]]
+                preview_label = 'img 1 preview'
         return {'id': key, 'run_id': record['run_id'], 'scene': config.get('scene_id', ''),
                 'can_stop': config.get('pipeline') == 'splatfix' and record.get('state', {}).get('status') in ('queued', 'waiting_gpu', 'starting', 'running'),
                 'message': record.get('state', {}).get('message'),
@@ -153,10 +158,65 @@ class ResultCatalog:
                 'native_ply_url': self.studio.file_url(native) if manifest and (native := self.studio.result_artifact(manifest, result.get('native_splat_path'))) else None,
                 'provenance_url': self.studio.file_url(manifest) if manifest else None,
                 'preview_url': preview[0] if preview else None,
+                'preview_label': preview_label if preview else None,
                 'metrics': metrics.get('aggregate', {}), 'test_count': metrics.get('published_test_count'),
                 'metrics_scope': metrics.get('scope'), 'metrics_url': self.studio.file_url(metrics_file) if metrics else None,
                 'limitation': result.get('limitation'), 'config': config,
                 '_manifest': manifest, '_paths': {'original': original, 'repaired': repaired}}
+
+    def _reconstruction_gallery(self, manifest, result):
+        """Share input selection and ordering between gallery and card preview."""
+        root = manifest.parent
+        gallery = {'frames': [], 'reference_count': None, 'verified_inputs': False,
+                   'stage': 'ArtiFixer · reconstruction inputs'}
+        def local(raw):
+            return self.studio.result_artifact(manifest, raw)
+        prediction = local(result.get('prediction_frames'))
+        if prediction is None:
+            # Saved-view worker uses this fixed first-pass location (not plus/).
+            prediction = local('inference/splatfix/frames/batch_0000/pred')
+        allowed = None
+        if result.get('inference_ready') and isinstance(result.get('reconstruction_inputs'), list):
+            allowed = set(result['reconstruction_inputs'])
+            gallery['reference_count'] = result.get('reference_count')
+            gallery['verified_inputs'] = True
+        supervision = local(result.get('supervision_manifest') or 'supervision.json')
+        groups = read_json(supervision, {}).get('groups', []) if supervision else []
+        if groups:
+            allowed = {int(g['source_index']) for g in groups if not g.get('reference')}
+            gallery['reference_count'] = sum(bool(g.get('reference')) for g in groups)
+            gallery['verified_inputs'] = True
+        if allowed is None:
+            split = local(result.get('inference_split') or 'prepared/bicycle/split.json')
+            scenes = read_json(split, {}).get('test', {}) if split else {}
+            if len(scenes) == 1:
+                scene = next(iter(scenes.values()))
+                def split_asset(value):
+                    return local(str(split.parent.relative_to(root) / value)) if value else None
+                selected = split_asset(scene.get('selected_indices_path'))
+                targets = split_asset(scene.get('target_indices_path'))
+                refs = read_json(selected, []) if selected else []
+                target_ids = read_json(targets, []) if targets else None
+                if isinstance(refs, list) and refs:
+                    gallery['reference_count'] = len(refs)
+                    if isinstance(target_ids, list):
+                        allowed = set(target_ids)
+                    elif result.get('frame_count') is not None:
+                        allowed = set(range(int(result['frame_count'])))
+                    if allowed is not None:
+                        allowed -= set(refs)
+                        gallery['verified_inputs'] = True
+        if prediction and prediction.is_dir():
+            frames = [p for p in prediction.glob('*.png') if p.stem.isdigit()
+                      and p.resolve().is_relative_to(root.resolve())]
+            for frame in sorted(frames, key=lambda p: int(p.stem)):
+                index = int(frame.stem)
+                if allowed is None or index in allowed:
+                    gallery['frames'].append({'index': index, 'name': frame.name,
+                                              'url': self.studio.file_url(frame)})
+        gallery['count'] = len(gallery['frames'])
+        gallery['expected_count'] = len(allowed) if allowed is not None else None
+        return gallery, allowed
 
     def run_detail(self, key):
         """List first-pass inputs without reading pixel data or trusting remote paths."""
@@ -176,6 +236,8 @@ class ResultCatalog:
             return row
         result = read_json(manifest, {})
         root = manifest.parent
+        gallery, allowed = self._reconstruction_gallery(manifest, result)
+        row['gallery'] = gallery
         from ..splatfix.resolution import PROFILE_LABELS
         recorded_request = read_json(root / 'request.json', {})
         profile = (result.get('resolution_policy') or {}).get('profile') or recorded_request.get('resolution_profile')
@@ -213,23 +275,11 @@ class ResultCatalog:
                     row[key].append({'index': item['index'], 'name': item['name'],
                                      'url': self.studio.file_url(path)})
         snapshot_references = list(row['reference_images'])
-        prediction = local(result.get('prediction_frames'))
-        if prediction is None:
-            # Saved-view worker uses this fixed first-pass location (not plus/).
-            prediction = local('inference/splatfix/frames/batch_0000/pred')
-        allowed = None
-        if result.get('inference_ready') and isinstance(result.get('reconstruction_inputs'), list):
-            allowed = set(result['reconstruction_inputs'])
-            gallery['reference_count'] = result.get('reference_count')
-            gallery['verified_inputs'] = True
         supervision = local(result.get('supervision_manifest') or 'supervision.json')
         if supervision and supervision.is_file():
             data = read_json(supervision, {})
             groups = data.get('groups', [])
             if groups:
-                allowed = {int(g['source_index']) for g in groups if not g.get('reference')}
-                gallery['reference_count'] = sum(bool(g.get('reference')) for g in groups)
-                gallery['verified_inputs'] = True
                 # These are materialized copies of the actual conditioning
                 # references, including edited RGB, rather than viewer previews.
                 reference_index = 0
@@ -268,21 +318,9 @@ class ResultCatalog:
                             return None
                         return local(str(split.parent.relative_to(root) / value))
                     selected = split_asset(scene.get('selected_indices_path'))
-                    targets = split_asset(scene.get('target_indices_path'))
                     refs = read_json(selected, []) if selected else []
-                    target_ids = read_json(targets, []) if targets else None
                     if isinstance(refs, list) and refs:
                         gallery['reference_count'] = len(refs)
-                        # Loading references must not replace indices already verified
-                        # by the inference preview or supervision manifest.
-                        if allowed is None:
-                            if isinstance(target_ids, list):
-                                allowed = set(target_ids)
-                            elif result.get('frame_count') is not None:
-                                allowed = set(range(int(result['frame_count'])))
-                            if allowed is not None:
-                                allowed -= set(refs)
-                                gallery['verified_inputs'] = True
                         transforms = split_asset(scene.get('transforms_path'))
                         image_root = split_asset(scene.get('image_root'))
                         cameras = read_json(transforms, {}).get('frames', []) if transforms else []
@@ -324,16 +362,6 @@ class ResultCatalog:
                 add_reference(local(raw), index, f'Reference {index + 1}')
             if row['reference_images']:
                 gallery['reference_count'] = len(row['reference_images'])
-        if prediction and prediction.is_dir():
-            frames = [p for p in prediction.glob('*.png') if p.stem.isdigit()
-                      and p.resolve().is_relative_to(root.resolve())]
-            for frame in sorted(frames, key=lambda p: int(p.stem)):
-                index = int(frame.stem)
-                if allowed is None or index in allowed:
-                    gallery['frames'].append({'index': index, 'name': frame.name,
-                                              'url': self.studio.file_url(frame)})
-        gallery['count'] = len(gallery['frames'])
-        gallery['expected_count'] = len(allowed) if allowed is not None else None
         return row
 
     def review_views(self, key):
