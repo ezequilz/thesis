@@ -172,7 +172,10 @@ def run_repeat_benchmark(prior, output_dir, *, resolution_profile='training', re
         _, proof, split = prepare_repeat(prior, root, should_stop)
         manifest['repeat_repair'] = proof
         if resolution_profile != 'early_original':
-            manifest['resolution_policy'] = align_repeat_inputs(split, resolution_profile)
+            # Chained passes already have calibrated references. Reusing them
+            # preserves pixels and avoids copying aligned-input onto itself.
+            if old.get('runtime', {}).get('resolution_profile') != resolution_profile:
+                manifest['resolution_policy'] = align_repeat_inputs(split, resolution_profile)
             stage('rerender_repaired_input', [cfg['python'], str(Path(__file__).with_name('repeat_render.py')),
                 '--repo', cfg['repo'], '--split', str(split)])
             proof['resolution_adaptation'] = 'Original camera poses preserved; calibrated v1 references and newly rendered repaired-splat RGB/opacity'

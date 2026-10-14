@@ -33,6 +33,18 @@ Promise.resolve(vm.runInContext(`(async()=>{
   $('image-cache-insertion').value='on';
   assert.equal(payload('repair').image_cache_insertion,true);
   assert.equal(payload('benchmark').image_cache_insertion,undefined);
+  $('benchmark-runs').value='3';
+  assert.equal(payload('benchmark').benchmark_runs,3);
+  schedule('benchmark');
+  assert.equal(pendingPayload.benchmark_runs,3);
+  assert.ok($('schedule-context').textContent.includes('3 consecutive run(s)'));
+  $('benchmark-runs').value='1';
+  assert.equal(pendingPayload.benchmark_runs,3);
+  $('benchmark-runs').valid=false;
+  pendingStage='';schedule('benchmark');
+  assert.equal(pendingStage,'');
+  $('benchmark-runs').valid=true;
+
   assert.equal(payload('repair').reconstruction_method,'artifixer');
   assert.equal(payload('repair').split_mode,'double-split');
   $('split-mode').value='single-split';

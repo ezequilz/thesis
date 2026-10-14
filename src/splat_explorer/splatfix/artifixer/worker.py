@@ -30,31 +30,49 @@ def execute(root):
             raise InterruptedError('Cancelled before reconstruction')
         publish(status='running', phase='validation')
         preview = {}
+        completed_results = []
         def progress(event):
             if event.get('output_dir'):
                 for name in ('input', 'inference'):
                     marker = Path(event['output_dir']) / f'{name}-preview.json'
                     if marker.is_file():
                         preview[f'{name}_preview'] = str(marker)
-            publish(status='running', **preview, **event)
+            publish(status='running', completed_results=completed_results, **preview, **event)
+        from .run_evaluation import finalize_run_evaluation
         if request.get('stage') == 'benchmark':
-            if request['runtime'].get('repeat_from'):
-                from .repeat_benchmark import run_repeat_benchmark
-                result = run_repeat_benchmark(request['runtime']['repeat_from'], request['output'],
-                                              resolution_profile=request['runtime'].get('resolution_profile', 'training'),
-                                              regularization_profile=request['runtime'].get('regularization_profile', 'artifixer'),
-                                              should_stop=stop, on_progress=progress)
-            else:
-                from .benchmark import run_benchmark
-                result = run_benchmark(request['source'], request['output'], runtime=request['runtime'],
-                                       should_stop=stop, on_progress=progress)
+            from .benchmark import run_benchmark
+            from .repeat_benchmark import run_repeat_benchmark
+            runs = request.get('benchmark_runs', 1)
+            if type(runs) is not int or runs < 1:
+                raise ValueError('benchmark_runs must be a positive integer')
+            prior = request['runtime'].get('repeat_from')
+            for pass_number in range(1, runs + 1):
+                if stop():
+                    raise InterruptedError('Cancelled before benchmark pass')
+                preview.clear()
+                def pass_progress(event):
+                    progress({**event, 'benchmark_pass': pass_number, 'benchmark_runs': runs,
+                              'message': f"Benchmark pass {pass_number}/{runs}: {event.get('phase', 'running')}"})
+                pass_progress({'phase': 'validation'})
+                if prior:
+                    result = run_repeat_benchmark(prior, request['output'],
+                        resolution_profile=request['runtime'].get('resolution_profile', 'training'),
+                        regularization_profile=request['runtime'].get('regularization_profile', 'artifixer'),
+                        should_stop=stop, on_progress=pass_progress)
+                else:
+                    result = run_benchmark(request['source'], request['output'], runtime=request['runtime'],
+                                           should_stop=stop, on_progress=pass_progress)
+                finalize_run_evaluation(result['output_dir'], request['runtime'],
+                                        should_stop=stop, on_progress=pass_progress)
+                prior = result['output_dir']
+                completed_results.append(str(Path(prior) / 'result.json'))
+                pass_progress({'phase': 'pass_complete', 'output_dir': prior})
         else:
             result = run_repair(request['checkpoint'], request['output'], mode=request['mode'],
                                 frames=request['frames'], span_fraction=request['span_fraction'],
                                 runtime=request['runtime'], should_stop=stop, on_progress=progress)
-        from .run_evaluation import finalize_run_evaluation
-        finalize_run_evaluation(result['output_dir'], request['runtime'], should_stop=stop, on_progress=progress)
-        publish(status='completed', phase='finished', result=result)
+            finalize_run_evaluation(result['output_dir'], request['runtime'], should_stop=stop, on_progress=progress)
+        publish(status='completed', phase='finished', result=result, completed_results=completed_results)
     except InterruptedError as exc:
         from .interrupted import preserve_interrupted_results
         try:

@@ -13,9 +13,37 @@ from splat_explorer.splatfix.checkpoint import Checkpoint
 from splat_explorer.splatfix import repair
 
 
+def write_initialization_ply(path, rest_count=45):
+    names = ['x', 'y', 'z', 'rot_0', 'rot_1', 'rot_2', 'rot_3',
+             'scale_0', 'scale_1', 'scale_2', 'opacity', 'f_dc_0', 'f_dc_1', 'f_dc_2']
+    names += [f'f_rest_{i}' for i in range(rest_count)]
+    data = np.zeros(2, dtype=[(name, '<f4') for name in names])
+    data['rot_0'] = 1
+    data['scale_0'] = -2
+    data['opacity'] = .75
+    for name in names[14:]:
+        data[name] = .123
+    header = 'ply\nformat binary_little_endian 1.0\nelement vertex 2\n'
+    header += ''.join(f'property float {name}\n' for name in names) + 'end_header\n'
+    path.write_bytes(header.encode() + data.tobytes())
+
+
+def test_full_splat_snapshot_preserves_raw_parameters_and_sh(tmp_path):
+    source = tmp_path / 'scene.ply'
+    write_initialization_ply(source)
+    result = repair.prepare_splat_initialization(source, tmp_path / 'initialization.ply')
+    assert Path(result['source_ply']).read_bytes() == source.read_bytes()
+    assert result['source_ply_sh_degree'] == 3
+    assert result['source_ply_gaussians'] == 2
+    assert result['source_ply_sha256'] == repair.digest_file(source)
+    write_initialization_ply(source, rest_count=24)
+    with pytest.raises(ValueError, match='degree-3'):
+        repair.prepare_splat_initialization(source, tmp_path / 'bad.ply')
+
+
 def make_checkpoint(tmp_path):
     scene_path = tmp_path / 'scene.ply'
-    scene_path.write_text('fixture')
+    write_initialization_ply(scene_path)
     cp = Checkpoint.create(tmp_path / 'runs', scene_path, target_views=1,
                            metadata={'scene_load': {'min_opacity': .05, 'lod_level': 2},
                                      'renderer': {'backend': 'viser'}})
@@ -90,8 +118,9 @@ def test_missing_edits_fail_before_gpu_or_api_work(tmp_path, monkeypatch):
         repair.run_repair(cp.root, tmp_path / 'repairs')
 
 
+@pytest.mark.parametrize('initialization', ['full_splat', 'point_cloud'])
 @pytest.mark.parametrize('mode', ['baseline', 'edited'])
-def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, monkeypatch, mode):
+def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, monkeypatch, mode, initialization):
     cp = make_checkpoint(tmp_path)
     mock_scene(monkeypatch)
     if mode == 'edited':
@@ -100,7 +129,7 @@ def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, 
         cp.views[0]['repaired_rgb'] = str(edit.relative_to(cp.root))
         cp.save()
     trajectory_root, trajectory = repair.prepare_trajectory(cp, frames=9, renderer_factory=FakeRenderer)
-    monkeypatch.setattr(repair, 'validate_runtime', lambda runtime: repair.DEFAULT_RUNTIME)
+    monkeypatch.setattr(repair, 'validate_runtime', lambda runtime: {**repair.DEFAULT_RUNTIME, 'reconstruction_initialization': initialization})
     phases = []
     def worker(command, **kwargs):
         phase = command[-1]
@@ -110,7 +139,13 @@ def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, 
         assert req['references'] == ([str(cp.image_path(cp.views[0], repaired=True))] if mode == 'edited'
                                      else [str(cp.root / trajectory['anchors'][0]['original_rgb'])])
         assert req['fit_iterations'] == 30000
-        assert req['reconstruction_recipe']['custom_reconstruction_overrides'] is False
+        if initialization == 'full_splat':
+            assert req['reconstruction_recipe']['initialization'] == 'full_splat_ply'
+            assert Path(req['source_ply']).read_bytes() == Path(cp.manifest['scene_path']).read_bytes()
+            assert req['source_ply_sha256'] == repair.digest_file(req['source_ply'])
+        else:
+            assert 'source_ply' not in req
+            assert req['initialization'] == 'original_splat_positions_and_rgb'
         if phase == 'caption':
             assert kwargs['env']['HF_HUB_OFFLINE'] == '0'
             caption = write_caption_fixture(root / 'caption.h5')
@@ -125,12 +160,13 @@ def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, 
     result = repair.run_repair(cp.root, tmp_path / 'repairs', mode=mode, frames=9, camera_scale=1., trajectory_mode='legacy_local_loops')
     assert phases == ['caption', 'infer', 'distill', 'plus']
     assert Path(result['splat_path']).read_bytes() == b'new isolated splat'
-    assert Path(cp.manifest['scene_path']).read_text() == 'fixture'
+    assert Path(cp.manifest['scene_path']).read_bytes().startswith(b'ply\n')
 
 
 @pytest.mark.parametrize('mode', ['baseline', 'edited'])
 @pytest.mark.parametrize('loops', [1, 2])
-def test_worker_calls_authors_fresh_reconstruction_and_exports_only_that_model(tmp_path, monkeypatch, mode, loops):
+@pytest.mark.parametrize('full_splat', [True, False])
+def test_worker_calls_authors_fresh_reconstruction_and_exports_only_that_model(tmp_path, monkeypatch, mode, loops, full_splat):
     """Exercise the actual adapter and its file/camera contract without CUDA."""
     import sys
     import types
@@ -156,6 +192,8 @@ def test_worker_calls_authors_fresh_reconstruction_and_exports_only_that_model(t
         Image.fromarray(np.full((32, 32, 3), 125, np.uint8)).save(reference)
     request = {'mode': mode, 'seed': 42, 'references': [str(reference)] * loops,
                'source_points3d': str(cp.root / trajectory['points3d']), 'camera_scale': 1.}
+    if full_splat:
+        request.update(repair.prepare_splat_initialization(cp.manifest['scene_path'], root / 'initialization.ply'))
     prediction_root = root / 'inference/splatfix/frames/batch_0000/pred'
     prediction_root.mkdir(parents=True)
     for index in range(9 * loops):
@@ -173,6 +211,11 @@ def test_worker_calls_authors_fresh_reconstruction_and_exports_only_that_model(t
 
     def train(scene, paths, **kwargs):
         events.append('train')
+        config = training.compose_3dgrut_config('', [], '')
+        assert config.import_ply.enabled is full_splat
+        if full_splat:
+            assert config.import_ply.path == request['source_ply']
+            assert config.import_ply.init_global_step == 0 and config.resume == ''
         assert kwargs == {
             'artifixer_frames_dir': root / 'distillation_predictions',
             'base_checkpoint': None, 'config_name': 'apps/colmap_3dgut_sparse_mcmc_lpips',
@@ -226,7 +269,11 @@ def test_worker_calls_authors_fresh_reconstruction_and_exports_only_that_model(t
         write_colmap_cameras=lambda path, cameras: path.write_text('calibrated cameras'),
         write_colmap_images=lambda path, images: path.write_text('calibrated images'),
         train_artifixer3d=train, render_artifixer3d=render)
-    module('data_processing', artifixer3d=official)
+    training = module('data_processing.threedgrut_training', Trainer3DGRUT=object,
+        compose_3dgrut_config=lambda *args: SimpleNamespace(resume='',
+            import_ply=SimpleNamespace(enabled=False, path='', init_global_step=30000),
+            import_ingp=SimpleNamespace(enabled=False)))
+    module('data_processing', artifixer3d=official, threedgrut_training=training)
     module('torch', manual_seed=lambda seed: None, cuda=SimpleNamespace(empty_cache=lambda: None))
     module('threedgrut')
     module('threedgrut.export')
@@ -249,7 +296,7 @@ def test_worker_calls_authors_fresh_reconstruction_and_exports_only_that_model(t
     distill(root, request, trajectory)
     assert events == ['train', 'render', 'export']
     assert (root / 'artifixer3d.ply').read_bytes() == b'fresh model only'
-    assert Path(cp.manifest['scene_path']).read_text() == 'fixture'
+    assert Path(cp.manifest['scene_path']).read_bytes().startswith(b'ply\n')
     assert json.loads((root / 'distillation.json').read_text())['splat_path'] == str(root / 'artifixer3d.ply')
 
 
@@ -993,3 +1040,13 @@ def test_repair_captures_viser_rgb_instead_of_selection_or_cuda_rgb(tmp_path, mo
             repair.prepare_trajectory(cp, frames=9)
         else:
             repair.prepare_saved_path(cp)
+
+
+def test_distillation_rejects_changed_initialization_before_loading_gpu(tmp_path):
+    from splat_explorer.splatfix.official_worker import distill
+    source = tmp_path / 'scene.ply'
+    write_initialization_ply(source)
+    request = repair.prepare_splat_initialization(source, tmp_path / 'initialization.ply')
+    Path(request['source_ply']).write_bytes(b'changed')
+    with pytest.raises(ValueError, match='changed since preparation'):
+        distill(tmp_path, request, {})

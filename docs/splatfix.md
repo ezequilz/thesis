@@ -93,7 +93,7 @@ inherits `base_gs_sparse -> base_gs` and switches the strategy to MCMC. Both
 SplatFix does not replace that inheritance with `base_mcmc`. No custom loss
 adapter or error-based allocation is used. Exact recipe replication does not
 remove the documented SplatFix input adaptations (rendered or edited anchors
-and splat positions/RGB as initialization).
+and full source PLY initialization for saved-view repairs).
 
 ### Reconstruction regularization comparison
 
@@ -432,13 +432,30 @@ weights are hashed into scale-cache provenance. The photographic
 Bicycle benchmark retains its separate official photographic preparation.
 
 
-The baseline is the **authors' algorithm on our selected rendered inputs**.
-It is not a reproduction of their photographic benchmark dataset. Where an
-original COLMAP `points3D.bin` is available in the same scene coordinates,
-provide `--artifixer-source-points3d /path/to/points3D.bin`. Otherwise source
-Gaussian positions and RGB become a point-cloud initialization for fresh
-3DGRUT training. Original Gaussian scales, opacities, and appearance parameters
-are not continued. This input adaptation is recorded in each run.
+The baseline uses the **authors' reconstruction machinery on our selected rendered inputs**.
+It is not a reproduction of their photographic benchmark dataset. Saved-view
+runs from an original PLY now snapshot its exact bytes into `initialization.ply`
+and use the pinned 3DGRUT `import_ply` path. Positions, scales, rotations, opacity,
+and degree-3 SH are retained; DC-only files are accepted with zero higher-order
+SH. Unsupported partial SH layouts fail explicitly instead of dropping appearance.
+The source stays in the same coordinates as the saved cameras, without normalization.
+
+The importer creates a new optimizer and starts at `import_ply.init_global_step=0`.
+The existing 30,000-step sparse MCMC/LPIPS schedule, including Gaussian birth and
+relocation, remains unchanged. `base_checkpoint=None` is intentional: this loads
+full Gaussian parameters without resuming the old optimizer or iteration count.
+This is an upstream-supported initialization variant, not the authors' default
+fresh-from-points experiment. It does not freeze or guarantee preservation of
+unobserved surfaces. A CUDA render comparison is needed to verify import fidelity.
+
+Set `splatfix.runtime.reconstruction_initialization: point_cloud` to restore the
+previous initialization path; the default is `full_splat`. In the fallback,
+`source_points3d` selects original COLMAP points when supplied; otherwise source
+Gaussian positions/RGB seed fresh training. Non-PLY assets retain that fallback.
+Photographic benchmarks keep their original COLMAP initialization. Both paths
+retain `base_checkpoint=None`. Requests/results record initialization, fresh
+training state, and the copied PLY hash; changed PLY snapshots are rejected before
+GPU reconstruction. The PLY snapshot bypasses our viewer loader, which drops SH.
 
 By default, both arms call unmodified upstream diffusion inference, followed by
 `data_processing.artifixer3d.train_artifixer3d` and `render_artifixer3d`—the
@@ -446,7 +463,7 @@ implementations behind the [authors' reconstruction entry point](https://github.
 By default there are no exact-starter patches. Repair's optional image cache
 insertion enables the existing exact-starter adaptation on the inference instance.
 There are no periodic GPT refreshes, custom fitting safeguards, or resumed
-source-splat checkpoints. The distinction between arms
+source-splat optimizer checkpoints. The distinction between arms
 is the saved anchor RGBs used as reference and reconstruction supervision.
 
 ## Outputs and verification

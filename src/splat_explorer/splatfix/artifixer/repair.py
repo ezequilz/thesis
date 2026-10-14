@@ -2,7 +2,8 @@
 
 The no-editor baseline uses rendered anchors, not captured photographs. This
 Input adaptation and the selected regularization profile are recorded. The
-default reconstruction is unchanged; base_mcmc is an opt-in loss comparison.
+default PLY initialization preserves all Gaussian parameters with fresh training
+state; base_mcmc is an opt-in loss comparison.
 """
 from __future__ import annotations
 import hashlib
@@ -27,6 +28,7 @@ UPSTREAM_REVISION = 'a392c4dfe17459ef9952407accdb9fcdcdddba98'
 DEFAULT_RUNTIME = {
     'resolution_profile': 'training',
     'regularization_profile': 'artifixer',
+    'reconstruction_initialization': 'full_splat',
     'image_cache_insertion': False,
     'repo': '/workspace/third_party/ArtiFixer',
     'python': '/workspace/artifixer-venv/bin/python',
@@ -85,6 +87,8 @@ def validate_runtime(runtime=None):
     from ..resolution import profile_size
     profile_size(cfg['resolution_profile'])
     validate_regularization(cfg['regularization_profile'])
+    if cfg['reconstruction_initialization'] not in ('full_splat', 'point_cloud'):
+        raise ValueError('reconstruction_initialization must be full_splat or point_cloud')
     if type(cfg['image_cache_insertion']) is not bool:
         raise ValueError('image_cache_insertion must be a boolean')
     repo = Path(cfg['repo']).resolve()
@@ -114,6 +118,34 @@ def validate_runtime(runtime=None):
         raise FileNotFoundError('ArtiFixer Python environment or release checkpoint is missing')
     cfg['repo'] = str(repo)
     return cfg
+
+
+def prepare_splat_initialization(source, destination):
+    """Snapshot raw PLY bytes: the viewer loader intentionally drops higher SH."""
+    from ...scene.catalog import openable_scene_path
+    from ...scene.ply_loader import _parse_header, _REQUIRED
+    source = openable_scene_path(Path(source)).resolve()
+    if source.suffix.lower() != '.ply':
+        return None  # Non-PLY assets retain their existing point-cloud recipe.
+    with source.open('rb') as stream:
+        count, properties, offset = _parse_header(stream)
+    names = [name for name, _ in properties]
+    rest = [name for name in names if name.startswith('f_rest_')]
+    if count <= 0 or any(name not in names for name in _REQUIRED):
+        raise ValueError('Full-splat initialization requires a nonempty standard Gaussian PLY')
+    # The pinned sparse recipe uses degree 3; its importer also accepts DC-only.
+    if set(rest) not in (set(), {f'f_rest_{i}' for i in range(45)}):
+        raise ValueError('Upstream PLY initialization requires degree-3 SH or DC-only appearance')
+    data = np.memmap(source, dtype=np.dtype(properties), mode='r', offset=offset, shape=(count,))
+    for name in (*_REQUIRED, *rest):
+        if not np.isfinite(data[name]).all():
+            raise ValueError(f'Nonfinite Gaussian PLY property: {name}')
+    del data
+    destination = Path(destination)
+    shutil.copyfile(source, destination)
+    return {'source_ply': str(destination.resolve()), 'source_ply_sha256': digest_file(destination),
+            'initialization': 'original_full_splat_ply',
+            'source_ply_gaussians': count, 'source_ply_sh_degree': 3 if rest else 0}
 
 
 def write_seed_points(path, scene):
@@ -427,6 +459,9 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         trajectory_root, trajectory = prepare_trajectory(cp, frames=frames, span_fraction=span_fraction, should_stop=should_stop, scene_path=cfg.get('scene_path'))
     if mode == 'baseline':
         references = [str(cp.root / anchor['original_rgb']) for anchor in trajectory['anchors']]
+    initialization = prepare_splat_initialization(
+        cfg.get('scene_path') or cp.manifest['scene_path'], root / 'initialization.ply'
+    ) if cfg.get('reconstruction_initialization', 'full_splat') == 'full_splat' else None
     points = cfg.get('source_points3d') or str(cp.root / trajectory['points3d'])
     request = {'reconstruction_method': 'artifixer', 'resolution_profile': cfg['resolution_profile'],
                'resolution': cp.manifest.get('metadata', {}).get('resolution'),
@@ -440,7 +475,7 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                'source_points3d': str(Path(points).resolve()),
                'initialization': 'source_colmap_points' if cfg.get('source_points3d') else 'original_splat_positions_and_rgb',
                'upstream_revision': UPSTREAM_REVISION, 'fit_iterations': ARTIFIXER3D_STEPS,
-               'reconstruction_recipe': reconstruction_recipe(cfg.get('regularization_profile', 'artifixer')),
+               'reconstruction_recipe': reconstruction_recipe(cfg.get('regularization_profile', 'artifixer'), source_ply=bool(initialization)),
                'input_adaptation': 'Source splat RGB captured through the harness Viser at every calibrated camera. CUDA supplies only opacity/depth. Edited mode uses edits of Viser captures.',
                'anchor_rgb_policy': 'viser',
                'trajectory_mode': trajectory_mode,
@@ -451,6 +486,7 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                'native_library_path_active': bool(cfg.get('native_library_dir') and Path(cfg['native_library_dir']).is_dir()),
                'reference_sha256': [digest_file(path) for path in references],
                'source_points3d_sha256': digest_file(points), 'trajectory_signature': trajectory['signature']}
+    request.update(initialization or {})
     atomic_json(root / 'request.json', request)
     env = runtime_environment(cfg)
     try:

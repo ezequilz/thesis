@@ -111,6 +111,15 @@ class ResultCatalog:
                 rows.append(self._row(key, record, original, repaired, result, metrics, metrics_file, manifest))
             if len(rows) == first_row and config.get('pipeline') == 'splatfix' and config.get('splatfix', {}).get('stage') in ('benchmark', 'repair'):
                 rows.append(self._row(record['run_id'], record, None, None, {}, {}, None, None))
+            job_rows = rows[first_row:]
+            if config.get('splatfix', {}).get('stage') == 'benchmark':
+                job_rows.sort(key=lambda row: (row['repair_pass'], row['result_name']))
+                rows[first_row:] = job_rows
+                total = max(config.get('splatfix', {}).get('benchmark_runs', 1), len(job_rows))
+                chain = [{'id': item['id'], 'number': index, 'detail_url': item['detail_url'],
+                          'status': item['status']} for index, item in enumerate(job_rows, 1)]
+                for index, item in enumerate(job_rows, 1):
+                    item.update(chain_runs=chain, chain_position=index, chain_total=total)
             original, repaired = root / 'scene_original.ply', root / 'scene_repaired.ply'
             if any(p.is_file() and not p.resolve().is_relative_to(self.studio.root.resolve()) for p in (original, repaired)):
                 continue
@@ -137,15 +146,20 @@ class ResultCatalog:
                 gallery, _ = self._reconstruction_gallery(manifest, result)
                 preview = [frame['url'] for frame in gallery['frames'][:1]]
                 preview_label = 'img 1 preview'
-        return {'id': key, 'run_id': record['run_id'], 'scene': config.get('scene_id', ''),
-                'can_stop': config.get('pipeline') == 'splatfix' and record.get('state', {}).get('status') in ('queued', 'waiting_gpu', 'starting', 'running'),
+        benchmark = read_json(manifest.parent / 'benchmark-run.json', {}) if manifest else {}
+        repair_pass = (result.get('repeat_repair') or benchmark.get('repeat_repair') or {}).get('repair_pass', 1)
+        status = record.get('state', {}).get('status')
+        if manifest and manifest.name == 'result.json':
+            status = 'completed'
+        return {'repair_pass': repair_pass, 'job_status': record.get('state', {}).get('status'), 'id': key, 'run_id': record['run_id'], 'scene': config.get('scene_id', ''),
+                'can_stop': not record.get('state', {}).get('details', {}).get('remote_finished') and config.get('pipeline') == 'splatfix' and record.get('state', {}).get('status') in ('queued', 'waiting_gpu', 'starting', 'running'),
                 'message': record.get('state', {}).get('message'),
                 'incomplete': result.get('incomplete', False),
                 'inference_ready': result.get('inference_ready', False),
                 'phase': record.get('state', {}).get('details', {}).get('phase'),
                 'interruption': result.get('interruption'),
                 'diagnostics_url': self.studio.file_url(manifest.parent / 'benchmark-run.json') if manifest and (manifest.parent / 'benchmark-run.json').is_file() else None,
-                'created_at': record.get('state', {}).get('created_at'), 'status': record.get('state', {}).get('status'),
+                'created_at': record.get('state', {}).get('created_at'), 'status': status,
                 'mode': options.get('mode') or config.get('repair_type', ''),
                 'model': result.get('model_variant') or options.get('model'),
                 'trajectory': result.get('trajectory_mode'), 'frames': result.get('frame_count'),
@@ -176,9 +190,10 @@ class ResultCatalog:
             # Saved-view worker uses this fixed first-pass location (not plus/).
             prediction = local('inference/splatfix/frames/batch_0000/pred')
         allowed = None
-        if result.get('inference_ready') and isinstance(result.get('reconstruction_inputs'), list):
-            allowed = set(result['reconstruction_inputs'])
-            gallery['reference_count'] = result.get('reference_count')
+        preview = result if result.get('inference_ready') else read_json(root / 'inference-preview.json', {})
+        if preview.get('inference_ready') and isinstance(preview.get('reconstruction_inputs'), list):
+            allowed = set(preview['reconstruction_inputs'])
+            gallery['reference_count'] = preview.get('reference_count')
             gallery['verified_inputs'] = True
         supervision = local(result.get('supervision_manifest') or 'supervision.json')
         groups = read_json(supervision, {}).get('groups', []) if supervision else []

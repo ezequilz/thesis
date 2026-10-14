@@ -14,6 +14,10 @@ def validate_options(raw):
         if model not in ('1.3b', '14b'):
             raise ValueError('model must be 1.3b or 14b')
         result['model'] = model
+        runs = raw.get('benchmark_runs', 1)
+        if type(runs) is not int or runs < 1:
+            raise ValueError('benchmark_runs must be a positive integer')
+        result['benchmark_runs'] = runs
     if raw['stage'] == 'repair':
         frames = raw.get('frames', 25)
         if type(frames) is not int or frames < 9 or frames > 101 or (frames - 1) % 4:

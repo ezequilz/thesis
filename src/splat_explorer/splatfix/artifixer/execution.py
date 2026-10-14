@@ -123,7 +123,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
             ssh('mkdir -p ' + shlex.quote(remote_dir + '/benchmark-input'))
             sync(str(source) + '/', endpoint + ':' + remote_dir + '/benchmark-input/')
             request = {'stage': 'benchmark', 'source': container_dir + '/benchmark-input',
-                       'output': container_dir + '/results', 'runtime': runtime}
+                       'output': container_dir + '/results', 'runtime': runtime,
+                       'benchmark_runs': options.get('benchmark_runs', 1)}
         else:
             ssh('mkdir -p ' + shlex.quote(remote_dir + '/checkpoint') + ' ' + shlex.quote(remote_dir + '/source'))
             sync(str(cp.root) + '/', endpoint + ':' + remote_dir + '/checkpoint/')
@@ -240,6 +241,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
             # Dense benchmark depth is a regenerable rendering diagnostic,
             # not inference input or a reconstruction deliverable. Keep it
             # on LRZ rather than duplicating gigabytes on the desktop.
+            update(phase='downloading_results', message='Downloading reconstruction results and images from LRZ')
             excludes = ['--exclude=/results/*/prepared/**/depth/'] if benchmark else []
             atomic_json(root / 'artifact-download-policy.json', {
                 'remote_dir': remote_dir, 'excluded_patterns': excludes,

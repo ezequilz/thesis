@@ -462,3 +462,88 @@ def test_loading_references_preserves_verified_prediction_indices(tmp_path):
     detail = studio.results.run_detail(studio.results.entries()[0]['id'])
     assert [frame['index'] for frame in detail['gallery']['frames']] == [7]
     assert detail['gallery']['expected_count'] == 1
+
+
+def test_chained_results_use_pass_order_and_stable_job_link(tmp_path):
+    studio, root, first = setup(tmp_path)
+    cfg = json.loads((root / 'config.json').read_text())
+    cfg['splatfix'].update(stage='benchmark', benchmark_runs=2, source='/benchmark-input', mode='baseline')
+    (root / 'config.json').write_text(json.dumps(cfg))
+    second = first.parent / 'benchmark_1.3b_aaa'
+    second.mkdir()
+    (second / 'artifixer3d.ply').write_bytes(b'ply')
+    (second / 'result.json').write_text(json.dumps({'splat_path': 'artifixer3d.ply',
+        'repeat_repair': {'repair_pass': 2}}))
+    rows = studio.results.entries()
+    assert [row['repair_pass'] for row in rows] == [1, 2]
+    assert all(row['status'] == 'completed' for row in rows)
+    initial = studio.results.run_detail(root.name)
+    assert initial['id'] == rows[0]['id']
+    assert initial['chain_total'] == 2
+    assert initial['chain_position'] == 1
+    assert [item['id'] for item in initial['chain_runs']] == [row['id'] for row in rows]
+    following = studio.results.run_detail(rows[1]['id'])
+    assert following['chain_position'] == 2
+    assert following['chain_runs'][0]['detail_url'] == initial['detail_url']
+    assert following['ply_url'] != initial['ply_url']
+
+
+def test_chained_preview_navigation_keeps_key_after_completion(tmp_path):
+    studio, root, first = setup(tmp_path)
+    cfg = json.loads((root / 'config.json').read_text())
+    cfg['splatfix'].update(stage='benchmark', benchmark_runs=2, source='/benchmark-input', mode='baseline')
+    (root / 'config.json').write_text(json.dumps(cfg))
+    second = first.parent / 'benchmark_1.3b_aaa'
+    second.mkdir()
+    (second / 'input-preview.json').write_text(json.dumps({'inputs_ready': True}))
+    (second / 'benchmark-run.json').write_text(json.dumps({'repeat_repair': {'repair_pass': 2}}))
+    rows = studio.results.entries()
+    key = rows[1]['id']
+    assert rows[1]['repair_pass'] == 2
+    assert studio.results.run_detail(key)['chain_position'] == 2
+    (second / 'result.json').write_text(json.dumps({'repeat_repair': {'repair_pass': 2}}))
+    assert studio.results.run_detail(key)['status'] == 'completed'
+    assert len(studio.results.entries()) == 2
+
+
+def test_detail_chain_navigation_and_polling_javascript():
+    import shutil
+    import subprocess
+    import pytest
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node required for dashboard logic')
+    script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const elements=new Map();const get=id=>{if(!elements.has(id))elements.set(id,{addEventListener(){}});return elements.get(id)};
+const location={search:'?id=job',href:''};
+const context=vm.createContext({document:{getElementById:get},location,URLSearchParams,
+fetch:()=>new Promise(()=>{}),clearTimeout(){},setTimeout(){},assert});
+vm.runInContext(fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0],context);
+vm.runInContext(`
+const chain={chain_total:2,chain_position:1,chain_runs:[{detail_url:'/pass1'},{detail_url:'/pass2'}]};
+showChain(chain);assert.equal($('chainPrev').disabled,true);assert.equal($('chainNext').disabled,false);
+moveChain(1);assert.equal(location.href,'/pass2');
+showChain({...chain,chain_position:2});assert.equal($('chainNext').disabled,true);moveChain(-1);assert.equal(location.href,'/pass1');
+assert.equal(needsGalleryPolling({...chain,status:'completed',job_status:'running',inference_ready:true}),true);
+assert.equal(needsGalleryPolling({...chain,status:'completed',job_status:'completed'}),false);
+showChain({...chain,chain_runs:[{detail_url:'/pass1'}]});assert.equal($('chainNext').disabled,true);
+assert.ok($('chainPosition').textContent.includes('pending'));
+`,context);
+'''
+    subprocess.run([node, '-e', script, 'src/splat_explorer/web/static/splatfix_result_detail.html'], check=True)
+
+
+def test_completed_pass_keeps_preview_input_provenance_during_download(tmp_path):
+    studio, root, result = setup(tmp_path)
+    pred = result / 'inference/pred'
+    pred.mkdir(parents=True)
+    for index in (0, 1, 2):
+        (pred / f'{index:05d}.png').write_bytes(b'png')
+    (result / 'result.json').write_text(json.dumps({'prediction_frames': 'inference/pred'}))
+    (result / 'inference-preview.json').write_text(json.dumps({'inference_ready': True,
+        'reconstruction_inputs': [0, 2], 'reference_count': 1}))
+    gallery = studio.results.run_detail(root.name)['gallery']
+    assert gallery['verified_inputs']
+    assert gallery['reference_count'] == 1
+    assert [frame['index'] for frame in gallery['frames']] == [0, 2]

@@ -110,3 +110,108 @@ def test_training_alignment_preserves_camera_poses(tmp_path, monkeypatch):
     assert all(f['transform_matrix']==pose for f in result['frames'])
     assert all((f['w'],f['h'])==(720,480) for f in result['frames'])
     assert result['frames'][1]['file_path']=='images/a.jpg'
+
+
+@pytest.mark.parametrize('value', [0, -1, 1.5, '2', True, None])
+def test_chain_count_rejects_non_positive_integers(value):
+    with pytest.raises(ValueError, match='positive integer'):
+        validate_job(dict(stage='benchmark', source='/source', benchmark_runs=value))
+
+
+def test_chain_count_defaults_and_schedule():
+    assert validate_job(dict(stage='benchmark', source='/source'))['benchmark_runs'] == 1
+    options = validate_job(dict(stage='benchmark', source='/source', benchmark_runs=3,
+                                scheduled_at='2026-10-10T12:00:00+02:00'))
+    assert options['benchmark_runs'] == 3
+    assert options['scheduled_at'] == '2026-10-10T10:00:00+00:00'
+
+
+@pytest.mark.parametrize('count', [1, 2, 3])
+def test_worker_chains_previous_output_and_evaluates_each_pass(tmp_path, monkeypatch, count):
+    from splat_explorer.splatfix.artifixer import worker, benchmark, repeat_benchmark, run_evaluation
+    calls, evaluations, events = [], [], []
+    runtime = {'resolution_profile': 'training', 'regularization_profile': 'artifixer'}
+    atomic_json(tmp_path / 'worker-request.json', dict(stage='benchmark', source='/original',
+                output=str(tmp_path / 'results'), runtime=runtime, benchmark_runs=count))
+    def run(source, output, **kwargs):
+        calls.append(source)
+        kwargs['on_progress']({'phase': 'inference'})
+        events.append(json.loads((tmp_path / 'worker-status.json').read_text()))
+        return {'output_dir': str(Path(output) / f'pass-{len(calls)}')}
+    monkeypatch.setattr(benchmark, 'run_benchmark', run)
+    monkeypatch.setattr(repeat_benchmark, 'run_repeat_benchmark', run)
+    monkeypatch.setattr(run_evaluation, 'finalize_run_evaluation', lambda root, *a, **kw: evaluations.append(root))
+    worker.execute(tmp_path)
+    status = json.loads((tmp_path / 'worker-status.json').read_text())
+    assert status['status'] == 'completed'
+    assert calls == ['/original'] + [str(tmp_path / 'results' / f'pass-{i}') for i in range(1, count)]
+    assert evaluations == [str(tmp_path / 'results' / f'pass-{i}') for i in range(1, count + 1)]
+    assert [e['benchmark_pass'] for e in events] == list(range(1, count + 1))
+    assert all(e['benchmark_runs'] == count for e in events)
+    assert status['result']['output_dir'] == evaluations[-1]
+
+
+@pytest.mark.parametrize('cancel', [False, True])
+def test_chain_stops_before_next_pass_on_failure_or_cancel(tmp_path, monkeypatch, cancel):
+    from splat_explorer.splatfix.artifixer import worker, benchmark, repeat_benchmark, run_evaluation
+    atomic_json(tmp_path / 'worker-request.json', dict(stage='benchmark', source='/original',
+                output=str(tmp_path / 'results'), runtime={}, benchmark_runs=3))
+    def first(*args, **kwargs):
+        if not cancel:
+            raise RuntimeError('inference failed')
+        (tmp_path / 'STOP').touch()
+        return {'output_dir': str(tmp_path / 'results/pass-1')}
+    monkeypatch.setattr(benchmark, 'run_benchmark', first)
+    monkeypatch.setattr(repeat_benchmark, 'run_repeat_benchmark', lambda *a, **kw: pytest.fail('Must not start another pass'))
+    monkeypatch.setattr(run_evaluation, 'finalize_run_evaluation', lambda *a, **kw: None)
+    worker.execute(tmp_path)
+    status = json.loads((tmp_path / 'worker-status.json').read_text())
+    assert status['status'] == ('stopped' if cancel else 'error')
+
+
+def test_third_pass_uses_second_checkpoint_and_original_conditioning(tmp_path):
+    import shutil
+    prior = fixture(tmp_path)
+    old, _, split = prepare_repeat(prior, tmp_path / 'second')
+    second = tmp_path / 'second'
+    shutil.copytree(prior / 'prepared/bicycle/artifixer3d', split.parent / 'artifixer3d')
+    (split.parent / 'artifixer3d/repaired.pt').write_bytes(b'second repaired splat')
+    _, entry = b._split_entry(split)
+    entry.update(reconstruction_checkpoint='artifixer3d/repaired.pt', render_dir='artifixer3d/renders',
+                 opacity_dir='artifixer3d/opacity', selected_indices_path='artifixer3d/selected.json')
+    atomic_json(split.parent / 'split_artifixer3d_plus.json', {'test': {'bicycle': entry}})
+    atomic_json(second / 'benchmark-run.json', {**old, 'repeat_repair': {'repair_pass': 2}})
+    (second / 'artifixer3d.ply').write_bytes(b'second export')
+    _, proof, third_split = prepare_repeat(second, tmp_path / 'third')
+    _, third = b._split_entry(third_split)
+    assert b._metadata_path(third_split, third, 'reconstruction_checkpoint').read_bytes() == b'second repaired splat'
+    assert proof['repair_pass'] == 3
+    for key in ('transforms_path', 'selected_indices_path', 'target_indices_path', 'prompt_path'):
+        _, original = b._split_entry(prior / 'prepared/bicycle/split_trajectory.json')
+        assert b._metadata_path(third_split, third, key).read_bytes() == b._metadata_path(
+            prior / 'prepared/bicycle/split_trajectory.json', original, key).read_bytes()
+
+
+def test_repeat_reuses_already_aligned_references_and_rerenders_repaired_splat(tmp_path, monkeypatch):
+    from splat_explorer.splatfix.artifixer import repeat_benchmark as repeat
+    prior = fixture(tmp_path)
+    old = json.loads((prior / 'benchmark-run.json').read_text())
+    old['runtime'] = {'resolution_profile': 'training', 'model_variant': '1.3b', 'python': 'python', 'repo': '/authors'}
+    old['resolution_policy'] = {'profile': 'training'}
+    atomic_json(prior / 'benchmark-run.json', old)
+    monkeypatch.setattr(b, 'benchmark_runtime', lambda runtime: runtime)
+    monkeypatch.setattr(repeat, 'runtime_environment', lambda cfg: {})
+    monkeypatch.setattr(repeat, 'align_repeat_inputs', lambda *a: pytest.fail('References must stay unchanged'))
+    commands = []
+    def stop_after_render(command, **kwargs):
+        commands.append(command)
+        raise InterruptedError('Test stopped at repaired input rendering')
+    monkeypatch.setattr(repeat, 'run_worker', stop_after_render)
+    with pytest.raises(InterruptedError, match='Test stopped'):
+        repeat.run_repeat_benchmark(prior, tmp_path / 'results')
+    assert len(commands) == 1
+    assert Path(commands[0][1]).name == 'repeat_render.py'
+    split = Path(commands[0][commands[0].index('--split') + 1])
+    _, entry = b._split_entry(split)
+    assert b._metadata_path(split, entry, 'reconstruction_checkpoint').read_bytes() == b'repaired splat'
+    assert b._metadata_path(split, entry, 'transforms_path').read_bytes() == (prior / 'prepared/bicycle/transforms.json').read_bytes()

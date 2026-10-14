@@ -1,4 +1,4 @@
-"""Publish completed first-pass images while the GPU continues reconstruction."""
+"""Publish inputs, inference images and completed passes while the GPU continues."""
 from __future__ import annotations
 
 import json
@@ -72,17 +72,27 @@ class InferencePreviewMirror:
         self.retry_after = 0
 
     def poll(self, state):
-        raw = state.get('inference_preview') or state.get('input_preview')
-        if not raw or (self.thread is not None and self.thread.is_alive()) or time.monotonic() < self.retry_after:
+        if (self.thread is not None and self.thread.is_alive()) or time.monotonic() < self.retry_after:
             return
-        try:
-            path = PurePosixPath(raw)
-            relative = path.relative_to(self.container_root)
-            if '..' in path.parts or len(relative.parts) != 3 or relative.parts[0] != 'results' or path.name not in ('inference-preview.json', 'input-preview.json'):
-                return
-        except (ValueError, TypeError):
-            return
-        if (self.root / 'gpu' / str(relative)).is_file():
+        # Completed passes must become visible while subsequent passes run.
+        candidates = list(state.get('completed_results') or [])
+        candidates.append(state.get('inference_preview') or state.get('input_preview'))
+        relative = None
+        for raw in candidates:
+            if not raw:
+                continue
+            try:
+                path = PurePosixPath(raw)
+                candidate = path.relative_to(self.container_root)
+                if ('..' in path.parts or len(candidate.parts) != 3 or candidate.parts[0] != 'results'
+                        or path.name not in ('result.json', 'inference-preview.json', 'input-preview.json')):
+                    continue
+            except (ValueError, TypeError):
+                continue
+            if not (self.root / 'gpu' / str(candidate)).is_file():
+                relative = candidate
+                break
+        if relative is None:
             return
         self.retry_after = time.monotonic() + 30
         self.thread = threading.Thread(target=self._download, args=(relative,), daemon=True)
@@ -104,8 +114,13 @@ class InferencePreviewMirror:
                 '--include=/prepared/**/*.png', '--include=/prepared/**/*.jpg', '--include=/prepared/**/*.jpeg',
                 '--include=/conditioning-colmap/images/***', '--include=/conditioning-colmap/',
                 '--include=/request.json', '--include=/preview-trajectory.json',
-                '--include=/input-preview.json', '--include=/input-images/***',
-                '--include=/benchmark-run.json', '--exclude=*',
+                '--include=/input-preview.json', '--include=/inference-preview.json', '--include=/input-images/***',
+                '--include=/benchmark-run.json',
+                *(['--include=/artifixer3d.ply', '--include=/plus/***'] if relative.name == 'result.json' else []),
+                '--include=/published-test-metrics.json', '--include=/evaluation-status.json',
+                '--include=/stage-comparison*.jpg', '--include=/stage-comparison.json',
+                '--include=/trajectory*.png', '--include=/trajectory-quality.json',
+                '--exclude=*',
                 '-e', self.ssh_command,
                 self.endpoint + ':' + str(PurePosixPath(self.remote_root) / relative.parent) + '/', str(staging) + '/'])
             data = json.loads((staging / relative.name).read_text())
@@ -113,6 +128,8 @@ class InferencePreviewMirror:
             if any(p.is_symlink() for p in staging.rglob('*')):
                 raise ValueError('Preview transfer must contain regular local files')
             prediction = Path(data.get('prediction_frames', '.'))
+            if relative.name == 'result.json' and prediction.is_absolute():
+                prediction = prediction.relative_to(self.container_root / relative.parent)
             if prediction.is_absolute() or '..' in prediction.parts:
                 raise ValueError('Preview predictions must be relative to the result')
             for index in data.get('reconstruction_inputs', []):

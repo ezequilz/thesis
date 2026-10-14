@@ -27,10 +27,13 @@ def test_regularization_added_once(override, lpips):
     assert result['total_loss'] == pytest.approx(10.7)
 
 
+@pytest.mark.parametrize('source_ply', [None, '/original.ply'])
 @pytest.mark.parametrize('profile', ['artifixer', 'base_mcmc'])
-def test_config_inheritance_is_scoped_and_preserves_other_settings(monkeypatch, profile):
+def test_config_inheritance_is_scoped_and_preserves_other_settings(monkeypatch, profile, source_ply):
     sparse = SimpleNamespace(loss=dict(use_opacity=False, lambda_opacity=0.0, use_scale=False,
-        lambda_scale=0.0, lambda_lpips_override=0.1), model={'density': 0.1}, schedule={'stop': 25000})
+        lambda_scale=0.0, lambda_lpips_override=0.1), model={'density': 0.1}, schedule={'stop': 25000}, resume='old.ckpt',
+        import_ingp=SimpleNamespace(enabled=True),
+        import_ply=SimpleNamespace(enabled=False, path='', init_global_step=30000))
     base = SimpleNamespace(loss=dict(use_opacity=True, lambda_opacity=0.037, use_scale=True, lambda_scale=0.029))
     calls = []
     def compose(name, overrides, directory):
@@ -43,9 +46,17 @@ def test_config_inheritance_is_scoped_and_preserves_other_settings(monkeypatch, 
     monkeypatch.setitem(sys.modules, 'data_processing', package)
     monkeypatch.setitem(sys.modules, training.__name__, training)
     with pytest.raises(RuntimeError, match='training failed'):
-        with worker.reconstruction_settings(profile):
+        with worker.reconstruction_settings(profile, source_ply=source_ply):
             config = training.compose_3dgrut_config(worker.ARTIFIXER3D_CONFIG, [], '/pinned')
             assert config.loss == ({**sparse.loss, **base.loss} if profile == 'base_mcmc' else sparse.loss)
+            if source_ply:
+                assert config.resume == ''
+                assert config.import_ingp.enabled is False
+                assert config.import_ply.enabled is True
+                assert config.import_ply.path == source_ply
+                assert config.import_ply.init_global_step == 0
+            else:
+                assert config.import_ply.enabled is False
             assert config.model == sparse.model and config.schedule == sparse.schedule
             raise RuntimeError('training failed')
     assert training.compose_3dgrut_config is compose and training.Trainer3DGRUT is object

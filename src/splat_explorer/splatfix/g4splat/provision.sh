@@ -6,9 +6,12 @@ prefix=$2
 revision=$3
 [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'G4Splat provisioning requires Linux x86_64 with NVIDIA CUDA'; exit 2; }
 mkdir -p "$(dirname "$repo")" "$(dirname "$prefix")"
-echo "Waiting for G4Splat installation lock: ${prefix}.setup.lock"
 exec 9>"${prefix}.setup.lock"
-flock 9
+if ! flock -n 9; then
+  echo 'Another G4Splat installation is running; waiting for it to finish.'
+  flock 9
+fi
+echo 'G4Splat installation lock acquired.'
 echo "Checking pinned G4Splat source at $repo"
 if [[ ! -d "$repo/.git" ]]; then
   git clone --recursive https://github.com/DaLi-Jack/G4Splat.git "$repo"
@@ -51,6 +54,11 @@ if [[ ! -x "$prefix/bin/nvcc" ]]; then
     --strict-channel-priority -c nvidia/label/cuda-11.8.0 -c conda-forge cuda-nvcc=11.8
 fi
 "$prefix/bin/nvcc" --version | grep 'release 11.8'
+if [[ ! -f "$prefix/.g4splat-system-libs" ]]; then
+  "$bootstrap/bin/micromamba" install -y -p "$prefix" --freeze-installed \
+    --strict-channel-priority -c conda-forge libgl libglib
+  touch "$prefix/.g4splat-system-libs"
+fi
 [[ -x "$prefix/bin/python" ]] || { echo "Incomplete G4Splat Python prefix: $prefix"; exit 2; }
 export CONDA_PREFIX="$prefix" CUDA_HOME="$prefix" CUDA_PATH="$prefix"
 export PATH="$prefix/bin:$PATH"
@@ -85,6 +93,8 @@ if [[ ! -f "$prefix/.g4splat-dependencies" ]]; then
   (cd mast3r/dust3r/croco/models/curope && python setup.py build_ext --inplace)
   touch "$prefix/.g4splat-dependencies"
 fi
+# Upstream leaves kiui unpinned; newer releases use Python 3.10-only syntax.
+python -m pip install 'kiui==0.2.20'
 # Each file is published only after a successful download; interrupted transfers resume.
 download() {
   local url=$1 target=$2

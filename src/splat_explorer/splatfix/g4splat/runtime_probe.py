@@ -19,7 +19,8 @@ def main():
     for name in ('diff_surfel_rasterization', 'simple_knn._C',
                  'tetranerf.utils.extension', 'pytorch3d._C', 'asmk', 'faiss',
                  'segment_anything', 'detectron2', 'depth_anything_v2.dpt',
-                 'mast3r.model', 'models.curope', 'gradio', 'diffusers', 'transformers', 'xformers.ops'):
+                 'mast3r.model', 'models.curope', 'gradio', 'diffusers', 'transformers',
+                 'xformers.ops', 'kiui.cam'):
         importlib.import_module(name)
     from simple_knn._C import distCUDA2
     distances = distCUDA2(torch.rand(1024, 3, device='cuda'))

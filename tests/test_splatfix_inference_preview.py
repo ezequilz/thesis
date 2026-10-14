@@ -208,3 +208,24 @@ def test_inputs_transfer_before_inference_and_remain_with_predictions(tmp_path):
     worker.finish()
     assert (saved / 'inference-preview.json').is_file()
     assert (saved / 'input-preview.json').is_file()
+
+
+def test_completed_pass_downloads_before_next_preview(tmp_path):
+    remote = tmp_path / 'remote/results/pass1'
+    pred = preview(remote)
+    (remote / 'artifixer3d.ply').write_bytes(b'ply')
+    (remote / 'result.json').write_text(json.dumps({
+        'prediction_frames': '/workspace/job/results/pass1/inference/model/frames/batch_0000/pred',
+        'splat_path': '/workspace/job/results/pass1/artifixer3d.ply'}))
+    local = tmp_path / 'local'
+    def transfer(argv):
+        assert argv[-2] == 'host:/dss/job/results/pass1/'
+        assert '--include=/result.json' in argv
+        assert '--include=/artifixer3d.ply' in argv
+        shutil.copytree(remote, Path(argv[-1]), dirs_exist_ok=True)
+    mirror = InferencePreviewMirror(local, '/workspace/job', '/dss/job', 'host', 'ssh', transfer)
+    mirror.poll({'completed_results': ['/workspace/job/results/pass1/result.json'],
+                 'input_preview': '/workspace/job/results/pass2/input-preview.json'})
+    mirror.finish()
+    assert (local / 'gpu/results/pass1/result.json').is_file()
+    assert (local / 'gpu/results/pass1/artifixer3d.ply').is_file()

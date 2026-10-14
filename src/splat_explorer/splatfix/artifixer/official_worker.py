@@ -30,14 +30,16 @@ def validate_regularization(profile):
     return profile
 
 
-def reconstruction_recipe(profile='artifixer'):
+def reconstruction_recipe(profile='artifixer', *, source_ply=False):
     """Record recipe identity without duplicating upstream hyperparameters."""
     validate_regularization(profile)
     return {'version': 'artifixer3d-regularization-choice-v1',
             'config_name': ARTIFIXER3D_CONFIG, 'steps': ARTIFIXER3D_STEPS,
-            'initialization': 'fresh', 'parameter_source': 'pinned_upstream',
+            'initialization': 'full_splat_ply' if source_ply else 'fresh',
+            'training_state': 'fresh', 'start_step': 0, 'parameter_source': 'pinned_upstream',
+            'initialization_source': 'original PLY; all Gaussian parameters' if source_ply else 'COLMAP points',
             'regularization_profile': profile,
-            'custom_reconstruction_overrides': profile != 'artifixer',
+            'custom_reconstruction_overrides': source_ply or profile != 'artifixer',
             'regularization_source': 'base_mcmc' if profile == 'base_mcmc' else 'base_gs_sparse -> base_gs',
             'loss_adaptation': 'include regularizers in generated-view total' if profile == 'base_mcmc' else None}
 
@@ -67,9 +69,9 @@ def regularized_trainer_class(base):
 
 
 @contextmanager
-def reconstruction_settings(profile='artifixer'):
+def reconstruction_settings(profile='artifixer', *, source_ply=None):
     validate_regularization(profile)
-    if profile == 'artifixer':
+    if profile == 'artifixer' and source_ply is None:
         yield
         return
     from data_processing import threedgrut_training as training
@@ -77,14 +79,22 @@ def reconstruction_settings(profile='artifixer'):
 
     def compose(config_name, overrides, config_dir):
         config = original_compose(config_name, overrides, config_dir)
-        regularized = original_compose('base_mcmc', [], config_dir)
-        # Inherit only regularization; keep the same initialization and schedules.
-        for key in ('use_opacity', 'lambda_opacity', 'use_scale', 'lambda_scale'):
-            config.loss[key] = regularized.loss[key]
+        if source_ply is not None:
+            # Use the authors' full Gaussian importer, with a fresh optimizer
+            # and the complete schedule. Never resume the source training step.
+            config.resume = ''
+            config.import_ingp.enabled = False
+            config.import_ply.enabled = True
+            config.import_ply.path = str(Path(source_ply).resolve())
+            config.import_ply.init_global_step = 0
+        if profile == 'base_mcmc':
+            regularized = original_compose('base_mcmc', [], config_dir)
+            for key in ('use_opacity', 'lambda_opacity', 'use_scale', 'lambda_scale'):
+                config.loss[key] = regularized.loss[key]
         return config
 
     training.compose_3dgrut_config = compose
-    training.Trainer3DGRUT = regularized_trainer_class(original_trainer)
+    training.Trainer3DGRUT = regularized_trainer_class(original_trainer) if profile == 'base_mcmc' else original_trainer
     try:
         yield
     finally:
@@ -598,7 +608,8 @@ def inference(root, request, trajectory, plus=False):
                       caption_path=request['caption_path'], caption_sha256=request['caption_sha256'],
                       initialization=request['initialization'], input_adaptation=request['input_adaptation'],
                       reconstruction='fresh ArtiFixer3D; 30000 steps; sparse MCMC LPIPS; regularization recorded in reconstruction_recipe',
-                      reconstruction_recipe=reconstruction_recipe(request.get('runtime', {}).get('regularization_profile', 'artifixer')),
+                      reconstruction_recipe=reconstruction_recipe(request.get('runtime', {}).get('regularization_profile', 'artifixer'),
+                                                                source_ply=bool(request.get('source_ply'))),
                       ply_stage='ArtiFixer3D; the + pass produces images, not another splat', merged=False)
         (root / 'result.json').write_text(json.dumps(result, indent=2))
 
@@ -661,6 +672,12 @@ def unique_supervision(trajectory, references):
 
 
 def distill(root, request, trajectory):
+    if request.get('source_ply'):
+        import hashlib
+        with Path(request['source_ply']).open('rb') as stream:
+            actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+        if actual != request.get('source_ply_sha256'):
+            raise ValueError('Source initialization PLY changed since preparation')
     import numpy as np
     import torch
     from data_processing import artifixer3d as official
@@ -712,7 +729,7 @@ def distill(root, request, trajectory):
     # Authors entry point, with the selected loss policy shared by both arms.
     # No resume checkpoint, custom fitter, SH truncation, or compositing.
     profile = request.get('runtime', {}).get('regularization_profile', 'artifixer')
-    with reconstruction_settings(profile):
+    with reconstruction_settings(profile, source_ply=request.get('source_ply')):
         checkpoint, reused = official.train_artifixer3d(
             scene, paths, artifixer_frames_dir=predictions,
             base_checkpoint=None, config_name=ARTIFIXER3D_CONFIG,
@@ -731,7 +748,8 @@ def distill(root, request, trajectory):
     PLYExporter().export(renderer.model, splat_path)
     (root / 'distillation.json').write_text(json.dumps({
         'splat_path': str(splat_path), 'reconstruction_checkpoint': str(checkpoint),
-        'reconstruction_recipe': reconstruction_recipe(profile),
+        'reconstruction_recipe': reconstruction_recipe(profile, source_ply=bool(request.get('source_ply'))),
+        'source_ply_sha256': request.get('source_ply_sha256'),
         'render_dir': str(render_dir), 'supervision_manifest': str(root / 'supervision.json'),
         'original_frame_count': len(render_transforms['frames']),
         'distillation_frame_count': len(transforms['frames'])}, indent=2))

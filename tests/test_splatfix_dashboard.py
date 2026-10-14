@@ -270,7 +270,7 @@ def test_registered_benchmark_queues_without_checkpoint(studio):
     source = benchmark_input(studio)
     job = studio.create({'stage': 'benchmark', 'source': str(source)})
     options = job['config']['splatfix']
-    assert options == {'stage': 'benchmark', 'source': str(source), 'mode': 'baseline', 'model': '1.3b', 'resolution_profile': 'training', 'regularization_profile': 'artifixer', 'split_mode': 'double-split', 'reconstruction_method': 'artifixer'}
+    assert options == {'stage': 'benchmark', 'source': str(source), 'mode': 'baseline', 'model': '1.3b', 'resolution_profile': 'training', 'regularization_profile': 'artifixer', 'split_mode': 'double-split', 'reconstruction_method': 'artifixer', 'benchmark_runs': 1}
     assert studio.benchmarks()[0]['ready']
     assert 'not confirmed' in studio.benchmarks()[0]['provenance_note']
     from splat_explorer.splatfix.jobs import requires_gpu
@@ -329,7 +329,7 @@ def test_benchmark_remote_stages_dataset_and_matched_model(studio, monkeypatch):
     from splat_explorer.scene_runs.lrz_transport import LrzSceneRunTransport
     from splat_explorer.splatfix.executor import SplatfixExecutor
     source = benchmark_input(studio)
-    job = studio.create({'stage': 'benchmark', 'source': str(source), 'model': '14b'})
+    job = studio.create({'stage': 'benchmark', 'source': str(source), 'model': '14b', 'benchmark_runs': 3})
     transfers, commands = [], []
     monkeypatch.setattr(lrz, 'load_lrz_config', lambda: {'workspace': '/dss/work', 'user': 'u', 'host': 'h'})
     monkeypatch.setattr(LrzSceneRunTransport, 'validate', lambda self: {})
@@ -347,6 +347,7 @@ def test_benchmark_remote_stages_dataset_and_matched_model(studio, monkeypatch):
     assert request['stage'] == 'benchmark'
     assert request['source'].endswith('/benchmark-input')
     assert 'checkpoint' not in request
+    assert request['benchmark_runs'] == 3
     assert request['runtime']['model_variant'] == '14b'
     assert request['runtime']['checkpoint'].endswith('artifixer-14b.pt')
     assert '14B' in request['runtime']['model_id']

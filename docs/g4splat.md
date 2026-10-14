@@ -52,6 +52,9 @@ On the CUDA worker, missing installations are provisioned by the packaged
 `g4splat/provision.sh` script under a filesystem lock. It clones the pinned
 upstream source, creates a separate Python 3.9 / PyTorch 2.0.1 / CUDA 11.8 prefix,
 pins the CUDA compiler to 11.8 and CMake below 4 for the upstream build files,
+selects the allocated GPU's architecture for PyTorch extension builds and installs
+the OpenGL/GLib libraries required by upstream OpenCV,
+pins the otherwise unconstrained `kiui` dependency to Python 3.9-compatible 0.2.20,
 builds the official rasterizer, KNN, tetrahedralization and MASt3R extensions,
 and downloads DepthAnythingV2, MASt3R, SAM and the official See3D sparse-view
 weights. It does not replace any depth estimates, losses, training stages or
@@ -64,6 +67,9 @@ products persist on the mounted workspace across allocations. Installation
 uses its own environment; application and ArtiFixer packages are not changed.
 The first run can take substantially longer while dependencies and weights
 are installed. STOP and the job deadline also apply during automatic setup.
+Concurrent runs wait for the active installer to release its filesystem lock.
+The lock file is created automatically and may remain after setup; its existence
+does not mean installation is still running.
 
 For manual provisioning inside the GPU container:
 
@@ -105,5 +111,7 @@ training process group and retains files already written by upstream; it does
 No completed result is published after a failed or cancelled pipeline.
 
 Restart the dashboard and queue manager after updating code. Integration tests
-exercise geometry export and orchestration without CUDA. A successful GPU run
-is still required to establish runtime compatibility and reconstruction quality.
+exercise geometry export and orchestration without CUDA. The provisioned LRZ
+A100 80GB environment passed CUDA/import/KNN preflight with PyTorch 2.0.1+cu118;
+run `run_20261009_004858` advanced through MASt3R into official chart alignment.
+A completed reconstruction is still required to assess end-to-end output quality.
