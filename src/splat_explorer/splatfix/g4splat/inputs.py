@@ -8,7 +8,9 @@ from ..checkpoint import atomic_json, camera_from_record
 from .backend import readiness
 
 
-def export_inputs(checkpoint, destination, mode):
+def export_inputs(checkpoint, destination, mode, *, source_depth=False, should_stop=lambda: False):
+    if not isinstance(source_depth, bool):
+        raise ValueError("source_depth must be a boolean")
     if mode not in ('baseline', 'edited'):
         raise ValueError('mode must be baseline or edited')
     state = readiness(checkpoint)
@@ -49,5 +51,10 @@ def export_inputs(checkpoint, destination, mode):
                 'colmap_convention': 'opencv_w2c', 'views': records,
                 'source_checkpoint': str(checkpoint.root), 'source_splat_used_for_initialization': False,
                 'resolution': checkpoint.manifest.get('metadata', {}).get('resolution')}
+    if source_depth:
+        from .source_depth import export_source_depth
+        manifest['source_depth'] = export_source_depth(checkpoint, root, should_stop=should_stop)
+        manifest['method_variant'] = 'source-splat-depth-extension'
+        manifest['source_splat_used_for_initialization'] = True
     atomic_json(root / 'inputs.json', manifest)
     return manifest

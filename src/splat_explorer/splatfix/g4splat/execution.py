@@ -40,13 +40,14 @@ def execute_remote(executor, run_id, options, root, stop, update):
             for view in checkpoint.views:
                 checkpoint.image_path(view, repaired=True)
         update(phase='inputs', message='Recapturing G4Splat inputs at the selected resolution')
-        # Preparation stays local: only calibrated RGBs go to the GPU. Neither
-        # the source splat nor any ArtiFixer trajectories initialize G4Splat.
+        # Preparation stays local; optional source depth maps travel with RGBs.
+        # The source splat itself is not transferred.
         import uuid
         preparation = root / ('g4splat-inputs-' + uuid.uuid4().hex[:8])
         prepared = prepare_repair_checkpoint(checkpoint, preparation / 'checkpoint', options['resolution_profile'],
                                              should_stop=stop)
-        export_inputs(prepared, preparation / 'inputs', options['mode'])
+        export_inputs(prepared, preparation / 'inputs', options['mode'],
+                      source_depth=runtime.get('source_depth', False), should_stop=stop)
         if stop():
             raise InterruptedError('Cancelled before G4Splat staging')
         update(phase='staging', message='Staging G4Splat calibrated RGB inputs')

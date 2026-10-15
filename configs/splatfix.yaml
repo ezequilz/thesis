@@ -11,6 +11,7 @@ splatfix:
   resolution_profile: training
   g4splat_runtime:
     auto_setup: true
+    source_depth: false  # Opt-in source-splat depth extension; changes the method.
     repo: /workspace/third_party/G4Splat
     python: /workspace/g4splat-env/bin/python
   runtime:

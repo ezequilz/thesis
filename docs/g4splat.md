@@ -6,7 +6,7 @@ or Schedule. ArtiFixer remains the default for old jobs and benchmarks.
 
 The adapter in `src/splat_explorer/splatfix/g4splat/` runs the official
 [DaLi-Jack/G4Splat](https://github.com/DaLi-Jack/G4Splat) checkout at
-`ec0736126707a42bb2c26ed8ba2c314909edc7a9`. It invokes the unchanged `train.py`
+`ec0736126707a42bb2c26ed8ba2c314909edc7a9`. It invokes `train.py`
 with the README's posed recipe: `--sfm_config posed --use_view_config
 --config_view_num N --select_inpaint_num 10 --tetra_downsample_ratio 0.25`.
 `N` is the actual saved selection count, not the paper's five-view example.
@@ -17,6 +17,8 @@ The original optimization configurations, mesh extraction and rendering run
 unchanged. Only the final held-out benchmark evaluator is skipped because saved
 selections contain no held-out photographs or ground-truth mesh. Commands,
 revision, input hashes, cameras and adaptations are recorded in the run folder.
+New runs apply the explicit `camera-consistency-v1` correction described below;
+they must not be reported as an unmodified-upstream baseline.
 
 ## Camera and image contract
 
@@ -31,9 +33,41 @@ No GPT call is made. Source checkpoints remain unchanged.
 The input exporter writes one COLMAP PINHOLE camera per image. Saved OpenCV
 camera-to-world transforms are inverted to world-to-camera rotations and
 translations, with COLMAP's scalar-first quaternion order. There are no
-fabricated feature tracks or initial points. The upstream `posed.yaml` fixes
-focal length, principal point, rotation and translation, while retaining the
-upstream internal image scaling and camera-location alignment.
+fabricated feature tracks or initial points. The upstream `posed.yaml` requests
+fixed calibration and poses, but upstream still optimizes translations internally
+before restoring the supplied poses.
+
+### Camera-consistency correction and required geometry check
+
+The shared upstream checkout remains pristine. `corrected_runtime.py` verifies
+the exact SHA-256 of the pinned MASt3R entrypoint and creates a run-local
+`corrected-runtime/` overlay. A source mismatch aborts the run. Its correction:
+
+- Applies a real centered crop to RGB and subtracts the crop offset from the
+  principal point. The saved full-resolution image has exactly the aspect ratio
+  of its MASt3R point map, avoiding a hidden crop followed by stretching depth
+  over a different field of view. For 832x480 inputs this saves 832x468 pixels
+  (six rows removed from each edge) with `cy=234`. The original staged image
+  remains 832x480 with `cy=240`. The 1280x720 and 960x720 profiles need no crop.
+- When upstream restores calibrated poses, transforms every view's point map
+  from its previous camera frame to the restored frame, preserving camera-local
+  coordinates and depth. A non-positive or non-finite global alignment scale
+  aborts the run. This restores coordinate consistency; it does not guarantee
+  that predicted scene depth is accurate.
+- Records exact pointmap intrinsics and crop calibration. Immediately before
+  `scripts/align_charts.py`, checks every point against its originating pixel.
+  All points must be finite and have positive camera z; maximum reprojection
+  error must be at most 0.5 pixels. Image dimensions, scaled pointmap intrinsics,
+  centered principal points and full-resolution COLMAP intrinsics must agree.
+  Invalid samples are not hidden by confidence masks or percentile thresholds,
+  because upstream depth alignment consumes all of them.
+
+`geometry-correction.json` records the patch/helper hashes;
+`reprojection-check.json` records per-view errors and the pass/fail outcome.
+Failure stops depth alignment and prevents publishing a completed result. The
+recipe and result identify the correction version. Existing outputs are not
+rewritten; rerun reconstruction to apply the correction. Strict checks may reject
+an upstream point map with invalid depth even after its poses are consistent.
 
 ## Native output and viewer compatibility
 
@@ -57,8 +91,9 @@ the OpenGL/GLib libraries required by upstream OpenCV,
 pins the otherwise unconstrained `kiui` dependency to Python 3.9-compatible 0.2.20,
 builds the official rasterizer, KNN, tetrahedralization and MASt3R extensions,
 and downloads DepthAnythingV2, MASt3R, SAM and the official See3D sparse-view
-weights. It does not replace any depth estimates, losses, training stages or
-model code. The See3D model snapshot is pinned to
+weights. Provisioning does not modify shared source or model weights. The run-local
+calibration correction is applied after runtime preflight; depth models, losses
+and the three generative rounds are retained. The See3D model snapshot is pinned to
 `cbf13b6f813137134907408e40d3f2a17d6f0a80` in `bruiiii/See3D`.
 
 Installation requires Linux x86_64, access to the public package/model hosts,
@@ -115,3 +150,36 @@ exercise geometry export and orchestration without CUDA. The provisioned LRZ
 A100 80GB environment passed CUDA/import/KNN preflight with PyTorch 2.0.1+cu118;
 run `run_20261009_004858` advanced through MASt3R into official chart alignment.
 A completed reconstruction is still required to assess end-to-end output quality.
+
+### Optional source-splat depth extension
+
+Set `splatfix.g4splat_runtime.source_depth: true` to render input-view camera-z
+maps locally using the same `CpuSplatRenderer.render_depth()` used by episodes.
+The default is `false`. This is recorded as `source-splat-depth-extension`, even
+when `mode=baseline` selects unedited RGB; it is **not** an authors-only baseline.
+Both local and LRZ staging send lossless float32 NPZ maps alongside RGBs.
+
+Each map records its pose/intrinsics, checksum, validity and a binary reliability
+mask. The existing renderer accepts front-layer coverage of at least 0.15;
+the extension additionally erodes validity by one pixel and rejects local depth
+spreads above 10%. Confidence is this binary reliability indicator, not a learned
+probability. Source splats can still contain floaters or wrong geometry: the
+extension transfers their trusted depths rather than guaranteeing ground truth.
+
+The runtime verifies source maps against the saved cameras, applies the same
+actual center crop as RGB (832×480 → 832×468 removes six rows at each edge),
+and uses nearest-neighbor sampling rather than blending depth across surfaces.
+Trusted depths replace MASt3R point-map samples before the mandatory reprojection
+gate and replace input-view depth prediction. Uncovered pixels retain predicted
+depth, which must be finite and positive where used. Trusted metric depth and
+world points are restored after chart optimization, with the chart scale factor,
+and after input-view plane refinement. Novel See3D views retain upstream
+inference. The original splat is neither overwritten nor uploaded to the worker.
+
+`inputs.json` records depth coverage and provenance; `source-depth-check.json`
+records trusted coverage on the point-map grid; `source-depth-extension.json`
+records hashes of the additional run-local upstream patches. Runs fail closed on
+mismatched cameras/checksums, no surviving trusted coverage, or invalid fallback
+geometry. CPU contract tests cover masks, exact cropping, pixel reprojection,
+metric scaling, and nonmutation of the upstream checkout. End-to-end CUDA
+training quality still requires a new reconstruction and native-render review.

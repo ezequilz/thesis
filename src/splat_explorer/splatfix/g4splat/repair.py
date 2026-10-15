@@ -1,4 +1,4 @@
-"""Run the pinned official G4Splat recipe in its own CUDA environment."""
+"""Run pinned G4Splat with a recorded calibration correction in its CUDA environment."""
 import json
 import os
 from pathlib import Path
@@ -10,10 +10,12 @@ from ..checkpoint import Checkpoint, atomic_json
 from ..executor import run_process
 from ..resolution import prepare_repair_checkpoint
 from .inputs import export_inputs
+from .geometry import CORRECTION_VERSION
 
 REVISION = 'ec0736126707a42bb2c26ed8ba2c314909edc7a9'
 DEFAULT_RUNTIME = {'repo': '/workspace/third_party/G4Splat',
-                   'python': '/workspace/g4splat-env/bin/python', 'resolution_profile': 'training', 'auto_setup': True}
+                   'python': '/workspace/g4splat-env/bin/python', 'resolution_profile': 'training',
+                   'auto_setup': True, 'source_depth': False}
 
 
 def validate_runtime(runtime):
@@ -89,6 +91,10 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda: False,
               'tetra_downsample_ratio': .25, 'generation_rounds': 3,
               'held_out_evaluation': 'skipped: no held-out ground truth', 'inputs': provenance,
               'native_representation': '2d_gaussian_surfels',
+              'geometry_correction': CORRECTION_VERSION,
+              'reprojection_check_required': True,
+              'method_variant': provenance.get('method_variant', 'camera-corrected-g4splat'),
+              'source_depth': provenance.get('source_depth', {'enabled': False}),
               'viewer_conversion': {'normal_thickness_ratio': .01, 'approximation': True}}
     atomic_json(output / 'recipe.json', recipe)
     on_progress({'phase': 'g4splat', 'message': 'Official geometry, See3D and surfel reconstruction',
@@ -130,10 +136,18 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda: False,
     viewer = output / 'g4splat-viewer.ply'
     if not native.is_file() or not viewer.is_file():
         raise RuntimeError('G4Splat did not produce its native and viewer PLY outputs')
+    report_path = output / 'reprojection-check.json'
+    report = json.loads(report_path.read_text()) if report_path.is_file() else {}
+    if report.get('passed') is not True or report.get('version') != CORRECTION_VERSION:
+        raise RuntimeError('G4Splat is missing a successful camera-consistency report')
     result = {'reconstruction_method': 'g4splat', 'mode': provenance['mode'],
               'output_dir': str(output), 'splat_path': str(viewer), 'native_splat_path': str(native),
               'native_representation': '2d_gaussian_surfels', 'viewer_is_approximation': True,
               'upstream_revision': REVISION, 'input_manifest': str(source / 'inputs.json'),
+              'geometry_correction': CORRECTION_VERSION,
+              'reprojection_report': str(output / 'reprojection-check.json'),
+              'method_variant': provenance.get('method_variant', 'camera-corrected-g4splat'),
+              'source_depth': provenance.get('source_depth', {'enabled': False}),
               'limitation': 'Native G4Splat output is 2D Gaussian surfels. Viewer PLY uses an approximate 1% normal thickness; evaluate with the native renderer.'}
     atomic_json(output / 'result.json', result)
     return result
@@ -157,5 +171,6 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None,
     on_progress({'phase': 'inputs', 'message': 'Recapturing calibrated reconstruction inputs'})
     prepared = prepare_repair_checkpoint(checkpoint, output / 'checkpoint', runtime['resolution_profile'],
                                          scene_path=runtime.get('scene_path'), should_stop=should_stop)
-    export_inputs(prepared, output / 'inputs', mode)
+    export_inputs(prepared, output / 'inputs', mode,
+                  source_depth=runtime.get('source_depth', False), should_stop=should_stop)
     return run_prepared(output / 'inputs', output, runtime=runtime, should_stop=should_stop, on_progress=on_progress)

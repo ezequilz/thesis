@@ -128,13 +128,20 @@ def test_official_entrypoint_retains_commands_and_skips_only_evaluation(tmp_path
     repo, output = tmp_path / 'repo', tmp_path / 'result/official'
     repo.mkdir()
     output.parent.mkdir()
+    (tmp_path / 'inputs').mkdir()
+    (tmp_path / 'inputs/inputs.json').write_text('{}')
     calls = []
     monkeypatch.setattr(sys, 'argv', ['runner', str(repo), 'inputs', str(output), '6'])
     monkeypatch.setattr(runner.os, 'system', lambda value: calls.append(value) or 0)
+    monkeypatch.setattr(runner, 'prepare_runtime', lambda repo, destination: Path(repo))
+    gates = []
+    monkeypatch.setattr(runner, 'validate_pointmaps', lambda *args: gates.append(args))
     def upstream(path, run_name):
         assert sys.argv[sys.argv.index('--config_view_num') + 1] == '6'
         assert sys.argv[sys.argv.index('--sfm_config') + 1] == 'posed'
         runner.os.system('python scripts/run_sfm.py --config posed')
+        runner.os.system('python scripts/align_charts.py --source_path inputs')
+        assert len(gates) == 1
         for stage in (1, 2, 3):
             runner.os.system(f'python scripts/see3d_inpaint.py --see3d_stage {stage}')
             runner.os.system('python scripts/refine_free_gaussians.py')
@@ -147,9 +154,9 @@ def test_official_entrypoint_retains_commands_and_skips_only_evaluation(tmp_path
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, 'path', list(sys.path))
     runner.main()
-    assert len(calls) == 7
+    assert len(calls) == 8
     records = [json.loads(line) for line in (output.parent / 'commands.jsonl').read_text().splitlines()]
-    assert len(records) == 8 and records[-1]['skipped']
+    assert len(records) == 9 and records[-1]['skipped']
     assert all(not row['skipped'] for row in records[:-1])
     assert (output.parent / 'g4splat-viewer.ply').is_file()
 

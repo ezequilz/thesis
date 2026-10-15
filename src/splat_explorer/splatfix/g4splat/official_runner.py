@@ -1,6 +1,6 @@
 """Python 3.9-compatible wrapper, executed in the separate authors' environment.
 
-Runs unmodified train.py. Only the held-out benchmark evaluator is skipped.
+Runs train.py with a versioned run-local calibration correction.
 Every upstream command is retained in commands.jsonl. Native surfels are kept.
 """
 import json
@@ -9,6 +9,15 @@ from pathlib import Path
 import runpy
 import shlex
 import sys
+
+try:
+    from .corrected_runtime import prepare_runtime
+    from .geometry import validate_pointmaps
+    from . import source_depth_runtime
+except ImportError:  # Direct invocation in the separate Python 3.9 environment.
+    from corrected_runtime import prepare_runtime
+    from geometry import validate_pointmaps
+    import source_depth_runtime
 
 
 def export_viewer_ply(source, target):
@@ -58,8 +67,16 @@ def export_viewer_ply(source, target):
 def main():
     repo, source, output, count = sys.argv[1:]
     output = Path(output)
+    source = str(Path(source).resolve())
+    input_manifest = json.loads((Path(source) / 'inputs.json').read_text())
+    use_source_depth = input_manifest.get('source_depth', {}).get('enabled') is True
+    repo = str(prepare_runtime(repo, output.parent / 'corrected-runtime'))
+    if use_source_depth:
+        source_depth_runtime.patch_source_depth_runtime(repo)
     original_system = os.system
+    geometry_checked = False
     def command(value):
+        nonlocal geometry_checked
         tokens = shlex.split(value)
         skipped = len(tokens) > 1 and tokens[1] == '2d-gaussian-splatting/eval/eval.py'
         with (output.parent / 'commands.jsonl').open('a') as stream:
@@ -67,6 +84,12 @@ def main():
                                      'reason': 'No held-out ground truth' if skipped else None}) + '\n')
         if skipped:
             return 0
+        if len(tokens) > 1 and tokens[1] == 'scripts/align_charts.py':
+            if use_source_depth:
+                source_depth_runtime.apply_source_depth_pointmaps(
+                    output / 'mast3r_sfm', output.parent / 'source-depth-check.json')
+            validate_pointmaps(output / 'mast3r_sfm', output.parent / 'reprojection-check.json')
+            geometry_checked = True
         return original_system(value)
     os.chdir(repo)
     sys.path.insert(0, repo)
@@ -74,10 +97,25 @@ def main():
     sys.argv = [str(Path(repo) / 'train.py'), '-s', source, '-o', str(output),
                 '--sfm_config', 'posed', '--use_view_config', '--config_view_num', count,
                 '--select_inpaint_num', '10', '--tetra_downsample_ratio', '0.25']
+    extension_env = {'SPLATFIX_SOURCE_DEPTH_INPUTS': source,
+                     'SPLATFIX_SOURCE_DEPTH_SCENE': str((output / 'mast3r_sfm').resolve())}
+    previous_env = {key: os.environ.get(key) for key in extension_env}
+    for key, value in extension_env.items():
+        if use_source_depth:
+            os.environ[key] = value
+        else:
+            os.environ.pop(key, None)
     try:
         runpy.run_path(sys.argv[0], run_name='__main__')
     finally:
         os.system = original_system
+        for key, value in previous_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    if not geometry_checked:
+        raise RuntimeError('G4Splat did not pass the pre-alignment geometry gate')
     native = output / 'free_gaussians/point_cloud/iteration_7000/point_cloud.ply'
     if not native.is_file():
         raise RuntimeError('Official final 7000-iteration surfel output is missing')
