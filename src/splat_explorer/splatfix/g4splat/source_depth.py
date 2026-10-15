@@ -21,7 +21,7 @@ def conservative_mask(depth):
     return interior & (far <= near * 1.1)
 
 
-def export_source_depth(checkpoint, root, *, should_stop=lambda: False):
+def export_source_depth(checkpoint, root, *, should_stop=lambda: False, on_progress=None):
     from ...scene import load_scene
     from ...rendering.cpu_splat_renderer import CpuSplatRenderer
     validate_source(checkpoint)
@@ -44,6 +44,8 @@ def export_source_depth(checkpoint, root, *, should_stop=lambda: False):
         records.append({'image': '%06d.png' % index, 'path': str(path.relative_to(root)),
                         'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
                         'valid_fraction': float(valid.mean())})
+        if on_progress:
+            on_progress(list(records))
     return {'enabled': True, 'version': VERSION, 'depth_convention': 'positive_camera_z_scene_units',
             'renderer': 'episodes CpuSplatRenderer.render_depth',
             'confidence': 'binary reliability; front-layer coverage >=0.15, 1px eroded, local depth spread <=10%',

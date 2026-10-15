@@ -140,9 +140,20 @@ splatfix --config configs/splatfix.yaml repair /path/to/checkpoint \
 The dashboard uses the existing LRZ allocation, durable queue and lease. Local
 Viser capture occurs before staging; only calibrated images and COLMAP inputs
 are transferred. Worker status, restart reattachment, STOP/deadline handling and
-artifact download use the existing job contract. Cancellation terminates the
-training process group and retains files already written by upstream; it does
-**not** promise an iteration-boundary checkpoint like the ArtiFixer adapter.
+artifact download use the existing job contract. Use **Stop gracefully & download** to retain an incomplete reconstruction.
+During surfel training, STOP/deadline requests save the current native PLY after
+optimizer updates and attempt an authors-format checkpoint before exiting. The
+run-local trainer hook verifies the pinned source hash; scheduled saves and the
+shared checkout are unchanged. A thin-Gaussian viewer PLY is also exported.
+During image generation or other non-training stages, cancellation retains the
+last saved surfels. Before any surfels exist, only inputs and diagnostics can be
+retained. A hung trainer is terminated after 240 seconds (configurable through
+`SPLATFIX_SAVE_STOP_TIMEOUT_SECONDS`); timeout/save failures remain in diagnostics.
+`partial-result.json` identifies incomplete outputs and whether they were saved
+on stop or recovered from an earlier stage. Native/viewer files are downloaded
+before the GPU lease is released and appear in run details. Exact optimizer/RNG
+resume is not guaranteed. This hook applies to newly launched workers; already
+running workers must finish or stop using their original cancellation behavior.
 No completed result is published after a failed or cancelled pipeline.
 
 Restart the dashboard and queue manager after updating code. Integration tests

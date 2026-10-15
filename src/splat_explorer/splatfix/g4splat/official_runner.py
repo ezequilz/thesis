@@ -14,10 +14,12 @@ try:
     from .corrected_runtime import prepare_runtime
     from .geometry import validate_pointmaps
     from . import source_depth_runtime
+    from . import graceful
 except ImportError:  # Direct invocation in the separate Python 3.9 environment.
     from corrected_runtime import prepare_runtime
     from geometry import validate_pointmaps
     import source_depth_runtime
+    import graceful
 
 
 def export_viewer_ply(source, target):
@@ -73,10 +75,13 @@ def main():
     repo = str(prepare_runtime(repo, output.parent / 'corrected-runtime'))
     if use_source_depth:
         source_depth_runtime.patch_source_depth_runtime(repo)
+    graceful.patch_runtime(repo)
     original_system = os.system
     geometry_checked = False
     def command(value):
         nonlocal geometry_checked
+        if (output.parent / 'SAVE_STOP').exists():
+            raise SystemExit(75)
         tokens = shlex.split(value)
         skipped = len(tokens) > 1 and tokens[1] == '2d-gaussian-splatting/eval/eval.py'
         with (output.parent / 'commands.jsonl').open('a') as stream:
@@ -90,7 +95,18 @@ def main():
                     output / 'mast3r_sfm', output.parent / 'source-depth-check.json')
             validate_pointmaps(output / 'mast3r_sfm', output.parent / 'reprojection-check.json')
             geometry_checked = True
-        return original_system(value)
+        training = len(tokens) > 1 and tokens[1] == 'scripts/refine_free_gaussians.py'
+        active = output.parent / 'training-active'
+        if training:
+            active.touch()
+        try:
+            result = original_system(value)
+        finally:
+            if training:
+                active.unlink(missing_ok=True)
+        if (output.parent / 'SAVE_STOP').exists():
+            raise SystemExit(75)
+        return result
     os.chdir(repo)
     sys.path.insert(0, repo)
     os.system = command
@@ -100,6 +116,8 @@ def main():
     extension_env = {'SPLATFIX_SOURCE_DEPTH_INPUTS': source,
                      'SPLATFIX_SOURCE_DEPTH_SCENE': str((output / 'mast3r_sfm').resolve())}
     previous_env = {key: os.environ.get(key) for key in extension_env}
+    previous_stop = os.environ.get('SPLATFIX_G4_STOP')
+    os.environ['SPLATFIX_G4_STOP'] = str((output.parent / 'SAVE_STOP').resolve())
     for key, value in extension_env.items():
         if use_source_depth:
             os.environ[key] = value
@@ -109,6 +127,10 @@ def main():
         runpy.run_path(sys.argv[0], run_name='__main__')
     finally:
         os.system = original_system
+        if previous_stop is None:
+            os.environ.pop('SPLATFIX_G4_STOP', None)
+        else:
+            os.environ['SPLATFIX_G4_STOP'] = previous_stop
         for key, value in previous_env.items():
             if value is None:
                 os.environ.pop(key, None)

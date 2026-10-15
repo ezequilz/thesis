@@ -136,6 +136,7 @@ def test_failed_gate_does_not_invoke_alignment_or_publish(tmp_path, monkeypatch)
     monkeypatch.setattr(sys, 'path', list(sys.path))
     monkeypatch.setattr(sys, 'argv', ['runner', str(repo), 'inputs', str(output), '2'])
     monkeypatch.setattr(official_runner, 'prepare_runtime', lambda *args: repo)
+    monkeypatch.setattr(official_runner.graceful, 'patch_runtime', lambda *args: None)
     calls = []
     original_system = lambda value: calls.append(value) or 0
     monkeypatch.setattr(official_runner.os, 'system', original_system)
@@ -219,6 +220,7 @@ def test_runner_depth_extension_precedes_gate_and_isolates_environment(tmp_path,
     monkeypatch.setattr(sys, 'path', list(sys.path))
     monkeypatch.setattr(sys, 'argv', ['runner', str(repo), str(source), str(output), '2'])
     monkeypatch.setattr(official_runner, 'prepare_runtime', lambda *args: repo)
+    monkeypatch.setattr(official_runner.graceful, 'patch_runtime', lambda *args: None)
     events = []
     helper = official_runner.source_depth_runtime
     monkeypatch.setattr(helper, 'patch_source_depth_runtime', lambda *a: events.append('patch'))

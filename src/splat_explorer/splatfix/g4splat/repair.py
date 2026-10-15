@@ -129,9 +129,21 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda: False,
                     return  # Writer may still be appending this record.
                 last_command = lines[-1]
                 on_progress({'phase': 'g4splat', 'message': entry['command'], 'output_dir': str(output)})
-    run_process(command, output / 'g4splat.log', should_stop, tick)
-    if should_stop():
-        raise InterruptedError('G4Splat stopped before publishing results')
+    from .graceful import stop_poll, preserve_partial
+    poll = stop_poll(output, should_stop, on_progress,
+                     timeout=float(os.environ.get('SPLATFIX_SAVE_STOP_TIMEOUT_SECONDS', '240')))
+    try:
+        run_process(command, output / 'g4splat.log', poll, tick)
+        if should_stop():
+            raise InterruptedError('G4Splat stopped before publishing results')
+    except (InterruptedError, RuntimeError) as exc:
+        # The cooperative trainer exits nonzero after saving. Treat that exit
+        # as cancellation only when the user/deadline actually requested it.
+        if not should_stop():
+            raise
+        preserve_partial(output, {**provenance, 'input_manifest': str(source / 'inputs.json')},
+                         'G4Splat stopped; available reconstruction outputs retained')
+        raise InterruptedError('G4Splat stopped; available splat and diagnostics preserved') from exc
     native = output / 'official/free_gaussians/point_cloud/iteration_7000/point_cloud.ply'
     viewer = output / 'g4splat-viewer.ply'
     if not native.is_file() or not viewer.is_file():

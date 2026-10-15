@@ -53,16 +53,27 @@ def execute_remote(executor, run_id, options, root, stop, update):
         # The source splat itself is not transferred.
         import uuid
         preparation = root / ('g4splat-inputs-' + uuid.uuid4().hex[:8])
+        atomic_json(root / 'g4splat-staging.json', {
+            'version': 1, 'input_manifest': str((preparation / 'inputs/inputs.json').relative_to(root)),
+            'status': 'exporting', 'source_depth_enabled': runtime.get('source_depth', False)})
         prepared = prepare_repair_checkpoint(checkpoint, preparation / 'checkpoint', options['resolution_profile'],
                                              should_stop=stop)
         export_inputs(prepared, preparation / 'inputs', options['mode'],
                       source_depth=runtime.get('source_depth', False), should_stop=stop)
+        import hashlib
+        input_manifest = preparation / 'inputs/inputs.json'
+        staging = {'version': 1, 'input_manifest': str(input_manifest.relative_to(root)),
+                   'manifest_sha256': hashlib.sha256(input_manifest.read_bytes()).hexdigest(),
+                   'status': 'exported', 'remote_inputs': remote + '/inputs',
+                   'source_depth_enabled': runtime.get('source_depth', False)}
+        atomic_json(root / 'g4splat-staging.json', staging)
         if stop():
             raise InterruptedError('Cancelled before G4Splat staging')
         update(phase='staging', message='Staging G4Splat calibrated RGB inputs')
         lrz.sync_code_to_dss(cfg)
         ssh('mkdir -p ' + shlex.quote(remote + '/inputs'))
         sync(str(preparation / 'inputs') + '/', endpoint + ':' + remote + '/inputs/')
+        atomic_json(root / 'g4splat-staging.json', {**staging, 'status': 'transferred'})
         request = {'reconstruction_method': 'g4splat', 'stage': 'repair', 'mode': options['mode'],
                    'inputs': container + '/inputs', 'output': container + '/results/g4splat', 'runtime': runtime,
                    'stop_at_epoch': executor.store.get_run(run_id).state.details.get('effective_deadline')}

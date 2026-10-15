@@ -134,6 +134,7 @@ def test_official_entrypoint_retains_commands_and_skips_only_evaluation(tmp_path
     monkeypatch.setattr(sys, 'argv', ['runner', str(repo), 'inputs', str(output), '6'])
     monkeypatch.setattr(runner.os, 'system', lambda value: calls.append(value) or 0)
     monkeypatch.setattr(runner, 'prepare_runtime', lambda repo, destination: Path(repo))
+    monkeypatch.setattr(runner.graceful, 'patch_runtime', lambda repo: None)
     gates = []
     monkeypatch.setattr(runner, 'validate_pointmaps', lambda *args: gates.append(args))
     def upstream(path, run_name):

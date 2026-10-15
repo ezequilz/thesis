@@ -157,12 +157,12 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0];
 const elements=new Map();
 const get=id=>{if(!elements.has(id))elements.set(id,{addEventListener(){},querySelector(){return{}},setAttribute(){},open:false});return elements.get(id)};
-let calls=0,timer=null;
+let calls=0,timer=null,lastDelay=null;
 let result={run_id:'run',status:'running',kind:'ArtiFixer3D',metrics:{},gallery:{frames:[]}};
 const document={getElementById:get,querySelectorAll:()=>[],hidden:false};
 const context=vm.createContext({document,location:{search:'?id=run'},URLSearchParams,
  fetch:async()=>{calls++;return{ok:true,json:async()=>result}},
- setTimeout:(fn,ms)=>{assert.equal(ms,30000);timer=fn;return 1},clearTimeout:()=>{timer=null}});
+ setTimeout:(fn,ms)=>{assert.ok([3000,30000].includes(ms));lastDelay=ms;timer=fn;return 1},clearTimeout:()=>{timer=null}});
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
  vm.runInContext(source,context);await flush();
@@ -179,6 +179,10 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
  }
  result={...result,status:'running',kind:'G4Splat · viewer approximation'};
  await get('refresh').onclick();assert.equal(typeof timer,'function');
+ result={...result,g4splat:{input_staging:{status:'exporting'},source_depth:{enabled:true},gate:{},
+   views:[],view_count:0,depth_scale:{},generation:[],artifacts:[],fitting:[]}};
+ await get('refresh').onclick();assert.equal(lastDelay,3000);
+ assert.match(get('g4Debug').innerHTML,/Local source-depth staging: exporting/);
  result={...result,status:'completed'};
  await get('refresh').onclick();assert.equal(timer,null);
  result={...result,kind:'ArtiFixer3D',gallery:{frames:[],verified_inputs:true,expected_count:0}};

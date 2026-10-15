@@ -107,9 +107,21 @@ def test_opt_in_export_records_extension_and_metric_maps(tmp_path, monkeypatch):
     import splat_explorer.splatfix.g4splat.source_depth as module
     monkeypatch.setattr(module,'validate_source',lambda cp:None)
     monkeypatch.setattr('splat_explorer.rendering.cpu_splat_renderer.CpuSplatRenderer.__init__',lambda self,scene:None)
-    monkeypatch.setattr('splat_explorer.rendering.cpu_splat_renderer.CpuSplatRenderer.render_depth',lambda self,camera:np.full((camera.height,camera.width),7.,dtype=np.float32))
     root=tmp_path/'inputs'
+    progress = []
+    def render_depth(self, camera):
+        published = json.loads((root/'inputs.json').read_text())
+        assert published['source_depth']['status'] == 'exporting'
+        ready = published['source_depth']['views']
+        progress.append(len(ready))
+        for view in ready:
+            with np.load(root/view['path'], allow_pickle=False) as data:
+                assert data['depth'].shape == (32, 32)
+        return np.full((camera.height,camera.width),7.,dtype=np.float32)
+    monkeypatch.setattr('splat_explorer.rendering.cpu_splat_renderer.CpuSplatRenderer.render_depth',render_depth)
     manifest=export_inputs(cp,root,'baseline',source_depth=True)
+    assert progress == [0, 1]
+    assert manifest['source_depth']['status'] == 'ready'
     assert manifest['mode']=='baseline' and manifest['method_variant']=='source-splat-depth-extension'
     assert manifest['source_splat_used_for_initialization']
     assert manifest['source_depth']['enabled']

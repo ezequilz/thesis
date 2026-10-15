@@ -53,8 +53,16 @@ def export_inputs(checkpoint, destination, mode, *, source_depth=False, should_s
                 'resolution': checkpoint.manifest.get('metadata', {}).get('resolution')}
     if source_depth:
         from .source_depth import export_source_depth
-        manifest['source_depth'] = export_source_depth(checkpoint, root, should_stop=should_stop)
         manifest['method_variant'] = 'source-splat-depth-extension'
         manifest['source_splat_used_for_initialization'] = True
+        def publish_source_progress(views):
+            manifest['source_depth'] = {'enabled': True, 'status': 'exporting',
+                'depth_convention': 'positive_camera_z_scene_units', 'views': views,
+                'expected_views': len(records)}
+            atomic_json(root / 'inputs.json', manifest)
+        publish_source_progress([])
+        manifest['source_depth'] = export_source_depth(checkpoint, root, should_stop=should_stop,
+                                                       on_progress=publish_source_progress)
+        manifest['source_depth']['status'] = 'ready'
     atomic_json(root / 'inputs.json', manifest)
     return manifest

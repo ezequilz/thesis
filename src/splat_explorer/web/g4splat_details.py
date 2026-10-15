@@ -54,7 +54,7 @@ def _depth(path):
 
 def _previews(root, sources):
     """Cache display-only PNGs; shared sampled p99 scaling, never per-image contrast."""
-    fingerprint = hashlib.sha256(('depth-preview-v1' + repr([
+    fingerprint = hashlib.sha256(('depth-preview-v2' + repr([
         (key, str(p), p.stat().st_size, p.stat().st_mtime_ns)
         for key, p in sources.items()])).encode()).hexdigest()[:20]
     cache = root / 'debug-previews' / fingerprint
@@ -63,7 +63,8 @@ def _previews(root, sources):
     with _LOCK:
         metadata = _json(_safe(root, str(cache.relative_to(root) / 'index.json')))
         if isinstance(metadata, dict) and isinstance(metadata.get('files'), dict):
-            expected = {key: hashlib.sha256(key.encode()).hexdigest()[:16] + '.png' for key in sources}
+            keys = list(sources) + [key + ':' + mask for key, p in sources.items() if p.suffix == '.npz' for mask in ('valid', 'confidence')]
+            expected = {key: hashlib.sha256(key.encode()).hexdigest()[:16] + '.png' for key in keys}
             if all(k in expected and v == expected[k] and _safe(root, str(cache.relative_to(root) / v))
                    for k, v in metadata['files'].items()):
                 return {k: cache / v for k, v in metadata['files'].items()}, metadata
@@ -78,7 +79,7 @@ def _previews(root, sources):
             except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
                 errors[key] = str(exc)
         upper = float(np.percentile(np.concatenate(samples), 99)) if samples else 1.0
-        files, stats = {}, {}
+        files, stats, source_info = {}, {}, {}
         for key, path in sources.items():
             if key in errors:
                 continue
@@ -99,9 +100,31 @@ def _previews(root, sources):
                 stats[key] = {'valid_fraction': float(valid.mean()),
                               'clipped_fraction': float((valid & (a > upper)).mean()),
                               'width': a.shape[1], 'height': a.shape[0]}
+                if path.suffix == '.npz':
+                    with np.load(path, allow_pickle=False) as archive:
+                        masks = {'valid': np.asarray(archive['valid'], dtype=np.float32)}
+                        if 'confidence' in archive:
+                            masks['confidence'] = np.asarray(archive['confidence'], dtype=np.float32)
+                        source_info[key] = {'actual_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                            'width': a.shape[1], 'height': a.shape[0], 'positive_valid_fraction': float(valid.mean()),
+                            'intrinsics': archive['intrinsics'].tolist() if 'intrinsics' in archive else None,
+                            'c2w': archive['c2w'].tolist() if 'c2w' in archive else None}
+                    for mask_name, mask in masks.items():
+                        if mask.shape != a.shape or not np.isfinite(mask).all() or (mask < 0).any() or (mask > 1).any():
+                            raise ValueError('Invalid source ' + mask_name + ' mask')
+                        mask_key = key + ':' + mask_name
+                        filename = hashlib.sha256(mask_key.encode()).hexdigest()[:16] + '.png'
+                        target = cache / filename
+                        if target.is_symlink():
+                            raise ValueError('Unsafe preview target')
+                        image = Image.fromarray((mask * 255).astype('uint8'))
+                        image.thumbnail((640, 400))
+                        image.save(target)
+                        files[mask_key] = filename
+
             except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
                 errors[key] = str(exc)
-        metadata = {'files': files, 'stats': stats, 'errors': errors, 'min': 0,
+        metadata = {'files': files, 'stats': stats, 'source_info': source_info, 'errors': errors, 'min': 0,
                     'max': upper, 'units': 'scene units (not established meters)',
                     'normalization': 'Shared sampled 99th percentile across displayed depth maps; values above white are clipped.',
                     'invalid_color': 'magenta = nonfinite or nonpositive depth'}
@@ -110,6 +133,52 @@ def _previews(root, sources):
             raise ValueError('Unsafe preview index')
         index.write_text(json.dumps(metadata, indent=2))
     return {k: cache / v for k, v in files.items()}, metadata
+
+
+def _input_signature(body):
+    return ([(v.get('image'), v.get('sha256')) for v in body.get('views', [])],
+            [(v.get('image'), v.get('sha256')) for v in body.get('source_depth', {}).get('views', [])])
+
+
+def _discover_inputs(root, recorded):
+    """Resolve the exact per-run export, never the newest arbitrary preparation."""
+    job_root = root.parent.parent  # run/gpu for transported jobs
+    run_root = job_root.parent
+    staging_path = _safe(run_root, 'g4splat-staging.json')
+    staging = _json(staging_path, {})
+    if staging:
+        path = _safe(run_root, staging.get('input_manifest', ''))
+        if staging.get('status') == 'exporting':
+            body = _json(path, {}) if path else {}
+            # The exporter atomically publishes each completed view. GPU transfer
+            # has not started; no checksum or consumption claim is made here.
+            if not recorded:
+                return body, path, {**staging, 'discovery': 'progressive local export', 'manifest_checksum_verified': False}
+
+        if path and path.name == 'inputs.json':
+            body = _json(path, {})
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+            if actual == staging.get('manifest_sha256') and (not recorded or _input_signature(body) == _input_signature(recorded)):
+                return body, path, {**staging, 'discovery': 'pinned local export', 'manifest_checksum_verified': True}
+        return recorded, None, {'status': 'unverified', 'error': 'Pinned local input manifest is missing, changed, or differs from result provenance.'}
+    candidates = []
+    downloaded = _safe(job_root, 'inputs/inputs.json')
+    if downloaded:
+        candidates.append(downloaded)
+    for candidate in sorted(run_root.glob('g4splat-inputs-*/inputs/inputs.json'))[:64]:
+        path = _safe(run_root, str(candidate.relative_to(run_root)))
+        if path:
+            candidates.append(path)
+    matching = [(p, _json(p, {})) for p in candidates]
+    matching = [(p, b) for p, b in matching if b.get('views') and (not recorded or _input_signature(b) == _input_signature(recorded))]
+    if matching:
+        signatures = {json.dumps(_input_signature(b), sort_keys=True) for _, b in matching}
+        if len(signatures) == 1:
+            path, body = matching[0]
+            return body, path, {'status': 'exported_transfer_unrecorded', 'discovery': 'matching run-local inputs',
+                                'manifest_checksum_verified': False}
+        return recorded, None, {'status': 'ambiguous', 'error': 'Multiple different local input exports exist; no staging record identifies the GPU input.'}
+    return recorded, None, {'status': 'not_available'}
 
 
 def build_details(studio, manifest, result):
@@ -121,12 +190,8 @@ def build_details(studio, manifest, result):
     def data(name, default=None):
         return _json(local(name), default)
     recipe = data('recipe.json', {})
-    inputs = recipe.get('inputs') or {}
-    # Exported inputs are siblings of results in local and downloaded jobs.
-    job_root = root.parent.parent
-    input_manifest = _safe(job_root, 'inputs/inputs.json')
-    if not inputs:
-        inputs = _json(input_manifest, {})
+    inputs, input_manifest, staging = _discover_inputs(root, recipe.get('inputs') or {})
+    input_root = input_manifest.parent if input_manifest else None
     cameras = data(SFM + '/cameras.json', {})
     report = data('reprojection-check.json', {})
     views = inputs.get('views', [])
@@ -176,7 +241,9 @@ def build_details(studio, manifest, result):
                     record['calibration_warning'] = 'Saved camera dimensions differ from staged RGB dimensions.'
             except (OSError, ValueError):
                 record['calibration_warning'] = 'Staged image could not be inspected.'
-        record['panels']['input'] = {'url': url(image), 'label': 'Staged input RGB'}
+        exported_rgb = _safe(input_root, view.get('image', '')) if input_root else None
+        record['panels']['input'] = {'url': url(image or exported_rgb),
+                                    'label': 'Runtime staged RGB' if image else 'Locally exported RGB (original grid)'}
         if native_root and native_order_known:
             native = local(str(native_root / 'renders' / f'{i:05d}.png'))
             record['panels']['native'] = {'url': url(native), 'label': 'Native training-view render'}
@@ -193,10 +260,14 @@ def build_details(studio, manifest, result):
                 sources[f'{i}:{stage}'] = path
         source_metadata = inputs.get('source_depth', {})
         source_view = next((v for v in source_metadata.get('views', []) if Path(v.get('image', '')).name == name), None)
+        record['source_export_status'] = 'pending' if source_metadata.get('status') == 'exporting' else 'not_available'
         if source_view:
-            source_path = _safe(job_root, 'inputs/' + source_view.get('path', ''))
+            source_path = _safe(input_root, source_view.get('path', '')) if input_root else None
             if source_path and source_path.suffix == '.npz':
                 sources[f'{i}:source'] = source_path
+                record['source_export_status'] = 'ready'
+            else:
+                record['source_export_status'] = 'missing'
             record['source_depth'] = source_view
         records.append(record)
     try:
@@ -209,6 +280,15 @@ def build_details(studio, manifest, result):
             key = f'{i}:{stage}'
             record['panels'][stage] = {'url': url(previews.get(key)), 'label': label,
                                       'stats': scale.get('stats', {}).get(key), 'error': scale.get('errors', {}).get(key)}
+        source_info = scale.get('source_info', {}).get(f'{i}:source', {})
+        for mask, label in [('valid', 'Exported source validity (white = usable)'), ('confidence', 'Exported source confidence (0–1; binary reliability)')]:
+            record['panels']['source_' + mask] = {'url': url(previews.get(f'{i}:source:{mask}')), 'label': label}
+        if record.get('source_depth'):
+            expected = record['source_depth'].get('sha256')
+            record['source_export'] = {**source_info, 'expected_sha256': expected,
+                'checksum_status': ('verified' if expected == source_info.get('actual_sha256') else 'mismatch')
+                                   if expected and source_info else 'not_available',
+                'grid': 'original locally exported camera grid; runtime crop/resize not applied'}
     artifacts = []
     for name, label in [('recipe.json', 'Recipe and input provenance'), ('result.json', 'Result metadata'),
                         ('reprojection-check.json', 'Reprojection gate report'), ('source-depth-check.json', 'Source-depth pointmap report'),
@@ -218,6 +298,11 @@ def build_details(studio, manifest, result):
         path = local(name)
         if path:
             artifacts.append({'label': label, 'url': url(path)})
+    if input_manifest:
+        artifacts.append({'label': 'Exact exported input manifest', 'url': url(input_manifest)})
+    staging_file = _safe(root.parent.parent.parent, 'g4splat-staging.json')
+    if staging_file:
+        artifacts.append({'label': 'Local-to-GPU staging record', 'url': url(staging_file)})
     generation = []
     for stage in range(1, 4):
         folder = root / SFM / 'see3d_render' / f'stage{stage}' / 'cat_img'
@@ -227,11 +312,11 @@ def build_details(studio, manifest, result):
             if safe:
                 panels.append({'name': p.name, 'url': url(safe)})
         generation.append({'stage': stage, 'panels': panels, 'status': 'Artifacts available' if panels else 'Not available'})
-    return {'variant': result.get('method_variant') or recipe.get('method_variant') or 'Historical run · correction provenance unavailable',
+    return {'variant': result.get('method_variant') or recipe.get('method_variant') or inputs.get('method_variant') or 'Historical run · correction provenance unavailable',
             'revision': result.get('upstream_revision') or recipe.get('revision'),
             'correction': result.get('geometry_correction') or recipe.get('geometry_correction'),
-            'source_depth': result.get('source_depth') or recipe.get('source_depth') or inputs.get('source_depth') or {'enabled': False},
-            'source_depth_check': data('source-depth-check.json', {}),
+            'source_depth': result.get('source_depth') or recipe.get('source_depth') or inputs.get('source_depth') or {'enabled': staging.get('source_depth_enabled', False)},
+            'source_depth_check': data('source-depth-check.json', {}), 'input_staging': staging,
             'gate_status': 'passed' if report.get('passed') is True else 'failed' if report.get('passed') is False else 'not_available',
             'gate': report, 'views': records, 'view_count': len(views), 'view_limit': MAX_VIEWS,
             'depth_scale': scale, 'native_order_known': native_order_known,
