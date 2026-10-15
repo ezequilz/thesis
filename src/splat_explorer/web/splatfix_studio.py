@@ -201,12 +201,13 @@ class SplatfixStudio(SceneRunStudio):
         return [self.file_url(p) for p in sorted(local.glob('*.png'))[:6]]
 
     def snapshot(self):
+        from ..splatfix.g4splat.baselines import baseline_catalog
         manager = read_json(self.root / 'manager.json', {})
         from ..scene_runs.store import _pid_alive
         alive = _pid_alive(int(manager.get("pid") or 0))
         from .. import repair_lrz
         from ..splatfix.resolution import PROFILES, PROFILE_LABELS
-        return {'reconstruction_methods': available_methods(), 'scenes': self.scenes(), 'checkpoints': self.checkpoints(), 'jobs': self.jobs(), 'benchmarks': self.benchmarks(),
+        return {'g4splat_baselines': baseline_catalog(self.cfg.output.dir, self.file_url), 'reconstruction_methods': available_methods(), 'scenes': self.scenes(), 'checkpoints': self.checkpoints(), 'jobs': self.jobs(), 'benchmarks': self.benchmarks(),
                 'manager': {'active': manager.get('status') == 'running' and alive, 'updated_at': manager.get('updated_at')},
                 'compute': {'configured': repair_lrz.lrz_configured(), 'label': 'Configured LRZ allocation'},
                 'capture_viewer_port': self.cfg.get('viewer', {}).get('port', 8080),

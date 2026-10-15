@@ -248,9 +248,17 @@ class ResultCatalog:
         row['stage_comparison'] = None
         row['comparison_gallery'] = []
         if manifest is None:
+            if row['kind'].startswith('G4Splat'):
+                from .g4splat_details import build_details
+                pending = self.studio.root / row['run_id'] / 'gpu/results/g4splat/result.json'
+                row['g4splat'] = build_details(self.studio, pending, {})
             return row
         result = read_json(manifest, {})
         root = manifest.parent
+        if result.get('reconstruction_method') == 'g4splat' or row['kind'].startswith('G4Splat'):
+            from .g4splat_details import build_details
+            row['g4splat'] = build_details(self.studio, manifest, result)
+            return row
         gallery, allowed = self._reconstruction_gallery(manifest, result)
         row['gallery'] = gallery
         from ..splatfix.resolution import PROFILE_LABELS

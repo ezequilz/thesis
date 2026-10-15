@@ -4,7 +4,10 @@ from ..checkpoint import camera_from_record
 
 
 def validate_options(raw):
-    return {}  # The pinned authors' recipe has no dashboard tuning overrides.
+    guidance = raw.get('source_depth', False)
+    if type(guidance) is not bool:
+        raise ValueError('source_depth must be a boolean')
+    return {'source_depth': guidance}
 
 
 def readiness(checkpoint):

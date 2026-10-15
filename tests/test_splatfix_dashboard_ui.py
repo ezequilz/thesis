@@ -45,6 +45,22 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(pendingStage,'');
   $('benchmark-runs').valid=true;
 
+  $('reconstruction-method').value='g4splat';
+  $('g4splat-source-depth').value='off';
+  assert.equal(payload('repair').source_depth,false);
+  $('g4splat-source-depth').value='on';
+  assert.equal(payload('repair').source_depth,true);
+  assert.equal(payload('repair').regularization_profile,undefined);
+  schedule('repair');
+  $('g4splat-source-depth').value='off';
+  assert.equal(pendingPayload.source_depth,true);
+  state.g4splat_baselines=[{id:'scene1',label:'Room',ready:false,status:'Awaiting assets',reason:'Missing original',protocol:'Untouched inputs'}];
+  refreshG4SplatBaselines();
+  assert.equal($('g4splat-baseline-scene').value,'scene1');
+  assert.equal($('g4splat-baseline-now').disabled,true);
+  assert.match($('g4splat-baseline-status').textContent,/Missing original/);
+  $('reconstruction-method').value='artifixer';
+  assert.equal(payload('repair').source_depth,undefined);
   assert.equal(payload('repair').reconstruction_method,'artifixer');
   assert.equal(payload('repair').split_mode,'double-split');
   $('split-mode').value='single-split';
@@ -162,6 +178,8 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
    result={...result,status,inference_ready:false};await get('refresh').onclick();assert.equal(timer,null);
  }
  result={...result,status:'running',kind:'G4Splat · viewer approximation'};
+ await get('refresh').onclick();assert.equal(typeof timer,'function');
+ result={...result,status:'completed'};
  await get('refresh').onclick();assert.equal(timer,null);
  result={...result,kind:'ArtiFixer3D',gallery:{frames:[],verified_inputs:true,expected_count:0}};
  await get('refresh').onclick();assert.equal(timer,null);

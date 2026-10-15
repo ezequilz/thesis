@@ -9,6 +9,16 @@ from .inputs import export_inputs
 from .repair import DEFAULT_RUNTIME
 
 
+def job_runtime(cfg, options):
+    runtime = {**DEFAULT_RUNTIME, **dict(cfg.get('splatfix', {}).get('g4splat_runtime', {}))}
+    # Frozen per-job choice wins, including explicit False. Older jobs retain
+    # the configured fallback because they predate the dashboard selector.
+    if 'source_depth' in options:
+        runtime['source_depth'] = options['source_depth']
+    runtime['resolution_profile'] = options['resolution_profile']
+    return runtime
+
+
 def execute_remote(executor, run_id, options, root, stop, update):
     from ... import repair_lrz as lrz
     from ...scene_runs.lrz_transport import LrzSceneRunTransport
@@ -33,8 +43,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
     if not launched:
         LrzSceneRunTransport(executor.cfg, run_id, root).validate()
         checkpoint = Checkpoint.load(options['checkpoint'])
-        runtime = {**DEFAULT_RUNTIME, **dict(executor.cfg.get('splatfix', {}).get('g4splat_runtime', {}))}
-        runtime['resolution_profile'] = options['resolution_profile']
+        runtime = job_runtime(executor.cfg, options)
         if options['mode'] == 'edited':
             checkpoint.require_viser_images()
             for view in checkpoint.views:
