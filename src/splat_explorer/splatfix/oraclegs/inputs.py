@@ -11,26 +11,30 @@ SIZES = {'576p': (1024, 576), '720p': (1280, 720)}
 AXES = np.diag([1., -1., -1., 1.])
 
 
-def fit_reference(image, camera, size, mode):
+def fit_reference(image, camera, size, mode, source_box=None):
     """Image-space affine applied identically to pixels and intrinsics."""
     width, height = size
+    x0,y0,x1,y1 = source_box or (0.,0.,float(image.width),float(image.height))
+    iw,ih = x1-x0,y1-y0
     k = camera.intrinsics.astype(float).copy()
-    k[0] *= image.width / camera.width
-    k[1] *= image.height / camera.height
+    k[0] *= iw / camera.width
+    k[1] *= ih / camera.height
+    k[0,2] += x0
+    k[1,2] += y0
     if mode == 'crop':
-        scale = max(width/image.width, height/image.height)
-        left = (image.width-width/scale)/2
-        top = (image.height-height/scale)/2
+        scale = max(width/iw, height/ih)
+        left = x0+(iw-width/scale)/2
+        top = y0+(ih-height/scale)/2
         output = image.resize(size, Image.Resampling.LANCZOS,
                               box=(left,top,left+width/scale,top+height/scale))
         affine = np.array([[scale,0,-left*scale],[0,scale,-top*scale],[0,0,1.]])
     else:
-        scale = min(width/image.width, height/image.height)
-        resized = (max(2,round(image.width*scale/2)*2),max(2,round(image.height*scale/2)*2))
+        scale = min(width/iw, height/ih)
+        resized = (max(2,round(iw*scale/2)*2),max(2,round(ih*scale/2)*2))
         left,top = (width-resized[0])//2,(height-resized[1])//2
         output = Image.new('RGB',size)
-        output.paste(image.resize(resized,Image.Resampling.LANCZOS),(left,top))
-        affine = np.array([[resized[0]/image.width,0,left],[0,resized[1]/image.height,top],[0,0,1.]])
+        output.paste(image.resize(resized,Image.Resampling.LANCZOS,box=(x0,y0,x1,y1)),(left,top))
+        affine = np.array([[resized[0]/iw,0,left-x0*resized[0]/iw],[0,resized[1]/ih,top-y0*resized[1]/ih],[0,0,1.]])
     return output, affine@k, affine
 
 
@@ -61,14 +65,34 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
         if should_stop():
             raise InterruptedError('Cancelled during OracleGS staging')
         source = checkpoint.image_path(view, repaired=mode == 'edited')
+        source_kind, source_box = 'saved_rgb', None
+        repair = view.get('image_repair') or {}
+        if mode == 'edited' and repair.get('response_image'):
+            source = checkpoint.image_path({'original_rgb':repair['response_image']})
+            source_kind = 'full_repair_response'
+            resize = repair.get('resize') or {}
+            source_box = resize.get('source_crop_box')
+            if (resize.get('method') != 'cover_center_crop' or
+                    repair.get('target_size') != [camera.width,camera.height] or
+                    not isinstance(source_box,list) or len(source_box) != 4):
+                raise ValueError('Saved full repair response lacks a calibrated crop mapping')
         name = f'ref_{i:06d}.png'
         with Image.open(source) as image:
-            if abs(image.width/image.height-camera.width/camera.height) > 1/max(image.size):
+            if source_box is not None:
+                box = np.asarray(source_box,dtype=float)
+                scale = float((repair.get('resize') or {}).get('scale',0))
+                if (not np.isfinite(box).all() or scale <= 0 or not np.isfinite(scale) or
+                        repair.get('response_size') != list(image.size) or
+                        not (0 <= box[0] < box[2] <= image.width and 0 <= box[1] < box[3] <= image.height) or
+                        not np.allclose((box[2:]-box[:2])*scale,[camera.width,camera.height],rtol=0,atol=1e-4)):
+                    raise ValueError('Saved repair response crop disagrees with camera calibration')
+            elif abs(image.width/image.height-camera.width/camera.height) > 1/max(image.size):
                 raise ValueError('Repaired RGB aspect ratio differs from saved camera; refusing to distort calibration')
-            fit_scale = (max if options['seva_fit'] == 'crop' else min)(width/image.width, height/image.height)
+            iw,ih = (source_box[2]-source_box[0],source_box[3]-source_box[1]) if source_box else image.size
+            fit_scale = (max if options['seva_fit'] == 'crop' else min)(width/iw, height/ih)
             if fit_scale > 1:
                 raise ValueError('OracleGS requires saved reference RGBs at least as large as the generation preset')
-            fitted, k, affine = fit_reference(image.convert('RGB'),camera,(width,height),options['seva_fit'])
+            fitted, k, affine = fit_reference(image.convert('RGB'),camera,(width,height),options['seva_fit'],source_box=source_box)
             fitted.save(scene/'images'/name)
         frames.append({'file_path':'images/'+name,'w':width,'h':height,
                        'fl_x':float(k[0,0]),'fl_y':float(k[1,1]),'cx':float(k[0,2]),'cy':float(k[1,2]),
@@ -77,6 +101,7 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
                         'source_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),
                         'sha256':hashlib.sha256((scene/'images'/name).read_bytes()).hexdigest(),
                         'camera':view['camera'], 'source_image':str(source),
+                        'source_kind':source_kind, 'source_crop_box':source_box,
                         'image_affine':affine.tolist(), 'staged_intrinsics':k.tolist()})
     # Only camera poses are interpolated here. SEVA owns both generative passes.
     keys = np.arange(len(order), dtype=float)

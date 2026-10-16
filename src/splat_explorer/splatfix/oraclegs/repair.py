@@ -60,7 +60,7 @@ def seva_request(inputs, output, manifest, runtime):
         'work_dir':str(output/'seva'), 'num_inputs':len(manifest['views']),
         'use_traj_prior':True, 'chunk_strategy':'interp-gt', 'chunk_strategy_first_pass':'gt-nearest',
         'cfg':[3.0,2.0], 'seed':runtime['seed'], 'W':width, 'H':height,
-        'save_input':True, 'replace_or_include_input':False}
+        'save_first_pass':True, 'save_input':True, 'replace_or_include_input':False}
     # Leave T adaptive, as recommended for procedural two-pass img2trajvid.
     # 720p uses a disclosed padding adapter for the U-Net's 64-pixel stride.
     if manifest['seva_resolution'] == '576p':
@@ -76,7 +76,8 @@ def training_args(dataset, model, n, runtime):
             '--iterations',str(runtime['iterations']),'--scale_reg','0.01','--opacity_reg','0.01',
             '--noise_lr','500000','--gt_synth_schedule','--gt_synth_ratio','1',
             '--lambda_lpips','0.3','--lambda_dssim_synth','0.3','--synth_attention_dir',
-            '--depths','depths','--save_iterations',str(runtime['iterations'])]
+            '--depths','depths','--save_iterations',
+            *[str(i) for i in sorted({i for i in (3000,7000,15000,runtime['iterations']) if i <= runtime['iterations']})]]
 
 
 def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, on_progress=lambda event:None):
@@ -188,5 +189,13 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None,
     root = Path(output_dir).resolve()
     root.mkdir(parents=True,exist_ok=True)
     export_inputs(Checkpoint.load(checkpoint_dir),root/'inputs',mode,runtime=runtime,should_stop=should_stop)
-    return run_prepared(root/'inputs',root/'results/oraclegs',runtime=runtime,
-                        should_stop=should_stop,on_progress=on_progress)
+    try:
+        return run_prepared(root/'inputs',root/'results/oraclegs',runtime=runtime,
+                            should_stop=should_stop,on_progress=on_progress)
+    except Exception as exc:
+        from .partial import salvage
+        try:
+            salvage(root/'results/oraclegs', str(exc))
+        except Exception as recovery_error:
+            atomic_json(root/'snapshot-recovery-error.json', {'message':str(recovery_error)})
+        raise

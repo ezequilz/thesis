@@ -247,6 +247,11 @@ class ResultCatalog:
         row['original_rgb_images'] = []
         row['stage_comparison'] = None
         row['comparison_gallery'] = []
+        if row['kind'] == 'OracleGS' or (manifest and read_json(manifest, {}).get('reconstruction_method') == 'oraclegs'):
+            from .oraclegs_details import build_details
+            pending = manifest or self.studio.root / row['run_id'] / 'gpu/results/oraclegs/result.json'
+            row['oraclegs'] = build_details(self.studio, pending, read_json(manifest, {}) if manifest else {})
+            return row
         if manifest is None:
             if row['kind'].startswith('G4Splat'):
                 from .g4splat_details import build_details

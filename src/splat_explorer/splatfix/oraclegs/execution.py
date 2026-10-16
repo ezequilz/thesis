@@ -7,6 +7,44 @@ from ..checkpoint import Checkpoint, atomic_json
 from .inputs import export_inputs
 from .repair import DEFAULT_RUNTIME
 
+# Only research artifacts: never transfer optimizer checkpoints during training.
+PREVIEW_FILTERS = ['- model/', '- combined/', '- seva-padded-inputs/', '+ */',
+    '+ *.json', '+ *.txt', '+ *.png', '+ *.jpg', '+ *.mp4', '- *']
+
+
+def mirror_previews(lrz, cfg, endpoint, remote, root, *, phase=None):
+    """One cache writer across executor/temporary observer; failures never stop GPU work."""
+    import fcntl
+    from ..jobs import read_json
+    root = Path(root)
+    with (root / '.oraclegs-preview.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        previous = read_json(root / 'oraclegs-preview-sync.json', {})
+        if time.time() - previous.get('updated_at_epoch', 0) < 60:
+            return False
+        if (phase == 'reconstruction' and previous.get('phase') == phase
+                and previous.get('status') == 'cached'):
+            return False
+        destination = root / 'gpu/results/oraclegs'
+        destination.mkdir(parents=True, exist_ok=True)
+        command = ['rsync', '-az', '--prune-empty-dirs', '-e', lrz.rsync_ssh_cmd(cfg)]
+        for rule in PREVIEW_FILTERS:
+            command += ['--filter', rule]
+        command += [endpoint + ':' + remote + '/results/oraclegs/', str(destination) + '/']
+        record = {'phase':phase, 'updated_at_epoch':time.time(), 'interval_seconds':60}
+        try:
+            reply = lrz._mux_run(command)
+            if getattr(reply, 'returncode', 0):
+                raise RuntimeError('OracleGS preview transfer failed; will retry')
+            atomic_json(root / 'oraclegs-preview-sync.json', {**record, 'status':'cached'})
+            return True
+        except Exception as exc:
+            atomic_json(root / 'oraclegs-preview-sync.json', {**record, 'status':'retrying', 'message':str(exc)})
+            raise
+
 
 def job_runtime(cfg, options):
     runtime = {**DEFAULT_RUNTIME, **dict(cfg.get('splatfix', {}).get('oraclegs_runtime', {}))}
@@ -82,9 +120,11 @@ def execute_remote(executor, run_id, options, root, stop, update):
         ssh(launcher)
     state, last = {}, None
     last_log = 0.
+    last_preview = 0.
+    preview_phase = None
     def mirror_log():
         nonlocal last_log
-        if time.monotonic() - last_log < 15:
+        if time.monotonic() - last_log < 60:
             return
         last_log = time.monotonic()
         phase = state.get('phase', '')
@@ -107,6 +147,18 @@ def execute_remote(executor, run_id, options, root, stop, update):
             ssh('touch ' + shlex.quote(remote + '/STOP'))
         state = read_status()
         mirror_log()
+        # Queue-owned observation, independent of browser tabs. Retry incomplete
+        # transfers; rsync publishes each file atomically (no --inplace).
+        phase = state.get('phase')
+        now = time.monotonic()
+        if now - last_preview >= 60 and (phase != preview_phase or phase in
+                ('seva_generation', 'vggt_attention') or preview_phase is None):
+            last_preview = now
+            try:
+                transferred = mirror_previews(lrz, cfg, endpoint, remote, root, phase=phase)
+                preview_phase = phase if transferred else None
+            except Exception:
+                preview_phase = None
         if state:
             atomic_json(root / 'worker-status.json', state)
         if state and state != last:
@@ -121,7 +173,11 @@ def execute_remote(executor, run_id, options, root, stop, update):
             if state.get('status') not in ('completed', 'error', 'stopped'):
                 state = {'status': 'error', 'message': 'OracleGS launcher exited without terminal worker status: ' + exited.strip()}
             break
-        time.sleep(2)
+        # Remain responsive to stop/deadline without repeatedly querying SSH.
+        for _ in range(10):
+            time.sleep(1)
+            if stop():
+                break
     # Connection/transfer failures keep the remote identity unresolved, allowing
     # reattachment and transfer retry before the shared lease is released.
     sync(endpoint + ':' + remote + '/', str(root / 'gpu') + '/')

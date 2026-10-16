@@ -7,6 +7,21 @@ import runpy
 import sys
 
 
+def install_snapshot_marker():
+    """Observe upstream Scene.save; mark only after its PLY write has completed."""
+    import scene
+    original = scene.Scene.save
+    def save(self, iteration):
+        result = original(self, iteration)
+        path = Path(self.model_path)/f'point_cloud/iteration_{iteration}/point_cloud.ply'
+        marker = Path(self.model_path)/'saved-snapshot.json'
+        temporary = marker.with_suffix('.tmp')
+        temporary.write_text(json.dumps({'iteration':int(iteration), 'size_bytes':path.stat().st_size}))
+        temporary.replace(marker)
+        return result
+    scene.Scene.save = save
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=['seva','attention','depth','train','script'])
@@ -54,6 +69,7 @@ def main():
             if not cv2.imwrite(str(destination/path.name),(scaled*65535).astype(np.uint16)):
                 raise IOError('Could not save depth')
     elif args.action == 'train':
+        install_snapshot_marker()
         import scene.dataset_readers as readers
         original = readers.readColmapCameras
         references = set(json.loads(Path(request['references']).read_text()))
@@ -64,6 +80,8 @@ def main():
         sys.argv = [str(repo/'train.py'), *request['argv']]
         runpy.run_path(str(repo/'train.py'),run_name='__main__')
     else:
+        if request.get('script') == 'train.py':
+            install_snapshot_marker()
         sys.argv = [str(repo/request['script']),*request['argv']]
         sys.path.insert(0,str((repo/request['script']).parent))
         runpy.run_path(sys.argv[0],run_name='__main__')

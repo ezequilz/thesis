@@ -357,3 +357,32 @@ def test_sfm_camera_alignment_guard(tmp_path):
     path.write_text('\n'.join(lines)+'\n')
     with pytest.raises(ValueError,match='pose drift'):
         verify_sfm_cameras(source,output)
+
+
+def test_full_response_reuses_recorded_camera_crop_without_upscaling(tmp_path):
+    cp=Checkpoint.create(tmp_path,tmp_path/'scene.ply',target_views=2,metadata={'renderer':{'backend':'viser'}})
+    for i in range(2):
+        camera=Camera(np.array([float(i),0.,0.]),np.eye(3),width=960,height=544,fov_deg=65.)
+        v=cp.add_view(Image.new('RGB',(960,544),'red'),camera)
+        directory=cp.root/'views'/v['id']
+        Image.new('RGB',(960,544),'blue').save(directory/'repaired.png')
+        Image.new('RGB',(1667,944),'green').save(directory/'response.image',format='PNG')
+        scale=544/944
+        left=(1667-960/scale)/2
+        v['repaired_rgb']=f"views/{v['id']}/repaired.png"
+        v['image_repair']={'response_image':f"views/{v['id']}/response.image",'response_size':[1667,944],
+                           'target_size':[960,544],'resize':{'method':'cover_center_crop','scale':scale,
+                           'source_crop_box':[left,0,1667-left,944]}}
+    cp.save()
+    m=export_inputs(cp,tmp_path/'staged')
+    for v in m['views']:
+        assert v['source_kind']=='full_repair_response'
+        image=Image.open(tmp_path/'staged'/v['image'])
+        assert image.size==(1024,576) and image.getpixel((0,0))==(0,128,0)
+        expected=np.array(v['camera']['intrinsics'])* (1024/960)
+        expected[1,2]-=(544*1024/960-576)/2
+        expected[2]=[0,0,1]
+        np.testing.assert_allclose(v['staged_intrinsics'],expected,rtol=0,atol=1e-8)
+    cp.views[0]['image_repair']['resize']['source_crop_box'][0]+=5
+    with pytest.raises(ValueError,match='crop disagrees'):
+        export_inputs(cp,tmp_path/'invalid')

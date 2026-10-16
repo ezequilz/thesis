@@ -114,10 +114,17 @@ def assemble(inputs, output):
 def validate_geometry(output):
     output = Path(output)
     points = (output/'dataset/sparse/0/points3D.txt').read_text().splitlines()
-    if not any(line.strip() and not line.startswith('#') for line in points):
-        raise ValueError('Sparse reference triangulation produced no points; cannot run the OracleGS SfM baseline')
+    count = sum(bool(line.strip()) and not line.startswith('#') for line in points)
     scales = json.loads((output/'dataset/sparse/0/depth_params.json').read_text())
-    if not scales or not any(float(s['scale']) > 0 for s in scales.values()):
+    reliable = sum(float(s['scale']) > 0 for s in scales.values())
+    report = {'passed': bool(count and reliable), 'triangulated_points': count,
+              'positive_depth_scales': reliable, 'depth_scale_count': len(scales),
+              'scope': 'Nonempty triangulation and positive depth scales; not a source geometry accuracy measurement.'}
+    from ..checkpoint import atomic_json
+    atomic_json(output/'geometry-check.json', report)
+    if not count:
+        raise ValueError('Sparse reference triangulation produced no points; cannot run the OracleGS SfM baseline')
+    if not reliable:
         raise ValueError('No reliable SfM-aligned reference depth; refusing to silently disable depth supervision')
 
 

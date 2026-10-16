@@ -63,3 +63,43 @@ The dashboard uses the existing queue, GPU lease, LRZ transport, status/deadline
 ## Validation boundary
 
 CPU tests cover camera projection and conventions, exact saved-pose inclusion, repaired-image preservation, separate GT/synthetic membership using the actual upstream COLMAP reader, database camera IDs, non-widescreen crop/pad projection, SfM pose-drift rejection, 720p padding/cropping, output identity and calibration checks, source hashes, option validation, worker cancellation, and full stage dispatch with model subprocess test doubles. These tests do not establish CUDA kernel compatibility, successful model downloads, generated-image quality, or end-to-end GPU training. A CUDA smoke run and a full six-reference reconstruction remain necessary before claiming a validated reproduction.
+
+### Live research diagnostics and interruption
+
+OracleGS run details now read locally cached artifacts: calibrated ground-truth
+references and their image affine/intrinsics, camera-alignment and SfM/depth gates,
+SEVA sparse first-pass anchors and full trajectory, a sampled generation contact
+sheet, exact-filename synthetic/attention pairs, source revisions, commands and
+logs. Missing reports are **unverified**, not successful checks. Alignment validates
+camera encoding consistency; it does not establish scene geometry accuracy.
+First-pass filenames are export indices, not an inferred target-camera mapping.
+
+The queue mirrors research outputs at most once per minute during generation and
+attention, then once on entry to reconstruction. It excludes model checkpoints and
+combined-image duplicates. Browser refresh only reads the local cache. Cache status,
+phase and last-transfer time are shown. Logs refresh at most once per minute;
+worker status checks are spaced ten seconds apart, with local cancellation checks
+between them. Final transfer and compute-lease handling retain the existing path.
+For jobs launched before this change, a bounded read-only observer is available:
+
+```sh
+python -m splat_explorer.splatfix.oraclegs.preview_cache \
+  --run-dir /local/run --remote-dir /remote/workspace/splatfix-jobs/run \
+  --max-seconds 43200
+```
+
+It reads existing local worker status, skips setup, exits on terminal status, and
+shares a file lock and freshness record with the queue to avoid duplicate transfers.
+It does not launch, cancel or resume GPU work. Existing workers require updated
+worker code on a subsequent launch for the snapshot behavior below.
+
+The original trainer supports intermediate Gaussian PLY snapshots. Runs now retain
+its 3000/7000/15000 save points (when below the configured final iteration), plus the
+final iteration. A wrapper records a snapshot only after upstream `Scene.save`
+returns successfully. On interruption or failure, the latest confirmed snapshot
+is copied to `oraclegs-partial.ply` and labeled incomplete in `partial-result.json`,
+with its actual saved iteration. A newer interrupted write is never selected.
+This is recovery of the **latest saved iteration**, not serialization at the exact
+stop instant or a resumable optimizer checkpoint. Before the first save, only
+available generation/geometry/attention artifacts can be downloaded. No upstream
+source, attention method, losses, optimizer or training schedule is modified.
