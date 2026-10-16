@@ -245,10 +245,11 @@ def test_real_upstream_colmap_loader_split_and_attention(tmp_path):
 @pytest.mark.parametrize('adapter',['trajectory','saved_poses'])
 @pytest.mark.parametrize('stop_training',[False,True])
 @pytest.mark.parametrize('count',[2,6])
-def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training,count):
+def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training,count,depth="predicted",initialization="sfm"):
     cp = checkpoint(tmp_path,count)
     inputs,output = tmp_path/'inputs',tmp_path/'run'
-    manifest = export_inputs(cp,inputs,runtime={'oracle_adapter':adapter,'oracle_target_frames':5})
+    runtime = {**repair.DEFAULT_RUNTIME, 'oracle_adapter':adapter, 'oracle_depth_source':depth, 'oracle_initialization':initialization}
+    manifest = export_inputs(cp,inputs,runtime={**runtime,'oracle_target_frames':5})
     frames = json.loads((inputs/'scene/transforms.json').read_text())['frames']
     phases = []
     requested = [False]
@@ -290,6 +291,11 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training
                 exports.append({**f,'file_path':relative})
             (generated/'transforms.json').write_text(json.dumps({'frames':exports}))
         elif phase == 'vggt_attention':
+            body = json.loads(Path(argv[-1]).read_text())
+            assert body['chunks']
+            assert all(len(c['reference_images']) == count for c in body['chunks'])
+            assert all(c['image_names'][0].startswith('ref_') for c in body['chunks'])
+            assert (output/'attention-chunks.json').exists()
             (output/'attention-raw').mkdir()
             for p in (output/'combined').glob('*.png'):
                 Image.new('L',(37,37),128).save(output/'attention-raw'/p.name)
@@ -300,6 +306,11 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training
             assert body['argv'][body['argv'].index('--lambda_lpips')+1]=='0.3'
             assert '--gt_synth_schedule' in body['argv'] and '--depths' in body['argv']
             assert len(list((dataset/f'synthetic_{count}_attention_maps').glob('*.png'))) == len(frames)-count
+            assert bool(body['source_depth']) == (depth == 'source_splat')
+            assert bool(body['source_initialization']) == (initialization == 'source_splat')
+            assert body['argv'][body['argv'].index('--depths')+1] == ('' if depth == 'source_splat' else 'depths')
+            if initialization == 'source_splat':
+                assert body['argv'][body['argv'].index('--sh_degree')+1] == '0'
             assert body['stop_control'] == str(output/'SAVE_STOP')
             if stop_training:
                 requested[0] = True
@@ -315,20 +326,21 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training
     monkeypatch.setattr(repair,'run_process',fake_process)
     if stop_training:
         with pytest.raises(InterruptedError,match='partial reconstruction saved'):
-            repair.run_prepared(inputs,output,should_stop=lambda:requested[0])
+            repair.run_prepared(inputs,output,runtime=runtime,should_stop=lambda:requested[0])
         from splat_explorer.splatfix.oraclegs.partial import salvage
         result = salvage(output,'User stop')
         assert result['saved_iteration'] == 42
         assert not (output/'result.json').exists()
     else:
-        result = repair.run_prepared(inputs,output)
+        result = repair.run_prepared(inputs,output,runtime=runtime)
     generations = ([f'seva_generation_{i+1:03d}_of_{count-1:03d}' for i in range(count-1)]
                    if adapter == 'trajectory' else ['seva_generation'])
+    depth_phases = ['reference_depth','depth_alignment'] if depth == 'predicted' else []
     assert phases == ['model_access','sfm_features','sfm_matching','sfm_triangulation','sfm_export',
-                      'reference_depth','depth_alignment',*generations,'vggt_attention','reconstruction']
+                      *depth_phases,*generations,'vggt_attention','reconstruction']
     assert Path(result['splat_path']).exists()
     recipe = json.loads((output/'recipe.json').read_text())
-    assert len(recipe['commands'])==9+len(generations)
+    assert len(recipe['commands'])==7+len(depth_phases)+len(generations)
     assert 'Only saved reference' in recipe['gt_policy']
 
 

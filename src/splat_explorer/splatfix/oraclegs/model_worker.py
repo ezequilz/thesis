@@ -58,12 +58,8 @@ def main():
         demo.WORK_DIR = request.pop('work_dir')
         demo.main(**request)
     elif args.action == 'attention':
-        import numpy as np
-        import torch
-        np.random.seed(request.pop('seed'))
-        torch.manual_seed(0)
-        import visualize_attn
-        visualize_attn.main(argparse.Namespace(**request))
+        from attention import run_attention
+        run_attention(request)
     elif args.action == 'depth':
         import cv2
         import numpy as np
@@ -86,6 +82,8 @@ def main():
                 raise IOError('Could not save depth')
     elif args.action == 'train':
         install_snapshot_marker()
+        from source_geometry_runtime import install_source_geometry
+        install_source_geometry(request)
         import scene.dataset_readers as readers
         original = readers.readColmapCameras
         references = set(json.loads(Path(request['references']).read_text()))
@@ -99,6 +97,8 @@ def main():
     else:
         if request.get('script') == 'train.py':
             install_snapshot_marker()
+            from source_geometry_runtime import install_source_geometry
+            install_source_geometry(request)
         sys.argv = [str(repo/request['script']),*request['argv']]
         sys.path.insert(0,str((repo/request['script']).parent))
         if request.get('script') == 'train.py':

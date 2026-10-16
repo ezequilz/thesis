@@ -18,7 +18,8 @@ DEFAULT_RUNTIME = {'repo':'/workspace/third_party/OracleGS',
     'colmap':'/workspace/oraclegs-model-env/bin/colmap',
     'depth_weights':'/workspace/models/oraclegs/depth_anything_v2_vitl.pth',
     'seva_fit':'crop', 'auto_setup':True, 'seva_resolution':'576p', 'oracle_adapter':'trajectory', 'oracle_target_frames':80,
-    'oracle_path_order':None, 'iterations':22000, 'cap_max':1800000, 'seed':23}
+    'oracle_depth_source':'predicted', 'oracle_initialization':'sfm',
+    'oracle_attention_batching':'within_trajectory', 'oracle_path_order':None, 'iterations':22000, 'cap_max':1800000, 'seed':23}
 
 
 def validate_runtime(runtime):
@@ -147,6 +148,13 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
     if should_stop():
         raise InterruptedError('Cancelled before OracleGS setup')
     manifest = json.loads((inputs/'inputs.json').read_text())
+    from .backend import validate_options
+    validate_options(runtime)
+    for key, default in [('oracle_depth_source', 'predicted'), ('oracle_initialization', 'sfm')]:
+        if manifest.get(key, default) != runtime.get(key, default):
+            raise ValueError(key + ' changed after staging; restage inputs')
+    from .source_geometry import validate_assets
+    validate_assets(inputs, manifest)
     validate_staged_trajectory(inputs, manifest)
     try:
         validate_runtime(runtime)
@@ -175,6 +183,8 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
                           'checkpoint-trajectory-adapter' if manifest['oracle_adapter']=='trajectory' else 'saved-poses-original-loader'),
         'gt_policy':'Only saved reference RGBs are GT; all SEVA outputs are synthetic',
         'attention_layers':[0,22], 'attention_weights':[0.25,0.75],
+        'attention_policy':'all-references-nearest-segment-endpoint-v1',
+        'attention_batching':runtime['oracle_attention_batching'],
         'schedule':'released train.py (differs from Beta schedule in paper)',
         'held_out_evaluation':'Unavailable: generated target images are not held-out GT',
         'graceful_stop':'In-memory stop-only hook after completed optimizer/MCMC iteration; atomic PLY export; 240s timeout',
@@ -226,11 +236,22 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
           '--Mapper.tri_ignore_two_view_tracks','0','--refine_intrinsics','0'])
     stage('sfm_export',[colmap,'model_converter','--input_path',sparse,'--output_path',sparse,'--output_type','TXT'])
     verify_sfm_cameras(inputs,output)
-    model('reference_depth','depth','depth_repo',{'images':str(dataset/'images'),'output':str(dataset/'depths'),
-          'weights':runtime['depth_weights']})
-    model('depth_alignment','script','repo',{'script':'utils/make_depth_scale.py','argv':[
-          '--base_dir',str(dataset),'--depths_dir',str(dataset/'depths'),'--model_type','txt']},training=True)
-    validate_geometry(output)
+    if manifest.get('oracle_depth_source', 'predicted') == 'predicted':
+        model('reference_depth','depth','depth_repo',{'images':str(dataset/'images'),'output':str(dataset/'depths'),
+              'weights':runtime['depth_weights']})
+        model('depth_alignment','script','repo',{'script':'utils/make_depth_scale.py','argv':[
+              '--base_dir',str(dataset),'--depths_dir',str(dataset/'depths'),'--model_type','txt']},training=True)
+        validate_geometry(output)
+    else:
+        points = (sparse/'points3D.txt').read_text().splitlines()
+        point_count = sum(bool(line.strip()) and not line.startswith('#') for line in points)
+        if manifest.get('oracle_initialization', 'sfm') == 'sfm' and not point_count:
+            raise ValueError('Sparse triangulation produced no points for SfM initialization')
+        atomic_json(output/'geometry-check.json', {
+            'triangulated_points':point_count,
+            'passed':True, 'depth_source':'source_splat',
+            'scope':'Validated staged camera-Z inverse depth and masks; no monocular prediction or SfM depth alignment',
+            'views':manifest['source_depth']['views']})
     if manifest.get('seva_segments'):
         from .segments import merge_segments
         for segment in manifest['seva_segments']:
@@ -245,9 +266,11 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         model('seva_generation','seva','seva_repo',seva_request(inputs,output,manifest,runtime))
     assemble(inputs,output)
     attention = dataset/f'synthetic_{n}_attention_maps'
+    from .attention import plan_chunks
+    chunks = plan_chunks(manifest, mode=runtime['oracle_attention_batching'], seed=runtime['seed'])
+    atomic_json(output/'attention-chunks.json', {'policy':recipe['attention_policy'], 'batching':runtime['oracle_attention_batching'], 'seed':runtime['seed'], 'chunks':chunks})
     model('vggt_attention','attention','vggt_repo',{'image_dir':str(output/'combined'),
-          'output_dir':str(output/'attention-raw'),'num_images':None,'source_frame':0,
-          'save_overlay':False,'seed':runtime['seed']})
+          'output_dir':str(output/'attention-raw'), 'chunks':chunks, 'seed':runtime['seed']})
     attention.mkdir()
     for image in (dataset/f'synthetic_{n}').glob('*.png'):
         source = output/'attention-raw'/('synth_'+image.name)
@@ -255,10 +278,16 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
             raise ValueError(f'Missing attention map for {image.name}')
         shutil.copyfile(source,attention/image.name)
     args = training_args(dataset,output/'model',n,runtime)
+    geometry_request = {'source_depth':str(inputs/'source-depth') if manifest.get('source_depth') else None,
+                        'source_initialization':str(inputs/'source-initialization.ply') if manifest.get('source_initialization') else None}
+    if manifest.get('source_depth'):
+        args[args.index('--depths')+1] = ''
+    if manifest.get('source_initialization'):
+        args += ['--sh_degree', str(manifest['source_initialization']['sh_degree'])]
     if manifest['oracle_adapter'] == 'trajectory':
-        model('reconstruction','train','repo',{'references':str(dataset/'reference_names.json'),'argv':args},training=True)
+        model('reconstruction','train','repo',{'references':str(dataset/'reference_names.json'),'argv':args, **geometry_request},training=True)
     else:
-        model('reconstruction','script','repo',{'script':'train.py','argv':args},training=True)
+        model('reconstruction','script','repo',{'script':'train.py','argv':args, **geometry_request},training=True)
     native = output/f"model/point_cloud/iteration_{runtime['iterations']}/point_cloud.ply"
     if not native.is_file() or not native.stat().st_size:
         raise RuntimeError('Official OracleGS did not produce its final PLY')

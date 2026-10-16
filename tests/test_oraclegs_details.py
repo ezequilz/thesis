@@ -219,3 +219,62 @@ def test_pair_videos_and_previews_visible_during_generation(tmp_path):
     assert 'Pair 1: reference 1 → 2' in d['videos'][0]['label']
     assert d['anchors'] and d['trajectory'] and d['overview_url']
     assert next(s for s in d['stages'] if s['name']=='seva_generation')['status']=='running'
+
+
+def test_authors_attention_grids_expose_legacy_and_reference_query_exports(tmp_path):
+    studio,run,root = fixture(tmp_path)
+    legacy = 'attention-raw/BATCH_01_AVG_L0_L22_from_frame_0_grid.png'
+    current = 'attention-raw/chunk_003/CHUNK_003_from_frame_0_grid.png'
+    png(root/legacy)
+    png(root/current)
+    png(root/'attention-raw/synth_target_000005.png')
+    write(root/'attention-chunks.json', {'batching':'within_trajectory','chunks':[{
+        'index':3,'source_image':'ref_000002.png','segment_indices':[1],
+        'reference_images':[f'ref_{i:06d}.png' for i in range(6)],
+        'context_target_images':['a','b'], 'target_images':['b']}]})
+    d = build_details(studio,root/'result.json',{})
+    assert len(d['attention_grids']) == 2
+    old,new = d['attention_grids']
+    from urllib.parse import unquote
+    assert unquote(old['url']).endswith(legacy) and old['source_image'] is None
+    assert unquote(new['url']).endswith(current)
+    assert new['source_image'] == 'ref_000002.png'
+    assert new['reference_count'] == 6
+    assert new['context_target_count'] == 2 and new['assigned_target_count'] == 1
+    assert d['attention_batching'] == 'within_trajectory'
+    assert any(a['url'].endswith('attention-chunks.json') for a in d['artifacts'])
+
+
+def test_authors_grid_discovery_rejects_symlinks_outside_run(tmp_path):
+    studio,run,root = fixture(tmp_path)
+    outside = tmp_path/'outside.png'
+    png(outside)
+    (root/'attention-raw').mkdir()
+    (root/'attention-raw/escape_grid.png').symlink_to(outside)
+    assert build_details(studio,root/'result.json',{})['attention_grids'] == []
+
+
+def test_individual_overlay_prefers_assigned_native_query_and_caches_legacy(tmp_path):
+    studio,run,root = fixture(tmp_path)
+    write(root/'recipe.json',{'inputs':{'views':[{'image':'scene/images/ref_000000.png'}]}})
+    rgb=root/'dataset/synthetic_1/target_000000.png'
+    raw=root/'attention-raw/synth_target_000000.png'
+    png(rgb)
+    raw.parent.mkdir(parents=True)
+    Image.new('L',(37,37),128).save(raw)
+    d=build_details(studio,root/'result.json',{})
+    item=d['synthetic'][0]
+    assert item['overlay_reconstructed'] and item['overlay_url']
+    cache=list((root/'debug-previews').glob('attention-overlay-*.png'))
+    assert len(cache)==1
+    assert Image.open(cache[0]).size==(518,518)
+    before=cache[0].stat().st_mtime_ns
+    build_details(studio,root/'result.json',{})
+    assert cache[0].stat().st_mtime_ns==before
+    native=root/'attention-raw/chunk_002/overlays/synth_target_000000.png'
+    png(native)
+    write(root/'attention-chunks.json',{'chunks':[{'index':2,'target_images':['synth_target_000000.png']}]})
+    item=build_details(studio,root/'result.json',{})['synthetic'][0]
+    assert not item['overlay_reconstructed']
+    from urllib.parse import unquote
+    assert unquote(item['overlay_url']).endswith(str(native))

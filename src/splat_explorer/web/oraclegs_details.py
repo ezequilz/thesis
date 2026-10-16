@@ -66,6 +66,39 @@ def generation_overview(root):
     return target
 
 
+def attention_overlay(root, rgb, attention):
+    """Cached legacy preview from quantized maps; native exports take priority."""
+    import numpy as np
+    from .plasma import PLASMA
+    if not rgb or not attention:
+        return None
+    fingerprint = hashlib.sha256(repr([(str(p),p.stat().st_size,p.stat().st_mtime_ns)
+        for p in (rgb,attention)]).encode()).hexdigest()[:20]
+    target = root/'debug-previews'/('attention-overlay-'+fingerprint+'.png')
+    if not target.resolve().is_relative_to(root.resolve()):
+        return None
+    with _LOCK:
+        if target.is_file():
+            return target
+        try:
+            with Image.open(rgb) as image, Image.open(attention) as raw:
+                w,h = image.size
+                nw,nh = (518,round(h*518/w/14)*14) if w>=h else (round(w*518/h/14)*14,518)
+                canvas = Image.new('RGB',(518,518),'white')
+                canvas.paste(image.convert('RGB').resize((nw,nh),Image.Resampling.BICUBIC),((518-nw)//2,(518-nh)//2))
+                weights = np.asarray(raw.convert('F').resize((518,518),Image.Resampling.BILINEAR))/255
+                color = (np.asarray(PLASMA)[np.minimum((weights*256).astype(int),255)]*255).astype(np.uint8)
+                overlay = Image.fromarray(np.rint(.2*np.asarray(canvas)+.8*color).astype(np.uint8))
+            target.parent.mkdir(parents=True,exist_ok=True)
+            temporary = target.with_suffix('.tmp')
+            with temporary.open('wb') as stream:
+                overlay.save(stream,format='PNG')
+            temporary.replace(target)
+            return target
+        except (OSError,ValueError):
+            return None
+
+
 def build_details(studio, manifest, result):
     root = manifest.parent
     task = generation_task(root)
@@ -112,8 +145,40 @@ def build_details(studio, manifest, result):
         p['attention_url'] = link(_safe(root, f'dataset/synthetic_{n}_attention_maps/' + p['name']) or
                                   _safe(root, 'attention-raw/synth_' + p['name']))
         p['role'] = 'Synthetic at saved pose' if p['name'].startswith('ref_') else 'Synthetic at intermediate pose'
+    # Both the released extractor and our batching adapter call the authors'
+    # save_attention_maps; expose its RGB/plasma grids without re-rendering them.
+    attention_plan = data('attention-chunks.json')
+    chunks = {f"chunk_{c['index']:03d}":c for c in attention_plan.get('chunks', [])}
+    attention_grids = []
+    for pattern in ('attention-raw/*_grid.png', 'attention-raw/chunk_*/*_grid.png'):
+        for p in sorted(root.glob(pattern))[:1000]:
+            safe = _safe(root, str(p.relative_to(root)))
+            if safe is None:
+                continue
+            chunk = chunks.get(p.parent.name, {})
+            attention_grids.append({'name':p.name, 'url':link(safe),
+                'chunk_index':chunk.get('index'), 'source_image':chunk.get('source_image'),
+                'segment_indices':chunk.get('segment_indices', []),
+                'reference_count':len(chunk.get('reference_images', [])) if chunk else None,
+                'context_target_count':len(chunk.get('context_target_images', [])) if chunk else None,
+                'assigned_target_count':len(chunk.get('target_images', [])) if chunk else None})
+    assignments = {name:chunk for chunk in attention_plan.get('chunks', [])
+                   for name in chunk.get('target_images', [])}
+    for item in synthetic:
+        name = 'synth_'+item['name']
+        chunk = assignments.get(name)
+        native = (_safe(root, f"attention-raw/chunk_{chunk['index']:03d}/overlays/"+name)
+                  if chunk else _safe(root,'attention-raw/overlays/'+name))
+        item['overlay_reconstructed'] = native is None
+        overlay = native or attention_overlay(root,
+            _safe(root,f'dataset/synthetic_{n}/'+item['name']),
+            _safe(root,f'dataset/synthetic_{n}_attention_maps/'+item['name']) or
+            _safe(root,'attention-raw/'+name))
+        item['overlay_url'] = link(overlay)
     phases = ['setup','sfm_features','sfm_matching','sfm_triangulation','sfm_export','reference_depth',
               'depth_alignment','seva_generation','vggt_attention','reconstruction']
+    if inputs.get('oracle_depth_source') == 'source_splat':
+        phases = [p for p in phases if p not in ('reference_depth', 'depth_alignment')]
     commands = recipe.get('commands', [])
     attempted = [('seva_generation' if (c.get('phase') or '').startswith('seva_generation_') else c.get('phase')) for c in commands]
     current = state.get('phase')
@@ -136,6 +201,7 @@ def build_details(studio, manifest, result):
     artifacts = []
     for name, label in [('recipe.json','Recipe, revisions and commands'), ('camera-alignment.json','Camera alignment gate'),
                         ('geometry-check.json','SfM and depth gate'),
+                        ('attention-chunks.json','Attention chunk and source assignments'),
                         ('seva-camera-audit.json','SEVA parsed camera audit'),
                         ('seva-conditioning-audit.json','SEVA diffusion translation and ray audit'), ('seva_generation-request.json','SEVA parameters'),
                         ('dataset/sparse/0/cameras.txt','COLMAP intrinsics'), ('dataset/sparse/0/images.txt','COLMAP camera poses'),
@@ -174,7 +240,8 @@ def build_details(studio, manifest, result):
             'geometry':data('geometry-check.json'), 'depth_scales':data('dataset/sparse/0/depth_params.json'),
             'anchors':panels(f'seva/{task}/scene/first-pass/samples-rgb/*.png') or panels(f'seva/{task}/scene/first-pass/forward_*/samples-rgb/*.png') or panels('seva-segments/*/seva/img2trajvid/scene/first-pass/samples-rgb/*.png'),
             'trajectory':panels(f'seva/{task}/scene/samples-rgb/*.png') or panels('seva-segments/*/seva/img2trajvid/scene/samples-rgb/*.png'),
-            'synthetic':synthetic, 'artifacts':artifacts,
+            'synthetic':synthetic, 'attention_grids':attention_grids,
+            'attention_batching':attention_plan.get('batching', recipe.get('attention_batching')), 'artifacts':artifacts,
             'videos':segment_videos+[{'label':label,'url':link(p)} for name,label in [
                 ('first-pass/samples-rgb.mp4','First pass · sparse anchors'),('samples-rgb.mp4','Full generated trajectory')]
                 if (p := _safe(root, f'seva/{task}/scene/' + name))]}

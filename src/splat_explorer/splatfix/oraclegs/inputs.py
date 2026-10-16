@@ -170,5 +170,7 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
                      'translation_distance':float(np.linalg.norm(cameras[b].position-cameras[a].position))}
                     for j,(a,b) in enumerate(zip(order[:-1],order[1:]))],
         'frames':target_records}
+    from .source_geometry import stage_source_geometry
+    stage_source_geometry(checkpoint, root, manifest, frames[:n], should_stop=should_stop)
     atomic_json(root/'inputs.json',manifest)
     return manifest

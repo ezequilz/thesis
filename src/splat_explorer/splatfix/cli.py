@@ -102,7 +102,7 @@ def repair_splat(cfg, args):
             if value is not None:
                 runtime[key] = str(value)
     if method == 'oraclegs':
-        for key in ('seva_resolution', 'seva_fit', 'oracle_adapter', 'oracle_target_frames'):
+        for key in ('oracle_depth_source', 'oracle_initialization', 'oracle_attention_batching', 'seva_resolution', 'seva_fit', 'oracle_adapter', 'oracle_target_frames'):
             value = getattr(args, key, None)
             if value is not None:
                 runtime[key] = value
@@ -141,8 +141,11 @@ def _add_stages(parser):
     from .methods import METHODS, DEFAULT_METHOD
     repair.add_argument("--seva-fit", choices=("crop", "pad"))
     repair.add_argument("--seva-resolution", choices=("576p", "720p"))
+    repair.add_argument("--oracle-depth-source", choices=("predicted", "source_splat"))
+    repair.add_argument("--oracle-initialization", choices=("sfm", "source_splat"))
     repair.add_argument("--oracle-adapter", choices=("trajectory", "saved_poses"))
-    repair.add_argument("--oracle-target-frames", type=int, help="Generated images per consecutive viewpoint pair, including endpoints (default: 80)")
+    repair.add_argument("--oracle-attention-batching", choices=["within_trajectory", "global"], help="VGGT target shuffle scope (default: within_trajectory)")
+    repair.add_argument("--oracle-target-frames", type=int, help="Generated interior images per consecutive viewpoint pair (default: 80)")
     repair.add_argument("--g4splat-repo", type=Path)
     repair.add_argument("--g4splat-python", type=Path)
     repair.add_argument("--reconstruction-method", choices=tuple(METHODS), default=DEFAULT_METHOD)
