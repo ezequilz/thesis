@@ -182,3 +182,22 @@ def test_snapshot_marker_only_published_after_successful_save(tmp_path,monkeypat
     with pytest.raises(OSError):
         scene.save(7000)
     assert json.loads((tmp_path/'saved-snapshot.json').read_text())['iteration']==3000
+
+
+def test_oracle_details_exposes_stop_until_request_then_partial_download(tmp_path):
+    from splat_explorer.splatfix.oraclegs.partial import salvage
+    studio,run,root=fixture(tmp_path)
+    studio.store.update_status(run.name,status='running',phase='reconstruction')
+    assert studio.results.run_detail(run.name)['can_stop'] is True
+    studio.cancel(run.name)
+    row=studio.results.run_detail(run.name)
+    assert row['status']=='stopping' and not row['can_stop']
+    native=root/'stop-snapshot.ply'
+    native.write_bytes(b'ply\nstop saved')
+    write(root/'stop-state.json',{'status':'saved','iteration':42,'size_bytes':native.stat().st_size})
+    salvage(root,'User stop')
+    studio.store.update_status(run.name,status='stopped',remote_finished=True)
+    row=studio.results.run_detail(run.name)
+    assert row['incomplete'] and row['oraclegs']['saved_iteration']==42
+    assert row['ply_url'].endswith('oraclegs-partial.ply')
+    assert not row['can_stop']

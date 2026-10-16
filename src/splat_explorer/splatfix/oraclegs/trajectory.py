@@ -1,8 +1,6 @@
 """SEVA GUI keyframe interpolation, without its viewer or GPU dependencies."""
 import numpy as np
 from scipy.spatial.transform import Rotation
-import splines
-import splines.quaternion
 
 
 def keyframe_path(cameras, order, frames_per_segment):
@@ -12,6 +10,11 @@ def keyframe_path(cameras, order, frames_per_segment):
     with distinct output identities, so every pair has exactly the requested
     number of generated images. No implicit closing segment is added.
     """
+    # Only input staging constructs paths; prepared GPU workers do not need
+    # this dependency in their orchestration environment.
+    import splines
+    import splines.quaternion
+
     positions = splines.KochanekBartels(
         [cameras[i].position.astype(float) for i in order],
         tcb=(0., 0., 0.), endconditions='natural')

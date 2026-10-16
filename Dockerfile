@@ -26,6 +26,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     "pillow>=10.0" \
     "pyyaml>=6.0" \
     "scipy>=1.11" \
+    "splines==0.3.3" \
     "viser>=0.2.7" \
     "openai>=1.40"
 

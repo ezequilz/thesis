@@ -7,7 +7,6 @@ import shutil
 import subprocess
 from ..checkpoint import Checkpoint, atomic_json
 from ..executor import run_process
-from .inputs import export_inputs
 from .adapter import known_model, assemble, validate_geometry, verify_sfm_cameras
 from .provision import runtime_environment, huggingface_environment
 
@@ -227,6 +226,7 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None,
         runtime['seed'] = seed
     root = Path(output_dir).resolve()
     root.mkdir(parents=True,exist_ok=True)
+    from .inputs import export_inputs
     export_inputs(Checkpoint.load(checkpoint_dir),root/'inputs',mode,runtime=runtime,should_stop=should_stop)
     try:
         return run_prepared(root/'inputs',root/'results/oraclegs',runtime=runtime,
