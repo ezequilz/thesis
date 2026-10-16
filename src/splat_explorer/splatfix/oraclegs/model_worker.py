@@ -91,13 +91,18 @@ def main():
             return reference_only_ground_truth(original(*a, **kw), references)
         readers.readColmapCameras = calibrated_views
         sys.argv = [str(repo/'train.py'), *request['argv']]
-        runpy.run_path(str(repo/'train.py'),run_name='__main__')
+        from graceful import run_training
+        run_training(repo, request['stop_control'])
     else:
         if request.get('script') == 'train.py':
             install_snapshot_marker()
         sys.argv = [str(repo/request['script']),*request['argv']]
         sys.path.insert(0,str((repo/request['script']).parent))
-        runpy.run_path(sys.argv[0],run_name='__main__')
+        if request.get('script') == 'train.py':
+            from graceful import run_training
+            run_training(repo, request['stop_control'])
+        else:
+            runpy.run_path(sys.argv[0],run_name='__main__')
 
 
 if __name__ == '__main__':

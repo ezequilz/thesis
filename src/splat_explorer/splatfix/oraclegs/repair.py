@@ -138,24 +138,38 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         'attention_layers':[0,22], 'attention_weights':[0.25,0.75],
         'schedule':'released train.py (differs from Beta schedule in paper)',
         'held_out_evaluation':'Unavailable: generated target images are not held-out GT',
+        'graceful_stop':'In-memory stop-only hook after completed optimizer/MCMC iteration; atomic PLY export; 240s timeout',
         'runtime':runtime, 'commands':[]}
     atomic_json(output/'recipe.json',recipe)
-    def stage(name, argv):
+    def stage(name, argv, *, training=False):
         if should_stop():
             raise InterruptedError('Cancelled before '+name)
         argv = [str(a) for a in argv]
         recipe['commands'].append({'phase':name,'argv':argv})
         atomic_json(output/'recipe.json',recipe)
         on_progress({'phase':name,'message':'OracleGS: '+name.replace('_',' ')})
-        run_process(argv,output/(name+'.log'),should_stop)
+        poll = should_stop
+        if training:
+            from .graceful import stop_poll
+            poll = stop_poll(output, should_stop, on_progress)
+        try:
+            run_process(argv,output/(name+'.log'),poll)
+        except Exception:
+            if training and (output/'SAVE_STOP').exists():
+                raise InterruptedError('OracleGS stopped; recovering the saved PLY (or last confirmed snapshot)')
+            raise
+        if training and ((output/'SAVE_STOP').exists() or should_stop()):
+            raise InterruptedError('OracleGS stopped early; partial reconstruction saved')
     def model(name, action, repo_key, body, *, training=False):
         request = output/(name+'-request.json')
+        if training:
+            body = {**body, 'stop_control':str(output/'SAVE_STOP')}
         atomic_json(request,body)
         python = Path(runtime['python' if training else 'model_python'])
         env = ['env','-u','PYTHONPATH','-u','PYTHONHOME','PYTHONNOUSERSITE=1',
                'LD_LIBRARY_PATH='+str(python.parent.parent/'lib')+':/usr/local/nvidia/lib:/usr/local/nvidia/lib64']
         env += [key+'='+value for key,value in huggingface_environment().items()]
-        stage(name,env+[python,'-u',HERE/'model_worker.py',action,runtime[repo_key],request])
+        stage(name,env+[python,'-u',HERE/'model_worker.py',action,runtime[repo_key],request],training=training)
     model('model_access','assets','seva_repo',{'output':str(output/'vae-provenance.json')})
     colmap = runtime['colmap']
     db = output/'database.db'

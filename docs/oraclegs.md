@@ -210,3 +210,22 @@ SEVA's exported poses and calibration. Neither gate measures whether the generat
 pixels depict the requested geometry. CPU regression tests cover moving/rotating
 keyframes, exact endpoints, 400 distinct outputs and parser mismatch rejection;
 a fresh GPU generation/reconstruction is needed to assess visual improvement.
+
+
+## Manual stop and partial PLY
+
+New OracleGS reconstructions support **Stop & save PLY** on the result details
+page. The worker lets the current iteration finish, synchronizes CUDA, and
+atomically publishes the current Gaussian model before exiting. This works even
+before iteration 3000. The downloaded `oraclegs-partial.ply` is explicitly marked
+incomplete and records its saved iteration. It is a model export, not a resumable
+optimizer checkpoint.
+
+The stop-only hook is inserted in memory after the pinned trainer's iteration
+updates; source hashes are verified and the shared upstream checkout is unchanged.
+The parent waits up to 240 seconds for a cooperative save before terminating a
+stuck process. A failed or timed-out save falls back to the last confirmed
+scheduled snapshot, when one exists. Before reconstruction begins, stopping
+retains generated artifacts but cannot create a PLY. Processes already launched
+with the old worker cannot acquire this hook; they retain scheduled-snapshot
+recovery until a new run is launched.

@@ -237,12 +237,14 @@ def test_real_upstream_colmap_loader_split_and_attention(tmp_path):
 
 
 @pytest.mark.parametrize('adapter',['trajectory','saved_poses'])
-def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter):
+@pytest.mark.parametrize('stop_training',[False,True])
+def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training):
     cp = checkpoint(tmp_path,2)
     inputs,output = tmp_path/'inputs',tmp_path/'run'
     manifest = export_inputs(cp,inputs,runtime={'oracle_adapter':adapter,'oracle_target_frames':5})
     frames = json.loads((inputs/'scene/transforms.json').read_text())['frames']
     phases = []
+    requested = [False]
     monkeypatch.setattr(repair,'validate_runtime',lambda _:None)
     monkeypatch.setattr(repair,'known_model',lambda *a:None)
     def fake_process(argv,log,stop):
@@ -286,11 +288,28 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter):
             assert body['argv'][body['argv'].index('--lambda_lpips')+1]=='0.3'
             assert '--gt_synth_schedule' in body['argv'] and '--depths' in body['argv']
             assert len(list((dataset/'synthetic_2_attention_maps').glob('*.png'))) == len(frames)-2
+            assert body['stop_control'] == str(output/'SAVE_STOP')
+            if stop_training:
+                requested[0] = True
+                assert stop() is False  # Cooperative save, not immediate SIGTERM.
+                assert Path(body['stop_control']).exists()
+                (output/'stop-snapshot.ply').write_bytes(b'ply current state')
+                (output/'stop-state.json').write_text(json.dumps({'status':'saved','iteration':42,
+                    'size_bytes':(output/'stop-snapshot.ply').stat().st_size}))
+                return
             ply = output/'model/point_cloud/iteration_22000/point_cloud.ply'
             ply.parent.mkdir(parents=True)
             ply.write_text('ply\nformat ascii 1.0\ncomment TEST DOUBLE\nend_header\n')
     monkeypatch.setattr(repair,'run_process',fake_process)
-    result = repair.run_prepared(inputs,output)
+    if stop_training:
+        with pytest.raises(InterruptedError,match='partial reconstruction saved'):
+            repair.run_prepared(inputs,output,should_stop=lambda:requested[0])
+        from splat_explorer.splatfix.oraclegs.partial import salvage
+        result = salvage(output,'User stop')
+        assert result['saved_iteration'] == 42
+        assert not (output/'result.json').exists()
+    else:
+        result = repair.run_prepared(inputs,output)
     assert phases == ['model_access','sfm_features','sfm_matching','sfm_triangulation','sfm_export',
                       'reference_depth','depth_alignment','seva_generation','vggt_attention','reconstruction']
     assert Path(result['splat_path']).exists()
