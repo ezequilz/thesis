@@ -91,6 +91,11 @@ conditions. The helper reads a token with a hidden prompt, sends it only through
 SSH stdin, authenticates the same worker account, and caches `config.yaml` and
 `modelv1.1.safetensors`. The optional `--download-local` also copies both files
 back to the local machine; omit it to avoid the additional multi-GB transfer.
+The helper and every OracleGS model subprocess explicitly share the LRZ
+account's `~/.cache/huggingface` (resolved from the account database, not `HOME`).
+This includes `HF_HOME`, both Hub-cache variables, and `HF_TOKEN_PATH`.
+Splatfix redirects `HOME` and `XDG_CACHE_HOME` for its general container runtime;
+those redirects must not hide the login or the weights installed by this helper.
 By default no model files are copied to the local machine. Use `--check-only`
 to verify the worker cache without entering a token again, or `--copy-only
 --download-local DIRECTORY` to retry an explicitly requested local copy. The
