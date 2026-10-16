@@ -10,11 +10,13 @@ The adapter in `src/splat_explorer/splatfix/g4splat/` runs the official
 with the README's posed recipe: `--sfm_config posed --use_view_config
 --config_view_num N --select_inpaint_num 10 --tetra_downsample_ratio 0.25`.
 `N` is the actual saved selection count, not the paper's five-view example.
-All selected images are training inputs. Geometry is inferred by MASt3R, with
+All selected images are training inputs. With source-depth guidance disabled,
+geometry is inferred by MASt3R, with
 plane-aware depth refinement and all three See3D rounds retained. Source splat
 points, opacity, ArtiFixer trajectories and ArtiFixer weights are not used.
-The original optimization configurations, mesh extraction and rendering run
-unchanged. Only the final held-out benchmark evaluator is skipped because saved
+The base adapter retains the original optimization configurations, mesh extraction
+and rendering. The optional source-depth extension below changes their geometry
+inputs. The final held-out benchmark evaluator is skipped because saved
 selections contain no held-out photographs or ground-truth mesh. Commands,
 revision, input hashes, cameras and adaptations are recorded in the run folder.
 New runs apply the explicit `camera-consistency-v1` correction described below;
@@ -180,12 +182,34 @@ extension transfers their trusted depths rather than guaranteeing ground truth.
 The runtime verifies source maps against the saved cameras, applies the same
 actual center crop as RGB (832×480 → 832×468 removes six rows at each edge),
 and uses nearest-neighbor sampling rather than blending depth across surfaces.
-Trusted depths replace MASt3R point-map samples before the mandatory reprojection
-gate and replace input-view depth prediction. Uncovered pixels retain predicted
-depth, which must be finite and positive where used. Trusted metric depth and
-world points are restored after chart optimization, with the chart scale factor,
-and after input-view plane refinement. Novel See3D views retain upstream
-inference. The original splat is neither overwritten nor uploaded to the worker.
+In the `source-splat-depth-v2` extension, repaired GPT-image RGBs are the input
+photometric targets (the ordinary input-view loss weight is retained). Source
+depth supplies the geometry prior and chart reference at trusted pixels.
+DepthAnything predictions fill holes, with their inverse-depth scale/offset fit
+robustly to trusted source depth rather than invalid MASt3R samples. A positive
+scale-only fit is used if the affine offset would produce nonpositive depth;
+unusable predictions still fail. Chart alignment runs normally on these priors
+and references, including the authors' scene-scale normalization. Its optimized
+depths, points and confidence are retained together; they are not reset afterward.
+
+Before plane extraction, trusted source depth is combined with chart completion
+in holes, in original scene units. Normals, the shared chart point cloud and
+visibility are computed from that geometry. Plane masks use those normals and
+the repaired RGB semantics. Plane-fitting support requires both source validity
+and the upstream multi-view visibility test. Thus the authors' global plane merge,
+RANSAC fit and ray-plane depth refinement operate on existing splat geometry.
+The resulting plane-refined targets are retained for Gaussian optimization;
+there is no post-plane overwrite with raw source depth. Novel See3D views retain
+the upstream generation and geometry refinement. The original splat is neither
+overwritten nor uploaded to the worker.
+
+Before the mandatory reprojection gate, trusted depths replace MASt3R point-map
+samples. Only nonfinite or behind-camera fallback samples are completed using
+source-aligned DepthAnything predictions. These completions are recorded and
+excluded from the chart reference loss; they are not promoted to measured
+geometry. Finite fallback samples with incorrect projection still fail the gate.
+Prediction for this repair runs in a short-lived subprocess to release GPU
+memory before chart alignment.
 
 `inputs.json` records depth coverage and provenance; `source-depth-check.json`
 records trusted coverage on the point-map grid; `source-depth-extension.json`
@@ -194,3 +218,21 @@ mismatched cameras/checksums, no surviving trusted coverage, or invalid fallback
 geometry. CPU contract tests cover masks, exact cropping, pixel reprojection,
 metric scaling, and nonmutation of the upstream checkout. End-to-end CUDA
 training quality still requires a new reconstruction and native-render review.
+
+### Diagnosis of run_20261016_134345
+
+The saved report and point maps show 188 behind-camera samples in `000002.png`
+and five in `000003.png`, all outside the trusted source mask. All six camera
+calibrations matched; the largest reprojection error among positive-depth
+samples was 0.01062 pixels, below the 0.5-pixel gate. Source coverage ranged from
+75.97% to 93.53%. This was invalid fallback geometry, not failed source projection.
+
+The custom option follows the paper's geometry-guided reconstruction principle,
+but is an explicit source-geometry extension, not a reproduction of its evaluation.
+Its binary source mask measures local coverage/smoothness, not geometric truth.
+The method assumes repaired RGBs remain registered to their saved cameras and
+mostly preserve the source scene layout. Planar fitting can regularize that
+layout; it cannot establish the correct shape of an object changed by an RGB
+edit. Quality must be assessed with native surfel renders, held-out views and
+depth/plane consistency, not the approximate thin-3D-Gaussian viewer export alone.
+MASt3R still runs, so this option does not yet eliminate its compute cost.

@@ -4,6 +4,9 @@ from ..checkpoint import camera_from_record
 
 
 def validate_options(raw):
+    fit = raw.get('seva_fit', 'crop')
+    if fit not in ('crop', 'pad'):
+        raise ValueError('seva_fit must be crop or pad')
     adapter = raw.get('oracle_adapter', 'trajectory')
     if adapter not in ('trajectory', 'saved_poses'):
         raise ValueError('oracle_adapter must be trajectory or saved_poses')
@@ -17,7 +20,7 @@ def validate_options(raw):
     if order is not None and (not isinstance(order, list) or len(order) < 2 or
                               any(type(i) is not int or i < 0 for i in order) or len(set(order)) != len(order)):
         raise ValueError('oracle_path_order must contain distinct nonnegative checkpoint view indices')
-    return {'oracle_adapter': adapter, 'seva_resolution': resolution, 'oracle_target_frames': frames, 'oracle_path_order': order}
+    return {'seva_fit': fit, 'oracle_adapter': adapter, 'seva_resolution': resolution, 'oracle_target_frames': frames, 'oracle_path_order': order}
 
 
 def readiness(checkpoint):
@@ -25,8 +28,6 @@ def readiness(checkpoint):
     ready = checkpoint.complete and 2 <= len(cameras) <= 8 and any(
         np.linalg.norm(c.position-cameras[0].position) > 1e-6 for c in cameras[1:])
     reason = 'OracleGS needs 2–8 complete, calibrated reference views at distinct positions'
-    if ready and any(abs(c.width/c.height-16/9) > 1/max(c.width,c.height) for c in cameras):
-        ready, reason = False, 'OracleGS 576p/720p presets require 16:9 checkpoint cameras; select 16:9 views to preserve framing'
     return {'ready': ready, 'reason': 'Calibrated references ready for OracleGS' if ready else reason}
 
 

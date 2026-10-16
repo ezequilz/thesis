@@ -29,7 +29,7 @@ def checkpoint(tmp_path, count=3):
     return cp
 
 
-@pytest.mark.parametrize('resolution,size',[('576p',(1024,576)),('720p',(1280,720))])
+@pytest.mark.parametrize('resolution,size',[('576p',(1024,576)),('720p',(1280,704))])
 def test_repaired_rgb_projection_and_exact_saved_path_poses(tmp_path,resolution,size):
     cp = checkpoint(tmp_path)
     root = tmp_path/'staged'
@@ -54,7 +54,9 @@ def test_repaired_rgb_projection_and_exact_saved_path_poses(tmp_path,resolution,
         projected = np.array([fx*xyz[0]/xyz[2]+cx,fy*xyz[1]/xyz[2]+cy])
         k = np.asarray(v['camera']['intrinsics'])
         old_pixel = k @ np.array([.3,-.2,2])
-        np.testing.assert_allclose(projected,old_pixel[:2]/old_pixel[2]*np.array(size)/[1920,1080],atol=1e-5)
+        expected = old_pixel[:2]/old_pixel[2]*(size[0]/1920)
+        expected[1] -= (1080*size[0]/1920-size[1])/2
+        np.testing.assert_allclose(projected,expected,atol=1e-5)
         assert any(np.allclose(f['transform_matrix'],target['transform_matrix']) for target in frames[3:])
     assert frames[3]['file_path'] == frames[2]['file_path']
     assert frames[-1]['file_path'] == frames[1]['file_path']
@@ -71,7 +73,7 @@ def test_repaired_rgb_projection_and_exact_saved_path_poses(tmp_path,resolution,
 def test_720_padding_preserves_calibration_and_pixels(tmp_path):
     cp = checkpoint(tmp_path,2)
     root = tmp_path/'inputs'
-    export_inputs(cp,root,runtime={'seva_resolution':'720p','oracle_target_frames':3})
+    export_inputs(cp,root,runtime={'seva_resolution':'720p','seva_fit':'pad','oracle_target_frames':3})
     _,w,h = pad_seva_inputs(root,tmp_path/'padded')
     assert (w,h) == (1280,768)
     old = json.loads((root/'scene/transforms.json').read_text())['frames'][0]
@@ -292,3 +294,66 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter):
     recipe = json.loads((output/'recipe.json').read_text())
     assert len(recipe['commands'])==9
     assert 'Only saved reference' in recipe['gt_policy']
+
+
+@pytest.mark.parametrize('mode',['crop','pad'])
+def test_non_widescreen_projection_after_fitting(tmp_path,mode):
+    from splat_explorer.splatfix.oraclegs.inputs import fit_reference
+    camera = Camera(np.array([2.,-1.,4.]),Rotation.from_euler('xyz',[12,23,34],degrees=True).as_matrix(),
+                    width=1600,height=1200,fov_deg=65.)
+    image = Image.new('RGB',(3200,2400),'blue')
+    fitted,k,affine = fit_reference(image,camera,(1024,576),mode)
+    assert fitted.size == (1024,576)
+    np.testing.assert_allclose(k[:2,2],[512,288],atol=1e-8)
+    points = np.array([[.2,.1,2.],[-.3,.4,3.],[0,0,4.]])
+    source_pixels = (camera.intrinsics@points.T).T
+    source_pixels = source_pixels/source_pixels[:,2:]
+    source_pixels[:,:2] *= 2  # Saved repaired image has twice the camera raster size.
+    transformed = (affine@source_pixels.T).T
+    projected = (k@points.T).T
+    np.testing.assert_allclose(projected/projected[:,2:],transformed,atol=1e-8)
+    if mode=='crop':
+        assert affine[1,2] == -96  # 3200×2400 → 1024×768, then crop 96 each side.
+        assert fitted.getpixel((0,0)) == (0,0,255)
+    else:
+        assert fitted.getpixel((0,0)) == (0,0,0)
+        assert fitted.getpixel((512,288)) == (0,0,255)
+
+
+def test_720_crop_and_pad_are_distinct_explicit_options(tmp_path):
+    cp = checkpoint(tmp_path,2)
+    cropped = export_inputs(cp,tmp_path/'crop',runtime={'seva_resolution':'720p','oracle_target_frames':3})
+    padded = export_inputs(cp,tmp_path/'pad',runtime={'seva_resolution':'720p','seva_fit':'pad','oracle_target_frames':3})
+    assert cropped['resolution']==cropped['seva_internal_resolution']==[1280,704]
+    assert padded['resolution']==[1280,720] and padded['seva_internal_resolution']==[1280,768]
+    for name,cy in [('crop',352),('pad',360)]:
+        f=json.loads((tmp_path/name/'scene/transforms.json').read_text())['frames'][0]
+        assert f['cy']==cy
+        np.testing.assert_allclose(np.asarray(f['transform_matrix'])@AXES,cp.views[0]['camera']['c2w'])
+    assert 'pad_to_stride' not in repair.seva_request(tmp_path/'crop',tmp_path/'out',cropped,repair.DEFAULT_RUNTIME)
+    assert repair.seva_request(tmp_path/'pad',tmp_path/'out',padded,repair.DEFAULT_RUNTIME)['pad_to_stride']==64
+
+
+def test_generation_intrinsics_mismatch_fails_closed(tmp_path):
+    source,output,_ = staged_generation(tmp_path)
+    path = output/'seva/img2trajvid/scene/transforms.json'
+    body = json.loads(path.read_text())
+    body['frames'][-1]['cx'] += 10
+    path.write_text(json.dumps(body))
+    with pytest.raises(ValueError,match='calibration'):
+        assemble(source,output)
+
+
+def test_sfm_camera_alignment_guard(tmp_path):
+    from splat_explorer.splatfix.oraclegs.adapter import verify_sfm_cameras
+    source,output,_=staged_generation(tmp_path)
+    verify_sfm_cameras(source,output)
+    report=json.loads((output/'camera-alignment.json').read_text())
+    assert report['passed'] and max(r['max_pixel_error'] for r in report['references'])<1e-4
+    path=output/'dataset/sparse/0/images.txt'
+    lines=path.read_text().splitlines()
+    fields=lines[0].split(); fields[5]=str(float(fields[5])+0.01)
+    lines[0]=' '.join(fields)
+    path.write_text('\n'.join(lines)+'\n')
+    with pytest.raises(ValueError,match='pose drift'):
+        verify_sfm_cameras(source,output)

@@ -11,6 +11,29 @@ SIZES = {'576p': (1024, 576), '720p': (1280, 720)}
 AXES = np.diag([1., -1., -1., 1.])
 
 
+def fit_reference(image, camera, size, mode):
+    """Image-space affine applied identically to pixels and intrinsics."""
+    width, height = size
+    k = camera.intrinsics.astype(float).copy()
+    k[0] *= image.width / camera.width
+    k[1] *= image.height / camera.height
+    if mode == 'crop':
+        scale = max(width/image.width, height/image.height)
+        left = (image.width-width/scale)/2
+        top = (image.height-height/scale)/2
+        output = image.resize(size, Image.Resampling.LANCZOS,
+                              box=(left,top,left+width/scale,top+height/scale))
+        affine = np.array([[scale,0,-left*scale],[0,scale,-top*scale],[0,0,1.]])
+    else:
+        scale = min(width/image.width, height/image.height)
+        resized = (max(2,round(image.width*scale/2)*2),max(2,round(image.height*scale/2)*2))
+        left,top = (width-resized[0])//2,(height-resized[1])//2
+        output = Image.new('RGB',size)
+        output.paste(image.resize(resized,Image.Resampling.LANCZOS),(left,top))
+        affine = np.array([[resized[0]/image.width,0,left],[0,resized[1]/image.height,top],[0,0,1.]])
+    return output, affine@k, affine
+
+
 def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, should_stop=lambda: False):
     options = validate_options(runtime or {})
     state = readiness(checkpoint)
@@ -26,18 +49,14 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
         order = list(range(len(cameras)))
     if any(i >= len(cameras) for i in order):
         raise ValueError('oracle_path_order references a missing checkpoint view')
-    width, height = SIZES[options['seva_resolution']]
+    requested = SIZES[options['seva_resolution']]
+    width, height = requested
+    if options['seva_fit'] == 'crop':
+        width, height = width//64*64, height//64*64
     root = Path(destination)
     scene = root / 'scene'
     (scene / 'images').mkdir(parents=True, exist_ok=False)
     frames, records = [], []
-    def frame(camera, name):
-        k = camera.intrinsics.astype(float).copy()
-        k[0] *= width / camera.width
-        k[1] *= height / camera.height
-        return {'file_path': 'images/'+name, 'w': width, 'h': height,
-                'fl_x': float(k[0,0]), 'fl_y': float(k[1,1]), 'cx': float(k[0,2]), 'cy': float(k[1,2]),
-                'transform_matrix': (camera.c2w.astype(float) @ AXES).tolist()}
     for i, (view, camera) in enumerate(zip(checkpoint.views, cameras)):
         if should_stop():
             raise InterruptedError('Cancelled during OracleGS staging')
@@ -46,14 +65,19 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
         with Image.open(source) as image:
             if abs(image.width/image.height-camera.width/camera.height) > 1/max(image.size):
                 raise ValueError('Repaired RGB aspect ratio differs from saved camera; refusing to distort calibration')
-            if image.width < width or image.height < height:
+            fit_scale = (max if options['seva_fit'] == 'crop' else min)(width/image.width, height/image.height)
+            if fit_scale > 1:
                 raise ValueError('OracleGS requires saved reference RGBs at least as large as the generation preset')
-            image.convert('RGB').resize((width,height), Image.Resampling.LANCZOS).save(scene/'images'/name)
-        frames.append(frame(camera,name))
+            fitted, k, affine = fit_reference(image.convert('RGB'),camera,(width,height),options['seva_fit'])
+            fitted.save(scene/'images'/name)
+        frames.append({'file_path':'images/'+name,'w':width,'h':height,
+                       'fl_x':float(k[0,0]),'fl_y':float(k[1,1]),'cx':float(k[0,2]),'cy':float(k[1,2]),
+                       'transform_matrix':(camera.c2w.astype(float)@AXES).tolist()})
         records.append({'view_id':view['id'], 'image': 'scene/images/'+name,
                         'source_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),
                         'sha256':hashlib.sha256((scene/'images'/name).read_bytes()).hexdigest(),
-                        'camera':view['camera'], 'source_image':str(source)})
+                        'camera':view['camera'], 'source_image':str(source),
+                        'image_affine':affine.tolist(), 'staged_intrinsics':k.tolist()})
     # Only camera poses are interpolated here. SEVA owns both generative passes.
     keys = np.arange(len(order), dtype=float)
     rotations = Slerp(keys, Rotation.from_matrix(np.stack([cameras[i].rotation for i in order])))
@@ -85,10 +109,10 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
     atomic_json(scene/f'train_test_split_{n}.json', {'train_ids':list(range(n)), 'test_ids':list(range(n,len(frames)))})
     manifest = {'reconstruction_method':'oraclegs', 'mode':mode, 'views':records,
                 'source_checkpoint':str(checkpoint.root), 'camera_convention':'opengl_c2w',
-                'source_camera_convention':'opencv_c2w', 'resolution':[width,height],
+                'source_camera_convention':'opencv_c2w', 'resolution':[width,height], 'requested_resolution':list(requested),
                 **options, 'oracle_path_order':order, 'path_order_source':'explicit' if options['oracle_path_order'] else 'checkpoint-selection-order',
                 'seva_internal_resolution':[width, ((height+63)//64)*64],
-                'resolution_adapter':'vertical-padding-then-crop' if height % 64 else None,
+                'resolution_adapter':('vertical-padding-then-crop' if height % 64 else 'calibrated-center-'+options['seva_fit']),
                 'reference_role':'ground_truth', 'source_splat_used_for_initialization':False}
     atomic_json(root/'inputs.json',manifest)
     return manifest

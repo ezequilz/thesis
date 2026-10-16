@@ -10,6 +10,7 @@ splatfix:
   # early_original: v0, original 960x720 captures and uncapped source inputs.
   resolution_profile: training
   oraclegs_runtime:
+    seva_fit: crop  # pad is the explicit fallback
     auto_setup: true
     seva_resolution: 576p
     oracle_adapter: trajectory

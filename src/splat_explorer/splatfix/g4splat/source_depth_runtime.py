@@ -104,7 +104,7 @@ def merge_source(name, fallback, scale=1.):
     return torch.where(mask, source, fallback)
 
 
-def source_or_predict(name, image, cameras, cam_idx, points, model_loader, predictor, fitter):
+def source_or_predict(name, image, model_loader, predictor):
     import torch
     depth, valid = calibrated_depth(name, image.shape[:2])
     source = torch.as_tensor(depth, device=image.device, dtype=image.dtype)
@@ -225,9 +225,8 @@ def patch_source_depth_runtime(overlay):
     a = body.index('        inv_depth = apply_depthanything(')
     b = body.index('        points3d_i =', a)
     body = body[:a] + '''        from splatfix_source_depth import source_or_predict
-        depth = source_or_predict(image_name, gt_image, pointmap_cameras, cam_idx,
-                                  cam_sfm_pts, source_model_loader, apply_depthanything,
-                                  fit_depth_to_point_cloud)
+        depth = source_or_predict(image_name, gt_image, source_model_loader,
+                                  apply_depthanything)
 ''' + body[b:]
     body = body.replace('points3d_i = pointmap_cameras.backproject_depth(cam_idx=cam_idx, depth=depth).view(_height, _width, 3)', 'points3d_i = __import__("splatfix_source_depth").calibrated_points(image_name, depth)')
     sources[relative] = source[:start] + body + source[end:]

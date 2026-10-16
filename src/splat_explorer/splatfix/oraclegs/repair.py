@@ -8,7 +8,7 @@ import subprocess
 from ..checkpoint import Checkpoint, atomic_json
 from ..executor import run_process
 from .inputs import export_inputs
-from .adapter import known_model, assemble, validate_geometry
+from .adapter import known_model, assemble, validate_geometry, verify_sfm_cameras
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_RUNTIME = {'repo':'/workspace/third_party/OracleGS',
@@ -17,7 +17,7 @@ DEFAULT_RUNTIME = {'repo':'/workspace/third_party/OracleGS',
     'python':'/workspace/oraclegs-env/bin/python', 'model_python':'/workspace/oraclegs-model-env/bin/python',
     'colmap':'/workspace/oraclegs-model-env/bin/colmap',
     'depth_weights':'/workspace/models/oraclegs/depth_anything_v2_vitl.pth',
-    'auto_setup':True, 'seva_resolution':'576p', 'oracle_adapter':'trajectory', 'oracle_target_frames':80,
+    'seva_fit':'crop', 'auto_setup':True, 'seva_resolution':'576p', 'oracle_adapter':'trajectory', 'oracle_target_frames':80,
     'oracle_path_order':None, 'iterations':22000, 'cap_max':1800000, 'seed':23}
 
 
@@ -65,7 +65,7 @@ def seva_request(inputs, output, manifest, runtime):
     # 720p uses a disclosed padding adapter for the U-Net's 64-pixel stride.
     if manifest['seva_resolution'] == '576p':
         request['L_short'] = 576
-    else:
+    elif height % 64:
         request['pad_to_stride'] = 64
     return request
 
@@ -145,6 +145,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
           '--Mapper.ba_refine_extra_params','0','--Mapper.fix_existing_images','1',
           '--Mapper.tri_ignore_two_view_tracks','0','--refine_intrinsics','0'])
     stage('sfm_export',[colmap,'model_converter','--input_path',sparse,'--output_path',sparse,'--output_type','TXT'])
+    verify_sfm_cameras(inputs,output)
     model('reference_depth','depth','depth_repo',{'images':str(dataset/'images'),'output':str(dataset/'depths'),
           'weights':runtime['depth_weights']})
     model('depth_alignment','script','repo',{'script':'utils/make_depth_scale.py','argv':[
@@ -174,7 +175,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
     shutil.copyfile(native,ply)
     result = {'reconstruction_method':'oraclegs','splat_path':str(ply),'mode':manifest['mode'],
               'method_variant':recipe['method_variant'],'input_manifest':str(inputs/'inputs.json'),
-              'recipe':str(output/'recipe.json'),'output_dir':str(output)}
+              'recipe':str(output/'recipe.json'),'camera_alignment':str(output/'camera-alignment.json'),'output_dir':str(output)}
     atomic_json(output/'result.json',result)
     return result
 

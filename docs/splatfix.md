@@ -836,4 +836,4 @@ requires both the dashboard and Viser processes to run the updated code.
 
 ## OracleGS
 
-Step 4 also offers OracleGS with SEVA two-pass trajectory generation and the authors' VGGT-attention-guided reconstruction. See [OracleGS integration](oraclegs.md) for the separate dataset-adapter choices, 576p default, padded 720p experiment, runtime setup, and validation limits.
+Step 4 also offers OracleGS with SEVA two-pass trajectory generation and the authors' VGGT-attention-guided reconstruction. See [OracleGS integration](oraclegs.md) for the separate dataset-adapter choices, 576p default, cropped 720p experiment with explicit padding fallback, runtime setup, and validation limits.

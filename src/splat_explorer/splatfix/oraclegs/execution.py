@@ -10,7 +10,7 @@ from .repair import DEFAULT_RUNTIME
 
 def job_runtime(cfg, options):
     runtime = {**DEFAULT_RUNTIME, **dict(cfg.get('splatfix', {}).get('oraclegs_runtime', {}))}
-    for key in ('seva_resolution', 'oracle_adapter', 'oracle_target_frames', 'oracle_path_order'):
+    for key in ('seva_resolution', 'seva_fit', 'oracle_adapter', 'oracle_target_frames', 'oracle_path_order'):
         if key in options:
             runtime[key] = options[key]
     return runtime

@@ -156,3 +156,48 @@ def reference_only_ground_truth(cameras, references):
     if any(c.is_synthetic and not c.attention_map_path for c in cameras):
         raise ValueError('Missing OracleGS synthetic attention map')
     return cameras
+
+
+def verify_sfm_cameras(inputs, output):
+    """Reject any pose/calibration drift between saved RGBs and triangulation."""
+    inputs,output = Path(inputs),Path(output)
+    manifest = json.loads((inputs/'inputs.json').read_text())
+    frames = json.loads((inputs/'scene/transforms.json').read_text())['frames'][:len(manifest['views'])]
+    sparse = output/'dataset/sparse/0'
+    calibrations = {}
+    for line in (sparse/'cameras.txt').read_text().splitlines():
+        if not line.strip() or line.startswith('#'):
+            continue
+        parts = line.split()
+        if parts[1] != 'PINHOLE':
+            raise ValueError('SfM changed the calibrated camera model')
+        calibrations[int(parts[0])] = parts
+    lines = [line for line in (sparse/'images.txt').read_text().splitlines() if not line.startswith('#')]
+    poses = {line.split()[9]:line.split() for line in lines[::2] if line.strip()}
+    if set(poses) != {Path(f['file_path']).name for f in frames}:
+        raise ValueError('SfM reference image identities changed')
+    errors=[]
+    for frame in frames:
+        name = Path(frame['file_path']).name
+        parts = poses[name]
+        camera = calibrations[int(parts[8])]
+        params = np.array(camera[4:],float)
+        expected = np.array([frame[k] for k in ('fl_x','fl_y','cx','cy')])
+        if tuple(map(int,camera[2:4])) != (frame['w'],frame['h']) or not np.allclose(params,expected,rtol=0,atol=1e-5):
+            raise ValueError(f'SfM calibration drift for {name}')
+        q = np.array(parts[1:5],float)
+        w2c = np.eye(4)
+        w2c[:3,:3] = Rotation.from_quat(q[[1,2,3,0]]).as_matrix()
+        w2c[:3,3] = np.array(parts[5:8],float)
+        c2w = np.asarray(frame['transform_matrix'])@AXES
+        if not np.allclose(w2c@c2w,np.eye(4),rtol=0,atol=1e-5):
+            raise ValueError(f'SfM camera pose drift for {name}')
+        points = np.array([[.2,-.1,2,1],[-.3,.2,3,1],[0,0,4,1]]).T
+        recovered = w2c@c2w@points
+        k = np.array([[params[0],0,params[2]],[0,params[1],params[3]],[0,0,1.]])
+        actual, wanted = k@recovered[:3], k@points[:3]
+        error = float(np.max(np.abs(actual[:2]/actual[2]-wanted[:2]/wanted[2])))
+        if error > 1e-3:
+            raise ValueError(f'SfM reprojection drift for {name}: {error} pixels')
+        errors.append({'image':name,'max_pixel_error':error})
+    (output/'camera-alignment.json').write_text(json.dumps({'passed':True,'references':errors},indent=2))

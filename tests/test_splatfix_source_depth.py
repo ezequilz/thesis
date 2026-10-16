@@ -55,6 +55,16 @@ def test_overlay_patch_never_mutates_symlink_target(tmp_path):
         assert hashlib.sha256((overlay/relative).read_bytes()).hexdigest() != expected
         compile((overlay/relative).read_text(), relative, 'exec')
     assert (tmp_path/'source-depth-extension.json').exists()
+    charts = (overlay/'matcha/dm_trainers/charts_alignment.py').read_text()
+    render = (overlay/'2d-gaussian-splatting/render_chart_views.py').read_text()
+    assert 'restore_charts' not in charts
+    assert charts.index('chart_reference_masks(scene_pm') < charts.index('pa.optimize(')
+    assert render.index('source_plane_depths(train_viewpoints') < render.index('charts_depth_normals = get_surf_normal_parallel')
+    assert 'charts_mono_normals = charts_depth_normals' in render
+    assert render.index('source_plane_visibility(train_viewpoints') < render.index('vis_points = []')
+    # Keep the actual plane fit and final plane-refined targets intact.
+    relative = '2d-gaussian-splatting/planes/refine_depth_with_planes.py'
+    assert (overlay/relative).read_bytes() == (upstream/relative).read_bytes()
 
 
 def test_metric_depth_and_pose_preserved_under_rotation_and_scale(tmp_path, monkeypatch):
