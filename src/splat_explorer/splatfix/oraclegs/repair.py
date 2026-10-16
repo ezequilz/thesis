@@ -18,7 +18,7 @@ DEFAULT_RUNTIME = {'repo':'/workspace/third_party/OracleGS',
     'colmap':'/workspace/oraclegs-model-env/bin/colmap',
     'depth_weights':'/workspace/models/oraclegs/depth_anything_v2_vitl.pth',
     'seva_fit':'crop', 'auto_setup':True, 'seva_resolution':'576p', 'oracle_adapter':'trajectory', 'oracle_target_frames':80,
-    'oracle_depth_source':'predicted', 'oracle_initialization':'sfm',
+    'seva_geometry_guidance':'off', 'oracle_depth_source':'predicted', 'oracle_initialization':'sfm',
     'oracle_attention_batching':'within_trajectory', 'oracle_path_order':None, 'iterations':22000, 'cap_max':1800000, 'seed':23}
 
 
@@ -122,6 +122,9 @@ def seva_request(inputs, output, manifest, runtime):
         'use_traj_prior':True, 'chunk_strategy':'interp' if task == 'img2vid' else 'interp-gt', 'chunk_strategy_first_pass':'gt-nearest',
         'cfg':[3.0,2.0], 'seed':runtime['seed'], 'W':width, 'H':height,
         'save_first_pass':True, 'save_input':True, 'replace_or_include_input':task == 'img2vid'}
+    if manifest.get('seva_geometry_guidance', 'off') == 'source_splat':
+        asset_root = Path(inputs).parents[1] if manifest.get('seva_segments') else Path(inputs)
+        request['source_geometry_guidance'] = {'inputs':str(asset_root), 'strength':0.35}
     # Leave T adaptive, as recommended for procedural two-pass img2trajvid.
     # 720p uses a disclosed padding adapter for the U-Net's 64-pixel stride.
     if manifest['seva_resolution'] == '576p':
@@ -150,7 +153,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
     manifest = json.loads((inputs/'inputs.json').read_text())
     from .backend import validate_options
     validate_options(runtime)
-    for key, default in [('oracle_depth_source', 'predicted'), ('oracle_initialization', 'sfm')]:
+    for key, default in [('seva_geometry_guidance', 'off'), ('oracle_depth_source', 'predicted'), ('oracle_initialization', 'sfm')]:
         if manifest.get(key, default) != runtime.get(key, default):
             raise ValueError(key + ' changed after staging; restage inputs')
     from .source_geometry import validate_assets
@@ -278,9 +281,9 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
             raise ValueError(f'Missing attention map for {image.name}')
         shutil.copyfile(source,attention/image.name)
     args = training_args(dataset,output/'model',n,runtime)
-    geometry_request = {'source_depth':str(inputs/'source-depth') if manifest.get('source_depth') else None,
+    geometry_request = {'source_depth':str(inputs/'source-depth') if manifest.get('oracle_depth_source') == 'source_splat' else None,
                         'source_initialization':str(inputs/'source-initialization.ply') if manifest.get('source_initialization') else None}
-    if manifest.get('source_depth'):
+    if manifest.get('oracle_depth_source') == 'source_splat':
         args[args.index('--depths')+1] = ''
     if manifest.get('source_initialization'):
         args += ['--sh_degree', str(manifest['source_initialization']['sh_degree'])]

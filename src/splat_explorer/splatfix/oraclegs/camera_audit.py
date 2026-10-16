@@ -97,10 +97,12 @@ def verify_conditioning(before, intrinsics, value):
 def install_conditioning_audit(evaluation, output):
     """Observe both upstream passes without changing camera or model behavior."""
     import inspect
+    from functools import wraps
     original = evaluation.get_value_dict
     signature = inspect.signature(original)
     report = {'passed':True, 'chunks':[],
               'scope':'Diffusion conditioning camera similarity and Plucker translation; not pixel geometry.'}
+    @wraps(original)
     def checked(*args, **kwargs):
         arguments = signature.bind(*args, **kwargs).arguments
         # Clone because the original may use tensor views during normalization.

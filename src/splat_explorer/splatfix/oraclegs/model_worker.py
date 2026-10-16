@@ -38,6 +38,7 @@ def main():
         vae = verified_vae()
         record_vae(request['output'], vae)
     elif args.action == 'seva':
+        geometry_guidance = request.pop('source_geometry_guidance', None)
         stride = request.pop('pad_to_stride', None)
         if stride:
             from adapter import pad_seva_inputs
@@ -55,6 +56,10 @@ def main():
             Path(request['work_dir']).parent/'seva-conditioning-audit.json')
         install_camera_audit(demo, request['data_path'],
                              Path(request['work_dir']).parent/'seva-camera-audit.json', request['task'])
+        if geometry_guidance:
+            from seva_geometry import install_geometry_guidance
+            install_geometry_guidance(evaluation, geometry_guidance,
+                Path(request['work_dir']).parent/'seva-geometry-guidance.json')
         demo.WORK_DIR = request.pop('work_dir')
         demo.main(**request)
     elif args.action == 'attention':

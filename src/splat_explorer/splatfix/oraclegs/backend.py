@@ -4,6 +4,9 @@ from ..checkpoint import camera_from_record
 
 
 def validate_options(raw):
+    guidance = raw.get('seva_geometry_guidance', 'off')
+    if guidance not in ('off', 'source_splat'):
+        raise ValueError('seva_geometry_guidance must be off or source_splat')
     depth = raw.get('oracle_depth_source', 'predicted')
     initialization = raw.get('oracle_initialization', 'sfm')
     if depth not in ('predicted', 'source_splat'):
@@ -29,7 +32,7 @@ def validate_options(raw):
     if order is not None and (not isinstance(order, list) or len(order) < 2 or
                               any(type(i) is not int or i < 0 for i in order) or len(set(order)) != len(order)):
         raise ValueError('oracle_path_order must contain distinct nonnegative checkpoint view indices')
-    return {'oracle_depth_source':depth, 'oracle_initialization':initialization, 'oracle_attention_batching':batching, 'seva_fit': fit, 'oracle_adapter': adapter, 'seva_resolution': resolution, 'oracle_target_frames': frames, 'oracle_path_order': order}
+    return {'seva_geometry_guidance':guidance, 'oracle_depth_source':depth, 'oracle_initialization':initialization, 'oracle_attention_batching':batching, 'seva_fit': fit, 'oracle_adapter': adapter, 'seva_resolution': resolution, 'oracle_target_frames': frames, 'oracle_path_order': order}
 
 
 def readiness(checkpoint):

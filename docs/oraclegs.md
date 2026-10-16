@@ -315,3 +315,60 @@ Two independent OracleGS selectors keep the existing defaults:
 Standard binary PLY initialization preserves the original file and all supported SH coefficients (degrees 0–3). SOG initialization uses the existing decoded viewer working set, including DC colors; higher-order SH is not decoded by that loader. The chosen representation, source fingerprint, Gaussian count, SH degree, asset hashes, and both settings are recorded in the input manifest and recipe. Source assets are staged locally and transferred with the job. SEVA generation, VGGT attention, RGB losses, MCMC updates, and graceful stopping continue normally. Fixed-pose COLMAP preparation still runs; it supplies depth alignment when predicted depth is selected and initialization when SfM is selected.
 
 CLI equivalents are `--oracle-depth-source source_splat` and `--oracle-initialization source_splat`. Either option can be enabled alone. Use a fresh run after reloading the persistent server/queue process; existing jobs retain their staged settings. These adapters do not modify pinned upstream files. CPU regression tests cover the four combinations and both dataset modes; GPU training quality must be compared on a new run.
+
+## SEVA source-depth guidance (experimental)
+
+`seva_geometry_guidance: off` is the default, independent of
+`oracle_depth_source` and `oracle_initialization`. Step 4 exposes **SEVA geometry
+guidance → Source-splat depth**, and the CLI accepts
+`--seva-geometry-guidance source_splat`. The choice is frozen into each queued
+run, its staged manifest, model requests and recipe. A fresh run is required.
+
+SEVA has no native predicted-depth conditioning input. This option is an
+inference adapter, not replacement of a predicted depth tensor: it reprojects
+saved reference RGBs using source-splat camera-Z depth and the unnormalized
+OpenCV cameras. It selects one reference per target using translation and
+rotation distance, resolves projected sample collisions with a target-Z buffer,
+and excludes invalid depth, uncovered pixels and coverage boundaries. At 720p,
+target intrinsics include SEVA's vertical padding; the reference depth remains
+in its original calibrated 720p grid.
+
+Both sparse-anchor and dense generation use these RGB reprojections as soft
+constraints on denoised latent estimates (strength 0.35). The same affine blend
+is applied to both classifier-free guidance branches; conditioned input frames
+remain untouched. Conservative pooling and erosion restrict latent guidance to
+covered areas. Uncovered regions remain generative. This does not introduce new
+model channels, change weights, or modify pinned upstream source files. The
+per-invocation `seva-geometry-guidance.json` records source-reference indices,
+projected/latent coverage and completed calls and is linked in run diagnostics.
+
+The source-only Z buffer cannot detect occluders absent from the selected source
+view. Edited RGB geometry can disagree with source depth. Guidance is therefore
+an experimental prior, not a guarantee of geometry consistency. CPU projection,
+configuration and dispatch checks do not validate its CUDA inference behavior or
+visual quality; compare a fresh guided run against the same seed with guidance
+off before relying on it. Enabling this setting alone retains predicted depth
+for reconstruction and SfM initialization.
+
+### Investigation of the supplied anchor pair
+
+Pixel hashes matched `file-7.png` and `file-8.png` to cached run
+`run_20261016_214940`, pair 000, first-pass anchors `013.png` and `014.png`.
+The parser audit maps these to target indices 73 and 79 (zero-based), at
+trajectory alpha 74/81 and 80/81. Their camera delta is about 0.530 scene units
+and 6.385 degrees; the latter is still 0.0883 units and 1.064 degrees from the
+ending reference. Thus these are consecutive sparse anchors, not consecutive
+dense frames. The native CPU schedule generates all 15 anchors jointly with
+all six reference RGBs in one 21-frame call. Dense generation then uses seven
+calls, each retaining all six references. A cross-call seam or dropped reference
+does not explain this particular anchor pair.
+
+That run had no source-depth guidance during generation. VGGT source-reference
+assignment occurs after SEVA and affects training attention, not anchor creation.
+The geometry gate passed with only 52 triangulated points and positive depth
+scales for two of six references; the ending reference `ref_000001` had scale
+zero. This gate checks minimum availability, not adequate geometric coverage.
+It cannot establish generation quality. The cached pose/ray audits passed and
+show consistent normalization within this segment, so they do not support a
+translation-loss or camera-reset explanation for this pair. Pixel-level
+multi-view consistency of independently edited references remains unverified.

@@ -102,7 +102,7 @@ def repair_splat(cfg, args):
             if value is not None:
                 runtime[key] = str(value)
     if method == 'oraclegs':
-        for key in ('oracle_depth_source', 'oracle_initialization', 'oracle_attention_batching', 'seva_resolution', 'seva_fit', 'oracle_adapter', 'oracle_target_frames'):
+        for key in ('seva_geometry_guidance', 'oracle_depth_source', 'oracle_initialization', 'oracle_attention_batching', 'seva_resolution', 'seva_fit', 'oracle_adapter', 'oracle_target_frames'):
             value = getattr(args, key, None)
             if value is not None:
                 runtime[key] = value
@@ -141,6 +141,7 @@ def _add_stages(parser):
     from .methods import METHODS, DEFAULT_METHOD
     repair.add_argument("--seva-fit", choices=("crop", "pad"))
     repair.add_argument("--seva-resolution", choices=("576p", "720p"))
+    repair.add_argument("--seva-geometry-guidance", choices=("off", "source_splat"))
     repair.add_argument("--oracle-depth-source", choices=("predicted", "source_splat"))
     repair.add_argument("--oracle-initialization", choices=("sfm", "source_splat"))
     repair.add_argument("--oracle-adapter", choices=("trajectory", "saved_poses"))
