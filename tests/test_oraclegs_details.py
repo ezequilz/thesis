@@ -202,3 +202,20 @@ def test_oracle_details_exposes_stop_until_request_then_partial_download(tmp_pat
     assert row['incomplete'] and row['oraclegs']['saved_iteration']==42
     assert row['ply_url'].endswith('oraclegs-partial.ply')
     assert not row['can_stop']
+
+
+def test_pair_videos_and_previews_visible_during_generation(tmp_path):
+    studio,run,root = fixture(tmp_path)
+    segments = [{'index':i,'from_reference':i,'to_reference':i+1} for i in range(5)]
+    write(root/'recipe.json', {'inputs':{'views':[], 'seva_segments':segments},
+                             'commands':[{'phase':'seva_generation_001_of_005'}]})
+    write(run/'worker-status.json',{'status':'running','phase':'seva_generation'})
+    scene = root/'seva-segments/000/seva/img2trajvid/scene'
+    png(scene/'first-pass/samples-rgb/000.png')
+    png(scene/'samples-rgb/000.png')
+    (scene/'samples-rgb.mp4').write_bytes(b'video')
+    d = build_details(studio,root/'result.json',{})
+    assert len(d['videos']) == 1
+    assert 'Pair 1: reference 1 → 2' in d['videos'][0]['label']
+    assert d['anchors'] and d['trajectory'] and d['overview_url']
+    assert next(s for s in d['stages'] if s['name']=='seva_generation')['status']=='running'

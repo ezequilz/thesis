@@ -70,3 +70,29 @@ def test_native_parser_and_chunks_use_reference_keyframes_and_keep_all_400_targe
     final = result['samples-rgb/image']
     assert torch.equal(final[gt],rgb[gt])
     assert torch.all(final[targets] == -1)
+
+
+def test_independent_pair_native_parser_and_dense_chunks_keep_all_six_references():
+    ns = native_functions()
+    torch = ns['torch']
+    for segment in range(5):
+        poses = np.repeat(np.eye(4)[None],86,axis=0)
+        poses[:6,0,3] = np.arange(6)
+        poses[6:,0,3] = segment+np.linspace(0,1,82)[1:-1]
+        parser = SimpleNamespace(image_paths=[f'{i}.png' for i in range(86)],
+            camtoworlds=poses,camera_ids=list(range(86)),
+            Ks_dict={i:np.eye(3) for i in range(86)},
+            splits_per_num_input_frames={6:{'train_ids':list(range(6)), 'test_ids':list(range(6,86))}})
+        ns['get_parser'] = lambda **kwargs: parser
+        config = {'T':21,'options':{'chunk_strategy':'interp-gt','sampler_verbose':False}}
+        paths,n,count,inputs,anchors,c2ws,ks,anchor_poses,anchor_ks = ns['parse_task'](
+            'img2trajvid','unused',6,21,config)
+        assert n == 6 and count == 80 and inputs == list(range(6))
+        np.testing.assert_allclose(c2ws[:,:3,3], poses[:,:3,3])
+        prior_poses = torch.cat([c2ws[inputs],anchor_poses],dim=0)
+        result = ns['chunk_input_and_test'](21,prior_poses,c2ws[6:],
+            inputs+anchors,list(range(6,86)),config['options'],
+            task='img2trajvid',chunk_strategy='interp-gt',gt_input_inds=inputs)
+        _,input_inds,_,test_inds,_ = result
+        assert sorted(i for chunk in test_inds for i in chunk) == list(range(80))
+        assert all(set(inputs).issubset(chunk) for chunk in input_inds)

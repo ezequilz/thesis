@@ -21,6 +21,13 @@ def generation_overview(root):
             indices = sorted({round(i * (len(paths)-1) / min(23, max(1,len(paths)-1))) for i in range(min(24,len(paths)))})
             groups.append((label, [paths[i] for i in indices], len(paths)))
     if not groups:
+        for folder in sorted(root.glob('seva-segments/[0-9][0-9][0-9]/seva/img2trajvid/scene')):
+            paths = [p for p in sorted(folder.glob('first-pass/samples-rgb/*.png'))
+                     if _safe(root, str(p.relative_to(root)))]
+            if paths:
+                step = max(1,len(paths)//12)
+                groups.append((f"Pair {int(folder.parents[2].name)+1} anchors", paths[::step][:12],len(paths)))
+    if not groups:
         return None
     fingerprint = hashlib.sha256(repr([(str(p),p.stat().st_size,p.stat().st_mtime_ns) for _,ps,_ in groups for p in ps]).encode()).hexdigest()[:20]
     relative = "debug-previews/generation-" + fingerprint + ".jpg"
@@ -108,12 +115,14 @@ def build_details(studio, manifest, result):
     phases = ['setup','sfm_features','sfm_matching','sfm_triangulation','sfm_export','reference_depth',
               'depth_alignment','seva_generation','vggt_attention','reconstruction']
     commands = recipe.get('commands', [])
-    attempted = [c.get('phase') for c in commands]
+    attempted = [('seva_generation' if (c.get('phase') or '').startswith('seva_generation_') else c.get('phase')) for c in commands]
     current = state.get('phase')
     if current == 'finished' and state.get('status') in ('error','stopped'):
         live_stage = _json(_safe(run, 'gpu/live-stage.json'), {})
         current = attempted[-1] if attempted else Path(live_stage.get('relative_path', '')).stem
         state = {**state, 'phase':current or 'finished'}
+    if (current or '').startswith('seva_generation_'):
+        current = 'seva_generation'
     stages = []
     for name in phases:
         status = 'pending'
@@ -144,6 +153,18 @@ def build_details(studio, manifest, result):
         p = _safe(root, name)
         if p:
             artifacts.append({'label':label,'url':link(p)})
+    segment_videos = []
+    for segment in inputs.get('seva_segments', []):
+        base = f"seva-segments/{segment['index']:03d}"
+        label = f"Pair {segment['index']+1}: reference {segment['from_reference']+1} → {segment['to_reference']+1}"
+        for relative, kind in [('first-pass/samples-rgb.mp4','sparse anchors'), ('samples-rgb.mp4','full sub-trajectory')]:
+            path = _safe(root, base+'/seva/img2trajvid/scene/'+relative)
+            if path:
+                segment_videos.append({'label':label+' · '+kind, 'url':link(path)})
+        for name in ('seva-camera-audit.json','seva-conditioning-audit.json'):
+            path = _safe(root, base+'/'+name)
+            if path:
+                artifacts.append({'label':label+' · '+name, 'url':link(path)})
     overview = generation_overview(root)
     live = _safe(run, 'gpu/live-stage.log')
     if live:
@@ -151,9 +172,9 @@ def build_details(studio, manifest, result):
     return {'saved_iteration':result.get('saved_iteration'), 'overview_url':link(overview), 'inputs':inputs, 'input_staging':staging, 'views':views, 'recipe':recipe,
             'state':state, 'cache':cache, 'stages':stages, 'alignment':alignment,
             'geometry':data('geometry-check.json'), 'depth_scales':data('dataset/sparse/0/depth_params.json'),
-            'anchors':panels(f'seva/{task}/scene/first-pass/samples-rgb/*.png') or panels(f'seva/{task}/scene/first-pass/forward_*/samples-rgb/*.png'),
-            'trajectory':panels(f'seva/{task}/scene/samples-rgb/*.png'),
+            'anchors':panels(f'seva/{task}/scene/first-pass/samples-rgb/*.png') or panels(f'seva/{task}/scene/first-pass/forward_*/samples-rgb/*.png') or panels('seva-segments/*/seva/img2trajvid/scene/first-pass/samples-rgb/*.png'),
+            'trajectory':panels(f'seva/{task}/scene/samples-rgb/*.png') or panels('seva-segments/*/seva/img2trajvid/scene/samples-rgb/*.png'),
             'synthetic':synthetic, 'artifacts':artifacts,
-            'videos':[{'label':label,'url':link(p)} for name,label in [
+            'videos':segment_videos+[{'label':label,'url':link(p)} for name,label in [
                 ('first-pass/samples-rgb.mp4','First pass · sparse anchors'),('samples-rgb.mp4','Full generated trajectory')]
                 if (p := _safe(root, f'seva/{task}/scene/' + name))]}

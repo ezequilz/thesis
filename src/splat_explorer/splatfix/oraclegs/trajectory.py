@@ -40,3 +40,11 @@ def keyframe_path(cameras, order, frames_per_segment, *, include_endpoints=True)
             if not np.isfinite(pose).all():
                 raise ValueError('SEVA keyframe spline produced a nonfinite camera')
             yield segment, local_index, float(alpha), reference, pose
+
+
+def pairwise_path(cameras, order, frames_per_segment):
+    """Cut into pairs first; other keyframes cannot influence either spline."""
+    for segment, (a,b) in enumerate(zip(order[:-1], order[1:])):
+        for _, local, alpha, reference, pose in keyframe_path(
+                cameras, [a,b], frames_per_segment, include_endpoints=False):
+            yield segment, local, alpha, reference, pose

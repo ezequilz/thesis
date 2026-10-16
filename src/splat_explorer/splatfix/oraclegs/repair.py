@@ -81,9 +81,9 @@ def validate_staged_trajectory(inputs, manifest):
     if manifest['oracle_adapter'] != 'trajectory':
         return
     trajectory = manifest.get('trajectory', {})
-    if (trajectory.get('version') != 3 or
-            trajectory.get('frame_count_semantics') not in ('per-segment-interior-targets', 'per-segment-including-both-endpoints')):
-        raise ValueError('Legacy OracleGS trajectory: restart the queue manager, then restage a fresh run for native reference keyframes')
+    if (trajectory.get('version') != 4 or
+            trajectory.get('frame_count_semantics') != 'per-segment-interior-targets'):
+        raise ValueError('Legacy OracleGS trajectory: restart the queue manager, then restage a fresh run for independent pairwise generation')
     order = manifest['oracle_path_order']
     expected = (len(order)-1)*manifest['oracle_target_frames']
     n = len(manifest['views'])
@@ -93,17 +93,23 @@ def validate_staged_trajectory(inputs, manifest):
             or len(frames) != n+expected or split['train_ids'] != list(range(n))
             or split['test_ids'] != list(range(n,n+expected))):
         raise ValueError('OracleGS staged trajectory count/split disagrees with frames per transition')
-    if manifest.get('seva_task') == 'img2vid':
-        order = manifest.get('seva_frame_order', [])
-        if sorted(order) != list(range(len(frames))):
-            raise ValueError('Invalid native SEVA frame order')
-        native = Path(inputs)/'ordered/scene'
-        native_frames = json.loads((native/'transforms.json').read_text())['frames']
-        native_split = json.loads((native/f'train_test_split_{n}.json').read_text())
-        expected_split = {'train_ids':[j for j,i in enumerate(order) if i < n],
-                          'test_ids':[j for j,i in enumerate(order) if i >= n]}
-        if native_frames != [frames[i] for i in order] or native_split != expected_split:
-            raise ValueError('Native SEVA images/cameras disagree with the staged trajectory')
+    if manifest.get('seva_task') != 'img2trajvid':
+        raise ValueError('Pairwise trajectories require SEVA img2trajvid')
+    segments = manifest.get('seva_segments', [])
+    if len(segments) != len(order)-1:
+        raise ValueError('OracleGS needs one SEVA run per camera pair')
+    for j, segment in enumerate(segments):
+        targets = list(range(j*manifest['oracle_target_frames'], (j+1)*manifest['oracle_target_frames']))
+        if (segment['index'] != j or segment['input_subdir'] != f'segments/{j:03d}'
+                or segment['target_indices'] != targets
+                or [segment['from_reference'],segment['to_reference']] != order[j:j+2]):
+            raise ValueError('Invalid SEVA segment mapping')
+        native = Path(inputs)/segment['input_subdir']/'scene'
+        selected = frames[:n]+[frames[n+i] for i in targets]
+        split = {'train_ids':list(range(n)), 'test_ids':list(range(n,n+len(targets)))}
+        if (json.loads((native/'transforms.json').read_text())['frames'] != selected or
+                json.loads((native/f'train_test_split_{n}.json').read_text()) != split):
+            raise ValueError('SEVA segment images/cameras disagree with the staged trajectory')
 
 
 
@@ -165,7 +171,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
     lock = json.loads((HERE/'upstream-lock.json').read_text())
     recipe = {'reconstruction_method':'oraclegs','inputs':manifest,
         'upstream':{k:{'url':v['url'],'revision':v['revision']} for k,v in lock.items()},
-        'method_variant':('native-ordered-keyframe-trajectory' if manifest.get('seva_task') == 'img2vid' else
+        'method_variant':('independent-pairwise-trajectories' if manifest.get('seva_segments') else
                           'checkpoint-trajectory-adapter' if manifest['oracle_adapter']=='trajectory' else 'saved-poses-original-loader'),
         'gt_policy':'Only saved reference RGBs are GT; all SEVA outputs are synthetic',
         'attention_layers':[0,22], 'attention_weights':[0.25,0.75],
@@ -180,7 +186,8 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         argv = [str(a) for a in argv]
         recipe['commands'].append({'phase':name,'argv':argv})
         atomic_json(output/'recipe.json',recipe)
-        on_progress({'phase':name,'message':'OracleGS: '+name.replace('_',' ')})
+        on_progress({'phase':'seva_generation' if name.startswith('seva_generation_') else name,
+                     'log_phase':name, 'message':'OracleGS: '+name.replace('_',' ')})
         poll = should_stop
         if training:
             from .graceful import stop_poll
@@ -224,7 +231,18 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
     model('depth_alignment','script','repo',{'script':'utils/make_depth_scale.py','argv':[
           '--base_dir',str(dataset),'--depths_dir',str(dataset/'depths'),'--model_type','txt']},training=True)
     validate_geometry(output)
-    model('seva_generation','seva','seva_repo',seva_request(inputs,output,manifest,runtime))
+    if manifest.get('seva_segments'):
+        from .segments import merge_segments
+        for segment in manifest['seva_segments']:
+            index = segment['index']
+            destination = output/'seva-segments'/f'{index:03d}'
+            destination.mkdir(parents=True)
+            request = seva_request(inputs/segment['input_subdir'], destination, manifest, runtime)
+            model(f'seva_generation_{index+1:03d}_of_{len(manifest["seva_segments"]):03d}',
+                  'seva','seva_repo',request)
+        merge_segments(inputs, output, manifest, should_stop=should_stop)
+    else:
+        model('seva_generation','seva','seva_repo',seva_request(inputs,output,manifest,runtime))
     assemble(inputs,output)
     attention = dataset/f'synthetic_{n}_attention_maps'
     model('vggt_attention','attention','vggt_repo',{'image_dir':str(output/'combined'),

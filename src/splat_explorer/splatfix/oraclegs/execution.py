@@ -127,7 +127,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
         if time.monotonic() - last_log < 60:
             return
         last_log = time.monotonic()
-        phase = state.get('phase', '')
+        phase = state.get('log_phase', state.get('phase', ''))
         relative = 'results/oraclegs/' + phase + '.log' if phase.isidentifier() else 'stage.log'
         try:
             text = ssh('if [ -f ' + shlex.quote(remote + '/' + relative) + ' ]; then tail -c 65536 ' +
