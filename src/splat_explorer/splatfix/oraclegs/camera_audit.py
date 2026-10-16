@@ -6,17 +6,18 @@ import numpy as np
 AXES = np.diag([1., -1., -1., 1.])
 
 
-def verify_parsed_cameras(data_path, parsed):
+def verify_parsed_cameras(data_path, parsed, task='img2trajvid'):
     paths, n, count, input_ids, anchor_ids, poses, intrinsics, anchors, anchor_k = parsed
     scene = Path(data_path)/'scene'
     frames = json.loads((scene/'transforms.json').read_text())['frames']
     split = json.loads((scene/f'train_test_split_{n}.json').read_text())
-    ordered = [frames[i] for i in split['train_ids']+split['test_ids']]
+    ordered = frames if task == 'img2vid' else [frames[i] for i in split['train_ids']+split['test_ids']]
     def array(value):
         return value.detach().cpu().numpy() if hasattr(value, 'detach') else np.asarray(value)
     expected = np.asarray([f['transform_matrix'] for f in ordered]) @ AXES
     expected_k = np.asarray([[[f['fl_x'],0,f['cx']],[0,f['fl_y'],f['cy']],[0,0,1]] for f in ordered])
-    if count != len(split['test_ids']) or list(input_ids) != list(range(n)):
+    expected_inputs = split['train_ids'] if task == 'img2vid' else list(range(n))
+    if count != len(split['test_ids']) or list(input_ids) != expected_inputs:
         raise ValueError('SEVA reference/target split changed before inference')
     if len(paths) != len(ordered) or any(Path(p).resolve() != (scene/f['file_path']).resolve()
                                        for p,f in zip(paths,ordered)):
@@ -28,19 +29,22 @@ def verify_parsed_cameras(data_path, parsed):
     check(poses, expected[:,:3], 'camera poses')
     check(intrinsics, expected_k, 'camera intrinsics')
     indices = np.linspace(0,count-1,len(anchor_ids)).round().astype(int)
-    check(anchors,expected[n+indices,:3], 'anchor poses')
-    check(anchor_k,expected_k[n+indices], 'anchor intrinsics')
+    native_indices = np.asarray(anchor_ids, dtype=int) if task == 'img2vid' else n+indices
+    check(anchors,expected[native_indices,:3], 'anchor poses')
+    check(anchor_k,expected_k[native_indices], 'anchor intrinsics')
     return {'passed':True, 'reference_count':n, 'target_count':count,
-            'anchor_target_indices':indices.tolist(),
-            'target_center_extent':np.ptp(expected[n:,:3,3],axis=0).tolist(),
+            'task':task, 'reference_frame_indices':expected_inputs,
+            'anchor_frame_indices':native_indices.tolist(),
+            'anchor_target_indices':indices.tolist() if task != 'img2vid' else None,
+            'target_center_extent':np.ptp(expected[split['test_ids'] if task == 'img2vid' else list(range(n,len(expected))),:3,3],axis=0).tolist(),
             'scope':'Actual SEVA parser outputs before inference; not generated-image geometric accuracy.'}
 
 
-def install_camera_audit(demo, data_path, output):
+def install_camera_audit(demo, data_path, output, task='img2trajvid'):
     original = demo.parse_task
     def parse(*args, **kwargs):
         parsed = original(*args, **kwargs)
-        report = verify_parsed_cameras(data_path, parsed)
+        report = verify_parsed_cameras(data_path, parsed, task)
         Path(output).write_text(json.dumps(report,indent=2))
         return parsed
     demo.parse_task = parse

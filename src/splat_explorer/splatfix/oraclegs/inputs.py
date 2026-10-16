@@ -1,5 +1,6 @@
 """Stage saved images and calibrated cameras without rendering or image blending."""
 import hashlib
+import shutil
 from pathlib import Path
 import numpy as np
 from PIL import Image
@@ -53,6 +54,7 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
         order = list(range(len(cameras)))
     if any(i >= len(cameras) for i in order):
         raise ValueError('oracle_path_order references a missing checkpoint view')
+    ordered_path = options['oracle_adapter'] == 'trajectory' and set(order) == set(range(len(cameras)))
     requested = SIZES[options['seva_resolution']]
     width, height = requested
     # Keep the requested framing/resolution. The diffusion stride is handled by
@@ -108,7 +110,8 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
         samples = [(min(j,len(order)-2),j,float(j == len(order)-1),i,
                     cameras[i].c2w.astype(float)) for j,i in enumerate(order)]
     else:
-        samples = keyframe_path(cameras, order, options['oracle_target_frames'])
+        samples = keyframe_path(cameras, order, options['oracle_target_frames'],
+                                include_endpoints=not ordered_path)
     target_records, used_names = [], set()
     for index, (a, local_index, alpha, reference, pose) in enumerate(samples):
         if should_stop():
@@ -133,7 +136,21 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
     n = len(records)
     atomic_json(scene/'transforms.json', {'frames':frames})
     atomic_json(scene/f'train_test_split_{n}.json', {'train_ids':list(range(n)), 'test_ids':list(range(n,len(frames)))})
-    manifest = {'reconstruction_method':'oraclegs', 'mode':mode, 'views':records,
+    native_order = list(range(len(frames)))
+    if ordered_path:
+        native_order = []
+        for segment, reference in enumerate(order[:-1]):
+            native_order.append(reference)
+            native_order.extend(n+t['target_index'] for t in target_records if t['segment_index'] == segment)
+        native_order.append(order[-1])
+        native = root/'ordered/scene'
+        shutil.copytree(scene, native)
+        atomic_json(native/'transforms.json', {'frames':[frames[i] for i in native_order]})
+        atomic_json(native/f'train_test_split_{n}.json', {
+            'train_ids':[i for i, original in enumerate(native_order) if original < n],
+            'test_ids':[i for i, original in enumerate(native_order) if original >= n]})
+    manifest = {'seva_task':'img2vid' if ordered_path else 'img2trajvid',
+                'seva_frame_order':native_order, 'reconstruction_method':'oraclegs', 'mode':mode, 'views':records,
                 'source_checkpoint':str(checkpoint.root), 'camera_convention':'opengl_c2w',
                 'source_camera_convention':'opencv_c2w', 'resolution':[width,height], 'requested_resolution':list(requested),
                 **options, 'oracle_path_order':order, 'path_order_source':'explicit' if options['oracle_path_order'] else 'checkpoint-selection-order',
@@ -141,9 +158,11 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
                 'resolution_adapter':('vertical-padding-then-crop' if height % 64 else 'calibrated-center-'+options['seva_fit']),
                 'reference_role':'ground_truth', 'source_splat_used_for_initialization':False}
     manifest['trajectory'] = {
-        'version':2, 'interpolation':('seva-gui-kochanek-bartels-natural-tension-0'
+        'version':3, 'interpolation':('seva-gui-kochanek-bartels-natural-tension-0'
             if options['oracle_adapter'] == 'trajectory' else 'saved-poses'),
-        'frame_count_semantics':'per-segment-including-both-endpoints',
+        'frame_count_semantics':('per-segment-interior-targets' if ordered_path else
+                                 'per-segment-including-both-endpoints'),
+        'reference_conditioning':('ordered-native-keyframes' if ordered_path else 'unordered-reference-set'),
         'frames_per_segment':options['oracle_target_frames'] if options['oracle_adapter'] == 'trajectory' else None,
         'target_count':len(target_records), 'closed':False,
         'segments':[{'index':j, 'from_reference':a, 'to_reference':b,

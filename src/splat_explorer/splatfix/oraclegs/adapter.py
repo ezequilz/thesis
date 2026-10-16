@@ -51,10 +51,28 @@ def assemble(inputs, output):
     manifest = json.loads((inputs/'inputs.json').read_text())
     frames = json.loads((inputs/'scene/transforms.json').read_text())['frames']
     n = len(manifest['views'])
-    generated = output/'seva/img2trajvid/scene'
+    generated = output/'seva'/manifest.get('seva_task', 'img2trajvid')/'scene'
     exported = json.loads((generated/'transforms.json').read_text())['frames']
     if len(exported) != len(frames):
         raise ValueError('SEVA output camera count does not match staged references and target path')
+    order = manifest.get('seva_frame_order', list(range(len(frames))))
+    if sorted(order) != list(range(len(frames))):
+        raise ValueError('Invalid SEVA frame mapping')
+    exported = [exported[order.index(i)] for i in range(len(frames))]
+    # Validate reference cameras too: native img2vid interleaves GT and targets.
+    for frame, out_frame in zip(frames, exported):
+        pose = np.asarray(out_frame['transform_matrix'])
+        if pose.shape == (3,4):
+            pose = np.vstack([pose,[0,0,0,1]])
+        if not np.allclose(pose, frame['transform_matrix'],atol=1e-5):
+            raise ValueError('SEVA changed target camera identity or order')
+        width,height = manifest['resolution']
+        internal = tuple(manifest.get('seva_internal_resolution', manifest['resolution']))
+        top = (internal[1]-height)//2
+        expected_k = [frame['fl_x'],frame['fl_y'],frame['cx'],frame['cy']+top]
+        if (out_frame['w'],out_frame['h']) != internal or not np.allclose(
+                [out_frame[k] for k in ('fl_x','fl_y','cx','cy')], expected_k, atol=1e-4):
+            raise ValueError('SEVA changed target camera calibration')
     dataset = output/'dataset'
     synthetic = dataset/f'synthetic_{n}'
     synthetic.mkdir()
@@ -73,18 +91,6 @@ def assemble(inputs, output):
     with (sparse/'cameras.txt').open('a') as cams, (sparse/'images.txt').open('a') as imgs:
         for j, frame in enumerate(frames[n:]):
             out_frame = exported[n+j]
-            pose = np.asarray(out_frame['transform_matrix'])
-            if pose.shape == (3,4):
-                pose = np.vstack([pose,[0,0,0,1]])
-            if not np.allclose(pose, frame['transform_matrix'],atol=1e-5):
-                raise ValueError('SEVA changed target camera identity or order')
-            width,height = manifest['resolution']
-            internal = tuple(manifest.get('seva_internal_resolution', manifest['resolution']))
-            top = (internal[1]-height)//2
-            expected_k = [frame['fl_x'],frame['fl_y'],frame['cx'],frame['cy']+top]
-            if (out_frame['w'],out_frame['h']) != internal or not np.allclose(
-                    [out_frame[k] for k in ('fl_x','fl_y','cx','cy')], expected_k, atol=1e-4):
-                raise ValueError('SEVA changed target camera calibration')
             raw = Path(out_frame['file_path'])
             path = (generated/raw).resolve()
             if raw.is_absolute() or not path.is_relative_to(generated.resolve()):

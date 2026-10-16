@@ -52,7 +52,8 @@ def test_pending_run_uses_oracle_details_without_result_manifest(tmp_path):
     assert d['state']['phase'] == 'setup'
 
 
-def test_live_generation_attention_pairing_and_overview_cache(tmp_path):
+@pytest.mark.parametrize('task', ['img2trajvid','img2vid'])
+def test_live_generation_attention_pairing_and_overview_cache(tmp_path,task):
     studio,run,root = fixture(tmp_path)
     write(root/'recipe.json',{'inputs':{'views':[{'image':'scene/images/ref_000000.png'}]},
                              'commands':[{'phase':'seva_generation'},{'phase':'vggt_attention'}]})
@@ -60,10 +61,10 @@ def test_live_generation_attention_pairing_and_overview_cache(tmp_path):
     png(root/'dataset/images/ref_000000.png')
     png(root/'dataset/synthetic_1/target_000010.png')
     png(root/'attention-raw/synth_target_000010.png')
-    png(root/'seva/img2trajvid/scene/first-pass/samples-rgb/000.png')
-    png(root/'seva/img2trajvid/scene/samples-rgb/010.png')
+    png(root/f'seva/{task}/scene/first-pass/samples-rgb/000.png')
+    png(root/f'seva/{task}/scene/samples-rgb/010.png')
     for name in ('first-pass/samples-rgb.mp4', 'samples-rgb.mp4'):
-        (root/'seva/img2trajvid/scene'/name).write_bytes(b'saved video')
+        (root/f'seva/{task}/scene'/name).write_bytes(b'saved video')
     d = build_details(studio, root/'result.json', {})
     assert len(d['anchors']) == len(d['trajectory']) == 1
     assert [v['label'] for v in d['videos']] == ['First pass · sparse anchors', 'Full generated trajectory']

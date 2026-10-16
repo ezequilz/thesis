@@ -54,7 +54,7 @@ def main():
         install_conditioning_audit(evaluation,
             Path(request['work_dir']).parent/'seva-conditioning-audit.json')
         install_camera_audit(demo, request['data_path'],
-                             Path(request['work_dir']).parent/'seva-camera-audit.json')
+                             Path(request['work_dir']).parent/'seva-camera-audit.json', request['task'])
         demo.WORK_DIR = request.pop('work_dir')
         demo.main(**request)
     elif args.action == 'attention':

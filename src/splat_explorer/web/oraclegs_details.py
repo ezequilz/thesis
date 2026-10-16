@@ -6,11 +6,16 @@ from .g4splat_details import _json, _safe, _LOCK
 from PIL import Image, ImageDraw
 
 
+def generation_task(root):
+    return 'img2vid' if (root/'seva/img2vid/scene').is_dir() else 'img2trajvid'
+
+
 def generation_overview(root):
     """Small cached contact sheet; filenames stay visible, no inferred camera pairing."""
+    task = generation_task(root)
     groups = []
-    for label, pattern in [("Sparse anchors", "seva/img2trajvid/scene/first-pass/samples-rgb/*.png"),
-                           ("Full trajectory", "seva/img2trajvid/scene/samples-rgb/*.png")]:
+    for label, pattern in [("Sparse anchors", f"seva/{task}/scene/first-pass/samples-rgb/*.png"),
+                           ("Full trajectory", f"seva/{task}/scene/samples-rgb/*.png")]:
         paths = [p for p in sorted(root.glob(pattern))[:1000] if _safe(root, str(p.relative_to(root)))]
         if paths:
             indices = sorted({round(i * (len(paths)-1) / min(23, max(1,len(paths)-1))) for i in range(min(24,len(paths)))})
@@ -56,6 +61,7 @@ def generation_overview(root):
 
 def build_details(studio, manifest, result):
     root = manifest.parent
+    task = generation_task(root)
     run = root.parent.parent.parent
     def data(name, default=None):
         return _json(_safe(root, name), {} if default is None else default)
@@ -125,7 +131,7 @@ def build_details(studio, manifest, result):
                         ('seva-conditioning-audit.json','SEVA diffusion translation and ray audit'), ('seva_generation-request.json','SEVA parameters'),
                         ('dataset/sparse/0/cameras.txt','COLMAP intrinsics'), ('dataset/sparse/0/images.txt','COLMAP camera poses'),
                         ('dataset/sparse/0/points3D.txt','Triangulated source points'), ('dataset/sparse/0/depth_params.json','Depth alignment scales'),
-                        ('seva/img2trajvid/scene/transforms.json','Generated camera encoding'),
+                        (f'seva/{task}/scene/transforms.json','Generated camera encoding'),
                         ('result.json','Final reconstruction provenance')]:
         p = _safe(root, name)
         if p:
@@ -145,9 +151,9 @@ def build_details(studio, manifest, result):
     return {'saved_iteration':result.get('saved_iteration'), 'overview_url':link(overview), 'inputs':inputs, 'input_staging':staging, 'views':views, 'recipe':recipe,
             'state':state, 'cache':cache, 'stages':stages, 'alignment':alignment,
             'geometry':data('geometry-check.json'), 'depth_scales':data('dataset/sparse/0/depth_params.json'),
-            'anchors':panels('seva/img2trajvid/scene/first-pass/samples-rgb/*.png') or panels('seva/img2trajvid/scene/first-pass/forward_*/samples-rgb/*.png'),
-            'trajectory':panels('seva/img2trajvid/scene/samples-rgb/*.png'),
+            'anchors':panels(f'seva/{task}/scene/first-pass/samples-rgb/*.png') or panels(f'seva/{task}/scene/first-pass/forward_*/samples-rgb/*.png'),
+            'trajectory':panels(f'seva/{task}/scene/samples-rgb/*.png'),
             'synthetic':synthetic, 'artifacts':artifacts,
             'videos':[{'label':label,'url':link(p)} for name,label in [
                 ('first-pass/samples-rgb.mp4','First pass · sparse anchors'),('samples-rgb.mp4','Full generated trajectory')]
-                if (p := _safe(root, 'seva/img2trajvid/scene/' + name))]}
+                if (p := _safe(root, f'seva/{task}/scene/' + name))]}

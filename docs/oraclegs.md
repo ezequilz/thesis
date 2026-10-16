@@ -6,8 +6,8 @@ OracleGS is an independent reconstruction method under `src/splat_explorer/splat
 
 1. Stage saved references, validate OpenCV camera-to-world rotations/calibration, preserve the source files, and downscale RGBs with Lanczos. Center-crop by default (`seva_fit: crop`), uniformly resizing to cover the output and updating focal lengths and principal points by the same image-space affine. Non-16:9 checkpoints are supported. Repaired-image aspect ratio must still match its saved camera: a previously unknown crop cannot be inferred safely. Padding (`seva_fit: pad`) is an explicit fallback to preserve framing. Inputs that require upscaling are rejected. Saved originals remain unchanged.
 2. Use the calibrated reference cameras with COLMAP feature extraction, exhaustive matching and fixed-pose triangulation. Match the COLMAP database IDs explicitly; permit two-view tracks for sparse inputs. Before depth or SEVA inference, verify that SfM retained every staged reference identity, pose and calibration. Save pixel-reprojection checks in `camera-alignment.json`; reject drift rather than continuing with misaligned supervision. No source-splat geometry initializes this reconstruction. Estimate reference pseudo inverse depth with Depth Anything V2 Large, then run the authors' `utils/make_depth_scale.py` to align depth to SfM. Empty triangulation or entirely unreliable depth fails the run.
-3. Stage SEVA `transforms.json` in OpenGL camera-to-world coordinates (`c2w_cv @ diag(1,-1,-1,1)`) and `train_test_split_N.json`. References retain their independent input order. The ordered target path includes each saved path pose exactly, plus intermediate poses. By default the path follows checkpoint selection order; `oracle_path_order` can supply a separate list of checkpoint indices through configuration or the job API. Camera translations and orientations use the natural Kochanek–Bartels keyframe splines from SEVA’s GUI (tension 0, open path); saved endpoint poses remain exact. Intrinsics interpolate between calibrated endpoints. No image interpolation is implemented here.
-4. Call the pinned SEVA `demo.main` with `task=img2trajvid`, `use_traj_prior=True`, `chunk_strategy=interp-gt`, `chunk_strategy_first_pass=gt-nearest`, and per-pass CFG `[3.0, 2.0]`. SEVA itself selects and generates sparse anchors in the first pass, then generates the full ordered trajectory in its second pass. The context window/anchor count remains adaptive as in its published implementation. Default target count: 80 per pair **per consecutive viewpoint pair**, including both endpoints. Six views produce five segments and 400 outputs. Junction poses occur twice with distinct image identities. Both saved poses and intermediate poses receive synthetic outputs.
+3. Stage SEVA `transforms.json` in OpenGL camera-to-world coordinates (`c2w_cv @ diag(1,-1,-1,1)`) and `train_test_split_N.json`. The canonical dataset retains reference identities independently of path order. When the path includes all references, an `ordered/scene` export interleaves the exact repaired reference keyframes with 80 strictly intermediate target poses per pair. Six references therefore yield 400 synthetic targets and 406 frames in the full trajectory video. `seva_frame_order` maps each native SEVA frame back to the canonical dataset. Camera positions and orientations follow SEVA GUI natural Kochanek–Bartels splines; intrinsics interpolate with the same path parameter. No RGB blending is performed.
+4. Complete ordered paths use pinned SEVA's native `task=img2vid`, `use_traj_prior=True`, `chunk_strategy=interp`, `chunk_strategy_first_pass=gt-nearest`, `replace_or_include_input=True`, and CFG `[3.0, 2.0]`. Its native parser excludes GT from generated first-pass anchors. Its native second-pass chunking uses the repaired references at their actual sequence positions, and final output includes the original reference pixels. Only the 400 generated targets enter OracleGS synthetic supervision. If an explicit path omits some reference cameras, their path positions are unknown: that case retains the documented `img2trajvid` / `interp-gt` mode, recorded in the manifest. The `saved_poses` diagnostic also retains `img2trajvid`.
 5. Run the authors' unmodified `vggt_aten/visualize_attn.py` implementation on the combined reference and synthetic images. The released global-attention extractor uses layers 0 and 22 with weights 1/4 and 3/4, per-layer normalization, source-frame index 0, and its existing batching behavior. Reference and synthetic images at the same pose have distinct filenames in this combined set. A fixed NumPy seed makes the authors' shuffle reproducible. All synthetic views must have matching attention maps.
 6. Run the original OracleGS optimizer and its pinned inverse-depth CUDA rasterizer. Ground-truth views use photometric supervision plus reliable SfM-aligned inverse-depth supervision. Synthetic views retain `is_synthetic=True` and use attention-weighted L1, weighted SSIM and globally weighted LPIPS. The original MCMC Gaussian updates, regularizers and GT/synthetic sampling code are unchanged. Defaults: 22,000 iterations, LPIPS 0.3, synthetic SSIM 0.3, scale/opacity regularization 0.01, noise LR 500000, `cap_max=1800000`, `init_type=sfm`. Inputs are already resized, so training uses `-r 1`.
 7. Save native 3D Gaussian PLY, recipe, command requests/logs, depth products, sparse model, SEVA outputs and attention maps. The queue downloads results and exposes the PLY through the existing results UI. Cancellation terminates the active subprocess group; completed intermediate products are retained. A stopped run is not advertised as a completed reconstruction.
@@ -34,7 +34,7 @@ The 720-pixel dimension is incompatible with the released SEVA U-Net's 64-pixel 
 
 The paper's prose gives a Beta-distribution synthetic sampling formula. The released `train.py` instead computes `prob_gt = 0.9 - progress * (1-progress)**3` when `--gt_synth_schedule` is enabled. This integration deliberately preserves the released implementation; it does not silently change the schedule to the paper formula.
 
-The OracleGS README's generation example uses `img2img`, CFG 3 and `T=80`. Our user-requested trajectory setup uses SEVA's documented sparse-reference `img2trajvid` two-pass recipe, including CFG `[3,2]` and adaptive context length. The number of target images is distinct from the SEVA context window `T`. Consequently this is an original-optimizer Splatfix baseline with an explicitly recorded input/generation configuration, not a claim to reproduce the paper's benchmark metrics. The Gaussian cap is configurable because the paper derives it per scene from another baseline. No held-out GT exists along the custom trajectory; generated images must never be reported as held-out ground truth for PSNR/SSIM/LPIPS evaluation.
+The OracleGS README's generation example uses `img2img`, CFG 3 and `T=80`. Our ordered trajectory setup uses SEVA's native `img2vid` recipe with known reference keyframe positions, CFG `[3,2]` and adaptive context length. The number of target images is distinct from the SEVA context window `T`. Consequently this is an original-optimizer Splatfix baseline with an explicitly recorded input/generation configuration, not a claim to reproduce the paper's benchmark metrics. The Gaussian cap is configurable because the paper derives it per scene from another baseline. No held-out GT exists along the custom trajectory; generated images must never be reported as held-out ground truth for PSNR/SSIM/LPIPS evaluation.
 
 Sources: [OracleGS authors' implementation](https://github.com/atakan-topaloglu/OracleGS), [VGGT attention extractor](https://github.com/atakan-topaloglu/vggt_aten), [SEVA CLI documentation](https://github.com/Stability-AI/stable-virtual-camera/blob/main/docs/CLI_USAGE.md), [COLMAP known-pose reconstruction](https://colmap.github.io/faq.html#reconstruct-sparse-dense-model-from-known-camera-poses), [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2).
 
@@ -256,3 +256,32 @@ does not establish that generated pixels obey the supplied cameras. Both camera
 audit reports are linked from run details. CPU regression tests inject erased ray
 moments and collapsed camera centers to verify rejection; real CUDA execution of
 this new audit and visual improvement remain to be validated.
+
+
+### Ordered reference keyframes (trajectory manifest v3)
+
+No OracleGS-specific orbit override was found. The active wrapper calls SEVA
+before attention extraction or OracleGS training; `img2trajvid` reads supplied
+poses and does not enter SEVA's preset-orbit branches. The previous integration
+nevertheless discarded known reference positions in the sequence by exporting
+references as a prefix and generating separate targets at those same poses.
+SEVA's `img2trajvid` interpolation deliberately excludes these unordered GT
+references from its temporal anchor ordering. A passing pose/ray audit cannot
+prove that the resulting generated pixels respect translation.
+
+Version 3 uses the native ordered-reference path described above. The change is
+an explicit SEVA input/task adaptation, not an alteration to OracleGS training
+or diffusion weights. Version 2 staging must be regenerated. Reload the persistent queue manager
+(`scripts/start.sh` detects changed code) before queuing a fresh run; creating a
+new job alone does not reload Python modules. Existing running processes retain
+their original request and cannot acquire this change in place.
+The saved-pose and off-path-reference modes remain available and are disclosed
+in `seva_task` and `trajectory.reference_conditioning`.
+
+Regression checks execute the pinned SEVA parser, prior selection, interpolation
+chunking and final reference inclusion on CPU. They check 400 target queries,
+all six reference anchors at indices 0/81/162/243/324/405, conditioning within
+segment boundaries, and unchanged reference pixels. Dataset tests verify native
+output reordering before pose/calibration checks and synthetic assembly at both
+resolutions. This verifies the implementation contract; a new GPU generation is
+still required to establish that it corrects the stationary-looking output.

@@ -81,9 +81,9 @@ def validate_staged_trajectory(inputs, manifest):
     if manifest['oracle_adapter'] != 'trajectory':
         return
     trajectory = manifest.get('trajectory', {})
-    if (trajectory.get('version') != 2 or
-            trajectory.get('frame_count_semantics') != 'per-segment-including-both-endpoints'):
-        raise ValueError('Legacy OracleGS trajectory: restage a fresh run for the configured images per transition')
+    if (trajectory.get('version') != 3 or
+            trajectory.get('frame_count_semantics') not in ('per-segment-interior-targets', 'per-segment-including-both-endpoints')):
+        raise ValueError('Legacy OracleGS trajectory: restart the queue manager, then restage a fresh run for native reference keyframes')
     order = manifest['oracle_path_order']
     expected = (len(order)-1)*manifest['oracle_target_frames']
     n = len(manifest['views'])
@@ -93,15 +93,28 @@ def validate_staged_trajectory(inputs, manifest):
             or len(frames) != n+expected or split['train_ids'] != list(range(n))
             or split['test_ids'] != list(range(n,n+expected))):
         raise ValueError('OracleGS staged trajectory count/split disagrees with frames per transition')
+    if manifest.get('seva_task') == 'img2vid':
+        order = manifest.get('seva_frame_order', [])
+        if sorted(order) != list(range(len(frames))):
+            raise ValueError('Invalid native SEVA frame order')
+        native = Path(inputs)/'ordered/scene'
+        native_frames = json.loads((native/'transforms.json').read_text())['frames']
+        native_split = json.loads((native/f'train_test_split_{n}.json').read_text())
+        expected_split = {'train_ids':[j for j,i in enumerate(order) if i < n],
+                          'test_ids':[j for j,i in enumerate(order) if i >= n]}
+        if native_frames != [frames[i] for i in order] or native_split != expected_split:
+            raise ValueError('Native SEVA images/cameras disagree with the staged trajectory')
+
 
 
 def seva_request(inputs, output, manifest, runtime):
     width,height = manifest['resolution']
-    request = {'data_path':str(inputs), 'data_items':'scene', 'task':'img2trajvid',
+    task = manifest.get('seva_task', 'img2trajvid')
+    request = {'data_path':str(Path(inputs)/'ordered' if task == 'img2vid' else inputs), 'data_items':'scene', 'task':task,
         'work_dir':str(output/'seva'), 'num_inputs':len(manifest['views']),
-        'use_traj_prior':True, 'chunk_strategy':'interp-gt', 'chunk_strategy_first_pass':'gt-nearest',
+        'use_traj_prior':True, 'chunk_strategy':'interp' if task == 'img2vid' else 'interp-gt', 'chunk_strategy_first_pass':'gt-nearest',
         'cfg':[3.0,2.0], 'seed':runtime['seed'], 'W':width, 'H':height,
-        'save_first_pass':True, 'save_input':True, 'replace_or_include_input':False}
+        'save_first_pass':True, 'save_input':True, 'replace_or_include_input':task == 'img2vid'}
     # Leave T adaptive, as recommended for procedural two-pass img2trajvid.
     # 720p uses a disclosed padding adapter for the U-Net's 64-pixel stride.
     if manifest['seva_resolution'] == '576p':
@@ -152,7 +165,8 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
     lock = json.loads((HERE/'upstream-lock.json').read_text())
     recipe = {'reconstruction_method':'oraclegs','inputs':manifest,
         'upstream':{k:{'url':v['url'],'revision':v['revision']} for k,v in lock.items()},
-        'method_variant':'checkpoint-trajectory-adapter' if manifest['oracle_adapter']=='trajectory' else 'saved-poses-original-loader',
+        'method_variant':('native-ordered-keyframe-trajectory' if manifest.get('seva_task') == 'img2vid' else
+                          'checkpoint-trajectory-adapter' if manifest['oracle_adapter']=='trajectory' else 'saved-poses-original-loader'),
         'gt_policy':'Only saved reference RGBs are GT; all SEVA outputs are synthetic',
         'attention_layers':[0,22], 'attention_weights':[0.25,0.75],
         'schedule':'released train.py (differs from Beta schedule in paper)',
