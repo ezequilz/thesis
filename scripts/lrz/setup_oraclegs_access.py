@@ -15,6 +15,9 @@ sys.path.insert(0, str(ROOT / 'src'))
 # token argument, shell interpolation, environment dump, or traceback here.
 REMOTE = r'''
 import json, os, sys
+sys.path.insert(0, '/workspace/code/src/splat_explorer/splatfix/oraclegs')
+from provision import huggingface_environment
+os.environ.update(huggingface_environment())
 from huggingface_hub import login, hf_hub_download
 os.umask(0o077)
 copy_only = '--copy-only' in sys.argv[1:]

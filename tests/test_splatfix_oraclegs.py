@@ -262,6 +262,9 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter):
         elif phase == 'depth_alignment':
             (dataset/'sparse/0/depth_params.json').write_text('{"ref_000000":{"scale":1,"offset":0}}')
         elif phase == 'seva_generation':
+            from splat_explorer.splatfix.oraclegs.provision import huggingface_environment
+            for key,value in huggingface_environment().items():
+                assert key+'='+value in argv
             body = json.loads(Path(argv[-1]).read_text())
             assert body['use_traj_prior'] and body['chunk_strategy']=='interp-gt'
             generated = output/'seva/img2trajvid/scene'

@@ -91,3 +91,18 @@ def test_runtime_probe_checks_both_isolated_environments(monkeypatch):
     for args, kw in calls:
         assert kw['timeout'] == 60
         assert 'PYTHONPATH' not in kw['env']
+
+
+def test_hf_paths_ignore_redirected_launcher_home(monkeypatch):
+    import pwd
+    from types import SimpleNamespace
+    monkeypatch.setattr(pwd, 'getpwuid', lambda uid: SimpleNamespace(pw_dir='/accounts/researcher'))
+    monkeypatch.setenv('HOME', '/workspace/python/home')
+    monkeypatch.setenv('XDG_CACHE_HOME', '/workspace/python/cache')
+    monkeypatch.setenv('HF_HOME', '/wrong/hf')
+    monkeypatch.setenv('HF_HUB_CACHE', '/wrong/hub')
+    monkeypatch.setenv('HF_TOKEN_PATH', '/wrong/token')
+    env=provision.runtime_environment('/workspace/oraclegs-model-env')
+    assert env['HF_HOME']=='/accounts/researcher/.cache/huggingface'
+    assert env['HF_TOKEN_PATH']==env['HF_HOME']+'/token'
+    assert env['HF_HUB_CACHE']==env['HUGGINGFACE_HUB_CACHE']==env['HF_HOME']+'/hub'

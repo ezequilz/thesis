@@ -6,8 +6,16 @@ import subprocess
 import sys
 
 
+def huggingface_environment():
+    """Use the authenticated account, independent of LRZ's redirected HOME."""
+    import pwd
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir) / '.cache/huggingface'
+    return {'HF_HOME': str(home), 'HF_HUB_CACHE': str(home/'hub'),
+            'HUGGINGFACE_HUB_CACHE': str(home/'hub'), 'HF_TOKEN_PATH': str(home/'token')}
+
+
 def runtime_environment(prefix):
-    env = {**os.environ, 'PYTHONNOUSERSITE':'1',
+    env = {**os.environ, **huggingface_environment(), 'PYTHONNOUSERSITE':'1',
            'LD_LIBRARY_PATH':str(Path(prefix)/'lib')+':/usr/local/nvidia/lib:/usr/local/nvidia/lib64'}
     for key in ('PYTHONPATH', 'PYTHONHOME', 'TORCH_CUDA_ARCH_LIST'):
         env.pop(key, None)

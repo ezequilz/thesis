@@ -9,7 +9,7 @@ from ..checkpoint import Checkpoint, atomic_json
 from ..executor import run_process
 from .inputs import export_inputs
 from .adapter import known_model, assemble, validate_geometry, verify_sfm_cameras
-from .provision import runtime_environment
+from .provision import runtime_environment, huggingface_environment
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_RUNTIME = {'repo':'/workspace/third_party/OracleGS',
@@ -154,6 +154,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         python = Path(runtime['python' if training else 'model_python'])
         env = ['env','-u','PYTHONPATH','-u','PYTHONHOME','PYTHONNOUSERSITE=1',
                'LD_LIBRARY_PATH='+str(python.parent.parent/'lib')+':/usr/local/nvidia/lib:/usr/local/nvidia/lib64']
+        env += [key+'='+value for key,value in huggingface_environment().items()]
         stage(name,env+[python,'-u',HERE/'model_worker.py',action,runtime[repo_key],request])
     model('model_access','assets','seva_repo',{'output':str(output/'vae-provenance.json')})
     colmap = runtime['colmap']

@@ -34,6 +34,9 @@ def test_remote_program_downloads_only_required_files_without_echoing_secret(mon
     script=load_script()
     import io,sys
     calls=[]
+    from splat_explorer.splatfix.oraclegs import provision
+    monkeypatch.setitem(sys.modules,'provision', provision)
+    monkeypatch.setattr(provision, 'huggingface_environment', lambda: {})
     fake=SimpleNamespace(login=lambda **kw:calls.append(('login',kw)),
         hf_hub_download=lambda **kw: calls.append(('download',kw)) or '/cache/'+kw['filename'])
     monkeypatch.setitem(sys.modules,'huggingface_hub',fake)
