@@ -762,6 +762,50 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_video_file(self, target: Path) -> None:
+        """Stream saved MP4 artifacts, including the byte ranges used for seeking."""
+        with target.open("rb") as source:
+            size = target.stat().st_size
+            start, end = 0, size - 1
+            partial = False
+            requested = self.headers.get("Range", "")
+            if requested.startswith("bytes=") and "," not in requested:
+                try:
+                    first, last = requested[6:].split("-", 1)
+                    if not (first.isdigit() and (not last or last.isdigit())
+                            or not first and last.isdigit() and int(last) > 0):
+                        raise ValueError
+                    start = int(first) if first else max(0, size - int(last))
+                    end = min(int(last), size - 1) if first and last else size - 1
+                    if start > end or start >= size:
+                        raise ValueError
+                    partial = True
+                except ValueError:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+            self.send_response(206 if partial else 200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(end - start + 1))
+            self.send_header("Cache-Control", "no-store")
+            if partial:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            source.seek(start)
+            remaining = end - start + 1
+            try:
+                while remaining > 0:
+                    chunk = source.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # A player can cancel a range when the user seeks or closes it.
+
     def _send_json(self, obj: dict, code: int = 200) -> None:
         self._send(code, json.dumps(obj, default=str).encode(), "application/json")
 
@@ -1275,7 +1319,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif self.command == "GET" and path == "/api/splatfix/file":
                 query = parse_qs(urlsplit(self.path).query)
                 target = studio.allowed_file(query.get("path", [""])[0])
-                self._send(200, target.read_bytes(), mimetypes.guess_type(target.name)[0] or "application/octet-stream")
+                if target.suffix.lower() == ".mp4":
+                    self._send_video_file(target)
+                else:
+                    self._send(200, target.read_bytes(), mimetypes.guess_type(target.name)[0] or "application/octet-stream")
             elif self.command == "POST" and path == "/api/splatfix/checkpoints/delete":
                 try:
                     self._send_json(studio.delete_checkpoint(body))

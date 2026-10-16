@@ -12,6 +12,7 @@ dependencies = [
     "pillow>=10.0",
     "pyyaml>=6.0",
     "scipy>=1.11",
+    "splines==0.3.3",
 ]
 
 [project.optional-dependencies]

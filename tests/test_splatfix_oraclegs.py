@@ -36,9 +36,9 @@ def test_repaired_rgb_projection_and_exact_saved_path_poses(tmp_path,resolution,
     before = [hashlib.sha256(cp.image_path(v,repaired=True).read_bytes()).hexdigest() for v in cp.views]
     manifest = export_inputs(cp,root,runtime={'seva_resolution':resolution,'oracle_target_frames':11,'oracle_path_order':[2,0,1]})
     frames = json.loads((root/'scene/transforms.json').read_text())['frames']
-    assert len(frames) == 14
+    assert len(frames) == 25
     split = json.loads((root/'scene/train_test_split_3.json').read_text())
-    assert split == {'train_ids':[0,1,2],'test_ids':list(range(3,14))}
+    assert split == {'train_ids':[0,1,2],'test_ids':list(range(3,25))}
     for i, v in enumerate(cp.views):
         f = frames[i]
         rgb = Image.open(root/'scene'/f['file_path'])
@@ -389,3 +389,76 @@ def test_full_response_reuses_recorded_camera_crop_without_upscaling(tmp_path):
     cp.views[0]['image_repair']['resize']['source_crop_box'][0]+=5
     with pytest.raises(ValueError,match='crop disagrees'):
         export_inputs(cp,tmp_path/'invalid')
+
+
+def test_each_pair_has_80_distinct_outputs_and_exact_endpoints(tmp_path):
+    from splat_explorer.splatfix.oraclegs.trajectory import keyframe_path
+    from splat_explorer.splatfix.checkpoint import camera_from_record
+    cp = checkpoint(tmp_path, 6)
+    cameras = [camera_from_record(v) for v in cp.views]
+    # Exercise curved translation and quaternion sign continuity, not only a line.
+    for i,c in enumerate(cameras):
+        c.position = np.array([np.cos(i), np.sin(i), i/10])
+        c.rotation = Rotation.from_euler('y', i*65, degrees=True).as_matrix()
+    path = list(keyframe_path(cameras, list(range(6)), 80))
+    assert len(path) == 400
+    for i in range(5):
+        segment = path[i*80:(i+1)*80]
+        np.testing.assert_array_equal(segment[0][-1],cameras[i].c2w)
+        np.testing.assert_array_equal(segment[-1][-1],cameras[i+1].c2w)
+        poses = np.array([x[-1] for x in segment])
+        assert np.linalg.norm(np.ptp(poses[:,:3,3],axis=0)) > .1
+        np.testing.assert_allclose(np.linalg.det(poses[:,:3,:3]),1,atol=1e-6)
+    root = tmp_path/'staged'
+    manifest = export_inputs(cp, root)
+    frames = json.loads((root/'scene/transforms.json').read_text())['frames'][6:]
+    assert len(frames) == len({f['file_path'] for f in frames}) == 400
+    assert manifest['trajectory']['target_count'] == 400
+    for i in range(4):
+        np.testing.assert_array_equal(frames[i*80+79]['transform_matrix'],frames[(i+1)*80]['transform_matrix'])
+
+
+def test_seva_parser_audit_detects_translation_and_image_pairing_errors(tmp_path):
+    from splat_explorer.splatfix.oraclegs.camera_audit import verify_parsed_cameras
+    cp = checkpoint(tmp_path,3)
+    root = tmp_path/'inputs'
+    export_inputs(cp,root,runtime={'oracle_target_frames':4})
+    frames = json.loads((root/'scene/transforms.json').read_text())['frames']
+    poses = (np.array([f['transform_matrix'] for f in frames])@AXES)[:,:3]
+    ks = np.array([[[f['fl_x'],0,f['cx']],[0,f['fl_y'],f['cy']],[0,0,1]] for f in frames])
+    paths = [str(root/'scene'/f['file_path']) for f in frames]
+    indices = [3,7,10]
+    parsed = (paths,3,8,[0,1,2],[3.,6.5,10.],poses,ks,poses[indices],ks[indices])
+    assert verify_parsed_cameras(root,parsed)['passed']
+    poses[4,:,3] = poses[3,:,3]
+    with pytest.raises(ValueError,match='camera poses'):
+        verify_parsed_cameras(root,parsed)
+    poses[4] = (np.array(frames[4]['transform_matrix'])@AXES)[:3]
+    paths[0],paths[1] = paths[1],paths[0]
+    with pytest.raises(ValueError,match='pairing'):
+        verify_parsed_cameras(root,parsed)
+
+
+def test_pinned_seva_parser_preserves_reference_pairing_and_translated_path(tmp_path):
+    # Execute the actual CPU parser classes without importing SEVA's GPU stack.
+    import ast
+    import os
+    from glob import glob
+    from typing import Dict, List, Optional, Tuple
+    from splat_explorer.splatfix.oraclegs import inputs as inputs_module
+    source = Path(inputs_module.__file__).parent/'upstream/seva/seva/data_io.py'
+    tree = ast.parse(source.read_text())
+    tree.body = [node for node in tree.body if isinstance(node,ast.ClassDef)
+                 and node.name in ('BaseParser','ReconfusionParser')]
+    ns = dict(np=np, json=json, os=os, osp=os.path, glob=glob,
+              Dict=Dict, List=List, Optional=Optional, Tuple=Tuple)
+    exec(compile(tree,str(source),'exec'),ns)
+    cp = checkpoint(tmp_path,3)
+    root = tmp_path/'inputs'
+    export_inputs(cp,root,runtime={'oracle_target_frames':5,'oracle_path_order':[2,0,1]})
+    parser = ns['ReconfusionParser'](str(root/'scene'),normalize=False)
+    assert parser.splits_per_num_input_frames[3]['train_ids'] == [0,1,2]
+    assert len(parser.splits_per_num_input_frames[3]['test_ids']) == 10
+    for idx, reference in [(0,0),(1,1),(2,2),(3,2),(7,0),(8,0),(12,1)]:
+        np.testing.assert_allclose(parser.camtoworlds[idx],cp.views[reference]['camera']['c2w'],atol=1e-6)
+    assert np.linalg.norm(parser.camtoworlds[4,:3,3]-parser.camtoworlds[3,:3,3]) > .1

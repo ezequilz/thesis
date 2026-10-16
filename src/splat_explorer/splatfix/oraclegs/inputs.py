@@ -3,7 +3,7 @@ import hashlib
 from pathlib import Path
 import numpy as np
 from PIL import Image
-from scipy.spatial.transform import Rotation, Slerp
+from .trajectory import keyframe_path
 from ..checkpoint import atomic_json, camera_from_record
 from .backend import readiness, validate_options
 
@@ -104,25 +104,26 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
                         'source_kind':source_kind, 'source_crop_box':source_box,
                         'image_affine':affine.tolist(), 'staged_intrinsics':k.tolist()})
     # Only camera poses are interpolated here. SEVA owns both generative passes.
-    keys = np.arange(len(order), dtype=float)
-    rotations = Slerp(keys, Rotation.from_matrix(np.stack([cameras[i].rotation for i in order])))
     if options['oracle_adapter'] == 'saved_poses':
-        samples = keys
+        samples = [(min(j,len(order)-2),j,float(j == len(order)-1),i,
+                    cameras[i].c2w.astype(float)) for j,i in enumerate(order)]
     else:
-        if options['oracle_target_frames'] < len(order):
-            raise ValueError('Target frame count must include every saved path pose')
-        # Allocate samples to segments while including every exact saved pose.
-        counts = np.full(len(order)-1, (options['oracle_target_frames']-1)//(len(order)-1))
-        counts[:(options['oracle_target_frames']-1) % (len(order)-1)] += 1
-        samples = np.concatenate([np.linspace(i,i+1,int(count)+1)[:-1] for i,count in enumerate(counts)] + [keys[-1:]])
-    for index, t in enumerate(samples):
-        a = min(int(t), len(order)-2)
-        alpha = t-a
+        samples = keyframe_path(cameras, order, options['oracle_target_frames'])
+    target_records, used_names = [], set()
+    for index, (a, local_index, alpha, reference, pose) in enumerate(samples):
+        if should_stop():
+            raise InterruptedError('Cancelled during OracleGS trajectory staging')
         left, right = frames[order[a]], frames[order[a+1]]
-        pose = np.eye(4)
-        pose[:3,:3] = rotations(t).as_matrix()
-        pose[:3,3] = (1-alpha)*cameras[order[a]].position + alpha*cameras[order[a+1]].position
-        name = f'ref_{order[int(t)]:06d}.png' if float(t).is_integer() else f'target_{index:06d}.png'
+        name = f'ref_{reference:06d}.png' if reference is not None else f'target_{index:06d}.png'
+        # A shared endpoint is generated once for each adjacent segment. Never
+        # overwrite either sample during OracleGS dataset assembly.
+        if name in used_names:
+            name = f'target_{index:06d}.png'
+        used_names.add(name)
+        target_records.append({'target_index':index, 'segment_index':a,
+            'segment_frame_index':local_index, 'alpha':alpha,
+            'reference_index':reference, 'image_name':name,
+            'position':pose[:3,3].tolist()})
         # Placeholders satisfy ReconfusionParser; never used as training labels.
         if not (scene/'images'/name).exists():
             Image.new('RGB',(width,height)).save(scene/'images'/name)
@@ -139,5 +140,15 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
                 'seva_internal_resolution':[width, ((height+63)//64)*64],
                 'resolution_adapter':('vertical-padding-then-crop' if height % 64 else 'calibrated-center-'+options['seva_fit']),
                 'reference_role':'ground_truth', 'source_splat_used_for_initialization':False}
+    manifest['trajectory'] = {
+        'version':2, 'interpolation':('seva-gui-kochanek-bartels-natural-tension-0'
+            if options['oracle_adapter'] == 'trajectory' else 'saved-poses'),
+        'frame_count_semantics':'per-segment-including-both-endpoints',
+        'frames_per_segment':options['oracle_target_frames'] if options['oracle_adapter'] == 'trajectory' else None,
+        'target_count':len(target_records), 'closed':False,
+        'segments':[{'index':j, 'from_reference':a, 'to_reference':b,
+                     'translation_distance':float(np.linalg.norm(cameras[b].position-cameras[a].position))}
+                    for j,(a,b) in enumerate(zip(order[:-1],order[1:]))],
+        'frames':target_records}
     atomic_json(root/'inputs.json',manifest)
     return manifest

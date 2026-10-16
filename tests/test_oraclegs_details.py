@@ -62,8 +62,12 @@ def test_live_generation_attention_pairing_and_overview_cache(tmp_path):
     png(root/'attention-raw/synth_target_000010.png')
     png(root/'seva/img2trajvid/scene/first-pass/samples-rgb/000.png')
     png(root/'seva/img2trajvid/scene/samples-rgb/010.png')
+    for name in ('first-pass/samples-rgb.mp4', 'samples-rgb.mp4'):
+        (root/'seva/img2trajvid/scene'/name).write_bytes(b'saved video')
     d = build_details(studio, root/'result.json', {})
     assert len(d['anchors']) == len(d['trajectory']) == 1
+    assert [v['label'] for v in d['videos']] == ['First pass · sparse anchors', 'Full generated trajectory']
+    assert all(v['url'].endswith('samples-rgb.mp4') for v in d['videos'])
     assert d['synthetic'][0]['attention_url'].endswith('synth_target_000010.png')
     assert d['synthetic'][0]['role'] == 'Synthetic at intermediate pose'
     assert d['overview_url']

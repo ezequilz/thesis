@@ -6,8 +6,8 @@ OracleGS is an independent reconstruction method under `src/splat_explorer/splat
 
 1. Stage saved references, validate OpenCV camera-to-world rotations/calibration, preserve the source files, and downscale RGBs with Lanczos. Center-crop by default (`seva_fit: crop`), uniformly resizing to cover the output and updating focal lengths and principal points by the same image-space affine. Non-16:9 checkpoints are supported. Repaired-image aspect ratio must still match its saved camera: a previously unknown crop cannot be inferred safely. Padding (`seva_fit: pad`) is an explicit fallback to preserve framing. Inputs that require upscaling are rejected. Saved originals remain unchanged.
 2. Use the calibrated reference cameras with COLMAP feature extraction, exhaustive matching and fixed-pose triangulation. Match the COLMAP database IDs explicitly; permit two-view tracks for sparse inputs. Before depth or SEVA inference, verify that SfM retained every staged reference identity, pose and calibration. Save pixel-reprojection checks in `camera-alignment.json`; reject drift rather than continuing with misaligned supervision. No source-splat geometry initializes this reconstruction. Estimate reference pseudo inverse depth with Depth Anything V2 Large, then run the authors' `utils/make_depth_scale.py` to align depth to SfM. Empty triangulation or entirely unreliable depth fails the run.
-3. Stage SEVA `transforms.json` in OpenGL camera-to-world coordinates (`c2w_cv @ diag(1,-1,-1,1)`) and `train_test_split_N.json`. References retain their independent input order. The ordered target path includes each saved path pose exactly, plus intermediate poses. By default the path follows checkpoint selection order; `oracle_path_order` can supply a separate list of checkpoint indices through configuration or the job API. Camera translations and orientations are interpolated to define query poses; no image interpolation is implemented here.
-4. Call the pinned SEVA `demo.main` with `task=img2trajvid`, `use_traj_prior=True`, `chunk_strategy=interp-gt`, `chunk_strategy_first_pass=gt-nearest`, and per-pass CFG `[3.0, 2.0]`. SEVA itself selects and generates sparse anchors in the first pass, then generates the full ordered trajectory in its second pass. The context window/anchor count remains adaptive as in its published implementation. Default target count: 80. Both saved poses and intermediate poses receive synthetic outputs.
+3. Stage SEVA `transforms.json` in OpenGL camera-to-world coordinates (`c2w_cv @ diag(1,-1,-1,1)`) and `train_test_split_N.json`. References retain their independent input order. The ordered target path includes each saved path pose exactly, plus intermediate poses. By default the path follows checkpoint selection order; `oracle_path_order` can supply a separate list of checkpoint indices through configuration or the job API. Camera translations and orientations use the natural Kochanek–Bartels keyframe splines from SEVA’s GUI (tension 0, open path); saved endpoint poses remain exact. Intrinsics interpolate between calibrated endpoints. No image interpolation is implemented here.
+4. Call the pinned SEVA `demo.main` with `task=img2trajvid`, `use_traj_prior=True`, `chunk_strategy=interp-gt`, `chunk_strategy_first_pass=gt-nearest`, and per-pass CFG `[3.0, 2.0]`. SEVA itself selects and generates sparse anchors in the first pass, then generates the full ordered trajectory in its second pass. The context window/anchor count remains adaptive as in its published implementation. Default target count: 80 per pair **per consecutive viewpoint pair**, including both endpoints. Six views produce five segments and 400 outputs. Junction poses occur twice with distinct image identities. Both saved poses and intermediate poses receive synthetic outputs.
 5. Run the authors' unmodified `vggt_aten/visualize_attn.py` implementation on the combined reference and synthetic images. The released global-attention extractor uses layers 0 and 22 with weights 1/4 and 3/4, per-layer normalization, source-frame index 0, and its existing batching behavior. Reference and synthetic images at the same pose have distinct filenames in this combined set. A fixed NumPy seed makes the authors' shuffle reproducible. All synthetic views must have matching attention maps.
 6. Run the original OracleGS optimizer and its pinned inverse-depth CUDA rasterizer. Ground-truth views use photometric supervision plus reliable SfM-aligned inverse-depth supervision. Synthetic views retain `is_synthetic=True` and use attention-weighted L1, weighted SSIM and globally weighted LPIPS. The original MCMC Gaussian updates, regularizers and GT/synthetic sampling code are unchanged. Defaults: 22,000 iterations, LPIPS 0.3, synthetic SSIM 0.3, scale/opacity regularization 0.01, noise LR 500000, `cap_max=1800000`, `init_type=sfm`. Inputs are already resized, so training uses `-r 1`.
 7. Save native 3D Gaussian PLY, recipe, command requests/logs, depth products, sparse model, SEVA outputs and attention maps. The queue downloads results and exposes the PLY through the existing results UI. Cancellation terminates the active subprocess group; completed intermediate products are retained. A stopped run is not advertised as a completed reconstruction.
@@ -170,3 +170,43 @@ This is recovery of the **latest saved iteration**, not serialization at the exa
 stop instant or a resumable optimizer checkpoint. Before the first save, only
 available generation/geometry/attention artifacts can be downloaded. No upstream
 source, attention method, losses, optimizer or training schedule is modified.
+
+
+## Camera-path debugging, 2026-10-16
+
+The inspected run `run_20261016_183036` contains six reference cameras and 80
+synthetic targets. Its reference centers span approximately
+`[12.283559, 1.122240, 4.441781]` in source-scene coordinates. The generated
+`transforms.json` retains translation. The OpenCV → OpenGL export and SEVA's
+OpenGL → OpenCV parser conversion preserve camera centers; COLMAP inversion
+also retains them. This evidence does **not** establish that generated image
+content obeyed those cameras. Output metadata alone cannot prove that.
+
+Two integration issues were corrected:
+
+- `oracle_target_frames` previously allocated one total budget over all pairs.
+  It now means images per pair. Its default 80 yields 400 targets for six views.
+  `inputs.json` records versioned count semantics, segment endpoints, sample
+  indices, reference identities and actual target positions. Existing staged
+  runs keep their original trajectories and require a fresh run to use this fix.
+- The previous custom path used straight-line position interpolation plus
+  independent SLERP. It now uses SEVA's GUI quaternion and position splines,
+  with exact saved endpoints, natural ends and no implicit loop. The pinned
+  upstream model and optimizer files remain unchanged. This is the GUI path
+  construction, not the separate smoothed B-spline prior used by img2img.
+
+The selected path itself has difficult transitions: reference 3 → 4 (zero-based)
+rotates approximately 175.31 degrees across 5.38 scene units. The old straight
+segment approaches within about 0.65 units of the least-squares viewing center.
+This is a plausible contributor to the visual failure, **not proof of a camera
+encoding defect**. A camera spline does not infer obstacle clearance or ensure
+multi-view consistency of independently repaired images. Selection order remains
+explicit and is never silently reordered.
+
+Before diffusion, `seva-camera-audit.json` now verifies the actual upstream parser
+outputs against staged images, OpenCV poses, pixel intrinsics, split membership,
+and sampled first-pass anchors. The existing reconstruction gate still checks
+SEVA's exported poses and calibration. Neither gate measures whether the generated
+pixels depict the requested geometry. CPU regression tests cover moving/rotating
+keyframes, exact endpoints, 400 distinct outputs and parser mismatch rejection;
+a fresh GPU generation/reconstruction is needed to assess visual improvement.

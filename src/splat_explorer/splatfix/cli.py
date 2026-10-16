@@ -142,7 +142,7 @@ def _add_stages(parser):
     repair.add_argument("--seva-fit", choices=("crop", "pad"))
     repair.add_argument("--seva-resolution", choices=("576p", "720p"))
     repair.add_argument("--oracle-adapter", choices=("trajectory", "saved_poses"))
-    repair.add_argument("--oracle-target-frames", type=int)
+    repair.add_argument("--oracle-target-frames", type=int, help="Generated images per consecutive viewpoint pair, including endpoints (default: 80)")
     repair.add_argument("--g4splat-repo", type=Path)
     repair.add_argument("--g4splat-python", type=Path)
     repair.add_argument("--reconstruction-method", choices=tuple(METHODS), default=DEFAULT_METHOD)
