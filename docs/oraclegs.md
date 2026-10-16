@@ -23,8 +23,8 @@ The two options are shown separately in Step 4 and recorded as `checkpoint-traje
 ## Resolution
 
 - **576p (default):** 1024 × 576, calibrated center crop, `L_short=576`. Both dimensions satisfy SEVA's 64-pixel spatial stride. For 16:9 inputs this is simply downscaling; other aspect ratios are cropped with matching intrinsics.
-- **720p experiment, default crop:** 1280 × **704**. For a 1280 × 720 frame, remove 8 pixels above and below and subtract 8 from `cy`. Do not stretch the result back to 720 pixels. Reference GT, generated images, depth, attention and reconstruction all use this same 704-pixel calibration. Camera positions and rotations are unchanged.
-- **Explicit padding fallback:** choose `seva_fit: pad` in configuration, `--seva-fit pad` on the CLI, or “Padding fallback” in Step 4. The 720p output remains 1280 × 720. SEVA internally receives 1280 × 768 with 24 pixels above/below and `cy + 24`; generated outputs are cropped back to 720 with the matching original calibration. The default 576p size needs no extra stride padding. For non-16:9 inputs, this option letterboxes the reference image and records its calibrated image transform.
+- **720p experiment:** 1280 × 720 references and reconstruction for both fitting modes. SEVA internally receives 1280 × 768 with 24 pixels above/below and `cy + 24`; generated outputs are cropped back to 720 with the original calibration. This preserves 16:9 framing without stretching.
+- **Image fitting:** `crop` and `pad` control how non-16:9 sources fit the requested frame. Stride padding is independent of that choice and automatic for 720p.
 
 The 720-pixel dimension is incompatible with the released SEVA U-Net's 64-pixel stride. Native 1280 × 720 diffusion is not claimed. `inputs.json` distinguishes the requested preset, actual reconstruction resolution, internal SEVA resolution, fitting mode, and per-reference image affine/intrinsics. SEVA output pose and calibration are checked before images are admitted to reconstruction.
 
@@ -47,6 +47,68 @@ bash src/splat_explorer/splatfix/oraclegs/provision.sh /workspace
 ```
 
 Settings live in `splatfix.oraclegs_runtime`. Defaults use `/workspace/third_party/OracleGS`, `/workspace/third_party/oraclegs-{seva,vggt,depth}`, `/workspace/oraclegs-env/bin/python`, `/workspace/oraclegs-model-env/bin/python`, and `/workspace/models/oraclegs/depth_anything_v2_vitl.pth`. Set `auto_setup: false` for a manually installed custom layout. All runtime paths can be overridden there.
+
+The trainer's compiler is installed separately in `/workspace/oraclegs-cuda-11.7`
+from NVIDIA's pinned CUDA 11.7.1 packages. Setup verifies `nvcc --version`, CUDA
+headers and the runtime library before compiling the original extensions, even
+when the Python environment already exists. This avoids the `cudatoolkit-dev`
+runfile post-install hook, which failed in the LRZ container while environment
+creation still reported success. Incomplete compiler installations are repaired
+on retry; the system CUDA and other methods' environments are left unchanged.
+The setup also discards NGC's inherited CUDA architecture list and isolates the
+Python library paths. SEVA uses Diffusers 0.32.2 and Hugging Face Hub 0.28.1 with
+PyTorch 2.5.1: newer unpinned Diffusers releases require unavailable PyTorch APIs.
+Setup checks the SEVA module imports as well as both trainer CUDA extensions. Every run repeats isolated import/version probes before SfM; existing Python executables alone no longer allow an incomplete installation to bypass automatic repair.
+
+
+SEVA's pinned loader requests the unavailable `stabilityai/stable-diffusion-2-1-base`
+VAE repository (observed HTTP 401; also reported in
+[SEVA issue 92](https://github.com/Stability-AI/stable-virtual-camera/issues/92)).
+The wrapper redirects only that VAE lookup to a local, checksum-verified snapshot
+of `sd2-community/stable-diffusion-2-1-base`, revision
+`4e63672c03103b6c636b8fb4119ba982469b2955`. Both configuration and safetensors
+hashes are pinned in `model_assets.py` and recorded in `vae-provenance.json`.
+The weights match the SD 2.1 public clones and the blob published by Stability AI
+in `sd-vae-ft-mse`; direct comparison with the unavailable original endpoint is
+not possible. This is a disclosed model-source recovery, with the upstream
+SEVA codec, sampling, and network code unchanged. No arbitrary VAE replacement
+or silent fallback is permitted. SEVA and CLIP weights still use their upstream
+sources and access requirements. The `model_access` stage checks the official
+SEVA configuration before SfM or large CLIP downloads. A 401/403 produces a concise
+actionable error; accept the model's access conditions and run
+`/workspace/oraclegs-model-env/bin/huggingface-cli login` inside the worker
+container as the same user. Credentials belong in the Hugging Face credential
+store or protected environment, never in job JSON.
+
+For users without a worker shell, run the local helper from the repository:
+
+```sh
+.venv/bin/python scripts/lrz/setup_oraclegs_access.py
+```
+
+Connect to LRZ through Splatfix first and accept the official model access
+conditions. The helper reads a token with a hidden prompt, sends it only through
+SSH stdin, authenticates the same worker account, and caches `config.yaml` and
+`modelv1.1.safetensors`. The optional `--download-local` also copies both files
+back to the local machine; omit it to avoid the additional multi-GB transfer.
+By default no model files are copied to the local machine. Use `--check-only`
+to verify the worker cache without entering a token again, or `--copy-only
+--download-local DIRECTORY` to retry an explicitly requested local copy. The
+copy command supports Apple's bundled rsync 2.6.9.
+No token is placed in shell arguments, job JSON, or the repository. The helper
+does not start reconstruction. A live configured GPU allocation is required for
+the existing container transport.
+
+Remote validation on 2026-10-16 used six repaired references at **1024 × 576**.
+Both CUDA extensions and SEVA modules imported on the allocated A100.
+Run `run_20261016_180646` passed known-pose SfM, camera-alignment and depth gates
+(51 triangulated points; two positive depth scales out of six), then exposed the
+retired VAE dependency. Its replacement snapshot was downloaded and both hashes
+verified on the worker. The subsequent retry `run_20261016_180953` was stopped
+after a separate check confirmed HTTP 401 for the gated official SEVA model.
+Generation, attention extraction and final training have **not** been validated
+end to end; authorized model access is required to finish that validation.
+
 
 Local CUDA CLI example:
 

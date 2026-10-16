@@ -9,6 +9,7 @@ from ..checkpoint import Checkpoint, atomic_json
 from ..executor import run_process
 from .inputs import export_inputs
 from .adapter import known_model, assemble, validate_geometry, verify_sfm_cameras
+from .provision import runtime_environment
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_RUNTIME = {'repo':'/workspace/third_party/OracleGS',
@@ -52,6 +53,28 @@ def validate_runtime(runtime):
     for key in ('iterations','cap_max'):
         if type(runtime[key]) is not int or runtime[key] <= 0:
             raise ValueError(f'{key} must be a positive integer')
+    probe_runtime(runtime)
+
+
+def probe_runtime(runtime):
+    """Existing executables are not proof that a failed setup completed."""
+    checks = {
+        'python': 'import torch, diff_gaussian_rasterization, simple_knn._C; '
+                  'assert torch.__version__ == "1.13.1+cu117", torch.__version__',
+        'model_python': 'import torch; import seva.eval; '
+                        'from seva.modules.autoencoder import AutoEncoder; '
+                        'from seva.modules.conditioner import CLIPConditioner; '
+                        'assert torch.__version__.split("+")[0] == "2.5.1", torch.__version__',
+    }
+    for key, code in checks.items():
+        python = Path(runtime[key])
+        try:
+            subprocess.check_output([str(python), '-c', code],
+                env=runtime_environment(python.parent.parent),
+                stderr=subprocess.STDOUT, text=True, timeout=60)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            detail = getattr(exc, 'output', '') or str(exc)
+            raise FileNotFoundError(f'Incomplete OracleGS {key} runtime: {detail[-4000:]}') from exc
 
 
 def seva_request(inputs, output, manifest, runtime):
@@ -132,6 +155,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         env = ['env','-u','PYTHONPATH','-u','PYTHONHOME','PYTHONNOUSERSITE=1',
                'LD_LIBRARY_PATH='+str(python.parent.parent/'lib')+':/usr/local/nvidia/lib:/usr/local/nvidia/lib64']
         stage(name,env+[python,'-u',HERE/'model_worker.py',action,runtime[repo_key],request])
+    model('model_access','assets','seva_repo',{'output':str(output/'vae-provenance.json')})
     colmap = runtime['colmap']
     db = output/'database.db'
     stage('sfm_features',[colmap,'feature_extractor','--database_path',db,'--image_path',dataset/'images',

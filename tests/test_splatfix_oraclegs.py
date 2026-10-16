@@ -29,7 +29,7 @@ def checkpoint(tmp_path, count=3):
     return cp
 
 
-@pytest.mark.parametrize('resolution,size',[('576p',(1024,576)),('720p',(1280,704))])
+@pytest.mark.parametrize('resolution,size',[('576p',(1024,576)),('720p',(1280,720))])
 def test_repaired_rgb_projection_and_exact_saved_path_poses(tmp_path,resolution,size):
     cp = checkpoint(tmp_path)
     root = tmp_path/'staged'
@@ -288,11 +288,11 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter):
             ply.write_text('ply\nformat ascii 1.0\ncomment TEST DOUBLE\nend_header\n')
     monkeypatch.setattr(repair,'run_process',fake_process)
     result = repair.run_prepared(inputs,output)
-    assert phases == ['sfm_features','sfm_matching','sfm_triangulation','sfm_export',
+    assert phases == ['model_access','sfm_features','sfm_matching','sfm_triangulation','sfm_export',
                       'reference_depth','depth_alignment','seva_generation','vggt_attention','reconstruction']
     assert Path(result['splat_path']).exists()
     recipe = json.loads((output/'recipe.json').read_text())
-    assert len(recipe['commands'])==9
+    assert len(recipe['commands'])==10
     assert 'Only saved reference' in recipe['gt_policy']
 
 
@@ -320,17 +320,17 @@ def test_non_widescreen_projection_after_fitting(tmp_path,mode):
         assert fitted.getpixel((512,288)) == (0,0,255)
 
 
-def test_720_crop_and_pad_are_distinct_explicit_options(tmp_path):
+def test_720_preserves_requested_resolution_for_both_fitting_modes(tmp_path):
     cp = checkpoint(tmp_path,2)
     cropped = export_inputs(cp,tmp_path/'crop',runtime={'seva_resolution':'720p','oracle_target_frames':3})
     padded = export_inputs(cp,tmp_path/'pad',runtime={'seva_resolution':'720p','seva_fit':'pad','oracle_target_frames':3})
-    assert cropped['resolution']==cropped['seva_internal_resolution']==[1280,704]
+    assert cropped['resolution']==[1280,720] and cropped['seva_internal_resolution']==[1280,768]
     assert padded['resolution']==[1280,720] and padded['seva_internal_resolution']==[1280,768]
-    for name,cy in [('crop',352),('pad',360)]:
+    for name,cy in [('crop',360),('pad',360)]:
         f=json.loads((tmp_path/name/'scene/transforms.json').read_text())['frames'][0]
         assert f['cy']==cy
         np.testing.assert_allclose(np.asarray(f['transform_matrix'])@AXES,cp.views[0]['camera']['c2w'])
-    assert 'pad_to_stride' not in repair.seva_request(tmp_path/'crop',tmp_path/'out',cropped,repair.DEFAULT_RUNTIME)
+    assert repair.seva_request(tmp_path/'crop',tmp_path/'out',cropped,repair.DEFAULT_RUNTIME)['pad_to_stride']==64
     assert repair.seva_request(tmp_path/'pad',tmp_path/'out',padded,repair.DEFAULT_RUNTIME)['pad_to_stride']==64
 
 

@@ -24,7 +24,7 @@ def install_snapshot_marker():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['seva','attention','depth','train','script'])
+    parser.add_argument('action', choices=['assets','seva','attention','depth','train','script'])
     parser.add_argument('repo')
     parser.add_argument('request')
     args = parser.parse_args()
@@ -32,13 +32,23 @@ def main():
     repo = Path(args.repo).resolve()
     sys.path.insert(0,str(repo))
     os.chdir(repo)
-    if args.action == 'seva':
+    if args.action == 'assets':
+        from model_assets import check_seva_access, verified_vae, record_vae
+        check_seva_access()
+        vae = verified_vae()
+        record_vae(request['output'], vae)
+    elif args.action == 'seva':
         stride = request.pop('pad_to_stride', None)
         if stride:
             from adapter import pad_seva_inputs
             request['data_path'], request['W'], request['H'] = pad_seva_inputs(
                 Path(request['data_path']), Path(request['work_dir']).parent/'seva-padded-inputs', stride)
-        import demo
+        from model_assets import verified_vae, vae_source, record_vae
+        from diffusers.models import AutoencoderKL
+        vae = verified_vae()
+        record_vae(Path(request['work_dir']).parent/'vae-provenance.json', vae)
+        with vae_source(AutoencoderKL, vae):
+            import demo
         demo.WORK_DIR = request.pop('work_dir')
         demo.main(**request)
     elif args.action == 'attention':

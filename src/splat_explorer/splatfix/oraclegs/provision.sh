@@ -14,4 +14,9 @@ fi
 chmod u+x "$bootstrap/bin/micromamba"
 unset PYTHONPATH PYTHONHOME
 export PYTHONNOUSERSITE=1 MAMBA_ROOT_PREFIX="$bootstrap/root"
+# NGC's extra package index cannot resolve on LRZ; use public PyPI plus the
+# explicit PyTorch wheel indexes supplied by provision.py.
+unset PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST PIP_FIND_LINKS
+export PIP_CONFIG_FILE=/dev/null PIP_INDEX_URL=https://pypi.org/simple
+export PIP_DISABLE_PIP_VERSION_CHECK=1
 python "$(dirname "$0")/provision.py" "$base" "$bootstrap/bin/micromamba"

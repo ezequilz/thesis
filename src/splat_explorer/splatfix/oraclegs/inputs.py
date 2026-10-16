@@ -55,8 +55,8 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
         raise ValueError('oracle_path_order references a missing checkpoint view')
     requested = SIZES[options['seva_resolution']]
     width, height = requested
-    if options['seva_fit'] == 'crop':
-        width, height = width//64*64, height//64*64
+    # Keep the requested framing/resolution. The diffusion stride is handled by
+    # temporary padding, not by cropping 720p references down to 704 pixels.
     root = Path(destination)
     scene = root / 'scene'
     (scene / 'images').mkdir(parents=True, exist_ok=False)
