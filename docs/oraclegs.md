@@ -7,7 +7,7 @@ OracleGS is an independent reconstruction method under `src/splat_explorer/splat
 1. Stage saved references, validate OpenCV camera-to-world rotations/calibration, preserve the source files, and downscale RGBs with Lanczos. Center-crop by default (`seva_fit: crop`), uniformly resizing to cover the output and updating focal lengths and principal points by the same image-space affine. Non-16:9 checkpoints are supported. Repaired-image aspect ratio must still match its saved camera: a previously unknown crop cannot be inferred safely. Padding (`seva_fit: pad`) is an explicit fallback to preserve framing. Inputs that require upscaling are rejected. Saved originals remain unchanged.
 2. Use the calibrated reference cameras with COLMAP feature extraction, exhaustive matching and fixed-pose triangulation. Match the COLMAP database IDs explicitly; permit two-view tracks for sparse inputs. Before depth or SEVA inference, verify that SfM retained every staged reference identity, pose and calibration. Save pixel-reprojection checks in `camera-alignment.json`; reject drift rather than continuing with misaligned supervision. No source-splat geometry initializes this reconstruction. Estimate reference pseudo inverse depth with Depth Anything V2 Large, then run the authors' `utils/make_depth_scale.py` to align depth to SfM. Empty triangulation or entirely unreliable depth fails the run.
 3. Stage SEVA `transforms.json` in OpenGL camera-to-world coordinates (`c2w_cv @ diag(1,-1,-1,1)`) and `train_test_split_N.json`. Split the selected path into adjacent reference pairs **before** interpolation. Each pair uses SEVA GUI natural Kochanek–Bartels interpolation with only its two endpoints, producing 80 strictly interior targets by default. Six references yield five independent paths and 400 synthetic targets. Every pair receives all six repaired reference images and cameras, regardless of path order.
-4. Run each pair sequentially in a separate SEVA process using `img2trajvid`, `interp-gt`, `gt-nearest` first-pass conditioning, and CFG `[3,2]`. Each invocation performs SEVA's two passes: sparse generated anchors, then dense target synthesis. Generated anchors do not carry across pairs. Validate every exported pose and calibration before merging targets into the canonical reconstruction dataset; retain original repaired references for reconstruction. Per-pair videos, requests, logs, and camera/conditioning audits remain available. The `saved_poses` diagnostic retains its single invocation.
+4. Run each pair sequentially in a separate SEVA process using ordered `img2vid`, `interp-gt` with the ordered-pair chunk adapter, `gt-nearest` first-pass conditioning, and CFG `[3,2]`. Each invocation performs SEVA's two passes: sparse generated anchors, then dense target synthesis. Generated anchors do not carry across pairs. Validate every exported pose and calibration before merging targets into the canonical reconstruction dataset; retain original repaired references for reconstruction. Per-pair videos, requests, logs, and camera/conditioning audits remain available. The `saved_poses` diagnostic retains its single invocation.
 5. Run the pinned authors' VGGT attention operations through a reference-grounded batching adapter. Each chunk includes every saved reference and shuffled targets from one sub-trajectory by default (`oracle_attention_batching: within_trajectory`). The alternative `global` mode shuffles targets across all trajectories. Both are available in the reconstruction UI and CLI (`--oracle-attention-batching`). For 80 interior targets, steps 1–40 use the starting reference and 41–80 use the ending reference; midpoint ties use the start. For each context chunk, each required endpoint reference is placed first for a separate query; only maps for targets assigned to that source are published. Chunks are capped at 96 total images, including references. Shuffling is deterministic under the run seed. With six references and 80 targets per segment, the default has five 86-image contexts and ten source queries. Layers 0/22, weights 1/4 and 3/4, per-layer normalization, padded preprocessing, raw map export and training unpadding remain upstream operations. `attention-chunks.json` records source identities and target membership; per-chunk diagnostics retain repeated reference maps separately. This is a disclosed method variant, not the released random batching policy.
 6. Run the original OracleGS optimizer and its pinned inverse-depth CUDA rasterizer. Ground-truth views use photometric supervision plus reliable SfM-aligned inverse-depth supervision. Synthetic views retain `is_synthetic=True` and use attention-weighted L1, weighted SSIM and globally weighted LPIPS. The original MCMC Gaussian updates, regularizers and GT/synthetic sampling code are unchanged. Defaults: 22,000 iterations, LPIPS 0.3, synthetic SSIM 0.3, scale/opacity regularization 0.01, noise LR 500000, `cap_max=1800000`, `init_type=sfm`. Inputs are already resized, so training uses `-r 1`.
 7. Save native 3D Gaussian PLY, recipe, command requests/logs, depth products, sparse model, SEVA outputs and attention maps. The queue downloads results and exposes the PLY through the existing results UI. Cancellation terminates the active subprocess group; completed intermediate products are retained. A stopped run is not advertised as a completed reconstruction.
@@ -34,7 +34,7 @@ The 720-pixel dimension is incompatible with the released SEVA U-Net's 64-pixel 
 
 The paper's prose gives a Beta-distribution synthetic sampling formula. The released `train.py` instead computes `prob_gt = 0.9 - progress * (1-progress)**3` when `--gt_synth_schedule` is enabled. This integration deliberately preserves the released implementation; it does not silently change the schedule to the paper formula.
 
-The OracleGS README's generation example uses `img2img`, CFG 3 and `T=80`. Our pairwise trajectory setup uses SEVA's `img2trajvid` / `interp-gt` recipe, CFG `[3,2]` and adaptive context length. The number of target images is distinct from the SEVA context window `T`. Consequently this is an original-optimizer Splatfix baseline with an explicitly recorded input/generation configuration, not a claim to reproduce the paper's benchmark metrics. The Gaussian cap is configurable because the paper derives it per scene from another baseline. No held-out GT exists along the custom trajectory; generated images must never be reported as held-out ground truth for PSNR/SSIM/LPIPS evaluation.
+The OracleGS README's generation example uses `img2img`, CFG 3 and `T=80`. Our pairwise trajectory setup uses SEVA's `img2vid` / `interp-gt` recipe with an explicit ordered-pair chunk adapter, CFG `[3,2]` and adaptive context length. The number of target images is distinct from the SEVA context window `T`. Consequently this is an original-optimizer Splatfix baseline with an explicitly recorded input/generation configuration, not a claim to reproduce the paper's benchmark metrics. The Gaussian cap is configurable because the paper derives it per scene from another baseline. No held-out GT exists along the custom trajectory; generated images must never be reported as held-out ground truth for PSNR/SSIM/LPIPS evaluation.
 
 Sources: [OracleGS authors' implementation](https://github.com/atakan-topaloglu/OracleGS), [VGGT attention extractor](https://github.com/atakan-topaloglu/vggt_aten), [SEVA CLI documentation](https://github.com/Stability-AI/stable-virtual-camera/blob/main/docs/CLI_USAGE.md), [COLMAP known-pose reconstruction](https://colmap.github.io/faq.html#reconstruct-sparse-dense-model-from-known-camera-poses), [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2).
 
@@ -372,3 +372,35 @@ It cannot establish generation quality. The cached pose/ray audits passed and
 show consistent normalization within this segment, so they do not support a
 translation-loss or camera-reset explanation for this pair. Pixel-level
 multi-view consistency of independently edited references remains unverified.
+
+
+### Ordered independent pairs (trajectory manifest v5)
+
+Version 5 retains independent pair generation and restores ordered saved endpoints.
+Each segment is staged as `[off-path references, A, interior targets, B]` using
+`img2vid`. All saved references remain RGB conditioning in both passes. The
+first pass uses native `gt-nearest` joint generation; the dense-pass adapter
+retains every reference exactly once per chunk but uses only A, B and generated
+on-path anchors as temporal bounds. Off-path references cannot bound intervals.
+The context budget includes references, bounds and targets. No upstream source
+or diffusion weights change; anchor count and CFG settings remain unchanged.
+
+Every generated anchor and target has an explicit source assignment: A through
+the midpoint, B afterward, matching the existing VGGT endpoint policy. The
+`seva-ordered-pair.json` report records actual anchor indices, target assignments,
+and dense chunk bounds. Source-depth reprojection, when enabled, consumes that
+assignment rather than independently choosing the nearest camera. With guidance
+off, source assignment is provenance; it does not give one reference exclusive
+control over SEVA's joint RGB conditioning.
+
+Per-pair videos include A, targets and B, excluding off-path context images.
+PNG/export indices retain every reference for validated canonical merging. The
+diagnostics gallery labels assigned sources and links the per-pair report.
+Generated views remain synthetic; saved reference pixels remain reconstruction
+GT. Both resolutions retain their existing calibration/padding handling.
+
+Version 4 inputs are rejected. Reload the persistent queue/server and stage a
+fresh run to use version 5; running jobs cannot acquire it in place. CPU tests
+exercise native SEVA task parsing and first-pass chunking, the ordered dense
+adapter, source assignments, video slicing, merge contracts and source-depth
+selection. A fresh GPU comparison is still required to assess visual quality.

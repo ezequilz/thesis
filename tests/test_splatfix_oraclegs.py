@@ -59,13 +59,13 @@ def test_repaired_rgb_projection_and_exact_saved_path_poses(tmp_path,resolution,
         np.testing.assert_allclose(projected,expected,atol=1e-5)
     assert all(0 < t['alpha'] < 1 for t in manifest['trajectory']['frames'])
     native = json.loads((root/'segments/000/scene/transforms.json').read_text())['frames']
-    assert native[:3] == frames[:3] and native[3:] == frames[3:14]
+    assert native == [frames[i] for i in manifest['seva_segments'][0]['frame_order']]
     assert before == [hashlib.sha256(cp.image_path(v,repaired=True).read_bytes()).hexdigest() for v in cp.views]
     request = repair.seva_request(root,tmp_path/'out',manifest,repair.DEFAULT_RUNTIME)
     assert request['cfg'] == [3.,2.]
-    assert request['task'] == 'img2trajvid' and request['use_traj_prior'] is True
+    assert request['task'] == 'img2vid' and request['use_traj_prior'] is True
     assert request['chunk_strategy'] == 'interp-gt'
-    assert request['replace_or_include_input'] is False
+    assert request['replace_or_include_input'] is True
     assert request['chunk_strategy_first_pass'] == 'gt-nearest'
     assert ('L_short' in request) == (resolution=='576p')
     assert 'T' not in request  # SEVA infers the procedural anchor window.
@@ -142,8 +142,8 @@ def test_generated_reference_poses_never_replace_ground_truth(tmp_path,adapter,r
 
 
 def test_generation_pose_mismatch_fails_closed(tmp_path):
-    source,output,_ = staged_generation(tmp_path)
-    path = output/'seva/img2trajvid/scene/transforms.json'
+    source,output,manifest = staged_generation(tmp_path)
+    path = output/'seva'/manifest['seva_task']/'scene/transforms.json'
     body = json.loads(path.read_text())
     body['frames'][-1]['transform_matrix'][0][3] += 1
     path.write_text(json.dumps(body))
@@ -281,7 +281,7 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training
             (generated/'samples-rgb').mkdir(parents=True)
             exports=[]
             segment_frames = json.loads((Path(body['data_path'])/'scene/transforms.json').read_text())['frames']
-            assert segment_frames[:count] == frames[:count]
+            assert {f['file_path'] for f in segment_frames if 'ref_' in f['file_path']} == {f['file_path'] for f in frames[:count]}
             assert body['num_inputs'] == count
             if adapter == 'trajectory':
                 assert len(segment_frames) == count+5
@@ -383,8 +383,8 @@ def test_720_preserves_requested_resolution_for_both_fitting_modes(tmp_path):
 
 
 def test_generation_intrinsics_mismatch_fails_closed(tmp_path):
-    source,output,_ = staged_generation(tmp_path)
-    path = output/'seva/img2trajvid/scene/transforms.json'
+    source,output,manifest = staged_generation(tmp_path)
+    path = output/'seva'/manifest['seva_task']/'scene/transforms.json'
     body = json.loads(path.read_text())
     body['frames'][-1]['cx'] += 10
     path.write_text(json.dumps(body))
@@ -462,10 +462,10 @@ def test_each_pair_has_80_distinct_outputs_and_exact_endpoints(tmp_path):
     for i in range(5):
         native = json.loads((root/f'segments/{i:03d}/scene/transforms.json').read_text())['frames']
         split = json.loads((root/f'segments/{i:03d}/scene/train_test_split_6.json').read_text())
-        assert split['train_ids'] == list(range(6)) and split['test_ids'] == list(range(6,86))
-        assert native[6:] == frames[i*80:(i+1)*80]
+        assert split['train_ids'] == [0,1,2,3,4,85] and split['test_ids'] == list(range(5,85))
+        assert native[5:85] == frames[i*80:(i+1)*80]
         for j,view in enumerate(cp.views):
-            np.testing.assert_allclose(np.asarray(native[j]['transform_matrix'])@AXES,view['camera']['c2w'])
+            np.testing.assert_allclose(np.asarray(native[manifest['seva_segments'][i]['frame_order'].index(j)]['transform_matrix'])@AXES,view['camera']['c2w'])
 
 
 def test_seva_parser_audit_detects_translation_and_image_pairing_errors(tmp_path):
@@ -507,9 +507,9 @@ def test_pinned_seva_parser_preserves_reference_pairing_and_translated_path(tmp_
     root = tmp_path/'inputs'
     export_inputs(cp,root,runtime={'oracle_target_frames':5,'oracle_path_order':[2,0,1]})
     parser = ns['ReconfusionParser'](str(root/'segments/000/scene'),normalize=False)
-    assert parser.splits_per_num_input_frames[3]['train_ids'] == [0,1,2]
+    assert parser.splits_per_num_input_frames[3]['train_ids'] == [0,1,7]
     assert len(parser.splits_per_num_input_frames[3]['test_ids']) == 5
-    for idx, reference in [(0,0),(1,1),(2,2)]:
+    for idx, reference in [(0,1),(1,2),(7,0)]:
         np.testing.assert_allclose(parser.camtoworlds[idx],cp.views[reference]['camera']['c2w'],atol=1e-6)
     assert np.linalg.norm(parser.camtoworlds[4,:3,3]-parser.camtoworlds[3,:3,3]) > .1
 
@@ -575,9 +575,9 @@ def test_native_staging_mapping_is_validated_and_off_path_references_remain_unor
         repair.validate_staged_trajectory(root,m)
     other = tmp_path/'off-path'
     m = export_inputs(cp,other,runtime={'oracle_target_frames':4,'oracle_path_order':[2,0]})
-    assert m['seva_task']=='img2trajvid'
+    assert m['seva_task']=='img2vid'
     request = repair.seva_request(other,tmp_path/'out',m,repair.DEFAULT_RUNTIME)
-    assert request['chunk_strategy']=='interp-gt' and not request['replace_or_include_input']
+    assert request['chunk_strategy']=='interp-gt' and request['replace_or_include_input']
     assert 'traj_prior' not in request and request['task'] != 'img2trajvid_s-prob'
 
 

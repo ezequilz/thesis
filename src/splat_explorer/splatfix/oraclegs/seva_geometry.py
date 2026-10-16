@@ -85,12 +85,15 @@ class ReferenceGuidance:
             raise ValueError('SEVA source guidance requires reference depth assets')
         self.extent = max(np.linalg.norm(np.ptp([r[3][:3,3] for r in self.references], axis=0)), 1e-6)
 
-    def target(self, pose, k, size):
+    def target(self, pose, k, size, source_reference=None):
         # Choose one reference to avoid averaging inconsistent edited RGBs.
         def score(ref):
             rotation = np.clip((np.trace(ref[3][:3,:3].T @ pose[:3,:3])-1)/2, -1, 1)
             return np.linalg.norm(ref[3][:3,3]-pose[:3,3])/self.extent + np.arccos(rotation)/np.pi
-        index = min(range(len(self.references)), key=lambda i: score(self.references[i]))
+        index = (min(range(len(self.references)), key=lambda i: score(self.references[i]))
+                 if source_reference is None else source_reference)
+        if not 0 <= index < len(self.references):
+            raise ValueError('Invalid assigned SEVA source reference')
         rgb, inv, valid, source_pose, source_k = self.references[index]
         guide, mask = project_reference(rgb, inv, valid, source_pose, source_k, pose, k, size)
         return guide, mask, index
@@ -137,7 +140,9 @@ def install_geometry_guidance(evaluation, request, report_path):
             if conditioned[i]:
                 guide, mask, source = np.zeros((height,width,3),np.float32), np.zeros((height,width),bool), None
             else:
-                guide, mask, source = references.target(pose, k, (width,height))
+                assigned = values.get('_ordered_pair_sources')
+                guide, mask, source = references.target(pose, k, (width,height),
+                    source_reference=assigned[i] if assigned is not None else None)
             guides.append(guide)
             masks.append(mask)
             records.append({'slot':i, 'conditioned':bool(conditioned[i]), 'source_reference':source,

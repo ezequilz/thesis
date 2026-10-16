@@ -112,3 +112,34 @@ def test_conditioning_audit_preserves_native_signature(tmp_path):
     evaluation=SimpleNamespace(get_value_dict=native)
     install_conditioning_audit(evaluation,tmp_path/'audit.json')
     assert inspect.signature(evaluation.get_value_dict)==inspect.signature(native)
+
+
+@pytest.mark.parametrize('adapter',['trajectory','saved_poses'])
+@pytest.mark.parametrize('depth',['predicted','source_splat'])
+def test_guided_pipeline_keeps_training_choice_independent(tmp_path,monkeypatch,adapter,depth):
+    import test_splatfix_oraclegs as contracts
+    from splat_explorer.splatfix.oraclegs import repair
+    from splat_explorer.rendering.cpu_splat_renderer import CpuSplatRenderer
+    original_checkpoint=contracts.checkpoint
+    def with_source(*args,**kwargs):
+        cp=original_checkpoint(*args,**kwargs)
+        source_ply(Path(cp.manifest['scene_path']))
+        return cp
+    monkeypatch.setattr(contracts,'checkpoint',with_source)
+    monkeypatch.setitem(repair.DEFAULT_RUNTIME,'seva_geometry_guidance','source_splat')
+    monkeypatch.setattr(CpuSplatRenderer,'render_depth',lambda self,cam:np.full((cam.height,cam.width),4,np.float32))
+    contracts.test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,False,2,depth,'sfm')
+    requests=list((tmp_path/'run').glob('seva_generation*-request.json'))
+    assert requests
+    for path in requests:
+        body=json.loads(path.read_text())
+        assert body['source_geometry_guidance']['inputs']==str(tmp_path/'inputs')
+
+
+def test_queue_freezes_guidance_choice(tmp_path):
+    from splat_explorer.splatfix.jobs import validate_job
+    cp=checkpoint(tmp_path,count=2)
+    job=validate_job({'stage':'repair','checkpoint':str(cp.root),'mode':'edited',
+                      'reconstruction_method':'oraclegs','seva_geometry_guidance':'source_splat'})
+    assert job['seva_geometry_guidance']=='source_splat'
+    assert job['oracle_depth_source']=='predicted'

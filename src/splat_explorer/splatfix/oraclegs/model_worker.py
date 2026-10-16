@@ -38,6 +38,7 @@ def main():
         vae = verified_vae()
         record_vae(request['output'], vae)
     elif args.action == 'seva':
+        endpoints = request.pop('ordered_pair_endpoints', None)
         geometry_guidance = request.pop('source_geometry_guidance', None)
         stride = request.pop('pad_to_stride', None)
         if stride:
@@ -54,6 +55,11 @@ def main():
         import seva.eval as evaluation
         install_conditioning_audit(evaluation,
             Path(request['work_dir']).parent/'seva-conditioning-audit.json')
+        if endpoints is not None:
+            from ordered_pair import install_ordered_pair
+            install_ordered_pair(evaluation, endpoints,
+                Path(request['work_dir']).parent/'seva-ordered-pair.json',
+                demo=demo, data_path=request['data_path'])
         install_camera_audit(demo, request['data_path'],
                              Path(request['work_dir']).parent/'seva-camera-audit.json', request['task'])
         if geometry_guidance:

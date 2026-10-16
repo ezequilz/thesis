@@ -123,7 +123,8 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
         used_names.add(name)
         target_records.append({'target_index':index, 'segment_index':a,
             'segment_frame_index':local_index, 'alpha':alpha,
-            'reference_index':reference, 'image_name':name,
+            'reference_index':reference, 'generation_source_reference_index':order[a] if alpha <= .5 else order[a+1],
+            'image_name':name,
             'position':pose[:3,3].tolist()})
         # Placeholders satisfy ReconfusionParser; never used as training labels.
         if not (scene/'images'/name).exists():
@@ -141,15 +142,18 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
             relative = f'segments/{segment:03d}'
             native = root/relative/'scene'
             (native/'images').mkdir(parents=True)
-            selected = frames[:n]+[frames[n+i] for i in targets]
+            frame_order = [i for i in range(n) if i not in (a,b)]+[a]+[n+i for i in targets]+[b]
+            selected = [frames[i] for i in frame_order]
             for frame in selected:
                 shutil.copyfile(scene/frame['file_path'], native/frame['file_path'])
             atomic_json(native/'transforms.json', {'frames':selected})
             atomic_json(native/f'train_test_split_{n}.json', {
-                'train_ids':list(range(n)), 'test_ids':list(range(n,len(selected)))})
+                'train_ids':[i for i,j in enumerate(frame_order) if j < n],
+                'test_ids':[i for i,j in enumerate(frame_order) if j >= n]})
             segments.append({'index':segment, 'from_reference':a, 'to_reference':b,
-                             'input_subdir':relative, 'target_indices':targets})
-    manifest = {'seva_task':'img2trajvid', 'seva_segments':segments,
+                             'input_subdir':relative, 'target_indices':targets, 'frame_order':frame_order,
+                             'endpoint_frame_indices':[n-2,len(selected)-1]})
+    manifest = {'seva_task':'img2vid' if segments else 'img2trajvid', 'seva_segments':segments,
                 'seva_frame_order':list(range(len(frames))), 'reconstruction_method':'oraclegs',
                 'mode':mode, 'views':records,
                 'source_checkpoint':str(checkpoint.root), 'camera_convention':'opengl_c2w',
@@ -159,10 +163,10 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
                 'resolution_adapter':('vertical-padding-then-crop' if height % 64 else 'calibrated-center-'+options['seva_fit']),
                 'reference_role':'ground_truth', 'source_splat_used_for_initialization':False}
     manifest['trajectory'] = {
-        'version':4, 'interpolation':('seva-gui-pairwise-kochanek-bartels-natural-tension-0'
+        'version':5, 'interpolation':('seva-gui-pairwise-kochanek-bartels-natural-tension-0'
             if options['oracle_adapter'] == 'trajectory' else 'saved-poses'),
         'frame_count_semantics':'per-segment-interior-targets' if segments else 'saved-poses',
-        'reference_conditioning':'all-references-per-independent-segment' if segments else 'unordered-reference-set',
+        'reference_conditioning':'ordered-endpoints-with-off-path-reference-context' if segments else 'unordered-reference-set',
         'generation_schedule':'sequential-independent-segments' if segments else 'single-run',
         'frames_per_segment':options['oracle_target_frames'] if options['oracle_adapter'] == 'trajectory' else None,
         'target_count':len(target_records), 'closed':False,

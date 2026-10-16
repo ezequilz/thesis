@@ -82,7 +82,7 @@ def validate_staged_trajectory(inputs, manifest):
     if manifest['oracle_adapter'] != 'trajectory':
         return
     trajectory = manifest.get('trajectory', {})
-    if (trajectory.get('version') != 4 or
+    if (trajectory.get('version') != 5 or
             trajectory.get('frame_count_semantics') != 'per-segment-interior-targets'):
         raise ValueError('Legacy OracleGS trajectory: restart the queue manager, then restage a fresh run for independent pairwise generation')
     order = manifest['oracle_path_order']
@@ -94,8 +94,8 @@ def validate_staged_trajectory(inputs, manifest):
             or len(frames) != n+expected or split['train_ids'] != list(range(n))
             or split['test_ids'] != list(range(n,n+expected))):
         raise ValueError('OracleGS staged trajectory count/split disagrees with frames per transition')
-    if manifest.get('seva_task') != 'img2trajvid':
-        raise ValueError('Pairwise trajectories require SEVA img2trajvid')
+    if manifest.get('seva_task') != 'img2vid':
+        raise ValueError('Pairwise trajectories require ordered SEVA img2vid')
     segments = manifest.get('seva_segments', [])
     if len(segments) != len(order)-1:
         raise ValueError('OracleGS needs one SEVA run per camera pair')
@@ -106,8 +106,14 @@ def validate_staged_trajectory(inputs, manifest):
                 or [segment['from_reference'],segment['to_reference']] != order[j:j+2]):
             raise ValueError('Invalid SEVA segment mapping')
         native = Path(inputs)/segment['input_subdir']/'scene'
-        selected = frames[:n]+[frames[n+i] for i in targets]
-        split = {'train_ids':list(range(n)), 'test_ids':list(range(n,n+len(targets)))}
+        a,b = order[j:j+2]
+        frame_order = [i for i in range(n) if i not in (a,b)]+[a]+[n+i for i in targets]+[b]
+        selected = [frames[i] for i in frame_order]
+        if (segment.get('frame_order') != frame_order or
+                segment.get('endpoint_frame_indices') != [n-2,len(selected)-1]):
+            raise ValueError('Invalid SEVA segment endpoint/frame mapping')
+        split = {'train_ids':[i for i,k in enumerate(frame_order) if k < n],
+                 'test_ids':[i for i,k in enumerate(frame_order) if k >= n]}
         if (json.loads((native/'transforms.json').read_text())['frames'] != selected or
                 json.loads((native/f'train_test_split_{n}.json').read_text()) != split):
             raise ValueError('SEVA segment images/cameras disagree with the staged trajectory')
@@ -117,15 +123,17 @@ def validate_staged_trajectory(inputs, manifest):
 def seva_request(inputs, output, manifest, runtime):
     width,height = manifest['resolution']
     task = manifest.get('seva_task', 'img2trajvid')
-    request = {'data_path':str(Path(inputs)/'ordered' if task == 'img2vid' else inputs), 'data_items':'scene', 'task':task,
+    request = {'data_path':str(inputs), 'data_items':'scene', 'task':task,
         'work_dir':str(output/'seva'), 'num_inputs':len(manifest['views']),
-        'use_traj_prior':True, 'chunk_strategy':'interp' if task == 'img2vid' else 'interp-gt', 'chunk_strategy_first_pass':'gt-nearest',
+        'use_traj_prior':True, 'chunk_strategy':'interp-gt', 'chunk_strategy_first_pass':'gt-nearest',
         'cfg':[3.0,2.0], 'seed':runtime['seed'], 'W':width, 'H':height,
         'save_first_pass':True, 'save_input':True, 'replace_or_include_input':task == 'img2vid'}
+    if manifest.get('seva_segments'):
+        request['ordered_pair_endpoints'] = [len(manifest['views'])-2, len(manifest['views'])+manifest['oracle_target_frames']-1]
     if manifest.get('seva_geometry_guidance', 'off') == 'source_splat':
         asset_root = Path(inputs).parents[1] if manifest.get('seva_segments') else Path(inputs)
         request['source_geometry_guidance'] = {'inputs':str(asset_root), 'strength':0.35}
-    # Leave T adaptive, as recommended for procedural two-pass img2trajvid.
+    # Preserve the existing anchor budget; endpoint ordering is a separate change.
     # 720p uses a disclosed padding adapter for the U-Net's 64-pixel stride.
     if manifest['seva_resolution'] == '576p':
         request['L_short'] = 576

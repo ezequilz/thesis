@@ -11,7 +11,7 @@ def merge_segments(inputs, output, manifest, *, should_stop=lambda:False):
     inputs, output = Path(inputs), Path(output)
     frames = json.loads((inputs/'scene/transforms.json').read_text())['frames']
     n = len(manifest['views'])
-    destination = output/'seva/img2trajvid/scene'
+    destination = output/'seva'/manifest['seva_task']/'scene'
     destination.mkdir(parents=True, exist_ok=False)
     merged = [None]*len(frames)
     provenance = []
@@ -19,9 +19,9 @@ def merge_segments(inputs, output, manifest, *, should_stop=lambda:False):
         if should_stop():
             raise InterruptedError('Cancelled while collecting SEVA sub-trajectories')
         index = segment['index']
-        source = output/'seva-segments'/f'{index:03d}'/'seva/img2trajvid/scene'
+        source = output/'seva-segments'/f'{index:03d}'/'seva'/manifest['seva_task']/'scene'
         exported = json.loads((source/'transforms.json').read_text())['frames']
-        canonical = list(range(n))+[n+i for i in segment['target_indices']]
+        canonical = segment['frame_order']
         verify_exported_cameras([frames[i] for i in canonical], exported, manifest)
         for local, global_index in enumerate(canonical):
             if should_stop():
@@ -45,7 +45,7 @@ def merge_segments(inputs, output, manifest, *, should_stop=lambda:False):
             merged[global_index] = {**exported[local], 'file_path':relative}
             if global_index >= n:
                 provenance.append({'target_index':global_index-n, 'segment_index':index,
-                                   'segment_target_index':local-n, 'source':str(image.relative_to(output.resolve()))})
+                                   'segment_target_index':segment['target_indices'].index(global_index-n), 'source':str(image.relative_to(output.resolve()))})
     if any(frame is None for frame in merged):
         raise ValueError('SEVA segments did not generate every target camera')
     atomic_json(destination/'transforms.json', {'frames':merged})

@@ -278,3 +278,25 @@ def test_individual_overlay_prefers_assigned_native_query_and_caches_legacy(tmp_
     assert not item['overlay_reconstructed']
     from urllib.parse import unquote
     assert unquote(item['overlay_url']).endswith(str(native))
+
+
+def test_ordered_pair_sources_and_video_are_visible(tmp_path):
+    studio,run,root = fixture(tmp_path)
+    write(root/'recipe.json', {'inputs':{'seva_task':'img2vid','views':[],
+        'seva_segments':[{'index':0,'from_reference':2,'to_reference':0}]}})
+    base=root/'seva-segments/000'
+    scene=base/'seva/img2vid/scene'
+    png(scene/'first-pass/samples-rgb/000.png')
+    for i in [0,4,5,85]:
+        png(scene/f'samples-rgb/{i:03d}.png')
+    (scene/'samples-rgb.mp4').write_bytes(b'video')
+    write(base/'seva-ordered-pair.json', {'endpoint_frame_indices':[4,85],
+        'endpoint_reference_indices':[2,0],
+        'anchors':[{'anchor_index':0,'frame_index':5,'source_reference_index':2}],
+        'targets':[{'frame_index':5,'source_reference_index':2}]})
+    d=build_details(studio,root/'result.json',{})
+    assert len(d['videos'])==1 and 'img2vid' in d['videos'][0]['url']
+    assert d['anchors'][0]['source_reference_index']==2
+    assert 'source reference 3' in d['anchors'][0]['name']
+    assert len(d['trajectory'])==3  # no off-path context frame 000
+    assert any('seva-ordered-pair.json' in a['label'] for a in d['artifacts'])

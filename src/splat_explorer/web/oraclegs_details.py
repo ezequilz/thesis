@@ -21,7 +21,7 @@ def generation_overview(root):
             indices = sorted({round(i * (len(paths)-1) / min(23, max(1,len(paths)-1))) for i in range(min(24,len(paths)))})
             groups.append((label, [paths[i] for i in indices], len(paths)))
     if not groups:
-        for folder in sorted(root.glob('seva-segments/[0-9][0-9][0-9]/seva/img2trajvid/scene')):
+        for folder in sorted(root.glob('seva-segments/[0-9][0-9][0-9]/seva/img2*/scene')):
             paths = [p for p in sorted(folder.glob('first-pass/samples-rgb/*.png'))
                      if _safe(root, str(p.relative_to(root)))]
             if paths:
@@ -129,8 +129,39 @@ def build_details(studio, manifest, result):
     state = _json(_safe(run, 'worker-status.json'), {})
     cache = _json(_safe(run, 'oraclegs-preview-sync.json'), {})
     def panels(pattern):
-        return [{'name': p.name, 'url': link(safe)} for p in sorted(root.glob(pattern))[:1000]
-                if (safe := _safe(root, str(p.relative_to(root))))]
+        items = []
+        for p in sorted(root.glob(pattern))[:1000]:
+            safe = _safe(root, str(p.relative_to(root)))
+            if not safe:
+                continue
+            item = {'name':p.name, 'url':link(safe)}
+            relative = p.relative_to(root)
+            if relative.parts[0] == 'seva-segments' and p.stem.isdigit():
+                base = '/'.join(relative.parts[:2])
+                ordered = data(base+'/seva-ordered-pair.json')
+                first_pass = 'first-pass' in relative.parts
+                index = int(p.stem)
+                key = 'anchor_index' if first_pass else 'frame_index'
+                record = next((r for r in ordered.get('anchors' if first_pass else 'targets', [])
+                               if r[key] == index), None)
+                endpoints = ordered.get('endpoint_frame_indices', [])
+                if not first_pass and endpoints and index < endpoints[0]:
+                    continue  # Off-path context images are not trajectory frames.
+                if record:
+                    item['source_reference_index'] = record['source_reference_index']
+                    item['name'] += ' · source reference '+str(record['source_reference_index']+1)
+                elif not first_pass and index in endpoints:
+                    source = ordered['endpoint_reference_indices'][endpoints.index(index)]
+                    item['name'] += ' · saved endpoint reference '+str(source+1)
+            elif relative.parts[0] == 'seva' and 'first-pass' not in relative.parts and p.stem.isdigit():
+                target = next((f for f in inputs.get('trajectory', {}).get('frames', [])
+                               if f['target_index'] == int(p.stem)), {})
+                source = target.get('generation_source_reference_index')
+                if source is not None:
+                    item['source_reference_index'] = source
+                    item['name'] += ' · source reference '+str(source+1)
+            items.append(item)
+        return items
     views = []
     for v in inputs.get('views', [])[:8]:
         name = Path(v.get('image', '')).name
@@ -224,10 +255,10 @@ def build_details(studio, manifest, result):
         base = f"seva-segments/{segment['index']:03d}"
         label = f"Pair {segment['index']+1}: reference {segment['from_reference']+1} → {segment['to_reference']+1}"
         for relative, kind in [('first-pass/samples-rgb.mp4','sparse anchors'), ('samples-rgb.mp4','full sub-trajectory')]:
-            path = _safe(root, base+'/seva/img2trajvid/scene/'+relative)
+            path = _safe(root, base+'/seva/'+inputs.get('seva_task','img2trajvid')+'/scene/'+relative)
             if path:
                 segment_videos.append({'label':label+' · '+kind, 'url':link(path)})
-        for name in ('seva-camera-audit.json','seva-conditioning-audit.json','seva-geometry-guidance.json'):
+        for name in ('seva-camera-audit.json','seva-conditioning-audit.json','seva-geometry-guidance.json','seva-ordered-pair.json'):
             path = _safe(root, base+'/'+name)
             if path:
                 artifacts.append({'label':label+' · '+name, 'url':link(path)})
@@ -238,8 +269,8 @@ def build_details(studio, manifest, result):
     return {'saved_iteration':result.get('saved_iteration'), 'overview_url':link(overview), 'inputs':inputs, 'input_staging':staging, 'views':views, 'recipe':recipe,
             'state':state, 'cache':cache, 'stages':stages, 'alignment':alignment,
             'geometry':data('geometry-check.json'), 'depth_scales':data('dataset/sparse/0/depth_params.json'),
-            'anchors':panels(f'seva/{task}/scene/first-pass/samples-rgb/*.png') or panels(f'seva/{task}/scene/first-pass/forward_*/samples-rgb/*.png') or panels('seva-segments/*/seva/img2trajvid/scene/first-pass/samples-rgb/*.png'),
-            'trajectory':panels(f'seva/{task}/scene/samples-rgb/*.png') or panels('seva-segments/*/seva/img2trajvid/scene/samples-rgb/*.png'),
+            'anchors':panels(f'seva/{task}/scene/first-pass/samples-rgb/*.png') or panels(f'seva/{task}/scene/first-pass/forward_*/samples-rgb/*.png') or panels('seva-segments/*/seva/img2*/scene/first-pass/samples-rgb/*.png'),
+            'trajectory':panels(f'seva/{task}/scene/samples-rgb/*.png') or panels('seva-segments/*/seva/img2*/scene/samples-rgb/*.png'),
             'synthetic':synthetic, 'attention_grids':attention_grids,
             'attention_batching':attention_plan.get('batching', recipe.get('attention_batching')), 'artifacts':artifacts,
             'videos':segment_videos+[{'label':label,'url':link(p)} for name,label in [
