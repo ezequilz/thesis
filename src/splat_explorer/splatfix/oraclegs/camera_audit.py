@@ -44,3 +44,74 @@ def install_camera_audit(demo, data_path, output):
         Path(output).write_text(json.dumps(report,indent=2))
         return parsed
     demo.parse_task = parse
+
+
+def verify_conditioning(before, intrinsics, value):
+    """Check the actual diffusion cameras, allowing SEVA's shared similarity.
+
+    Centering and uniform positive scaling are legitimate; losing relative
+    translation, rotating a camera, or changing calibration is not.
+    """
+    def array(x):
+        return x.detach().cpu().numpy() if hasattr(x, 'detach') else np.asarray(x)
+    before = array(before).astype(float)
+    after = array(value['c2w']).astype(float)
+    if (after.shape != (len(before), 4, 4) or not np.isfinite(after).all()
+            or not np.allclose(after[:, :3, :3], before[:, :3, :3], atol=2e-5, rtol=0)):
+        raise ValueError('SEVA diffusion camera rotations changed')
+    source = before[:, :3, 3] - before[0, :3, 3]
+    actual = after[:, :3, 3] - after[0, :3, 3]
+    denom = float(np.sum(source**2))
+    scale = float(np.sum(source*actual)/denom) if denom > 1e-16 else None
+    if scale is not None:
+        if scale <= 0 or not np.allclose(actual, source*scale, atol=2e-5, rtol=2e-5):
+            raise ValueError('SEVA diffusion lost or changed relative camera translation')
+    elif not np.allclose(actual, 0, atol=2e-5):
+        raise ValueError('SEVA diffusion introduced relative camera translation')
+    k = array(intrinsics)
+    if array(value['K']).shape != k.shape or not np.allclose(array(value['K']), k, atol=1e-6, rtol=0):
+        raise ValueError('SEVA diffusion intrinsics changed')
+    rays = array(value['plucker_coordinate'])
+    if rays.ndim != 4 or rays.shape[:2] != (len(before), 6) or not np.isfinite(rays).all():
+        raise ValueError('SEVA diffusion ray encoding is invalid')
+    # Rays are expressed in the first camera's coordinate frame. Their moment
+    # must be origin cross direction; zeroing moments erases translation even
+    # if the separately exported pose metadata still looks correct.
+    centers = actual @ after[0, :3, :3]
+    directions = np.moveaxis(rays[:, :3], 1, -1)
+    if not np.allclose(np.linalg.norm(directions, axis=-1), 1, atol=2e-4, rtol=0):
+        raise ValueError('SEVA diffusion ray directions are not unit vectors')
+    moments = np.moveaxis(rays[:, 3:], 1, -1)
+    expected = np.cross(centers[:, None, None, :], directions)
+    if not np.allclose(moments, expected, atol=2e-4, rtol=2e-4):
+        raise ValueError('SEVA diffusion ray moments disagree with camera translation')
+    return {'camera_count':len(before), 'translation_scale':scale,
+            'source_relative_extent':np.ptp(source,axis=0).tolist(),
+            'normalized_relative_extent':np.ptp(actual,axis=0).tolist()}
+
+
+def install_conditioning_audit(evaluation, output):
+    """Observe both upstream passes without changing camera or model behavior."""
+    import inspect
+    original = evaluation.get_value_dict
+    signature = inspect.signature(original)
+    report = {'passed':True, 'chunks':[],
+              'scope':'Diffusion conditioning camera similarity and Plucker translation; not pixel geometry.'}
+    def checked(*args, **kwargs):
+        arguments = signature.bind(*args, **kwargs).arguments
+        # Clone because the original may use tensor views during normalization.
+        poses = arguments['curr_c2ws'].detach().cpu().numpy().copy()
+        intrinsics = arguments['curr_Ks'].detach().cpu().numpy().copy()
+        value = original(*args, **kwargs)
+        try:
+            report['chunks'].append(verify_conditioning(poses, intrinsics, value))
+        except ValueError as exc:
+            report.update(passed=False, error=str(exc))
+            raise
+        finally:
+            path = Path(output)
+            temporary = path.with_suffix('.tmp')
+            temporary.write_text(json.dumps(report, indent=2))
+            temporary.replace(path)
+        return value
+    evaluation.get_value_dict = checked

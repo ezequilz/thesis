@@ -120,7 +120,9 @@ def build_details(studio, manifest, result):
         stages.append({'name': name, 'status': status})
     artifacts = []
     for name, label in [('recipe.json','Recipe, revisions and commands'), ('camera-alignment.json','Camera alignment gate'),
-                        ('geometry-check.json','SfM and depth gate'), ('seva_generation-request.json','SEVA parameters'),
+                        ('geometry-check.json','SfM and depth gate'),
+                        ('seva-camera-audit.json','SEVA parsed camera audit'),
+                        ('seva-conditioning-audit.json','SEVA diffusion translation and ray audit'), ('seva_generation-request.json','SEVA parameters'),
                         ('dataset/sparse/0/cameras.txt','COLMAP intrinsics'), ('dataset/sparse/0/images.txt','COLMAP camera poses'),
                         ('dataset/sparse/0/points3D.txt','Triangulated source points'), ('dataset/sparse/0/depth_params.json','Depth alignment scales'),
                         ('seva/img2trajvid/scene/transforms.json','Generated camera encoding'),

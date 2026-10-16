@@ -481,3 +481,51 @@ def test_pinned_seva_parser_preserves_reference_pairing_and_translated_path(tmp_
     for idx, reference in [(0,0),(1,1),(2,2),(3,2),(7,0),(8,0),(12,1)]:
         np.testing.assert_allclose(parser.camtoworlds[idx],cp.views[reference]['camera']['c2w'],atol=1e-6)
     assert np.linalg.norm(parser.camtoworlds[4,:3,3]-parser.camtoworlds[3,:3,3]) > .1
+
+
+def test_diffusion_audit_checks_translated_rays_not_just_exported_poses():
+    from splat_explorer.splatfix.oraclegs.camera_audit import verify_conditioning
+    poses = np.repeat(np.eye(4)[None], 4, axis=0)
+    poses[:, :3, :3] = Rotation.from_euler('y', np.array([30, 60, 110, 170])[:,None], degrees=True).as_matrix()
+    poses[:, :3, 3] = [[10, 2, 3], [11, 3, 4], [13, 1, 4], [14, 2, 6]]
+    normalized = poses.copy()
+    normalized[:, :3, 3] = (poses[:, :3, 3]-[12, 2, 4])*0.3
+    k = np.repeat(np.array([[.9, 0, .5], [0, 1.6, .5], [0, 0, 1.]])[None], 4, axis=0)
+    # Independent inverse projection of two pixels into the first-camera frame.
+    rays = []
+    for pose, calibration in zip(normalized, k):
+        relative = np.linalg.inv(normalized[0]) @ pose
+        directions = (np.linalg.inv(calibration) @ np.array([[.1,.8],[.2,.7],[1,1]])).T
+        directions = directions @ relative[:3,:3].T
+        directions /= np.linalg.norm(directions,axis=-1,keepdims=True)
+        moments = np.cross(relative[:3,3], directions)
+        rays.append(np.concatenate([directions,moments],axis=-1).T[:,None,:])
+    value = {'c2w':normalized, 'K':k, 'plucker_coordinate':np.array(rays)}
+    assert verify_conditioning(poses[:,:3], k, value)['translation_scale'] == pytest.approx(.3)
+    broken = {**value, 'plucker_coordinate':value['plucker_coordinate'].copy()}
+    broken['plucker_coordinate'][:,3:] = 0
+    with pytest.raises(ValueError, match='ray moments'):
+        verify_conditioning(poses[:,:3], k, broken)
+    broken = {**value, 'c2w':normalized.copy()}
+    broken['c2w'][:,:3,3] = normalized[0,:3,3]
+    with pytest.raises(ValueError, match='relative camera translation'):
+        verify_conditioning(poses[:,:3], k, broken)
+    broken = {**value, 'c2w':normalized.copy()}
+    broken['c2w'][1,:3,:3] = normalized[2,:3,:3]
+    with pytest.raises(ValueError, match='rotations'):
+        verify_conditioning(poses[:,:3], k, broken)
+
+
+def test_stale_total_budget_trajectory_requires_restaging(tmp_path):
+    root = tmp_path/'staged'
+    manifest = export_inputs(checkpoint(tmp_path, 3), root, runtime={'oracle_target_frames':4})
+    repair.validate_staged_trajectory(root, manifest)
+    old = {k:v for k,v in manifest.items() if k != 'trajectory'}
+    with pytest.raises(ValueError, match='restage a fresh run'):
+        repair.validate_staged_trajectory(root, old)
+    split_path = root/'scene/train_test_split_3.json'
+    split = json.loads(split_path.read_text())
+    split['test_ids'] = split['test_ids'][:4]
+    split_path.write_text(json.dumps(split))
+    with pytest.raises(ValueError, match='count/split'):
+        repair.validate_staged_trajectory(root, manifest)

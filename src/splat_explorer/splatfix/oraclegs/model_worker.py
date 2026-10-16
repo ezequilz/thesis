@@ -49,7 +49,10 @@ def main():
         record_vae(Path(request['work_dir']).parent/'vae-provenance.json', vae)
         with vae_source(AutoencoderKL, vae):
             import demo
-        from camera_audit import install_camera_audit
+        from camera_audit import install_camera_audit, install_conditioning_audit
+        import seva.eval as evaluation
+        install_conditioning_audit(evaluation,
+            Path(request['work_dir']).parent/'seva-conditioning-audit.json')
         install_camera_audit(demo, request['data_path'],
                              Path(request['work_dir']).parent/'seva-camera-audit.json')
         demo.WORK_DIR = request.pop('work_dir')

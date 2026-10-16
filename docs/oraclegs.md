@@ -229,3 +229,30 @@ scheduled snapshot, when one exists. Before reconstruction begins, stopping
 retains generated artifacts but cannot create a PLY. Processes already launched
 with the old worker cannot acquire this hook; they retain scheduled-snapshot
 recovery until a new run is launched.
+
+### Diffusion-boundary audit and stale-run protection
+
+The additional review of the supplied video and cached `run_20261016_183036`
+confirms that this run predates the per-transition trajectory manifest. Its 80
+exported target cameras span `[12.283559, 1.122240, 4.441781]` scene units;
+translation was not absent from those poses. The five selected transitions rotate
+approximately 86, 102, 45, 175 and 109 degrees. The video shows strong turning and
+geometry changes, but does not identify a camera-encoding error by itself.
+Its geometry gate reports only 52 triangulated points and positive depth scales
+for two of six references. These are weak geometric constraints, not evidence of
+successful multi-view reconstruction. The exact cause of the generated pixel
+inconsistency remains unverified without a fresh GPU run.
+
+New workers reject legacy total-budget staging before provisioning or inference;
+start a fresh run to stage 80 targets for each adjacent pair (400 for six views).
+The result page now distinguishes that count from historical total-budget runs.
+`seva-conditioning-audit.json` checks every call to the upstream diffusion
+conditioning function in both passes. It permits SEVA's centering and uniform
+positive scale, verifies preserved rotations and relative translations, and checks
+that Plucker ray moments encode the normalized camera centers. This closes the
+previous audit gap between parsed poses and diffusion ray conditioning. It does
+not modify the pinned upstream sources, model, chunking, or normalization, and
+does not establish that generated pixels obey the supplied cameras. Both camera
+audit reports are linked from run details. CPU regression tests inject erased ray
+moments and collapsed camera centers to verify rejection; real CUDA execution of
+this new audit and visual improvement remain to be validated.

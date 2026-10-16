@@ -76,6 +76,25 @@ def probe_runtime(runtime):
             raise FileNotFoundError(f'Incomplete OracleGS {key} runtime: {detail[-4000:]}') from exc
 
 
+def validate_staged_trajectory(inputs, manifest):
+    """Do not silently reuse a legacy total-budget path for a new GPU run."""
+    if manifest['oracle_adapter'] != 'trajectory':
+        return
+    trajectory = manifest.get('trajectory', {})
+    if (trajectory.get('version') != 2 or
+            trajectory.get('frame_count_semantics') != 'per-segment-including-both-endpoints'):
+        raise ValueError('Legacy OracleGS trajectory: restage a fresh run for the configured images per transition')
+    order = manifest['oracle_path_order']
+    expected = (len(order)-1)*manifest['oracle_target_frames']
+    n = len(manifest['views'])
+    split = json.loads((Path(inputs)/'scene'/f'train_test_split_{n}.json').read_text())
+    frames = json.loads((Path(inputs)/'scene/transforms.json').read_text())['frames']
+    if (trajectory.get('target_count') != expected or len(trajectory.get('frames', [])) != expected
+            or len(frames) != n+expected or split['train_ids'] != list(range(n))
+            or split['test_ids'] != list(range(n,n+expected))):
+        raise ValueError('OracleGS staged trajectory count/split disagrees with frames per transition')
+
+
 def seva_request(inputs, output, manifest, runtime):
     width,height = manifest['resolution']
     request = {'data_path':str(inputs), 'data_items':'scene', 'task':'img2trajvid',
@@ -108,6 +127,8 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
     output.mkdir(parents=True,exist_ok=True)
     if should_stop():
         raise InterruptedError('Cancelled before OracleGS setup')
+    manifest = json.loads((inputs/'inputs.json').read_text())
+    validate_staged_trajectory(inputs, manifest)
     try:
         validate_runtime(runtime)
     except FileNotFoundError:
@@ -123,7 +144,6 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         validate_runtime(runtime)
     if (output/'dataset').exists():
         raise ValueError('OracleGS output already contains a dataset; use a fresh isolated run')
-    manifest = json.loads((inputs/'inputs.json').read_text())
     n = len(manifest['views'])
     dataset = output/'dataset'
     (dataset/'images').mkdir(parents=True)
