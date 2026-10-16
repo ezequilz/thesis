@@ -49,3 +49,5 @@ where = ["src"]
 "splat_explorer.web" = ["static/*"]
 
 "splat_explorer.splatfix.g4splat" = ["*.sh"]
+
+"splat_explorer.splatfix.oraclegs" = ["*.sh", "*.json", "upstream/**/*"]

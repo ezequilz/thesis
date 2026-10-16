@@ -87,7 +87,7 @@ def repair_splat(cfg, args):
     from .methods import get_method
     run_repair = get_method(getattr(args, 'reconstruction_method', None)).run_repair
     method = getattr(args, "reconstruction_method", "artifixer")
-    runtime = dict(cfg.get("splatfix", {}).get("g4splat_runtime" if method == "g4splat" else "runtime", {}))
+    runtime = dict(cfg.get("splatfix", {}).get(method + "_runtime" if method in ("g4splat", "oraclegs") else "runtime", {}))
     runtime["resolution_profile"] = cfg.get("splatfix", {}).get("resolution_profile", "training")
     runtime['split_mode'] = getattr(args, 'split_mode', 'double-split')
     if getattr(args, 'image_cache_insertion', None) is not None:
@@ -101,6 +101,11 @@ def repair_splat(cfg, args):
             value = getattr(args, "g4splat_" + key, None)
             if value is not None:
                 runtime[key] = str(value)
+    if method == 'oraclegs':
+        for key in ('seva_resolution', 'oracle_adapter', 'oracle_target_frames'):
+            value = getattr(args, key, None)
+            if value is not None:
+                runtime[key] = value
     if args.scene is not None:
         runtime["scene_path"] = str(args.scene.resolve())
     result = run_repair(
@@ -132,8 +137,11 @@ def _add_stages(parser):
     edit = stages.add_parser("edit", help="Create missing GPT-image repairs in an existing checkpoint")
     edit.add_argument("checkpoint", type=Path)
     edit.set_defaults(func=edit_views)
-    repair = stages.add_parser("repair", help="Run fresh ArtiFixer3D/3D+ locally on a GPU from saved views")
+    repair = stages.add_parser("repair", help="Run the selected reconstruction method locally on a GPU from saved views")
     from .methods import METHODS, DEFAULT_METHOD
+    repair.add_argument("--seva-resolution", choices=("576p", "720p"))
+    repair.add_argument("--oracle-adapter", choices=("trajectory", "saved_poses"))
+    repair.add_argument("--oracle-target-frames", type=int)
     repair.add_argument("--g4splat-repo", type=Path)
     repair.add_argument("--g4splat-python", type=Path)
     repair.add_argument("--reconstruction-method", choices=tuple(METHODS), default=DEFAULT_METHOD)

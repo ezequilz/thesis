@@ -109,6 +109,8 @@ def validate_pointmaps(scene, report_path):
                               and np.allclose(k, scaled, atol=.01, rtol=0)
                               and np.allclose(full_k[:2, 2], np.array(wh)/2, atol=1e-4))
             row = {'image': name, 'pointmap_wh': [w, h], 'invalid_points': int((~valid).sum()),
+                   'nonfinite_points': int((~np.isfinite(local).all(axis=1)).sum()),
+                   'nonpositive_depth_points': int((np.isfinite(local).all(axis=1) & (local[:, 2] <= 1e-6)).sum()),
                    'nonfinite_projection_errors': int(len(error) - len(finite_error)),
                    'median_error_px': float(np.median(finite_error)) if len(finite_error) else None,
                    'p95_error_px': float(np.percentile(finite_error, 95)) if len(finite_error) else None,
@@ -118,7 +120,8 @@ def validate_pointmaps(scene, report_path):
                                  and error.max() <= MAX_REPROJECTION_ERROR_PX and calibration_ok)
             report['views'].append(row)
             if not row['passed']:
-                failures.append(name)
+                failures.append('{} (invalid_depth={}, max_error_px={}, calibration_ok={})'.format(
+                    name, row['invalid_points'], row['max_error_px'], calibration_ok))
         if failures:
             raise ValueError('Camera/point-map reprojection failed: ' + ', '.join(failures))
         report['passed'] = True

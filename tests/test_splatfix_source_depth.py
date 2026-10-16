@@ -128,3 +128,88 @@ def test_opt_in_export_records_extension_and_metric_maps(tmp_path, monkeypatch):
     with np.load(root/manifest['source_depth']['views'][0]['path']) as data:
         assert np.all(data['depth'][data['valid']]==7.)
         assert not data['valid'][0].any()
+
+
+def test_source_disparity_alignment_recovers_metric_scale_with_outliers():
+    from splat_explorer.splatfix.g4splat.source_depth_runtime import fit_source_disparity
+    disp = np.linspace(.2, 2, 1600).reshape(40, 40)
+    truth = 1 / (.3 + 1.7 * disp)
+    depth = truth.copy()
+    depth.flat[::17] *= 8
+    valid = np.ones(disp.shape, bool)
+    valid[:, -4:] = False
+    result, info = fit_source_disparity(disp, depth, valid)
+    np.testing.assert_allclose(result, truth, rtol=1e-7)
+    assert info['fit'] == 'robust-affine-inverse-depth'
+
+
+def test_negative_affine_extrapolation_uses_positive_scale_without_clamping():
+    from splat_explorer.splatfix.g4splat.source_depth_runtime import fit_source_disparity
+    disp = np.linspace(.01, 2, 1600).reshape(40, 40)
+    valid = disp > 1
+    depth = np.zeros_like(disp)
+    depth[valid] = 1 / (disp[valid] - .8)
+    result, info = fit_source_disparity(disp, depth, valid)
+    assert info['fit'] == 'positive-scale-inverse-depth'
+    assert np.isfinite(result).all() and (result > 0).all()
+    np.testing.assert_allclose(result * disp, 1 / info['beta'])
+
+
+@pytest.mark.parametrize('fault', ['nan', 'negative', 'no_anchors', 'zero'])
+def test_source_disparity_rejects_unusable_prediction(fault):
+    from splat_explorer.splatfix.g4splat.source_depth_runtime import fit_source_disparity
+    disp = np.ones((10, 10)); depth = disp * 2; valid = np.ones_like(disp, bool)
+    if fault == 'nan':
+        disp[0, 0] = np.nan
+    elif fault == 'negative':
+        disp[0, 0] = -1
+    elif fault == 'zero':
+        disp[0, 0] = 0
+    else:
+        valid[:] = False
+    with pytest.raises(ValueError):
+        fit_source_disparity(disp, depth, valid)
+
+
+def test_invalid_fallback_completed_but_not_used_as_chart_reference(tmp_path, monkeypatch):
+    from splat_explorer.splatfix.g4splat.source_depth_runtime import (
+        apply_source_depth_pointmaps, calibrated_rays, reference_mask,
+    )
+    file = depth_fixture(tmp_path, monkeypatch)
+    with np.load(file) as data:
+        maps = {k: data[k].copy() for k in data.files}
+    maps['valid'][100:120, 100:120] = False
+    np.savez(file, **maps)
+    manifest = json.loads((tmp_path/'inputs.json').read_text())
+    manifest['source_depth']['views'][0]['sha256'] = hashlib.sha256(file.read_bytes()).hexdigest()
+    (tmp_path/'inputs.json').write_text(json.dumps(manifest))
+    shape = (234, 416)
+    depth, valid = calibrated_depth('000000', shape)
+    rays, center = calibrated_rays('000000', shape)
+    points = rays * depth[..., None] + center
+    hole = np.argwhere(~valid)
+    a, b = hole[0], hole[1]
+    points[tuple(a)] = center - rays[tuple(a)] * 2  # behind camera
+    points[tuple(b)] = np.nan
+    # A finite but misprojected fallback must remain for the gate to reject.
+    c = hole[2]; points[tuple(c)][0] += 20
+    original = points.copy()
+    (tmp_path/'pointmaps').mkdir()
+    target = tmp_path/'pointmaps/000000.json'
+    target.write_text(json.dumps({'confs': np.ones(shape).tolist(), 'points': points.reshape(-1,3).tolist()}))
+    calls = []
+    def predict(name, requested_shape):
+        calls.append((name, requested_shape))
+        return 1/depth  # Oracle predictor tests the integration, not model accuracy.
+    report = apply_source_depth_pointmaps(tmp_path, tmp_path/'check.json', predict)
+    result = np.asarray(json.loads(target.read_text())['points']).reshape(*shape, 3)
+    assert report['views'][0]['completed_invalid_fallback_pixels'] == 2
+    assert len(calls) == 1
+    np.testing.assert_allclose(result[tuple(a)], rays[tuple(a)]*depth[tuple(a)]+center)
+    np.testing.assert_allclose(result[valid], original[valid])
+    np.testing.assert_allclose(result[tuple(c)], original[tuple(c)])
+    mask = reference_mask('000000.png', shape)
+    assert (~mask).sum() == 2 and mask[valid].all()
+    # Replay preserves provenance and does not rerun prediction.
+    apply_source_depth_pointmaps(tmp_path, tmp_path/'check.json', predict)
+    assert len(calls) == 1 and (~reference_mask('000000.png', shape)).sum() == 2

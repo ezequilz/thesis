@@ -11,6 +11,12 @@ from importlib import import_module
 DEFAULT_METHOD = 'artifixer'
 # Explicit allowlist: request values must never become arbitrary import paths.
 METHODS = {
+    'oraclegs': {
+        'module': 'splat_explorer.splatfix.oraclegs.backend',
+        'label': 'OracleGS',
+        'stages': ['repair'],
+        'description': 'SEVA two-pass trajectory generation, VGGT attention uncertainty, and original OracleGS reconstruction. Repaired references are ground truth.',
+    },
     'g4splat': {
         'module': 'splat_explorer.splatfix.g4splat.backend',
         'label': 'G4Splat',

@@ -9,6 +9,17 @@ splatfix:
   # Set 720p explicitly for 1280x720 novel camera renders.
   # early_original: v0, original 960x720 captures and uncapped source inputs.
   resolution_profile: training
+  oraclegs_runtime:
+    auto_setup: true
+    seva_resolution: 576p
+    oracle_adapter: trajectory
+    oracle_target_frames: 80
+    iterations: 22000
+    cap_max: 1800000
+    # Isolated environments; see docs/oraclegs.md for setup and protocol.
+    repo: /workspace/third_party/OracleGS
+    python: /workspace/oraclegs-env/bin/python
+    model_python: /workspace/oraclegs-model-env/bin/python
   g4splat_runtime:
     auto_setup: true
     source_depth: false  # Opt-in source-splat depth extension; changes the method.

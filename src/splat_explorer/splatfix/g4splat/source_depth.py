@@ -5,7 +5,7 @@ import numpy as np
 from scipy.ndimage import minimum_filter, maximum_filter
 from ..checkpoint import camera_from_record, validate_source
 
-VERSION = 'source-splat-depth-v1'
+VERSION = 'source-splat-depth-v2'
 
 
 def conservative_mask(depth):
@@ -49,5 +49,5 @@ def export_source_depth(checkpoint, root, *, should_stop=lambda: False, on_progr
     return {'enabled': True, 'version': VERSION, 'depth_convention': 'positive_camera_z_scene_units',
             'renderer': 'episodes CpuSplatRenderer.render_depth',
             'confidence': 'binary reliability; front-layer coverage >=0.15, 1px eroded, local depth spread <=10%',
-            'fallback': 'upstream prediction at invalid pixels and novel views',
+            'fallback': 'source-aligned prediction at input holes; upstream prediction at novel views',
             'source_fingerprint': checkpoint.manifest.get('source_fingerprint'), 'views': records}

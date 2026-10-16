@@ -163,7 +163,7 @@ class ResultCatalog:
                 'mode': options.get('mode') or config.get('repair_type', ''),
                 'model': result.get('model_variant') or options.get('model'),
                 'trajectory': result.get('trajectory_mode'), 'frames': result.get('frame_count'),
-                'kind': 'G4Splat · viewer approximation' if options.get('reconstruction_method') == 'g4splat' else 'ArtiFixer3D' if manifest or options.get('stage') in ('repair', 'benchmark') else 'Scene repair',
+                'kind': 'OracleGS' if options.get('reconstruction_method') == 'oraclegs' else 'G4Splat · viewer approximation' if options.get('reconstruction_method') == 'g4splat' else 'ArtiFixer3D' if manifest or options.get('stage') in ('repair', 'benchmark') else 'Scene repair',
                 'result_name': manifest.parent.name if manifest else record['run_id'],
                 'original': original is not None, 'repaired': repaired is not None,
                 'viser_url': '/splatfix/results/viser?id=' + quote(key),
