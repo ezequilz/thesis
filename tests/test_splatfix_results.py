@@ -518,6 +518,7 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const elements=new Map();const get=id=>{if(!elements.has(id))elements.set(id,{addEventListener(){}});return elements.get(id)};
 const location={search:'?id=job',href:''};
 const context=vm.createContext({document:{getElementById:get},location,URLSearchParams,
+ResizeObserver:class{observe(){}},
 fetch:()=>new Promise(()=>{}),clearTimeout(){},setTimeout(){},assert});
 vm.runInContext(fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0],context);
 vm.runInContext(`

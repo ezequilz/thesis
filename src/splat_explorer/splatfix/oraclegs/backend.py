@@ -20,8 +20,14 @@ def validate_options(raw):
     if fit not in ('crop', 'pad'):
         raise ValueError('seva_fit must be crop or pad')
     adapter = raw.get('oracle_adapter', 'trajectory')
-    if adapter not in ('trajectory', 'saved_poses'):
-        raise ValueError('oracle_adapter must be trajectory or saved_poses')
+    if adapter not in ('trajectory', 'saved_poses', 'per_view_preset'):
+        raise ValueError('oracle_adapter must be trajectory, saved_poses or per_view_preset')
+    preset = raw.get('oracle_preset', 'spiral')
+    if preset not in ('orbit', 'spiral', 'lemniscate', 'shuffle_orbit'):
+        raise ValueError('oracle_preset must be orbit, spiral, lemniscate or shuffle_orbit')
+    scale = raw.get('oracle_preset_scale', 1.0)
+    if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not np.isfinite(scale) or scale <= 0:
+        raise ValueError('oracle_preset_scale must be a finite positive number in scene units')
     resolution = raw.get('seva_resolution', '576p')
     if resolution not in ('576p', '720p'):
         raise ValueError('seva_resolution must be 576p or 720p')
@@ -32,7 +38,7 @@ def validate_options(raw):
     if order is not None and (not isinstance(order, list) or len(order) < 2 or
                               any(type(i) is not int or i < 0 for i in order) or len(set(order)) != len(order)):
         raise ValueError('oracle_path_order must contain distinct nonnegative checkpoint view indices')
-    return {'seva_geometry_guidance':guidance, 'oracle_depth_source':depth, 'oracle_initialization':initialization, 'oracle_attention_batching':batching, 'seva_fit': fit, 'oracle_adapter': adapter, 'seva_resolution': resolution, 'oracle_target_frames': frames, 'oracle_path_order': order}
+    return {'oracle_preset':preset, 'oracle_preset_scale':float(scale), 'seva_geometry_guidance':guidance, 'oracle_depth_source':depth, 'oracle_initialization':initialization, 'oracle_attention_batching':batching, 'seva_fit': fit, 'oracle_adapter': adapter, 'seva_resolution': resolution, 'oracle_target_frames': frames, 'oracle_path_order': order}
 
 
 def readiness(checkpoint):

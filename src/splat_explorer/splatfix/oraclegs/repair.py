@@ -79,6 +79,10 @@ def probe_runtime(runtime):
 
 def validate_staged_trajectory(inputs, manifest):
     """Do not silently reuse a legacy total-budget path for a new GPU run."""
+    if manifest.get('oracle_adapter') == 'per_view_preset':
+        from .presets import validate_preset_staging
+        validate_preset_staging(inputs, manifest)
+        return
     if manifest['oracle_adapter'] != 'trajectory':
         return
     trajectory = manifest.get('trajectory', {})
@@ -120,7 +124,7 @@ def validate_staged_trajectory(inputs, manifest):
 
 
 
-def seva_request(inputs, output, manifest, runtime):
+def seva_request(inputs, output, manifest, runtime, segment=None):
     width,height = manifest['resolution']
     task = manifest.get('seva_task', 'img2trajvid')
     request = {'data_path':str(inputs), 'data_items':'scene', 'task':task,
@@ -128,11 +132,17 @@ def seva_request(inputs, output, manifest, runtime):
         'use_traj_prior':True, 'chunk_strategy':'interp-gt', 'chunk_strategy_first_pass':'gt-nearest',
         'cfg':[3.0,2.0], 'seed':runtime['seed'], 'W':width, 'H':height,
         'save_first_pass':True, 'save_input':True, 'replace_or_include_input':task == 'img2vid'}
-    if manifest.get('seva_segments'):
+    if manifest.get('seva_segments') and manifest.get('oracle_adapter') != 'per_view_preset':
         request['ordered_pair_endpoints'] = [len(manifest['views'])-2, len(manifest['views'])+manifest['oracle_target_frames']-1]
     if manifest.get('seva_geometry_guidance', 'off') == 'source_splat':
         asset_root = Path(inputs).parents[1] if manifest.get('seva_segments') else Path(inputs)
         request['source_geometry_guidance'] = {'inputs':str(asset_root), 'strength':0.35}
+    if manifest.get('oracle_adapter') == 'per_view_preset':
+        preset = segment['preset'] if segment is not None else manifest['oracle_preset']
+        request.update(num_inputs=1, camera_scale=2.0, guider_types=[1,2], replace_or_include_input=True,
+                       cfg=[4.0 if preset == 'orbit' else 3.0, 2.0])
+        if segment is not None and 'source_geometry_guidance' in request:
+            request['source_geometry_guidance']['source_reference'] = segment['from_reference']
     # Preserve the existing anchor budget; endpoint ordering is a separate change.
     # 720p uses a disclosed padding adapter for the U-Net's 64-pixel stride.
     if manifest['seva_resolution'] == '576p':
@@ -190,7 +200,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
     lock = json.loads((HERE/'upstream-lock.json').read_text())
     recipe = {'reconstruction_method':'oraclegs','inputs':manifest,
         'upstream':{k:{'url':v['url'],'revision':v['revision']} for k,v in lock.items()},
-        'method_variant':('independent-pairwise-trajectories' if manifest.get('seva_segments') else
+        'method_variant':('per-view-seva-'+manifest['oracle_preset'] if manifest.get('oracle_adapter') == 'per_view_preset' else 'independent-pairwise-trajectories' if manifest.get('seva_segments') else
                           'checkpoint-trajectory-adapter' if manifest['oracle_adapter']=='trajectory' else 'saved-poses-original-loader'),
         'gt_policy':'Only saved reference RGBs are GT; all SEVA outputs are synthetic',
         'attention_layers':[0,22], 'attention_weights':[0.25,0.75],
@@ -269,7 +279,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
             index = segment['index']
             destination = output/'seva-segments'/f'{index:03d}'
             destination.mkdir(parents=True)
-            request = seva_request(inputs/segment['input_subdir'], destination, manifest, runtime)
+            request = seva_request(inputs/segment['input_subdir'], destination, manifest, runtime, segment=segment)
             model(f'seva_generation_{index+1:03d}_of_{len(manifest["seva_segments"]):03d}',
                   'seva','seva_repo',request)
         merge_segments(inputs, output, manifest, should_stop=should_stop)
@@ -295,7 +305,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         args[args.index('--depths')+1] = ''
     if manifest.get('source_initialization'):
         args += ['--sh_degree', str(manifest['source_initialization']['sh_degree'])]
-    if manifest['oracle_adapter'] == 'trajectory':
+    if manifest['oracle_adapter'] in ('trajectory', 'per_view_preset'):
         model('reconstruction','train','repo',{'references':str(dataset/'reference_names.json'),'argv':args, **geometry_request},training=True)
     else:
         model('reconstruction','script','repo',{'script':'train.py','argv':args, **geometry_request},training=True)

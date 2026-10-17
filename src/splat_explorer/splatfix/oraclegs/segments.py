@@ -46,6 +46,22 @@ def merge_segments(inputs, output, manifest, *, should_stop=lambda:False):
             if global_index >= n:
                 provenance.append({'target_index':global_index-n, 'segment_index':index,
                                    'segment_target_index':segment['target_indices'].index(global_index-n), 'source':str(image.relative_to(output.resolve()))})
+    # Explicit view subsets still retain every saved GT image for reconstruction.
+    if manifest['oracle_adapter'] == 'per_view_preset':
+        width, height = manifest['resolution']
+        internal = tuple(manifest['seva_internal_resolution'])
+        top = (internal[1]-height)//2
+        for i, frame in enumerate(frames[:n]):
+            if merged[i] is not None:
+                continue
+            relative = f'input/{i:06d}.png'
+            (destination/'input').mkdir(exist_ok=True)
+            with Image.open(inputs/'scene'/frame['file_path']) as image:
+                padded = Image.new('RGB',internal)
+                padded.paste(image,(0,top))
+                padded.save(destination/relative)
+            merged[i] = {**frame, 'file_path':relative, 'w':internal[0],
+                         'h':internal[1], 'cy':frame['cy']+top}
     if any(frame is None for frame in merged):
         raise ValueError('SEVA segments did not generate every target camera')
     atomic_json(destination/'transforms.json', {'frames':merged})

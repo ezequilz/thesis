@@ -142,7 +142,7 @@ def install_geometry_guidance(evaluation, request, report_path):
             else:
                 assigned = values.get('_ordered_pair_sources')
                 guide, mask, source = references.target(pose, k, (width,height),
-                    source_reference=assigned[i] if assigned is not None else None)
+                    source_reference=assigned[i] if assigned is not None else request.get('source_reference'))
             guides.append(guide)
             masks.append(mask)
             records.append({'slot':i, 'conditioned':bool(conditioned[i]), 'source_reference':source,

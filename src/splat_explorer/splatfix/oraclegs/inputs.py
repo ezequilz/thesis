@@ -4,7 +4,7 @@ import shutil
 from pathlib import Path
 import numpy as np
 from PIL import Image
-from .trajectory import pairwise_path
+from .trajectory import pairwise_path, per_view_preset_path, preset_assignments
 from ..checkpoint import atomic_json, camera_from_record
 from .backend import readiness, validate_options
 
@@ -104,17 +104,23 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
                         'camera':view['camera'], 'source_image':str(source),
                         'source_kind':source_kind, 'source_crop_box':source_box,
                         'image_affine':affine.tolist(), 'staged_intrinsics':k.tolist()})
+    preset_seed = (runtime or {}).get('seed', 23)
+    assigned_presets = preset_assignments(options['oracle_preset'], len(order), preset_seed)
+    preset_mode = options['oracle_adapter'] == 'per_view_preset'
     # Only camera poses are interpolated here. SEVA owns both generative passes.
     if options['oracle_adapter'] == 'saved_poses':
         samples = [(min(j,len(order)-2),j,float(j == len(order)-1),i,
                     cameras[i].c2w.astype(float)) for j,i in enumerate(order)]
+    elif preset_mode:
+        samples = per_view_preset_path(cameras, order, options['oracle_target_frames'],
+                                       assigned_presets, options['oracle_preset_scale'])
     else:
         samples = pairwise_path(cameras, order, options['oracle_target_frames'])
     target_records, used_names = [], set()
     for index, (a, local_index, alpha, reference, pose) in enumerate(samples):
         if should_stop():
             raise InterruptedError('Cancelled during OracleGS trajectory staging')
-        left, right = frames[order[a]], frames[order[a+1]]
+        left, right = frames[order[a]], frames[order[a] if preset_mode else order[a+1]]
         name = f'ref_{reference:06d}.png' if reference is not None else f'target_{index:06d}.png'
         # A shared endpoint is generated once for each adjacent segment. Never
         # overwrite either sample during OracleGS dataset assembly.
@@ -123,7 +129,7 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
         used_names.add(name)
         target_records.append({'target_index':index, 'segment_index':a,
             'segment_frame_index':local_index, 'alpha':alpha,
-            'reference_index':reference, 'generation_source_reference_index':order[a] if alpha <= .5 else order[a+1],
+            'reference_index':reference, 'generation_source_reference_index':order[a] if preset_mode or alpha <= .5 else order[a+1],
             'image_name':name,
             'position':pose[:3,3].tolist()})
         # Placeholders satisfy ReconfusionParser; never used as training labels.
@@ -153,7 +159,10 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
             segments.append({'index':segment, 'from_reference':a, 'to_reference':b,
                              'input_subdir':relative, 'target_indices':targets, 'frame_order':frame_order,
                              'endpoint_frame_indices':[n-2,len(selected)-1]})
-    manifest = {'seva_task':'img2vid' if segments else 'img2trajvid', 'seva_segments':segments,
+    if preset_mode:
+        from .presets import stage_preset_segments
+        segments = stage_preset_segments(root, frames, order, target_records, assigned_presets)
+    manifest = {'seva_task':'img2vid' if segments and not preset_mode else 'img2trajvid', 'seva_segments':segments,
                 'seva_frame_order':list(range(len(frames))), 'reconstruction_method':'oraclegs',
                 'mode':mode, 'views':records,
                 'source_checkpoint':str(checkpoint.root), 'camera_convention':'opengl_c2w',
@@ -174,6 +183,9 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
                      'translation_distance':float(np.linalg.norm(cameras[b].position-cameras[a].position))}
                     for j,(a,b) in enumerate(zip(order[:-1],order[1:]))],
         'frames':target_records}
+    if preset_mode:
+        from .presets import preset_metadata
+        manifest['trajectory'].update(preset_metadata(options, order, assigned_presets, preset_seed))
     from .source_geometry import stage_source_geometry
     stage_source_geometry(checkpoint, root, manifest, frames[:n], should_stop=should_stop)
     atomic_json(root/'inputs.json',manifest)

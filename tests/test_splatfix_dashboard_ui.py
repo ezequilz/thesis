@@ -45,6 +45,19 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(pendingStage,'');
   $('benchmark-runs').valid=true;
 
+  $('reconstruction-method').value='oraclegs';
+  $('oracle-adapter').value='per_view_preset';
+  $('oracle-preset').value='shuffle_orbit';
+  $('oracle-preset-scale').value='0.25';
+  updatePresetControls();
+  assert.equal($('oracle-preset-controls').hidden,false);
+  assert.equal(payload('repair').oracle_preset,'shuffle_orbit');
+  assert.equal(payload('repair').oracle_preset_scale,0.25);
+  schedule('repair');
+  $('oracle-preset').value='orbit';
+  assert.equal(pendingPayload.oracle_preset,'shuffle_orbit');
+  $('oracle-adapter').value='trajectory';updatePresetControls();
+  assert.equal($('oracle-preset-controls').hidden,true);
   $('reconstruction-method').value='g4splat';
   $('g4splat-source-depth').value='off';
   assert.equal(payload('repair').source_depth,false);
@@ -161,6 +174,7 @@ let calls=0,timer=null,lastDelay=null;
 let result={run_id:'run',status:'running',kind:'ArtiFixer3D',metrics:{},gallery:{frames:[]}};
 const document={getElementById:get,querySelectorAll:()=>[],hidden:false};
 const context=vm.createContext({document,location:{search:'?id=run'},URLSearchParams,
+ ResizeObserver:class{observe(){}},
  fetch:async()=>{calls++;return{ok:true,json:async()=>result}},
  setTimeout:(fn,ms)=>{assert.ok([3000,30000].includes(ms));lastDelay=ms;timer=fn;return 1},clearTimeout:()=>{timer=null}});
 const flush=()=>new Promise(resolve=>setImmediate(resolve));

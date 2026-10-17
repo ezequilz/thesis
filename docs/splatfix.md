@@ -837,3 +837,48 @@ requires both the dashboard and Viser processes to run the updated code.
 ## OracleGS
 
 Step 4 also offers OracleGS with SEVA two-pass trajectory generation and the authors' VGGT-attention-guided reconstruction. See [OracleGS integration](oraclegs.md) for the separate dataset-adapter choices, 576p default, 720p experiment with automatic diffusion stride padding, runtime setup, and validation limits.
+
+### Per-view SEVA preset experiment
+
+In OracleGS settings, select **Dataset integration → Per-view SEVA preset**,
+then choose **Orbit**, **Spiral**, **Lemniscate**, or **Shuffle orbit**. The existing
+pairwise and saved-pose modes remain available. Each selected view starts a
+separate SEVA `img2trajvid` job conditioned on that view's RGB alone. With six
+views and 80 target frames this produces six disconnected clips and 480 synthetic
+images. All saved references remain GT for reconstruction; targets, including
+those coincident with a reference pose, remain synthetic.
+
+The paths follow Stability AI's Basic-demo presets at pinned revision
+`fe19948e9b7bea261ab2db780a59656131404a83`:
+
+- Orbit: full 360° clockwise orbit around local `[0, 0, 10]`, radius 10.
+- Spiral: Gradio radii `[1, 1, 0.5]`, two turns, `zrate=0.5`, bounds `[1, 5]`,
+  rebased so its first pose is exactly the input camera.
+- Lemniscate: the author's 60° figure-eight construction, focus distance 10.
+- Shuffle orbit: balanced counts of those three presets, shuffled using the run
+  seed (23 by default). Six views get exactly two of each. For other counts the
+  preset counts differ by at most one. Assignments are recorded per segment.
+
+The size control specifies **scene units per demo unit**, default 1. All presets
+share it. It scales world-space translation, preserving rotations, while every
+clip retains its saved camera's calibrated intrinsics and orientation. Scene
+units are not necessarily metres. SEVA subsequently normalizes camera positions;
+this control is not a guarantee of proportional visible motion. Orbit can sweep
+far outside the observed scene. No collision avoidance or scene-depth adaptation
+is applied, so this is a reproducible diagnostic, not a guaranteed valid path.
+
+Sampling includes the initial camera and excludes the repeated loop endpoint.
+Generation uses camera scale 2, CFG `[4, 2]` for Orbit and `[3, 2]` for Spiral and
+Lemniscate, as in the Basic-demo preset settings. Geometry guidance, when enabled,
+uses the clip's own reference. Reconstruction depth and initialization settings
+remain independent. Saved metadata records the source, scale, seed, assignment,
+poses and reference ownership; results label each independent clip by preset.
+
+The source of the trajectory formulas is
+[SEVA geometry.py](https://github.com/Stability-AI/stable-virtual-camera/blob/fe19948e9b7bea261ab2db780a59656131404a83/seva/geometry.py),
+with Gradio defaults from
+[demo_gr.py](https://github.com/Stability-AI/stable-virtual-camera/blob/fe19948e9b7bea261ab2db780a59656131404a83/demo_gr.py).
+The authors recommend orbit/spiral/lemniscate to show scene depth in their
+[usage guide](https://github.com/Stability-AI/stable-virtual-camera/blob/fe19948e9b7bea261ab2db780a59656131404a83/docs/GR_USAGE.md).
+We preserve saved calibration instead of the demo's assumed 54° field of view;
+this integration is not a claim to reproduce a particular highlight video.

@@ -242,7 +242,7 @@ def test_real_upstream_colmap_loader_split_and_attention(tmp_path):
         reference_only_ground_truth(bad,['ref_000000.png','ref_000001.png'])
 
 
-@pytest.mark.parametrize('adapter',['trajectory','saved_poses'])
+@pytest.mark.parametrize('adapter',['trajectory','saved_poses','per_view_preset'])
 @pytest.mark.parametrize('stop_training',[False,True])
 @pytest.mark.parametrize('count',[2,6])
 def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training,count,depth="predicted",initialization="sfm"):
@@ -281,8 +281,14 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training
             (generated/'samples-rgb').mkdir(parents=True)
             exports=[]
             segment_frames = json.loads((Path(body['data_path'])/'scene/transforms.json').read_text())['frames']
-            assert {f['file_path'] for f in segment_frames if 'ref_' in f['file_path']} == {f['file_path'] for f in frames[:count]}
-            assert body['num_inputs'] == count
+            refs = {f['file_path'] for f in segment_frames if 'ref_' in f['file_path']}
+            if adapter == 'per_view_preset':
+                assert len(refs) == body['num_inputs'] == 1
+                assert refs.issubset({f['file_path'] for f in frames[:count]})
+                assert body['replace_or_include_input'] and len(segment_frames) == 6
+            else:
+                assert refs == {f['file_path'] for f in frames[:count]}
+                assert body['num_inputs'] == count
             if adapter == 'trajectory':
                 assert len(segment_frames) == count+5
             for i,f in enumerate(segment_frames):
@@ -301,7 +307,7 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training
                 Image.new('L',(37,37),128).save(output/'attention-raw'/p.name)
         elif phase == 'reconstruction':
             body = json.loads(Path(argv[-1]).read_text())
-            assert argv[-3] == ('train' if adapter=='trajectory' else 'script')
+            assert argv[-3] == ('train' if adapter in ('trajectory','per_view_preset') else 'script')
             assert '--synth_attention_dir' in body['argv']
             assert body['argv'][body['argv'].index('--lambda_lpips')+1]=='0.3'
             assert '--gt_synth_schedule' in body['argv'] and '--depths' in body['argv']
@@ -335,6 +341,8 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training
         result = repair.run_prepared(inputs,output,runtime=runtime)
     generations = ([f'seva_generation_{i+1:03d}_of_{count-1:03d}' for i in range(count-1)]
                    if adapter == 'trajectory' else ['seva_generation'])
+    if adapter == 'per_view_preset':
+        generations = [f'seva_generation_{i+1:03d}_of_{count:03d}' for i in range(count)]
     depth_phases = ['reference_depth','depth_alignment'] if depth == 'predicted' else []
     assert phases == ['model_access','sfm_features','sfm_matching','sfm_triangulation','sfm_export',
                       *depth_phases,*generations,'vggt_attention','reconstruction']

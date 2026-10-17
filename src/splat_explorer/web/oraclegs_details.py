@@ -254,6 +254,8 @@ def build_details(studio, manifest, result):
     for segment in inputs.get('seva_segments', []):
         base = f"seva-segments/{segment['index']:03d}"
         label = f"Pair {segment['index']+1}: reference {segment['from_reference']+1} → {segment['to_reference']+1}"
+        if inputs.get('oracle_adapter') == 'per_view_preset':
+            label = f"{segment.get('preset', inputs.get('oracle_preset', 'Preset')).title()} · reference {segment['from_reference']+1} (independent)"
         for relative, kind in [('first-pass/samples-rgb.mp4','sparse anchors'), ('samples-rgb.mp4','full sub-trajectory')]:
             path = _safe(root, base+'/seva/'+inputs.get('seva_task','img2trajvid')+'/scene/'+relative)
             if path:
