@@ -44,6 +44,8 @@ class ManualSelection:
             self.checkpoint = cp
             self.expected = metadata['manual_scene']
             self.width, self.height = metadata['width'], metadata['height']
+            self.seva = metadata.get('capture_set') == 'seva'
+            self.depth_renderer = None
             self.folder = self.server.gui.add_folder('Custom view finding')
             with self.folder:
                 self.status = self.server.gui.add_markdown(self.progress())
@@ -53,11 +55,41 @@ class ManualSelection:
             self.save_button.on_click(self.save_current)
             self.finish_button.on_click(self.finish)
             self.close_button.on_click(self.close)
+            for client in getattr(self.server, 'get_clients', lambda: {})().values():
+                self.apply_fov(client)
             return {'ok': True}
+
+    def apply_fov(self, client):
+        if self.folder is not None and self.seva:
+            aspect = float(getattr(client.camera, 'aspect', 1024 / 576))
+            if not np.isfinite(aspect) or aspect <= 0:
+                aspect = 1024 / 576
+            client.camera.fov = float(2 * np.arctan(np.tan(np.radians(54) / 2) / aspect))
+
+    def save_seva(self, image, camera):
+        from .oraclegs.captures import save_capture
+        from ..scene import load_scene
+        from ..rendering.cpu_splat_renderer import CpuSplatRenderer
+        cp = self.checkpoint
+        if self.depth_renderer is None:
+            loading = cp.manifest['metadata'].get('scene_load', {})
+            self.depth_renderer = CpuSplatRenderer(load_scene(openable_scene_path(cp.manifest['scene_path']),
+                min_opacity=loading.get('min_opacity', 0.), lod_level=loading.get('lod_level', 0)))
+        depth = self.depth_renderer.render_depth(camera)
+        view = {'id':f'{len(cp.views):03d}', 'camera':camera_to_record(camera),
+                'original_rgb':None, 'repaired_rgb':None, 'metadata':{'selection':'manual'}}
+        view['seva_capture'] = save_capture(cp, view, camera, np.array(image.convert('RGB')), depth)
+        self.require_scene()
+        cp.views.append(view)
+        try:
+            cp.save()
+        except Exception:
+            cp.views.pop()
+            raise
 
     def progress(self):
         cp = self.checkpoint
-        return f'**{len(cp.views)} / {cp.target_views} views saved** · {self.width} × {self.height}'
+        return f'**{len(cp.views)} / {cp.target_views} views saved** · {self.width} × {self.height}' + (' · **54° horizontal FOV**' if self.seva else '')
 
     def require_scene(self):
         state = self.scene_state
@@ -76,7 +108,12 @@ class ManualSelection:
             self.require_scene()
             if event.client is None:
                 raise ValueError('Save from a connected Viser tab')
+            if self.checkpoint.complete:
+                raise ValueError('Requested view selection is already complete')
+            self.apply_fov(event.client)
             camera = camera_from_client(event.client, self.width, self.height)
+            if self.seva:
+                camera.fov_deg = 54.
             if any(np.allclose(camera.c2w, camera_from_record(v).c2w, atol=1e-5)
                    for v in self.checkpoint.views):
                 raise ValueError('This position is already saved. Move to another view.')
@@ -87,7 +124,10 @@ class ManualSelection:
             }, any_client=True)
             self.require_scene()
             with Image.open(io.BytesIO(raw)) as image:
-                self.checkpoint.add_view(image, camera, {'selection': 'manual'})
+                if self.seva:
+                    self.save_seva(image, camera)
+                else:
+                    self.checkpoint.add_view(image, camera, {'selection': 'manual'})
             self.status.content = self.progress()
         except Exception as exc:
             self.status.content = self.progress() + '\n\n**Could not save:** ' + str(exc)

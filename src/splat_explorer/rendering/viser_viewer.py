@@ -36,12 +36,9 @@ logger = logging.getLogger(__name__)
 
 LIVE_STATE_PATH = Path("outputs/live/agent_state.json")
 
-# Viser packs covariance as float16. Needle Gaussians from a long single-view
-# photometric lift overflow that (scale^2 > 65504) and the WebGL shader
-# reads Inf as rainbow neon. Display-only clamp; the CUDA scene is unchanged.
-_VISER_MAX_SCALE = 128.0
-_VISER_MAX_ANISO = 128.0
-_VISER_MIN_SCALE = 1e-6
+# Viser packs covariance as float16. Preserve source geometry unless an actual
+# covariance entry exceeds that format; thin surface splats are valid.
+_VISER_MAX_COVARIANCE = float(np.finfo(np.float16).max)
 
 # Viser's splat shader applies last frame's projection. The dashboard visor
 # iframe is therefore sized to the VLM's 4:3 so get_render(W,H) matches the
@@ -190,21 +187,32 @@ def _view_pose(scene: GaussianScene, up_axis: str, fov_deg: float) -> dict:
     return _view_from_center(scene.robust_centroid(), up_axis, fov_deg)
 
 
-def visor_safe_scales(
-    scales: np.ndarray,
-    *,
-    min_scale: float = _VISER_MIN_SCALE,
-    max_scale: float = _VISER_MAX_SCALE,
-    max_aniso: float = _VISER_MAX_ANISO,
-) -> np.ndarray:
-    """Clamp scales so viser's float16 covariance packing stays finite."""
-    min_scale = max(float(min_scale), 1e-8)
-    max_scale = max(float(max_scale), min_scale)
-    max_aniso = max(float(max_aniso), 1.0)
-    s = np.clip(np.asarray(scales, dtype=np.float32), min_scale, max_scale)
-    s_min = np.clip(s.min(axis=-1, keepdims=True), min_scale, None)
-    s = np.minimum(s, s_min * max_aniso)
-    return np.clip(s, min_scale, max_scale)
+def visor_safe_covariances(quats: np.ndarray, scales: np.ndarray) -> np.ndarray:
+    """Preserve valid shapes; uniformly shrink only float16-overflowing covariances.
+
+    Compute bounded chunks in float64 so huge but finite scales cannot overflow
+    before the safety check. Uniform covariance scaling retains axis ratios and
+    orientation. No minimum scale or anisotropy limit is applied.
+    """
+    result = np.empty((len(scales), 3, 3), dtype=np.float32)
+    limited = 0
+    for start in range(0, len(scales), 65536):
+        stop = start + 65536
+        block = np.asarray(scales[start:stop], dtype=np.float64)
+        rotations = np.asarray(quats[start:stop])
+        if not np.isfinite(block).all() or (block < 0).any() or not np.isfinite(rotations).all():
+            raise ValueError('Viser requires finite rotations and finite nonnegative splat scales')
+        covariance = quats_to_covariances(rotations, block)
+        if not np.isfinite(covariance).all():
+            raise ValueError('Nonfinite splat covariance cannot be displayed in Viser')
+        peak = np.max(np.abs(covariance), axis=(1, 2))
+        unsafe = peak > _VISER_MAX_COVARIANCE
+        covariance[unsafe] *= (_VISER_MAX_COVARIANCE / peak[unsafe])[:, None, None]
+        result[start:stop] = covariance
+        limited += int(unsafe.sum())
+    if limited:
+        logger.warning('Limited %d splat covariances exceeding float16 range for Viser display', limited)
+    return result
 
 
 def _splat_index(scene: GaussianScene, max_splats: int) -> np.ndarray:
@@ -231,7 +239,7 @@ def _install_splats(
         centers=scene.means[idx],
         rgbs=scene.colors[idx],
         opacities=scene.opacities[idx, None],
-        covariances=quats_to_covariances(scene.quats[idx], visor_safe_scales(scene.scales[idx])),
+        covariances=visor_safe_covariances(scene.quats[idx], scene.scales[idx]),
     )
 
 
@@ -767,6 +775,9 @@ def serve_viewer(
         except Exception:
             pass
 
+        if manual_selection is not None:
+            manual_selection.apply_fov(client)
+
     # --- live agent overlay (fed by the episode dashboard) -------------------
     server.gui.configure_theme(
         control_layout="floating",
@@ -914,6 +925,8 @@ def serve_viewer(
                 _snap_clients_to_step(server, state, view["forward"], view)
             else:
                 _apply_view(server, view)
+        for client in server.get_clients().values():
+            manual_selection.apply_fov(client)
         scene_state.update(
             path=path,
             up_axis=up_ax,

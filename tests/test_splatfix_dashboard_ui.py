@@ -181,6 +181,25 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal($('edit-now').disabled,true);assert.equal($('edit-schedule').disabled,true);
   assert.equal($('repair-now').disabled,false);
   $('oracle-capture-source').value='saved';assert.equal(payload('repair').oracle_capture_source,'saved');
+  const view=cp.views[0];view.repaired_url='/saved-repair.png';view.seva_original_url='/seva-rgb.png';view.seva_repaired_url='/seva-repair.png';
+  assert.equal(checkpointImage(cp,view).url,'/saved-repair.png');
+  setCheckpointFov(cp.id,'seva');assert.equal(checkpointImage(cp,view).url,'/seva-repair.png');
+  assert.match($('checkpoint-grid').innerHTML,/data-fov="seva"/);
+  view.seva_repaired_url=null;assert.equal(checkpointImage(cp,view).url,'/seva-rgb.png');
+  view.seva_original_url=null;renderCheckpointGallery();
+  assert.equal(checkpointImage(cp,view).url,null);
+  assert.match($('checkpoint-grid').innerHTML,/54° capture pending/);
+  setCheckpointFov(cp.id,'saved');assert.equal(checkpointImage(cp,view).url,'/saved-repair.png');
+  setCheckpointImageMode(cp.id,'rgb');assert.equal(checkpointImage(cp,view).url,view.original_url);
+  assert.match($('checkpoint-grid').innerHTML,/checkpoint-toggle-divider/);
+  assert.match($('checkpoint-grid').innerHTML,/data-image-mode="rgb"/);
+  view.seva_original_url='/seva-rgb.png';view.seva_repaired_url='/seva-repair.png';
+  setCheckpointFov(cp.id,'seva');assert.equal(checkpointImage(cp,view).url,'/seva-rgb.png');
+  setCheckpointImageMode(cp.id,'gpt');assert.equal(checkpointImage(cp,view).url,'/seva-repair.png');
+  view.seva_repaired_url=null;assert.equal(checkpointImage(cp,view).url,'/seva-rgb.png');
+  assert.match(checkpointImage(cp,view).label,/RGB/);
+
+
 })()`,context)).catch(error=>{console.error(error);process.exitCode=1});
 '''
     result = subprocess.run([node, '-e', code, str(page)], capture_output=True, text=True)

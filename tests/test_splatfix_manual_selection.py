@@ -127,3 +127,46 @@ def test_selected_size_used_for_capture_and_gpt_crop(selection, size):
         assert image.getpixel((0, 0)) == (255, 0, 0)
         assert image.getpixel((size[0]-1, size[1]-1)) == (255, 0, 0)
     assert cp.views[0]['image_repair']['resize']['method'] == 'cover_center_crop'
+
+
+def test_direct_seva_capture_has_no_original_fov_assets(selection, monkeypatch):
+    from splat_explorer.splatfix.oraclegs.captures import validate_capture, select_checkpoint
+    from splat_explorer.splatfix.image_repair import repair_images
+    import splat_explorer.scene as scene
+    from splat_explorer.rendering.cpu_splat_renderer import CpuSplatRenderer
+    session, event, captures = selection
+    session.seva = True
+    session.width, session.height = 1024, 576
+    session.checkpoint.manifest['metadata'].update(capture_set='seva', width=1024, height=576)
+    session.checkpoint.manifest['target_views'] = 1
+    monkeypatch.setattr(scene, 'load_scene', lambda *a, **kw: object())
+    monkeypatch.setattr(CpuSplatRenderer, '__init__', lambda *a: None)
+    monkeypatch.setattr(CpuSplatRenderer, 'render_depth', lambda self, c: np.full((c.height,c.width),3.,dtype=np.float32))
+    session.apply_fov(event.client)
+    assert event.client.camera.fov == pytest.approx(2*np.arctan(np.tan(np.radians(27))*576/1024))
+    session.save_current(event)
+    cp = Checkpoint.load(session.checkpoint.root)
+    assert cp.complete, session.status.content
+    view = cp.views[0]
+    assert view['original_rgb'] is None and view['repaired_rgb'] is None
+    assert not (cp.root/'views/000/original.png').exists()
+    capture = validate_capture(cp, view)
+    assert capture['camera']['fov_deg'] == 54
+    assert (captures[0]['width'], captures[0]['height']) == (1024,576)
+    assert captures[0]['fov'] == pytest.approx(event.client.camera.fov)
+    assert select_checkpoint(cp,'seva').image_path(capture).is_file()
+    raw = io.BytesIO()
+    Image.new('RGB',(1672,940),'green').save(raw,format='PNG')
+    backend=SimpleNamespace(name='test',edit=lambda *_:SimpleNamespace(error=None,images=[raw.getvalue()]))
+    repair_images(cp,image_set='seva',backend=backend)
+    reloaded=Checkpoint.load(cp.root)
+    assert reloaded.views[0]['repaired_rgb'] is None
+    assert Image.open(reloaded.image_path(reloaded.views[0]['seva_capture'],True)).size == (1024,576)
+
+
+def test_live_seva_fov_respects_viewport_aspect(selection):
+    session,event,_=selection
+    session.seva=True
+    event.client.camera.aspect=1.0
+    session.apply_fov(event.client)
+    assert np.degrees(event.client.camera.fov)==pytest.approx(54.)

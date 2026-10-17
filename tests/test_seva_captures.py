@@ -191,3 +191,20 @@ def test_dashboard_defaults_to_seva_and_capture_jobs_are_deduplicated(studio, ca
         studio.create({'stage':'repair', 'checkpoint':str(cp.root), 'reconstruction_method':'oraclegs', 'mode':'edited'})
     run = studio.create({'stage':'edit', 'checkpoint':str(cp.root), 'image_set':'seva'})
     assert run['config']['splatfix']['image_set'] == 'seva'
+
+
+def test_seva_only_checkpoint_is_listed_and_original_jobs_are_rejected(studio, capture_backend):
+    cp = capture_checkpoint(checkpoint(studio.checkpoint_root, 2))
+    for view in cp.views:
+        view['original_rgb'] = None
+        view['repaired_rgb'] = None
+        view['camera'] = copy.deepcopy(view['seva_capture']['camera'])
+    cp.manifest['metadata']['capture_set'] = 'seva'
+    cp.save()
+    row = next(c for c in studio.checkpoints() if c['id'] == str(cp.root))
+    assert row['complete'] and row['seva_captured'] == 2
+    assert all(v['original_url'] is None and v['seva_original_url'] for v in row['views'])
+    with pytest.raises(ValueError, match='no original-FOV'):
+        studio.create({'stage':'edit','checkpoint':str(cp.root),'image_set':'saved'})
+    job=studio.create({'stage':'edit','checkpoint':str(cp.root),'image_set':'seva'})
+    assert job['config']['splatfix']['image_set']=='seva'

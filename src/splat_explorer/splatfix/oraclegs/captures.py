@@ -68,12 +68,35 @@ def select_checkpoint(checkpoint, source='saved', *, edited=False):
     return Checkpoint(checkpoint.root, manifest)
 
 
+def save_capture(checkpoint, view, camera, rgb, depth):
+    """Write a calibrated RGB/depth pair before publishing its view record."""
+    from ..g4splat.source_depth import conservative_mask
+    valid = conservative_mask(depth)
+    if not valid.any():
+        raise ValueError('No reliable SEVA source depth for view ' + view['id'])
+    directory = checkpoint.root/'views'/view['id']/'seva'
+    directory.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(rgb).save(directory/'original.png')
+    np.savez_compressed(directory/'depth.npz', depth=np.where(valid, depth, 0).astype(np.float32),
+                        valid=valid, intrinsics=camera.intrinsics, c2w=camera.c2w)
+    capture = {'profile':PROFILE, 'camera':camera_to_record(camera), 'captured_at':utc_now(),
+               'rgb_renderer':'viser', 'depth_renderer':'CpuSplatRenderer.render_depth',
+               'depth_convention':'positive_camera_z_scene_units',
+               'source_fingerprint':checkpoint.manifest.get('source_fingerprint'),
+               'original_rgb':str((directory/'original.png').relative_to(checkpoint.root)),
+               'source_depth':str((directory/'depth.npz').relative_to(checkpoint.root)),
+               'repaired_rgb':None, 'image_repair':None}
+    capture['sha256'] = {key:hashlib.sha256(asset_path(checkpoint, capture[key]).read_bytes()).hexdigest()
+                         for key in ('original_rgb', 'source_depth')}
+    validate_capture(checkpoint, {**view, 'seva_capture':capture})
+    return capture
+
+
 def capture_checkpoint(checkpoint, *, view_id=None, url=None, should_stop=lambda:False, on_progress=lambda **kw:None):
     """Capture missing views only; publish each RGB/depth pair after validation."""
     from ..viser_capture import CaptureSession
     from ...scene import load_scene
     from ...rendering.cpu_splat_renderer import CpuSplatRenderer
-    from ..g4splat.source_depth import conservative_mask
     checkpoint = Checkpoint.load(checkpoint.root if isinstance(checkpoint, Checkpoint) else checkpoint)
     with (checkpoint.root/'.seva-capture.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -106,24 +129,7 @@ def capture_checkpoint(checkpoint, *, view_id=None, url=None, should_stop=lambda
             camera = capture_camera(view)
             rgb = session.render(camera)
             depth = renderer.render_depth(camera)
-            valid = conservative_mask(depth)
-            if not valid.any():
-                raise ValueError('No reliable SEVA source depth for view ' + view['id'])
-            directory = checkpoint.root/'views'/view['id']/'seva'
-            directory.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(rgb).save(directory/'original.png')
-            np.savez_compressed(directory/'depth.npz', depth=np.where(valid, depth, 0).astype(np.float32),
-                                valid=valid, intrinsics=camera.intrinsics, c2w=camera.c2w)
-            capture = {'profile':PROFILE, 'camera':camera_to_record(camera), 'captured_at':utc_now(),
-                       'rgb_renderer':'viser', 'depth_renderer':'CpuSplatRenderer.render_depth',
-                       'depth_convention':'positive_camera_z_scene_units',
-                       'source_fingerprint':checkpoint.manifest.get('source_fingerprint'),
-                       'original_rgb':str((directory/'original.png').relative_to(checkpoint.root)),
-                       'source_depth':str((directory/'depth.npz').relative_to(checkpoint.root)),
-                       'repaired_rgb':None, 'image_repair':None}
-            capture['sha256'] = {key:hashlib.sha256(asset_path(checkpoint, capture[key]).read_bytes()).hexdigest()
-                                 for key in ('original_rgb', 'source_depth')}
-            validate_capture(checkpoint, {**view, 'seva_capture':capture})
+            capture = save_capture(checkpoint, view, camera, rgb, depth)
             # Merge into the latest manifest, retaining unrelated original-image edits.
             latest = Checkpoint.load(checkpoint.root)
             target = next(v for v in latest.views if v['id'] == view['id'])

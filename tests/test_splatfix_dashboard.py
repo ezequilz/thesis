@@ -855,8 +855,9 @@ def test_method_discovery_and_checkpoint_requirements_are_backend_owned(studio, 
     assert 'split_mode' not in options
 
 
+@pytest.mark.parametrize('capture_set', ['saved', 'seva'])
 @pytest.mark.parametrize('profile,size', [('training', (832, 480)), ('720p', (1280, 720))])
-def test_custom_selection_creates_portable_checkpoint_without_job(studio, tmp_path, monkeypatch, profile, size):
+def test_custom_selection_creates_portable_checkpoint_without_job(studio, tmp_path, monkeypatch, profile, size, capture_set):
     from splat_explorer.rendering.viser_renderer import ViserCaptureRenderer
     from splat_explorer.scene import catalog
     source = tmp_path / 'room.ply'
@@ -866,7 +867,9 @@ def test_custom_selection_creates_portable_checkpoint_without_job(studio, tmp_pa
     calls, published = [], []
     monkeypatch.setattr(ViserCaptureRenderer, '_request', lambda *args, **kwargs: calls.append((args, kwargs)))
     monkeypatch.setattr(catalog, 'publish_live_scene', lambda *args, **kwargs: published.append((args, kwargs)))
-    result = studio.start_custom({'scene_id': 'room', 'views': 4, 'resolution_profile': profile})
+    result = studio.start_custom({'scene_id': 'room', 'views': 4, 'resolution_profile': profile, 'capture_set':capture_set})
+    if capture_set == 'seva':
+        size = (1024,576)
     cp = Checkpoint.load(result['checkpoint'])
     assert cp.target_views == 4 and not cp.complete
     assert cp.manifest['scene_path'] == str(source)

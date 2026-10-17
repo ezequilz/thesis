@@ -30,7 +30,7 @@ class SplatfixStudio(SceneRunStudio):
         for path in sorted(manifests, reverse=True):
             try:
                 cp = Checkpoint.load(path)
-                views = [{**v, 'original_url': self.file_url(cp.image_path(v)),
+                views = [{**v, 'original_url': self.file_url(cp.image_path(v)) if v.get('original_rgb') else None,
                           'repaired_url': self.file_url(cp.image_path(v, True)) if v.get('repaired_rgb') else None}
                          for v in cp.views]
                 for view in views:
@@ -238,12 +238,15 @@ class SplatfixStudio(SceneRunStudio):
         scene = next((s for s in self.scenes() if s['id'] == body.get('scene_id')), None)
         if scene is None or not scene.get('path'):
             raise ValueError('Choose an available scene')
-        width, height = profile_size(options['resolution_profile'])
+        capture_set = body.get('capture_set', 'saved')
+        if capture_set not in ('saved', 'seva'):
+            raise ValueError('Unknown Custom capture FOV')
+        width, height = (1024, 576) if capture_set == 'seva' else profile_size(options['resolution_profile'])
         ident, generation = 'splatfix-manual-' + uuid.uuid4().hex, time.time_ns() // 1000000
         spec = SceneSpec(ident, scene['label'], Path(scene['path']),
                          up_axis=scene.get('up_axis', '+y'), lod_level=scene.get('lod_level', 0))
         cp = Checkpoint.create(self.checkpoint_root, spec.path, target_views=options['views'], metadata={
-            'selection': 'manual', 'renderer': {'backend': 'viser'},
+            'selection': 'manual', 'capture_set': capture_set, 'renderer': {'backend': 'viser'},
             'width': width, 'height': height, 'resolution_profile': options['resolution_profile'],
             'up_axis': spec.up_axis,
             'scene_load': {'lod_level': spec.lod_level,
@@ -315,6 +318,8 @@ class SplatfixStudio(SceneRunStudio):
                             and opts.get('checkpoint') == checkpoint
                             and existing.state.status.value in ('queued', 'waiting_gpu', 'starting', 'running', 'stopping')):
                         raise ValueError('A SEVA capture job is already queued or active for this checkpoint')
+            if not seva_set and options['stage'] in ('edit', 'repair') and any(not v.get('original_rgb') for v in cp['views']):
+                raise ValueError('This checkpoint has no original-FOV images; select SEVA captures')
             if not seva_set and (options['stage'] == 'edit' or options.get('mode') == 'edited') and cp['rgb_renderer'] != 'viser':
                 raise ValueError('Recapture these views in Viser before image editing or edited reconstruction')
             if options['stage'] == 'repair':

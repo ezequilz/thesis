@@ -157,7 +157,11 @@ class Checkpoint:
                 raise ValueError('Duplicate checkpoint view id')
             ids.add(view['id'])
             camera = camera_from_record(view)
-            with Image.open(checkpoint.image_path(view)) as image:
+            image_view = view
+            if not view.get('original_rgb'):
+                from .oraclegs.captures import validate_capture
+                image_view = validate_capture(checkpoint, view)
+            with Image.open(checkpoint.image_path(image_view)) as image:
                 if image.size != (camera.width, camera.height):
                     raise ValueError('Original RGB dimensions do not match saved camera')
             if view.get('repaired_rgb'):
@@ -190,6 +194,8 @@ class Checkpoint:
 
     def image_path(self, view, repaired=False):
         key = 'repaired_rgb' if repaired else 'original_rgb'
+        if not view.get(key):
+            raise ValueError('No saved image in this FOV set; select the SEVA capture set')
         relative = Path(view[key])
         path = (self.root / relative).resolve()
         if relative.is_absolute() or not path.is_relative_to(self.root):

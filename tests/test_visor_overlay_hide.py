@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from splat_explorer.rendering.viser_viewer import (
     overlay_node_names,
     queue_client_overlay_visibility,
-    visor_safe_scales,
+    visor_safe_covariances,
 )
 
 
@@ -59,13 +59,31 @@ def test_queue_client_overlay_visibility_skips_clients_without_a_socket():
     assert queue_client_overlay_visibility(SimpleNamespace(), ("/agent",), True) is False
 
 
-def test_visor_safe_scales_prevents_float16_covariance_overflow():
+def test_visor_preserves_thin_and_rotated_valid_splats():
     import numpy as np
+    from splat_explorer.rendering.base import quats_to_covariances
+    # An axis over sqrt(float16.max) is still safe when rotated across axes.
+    quats = np.array([[1,0,0,0], [np.cos(np.pi/8),0,0,np.sin(np.pi/8)]], dtype=np.float32)
+    scales = np.array([[1e-9,.05,56.], [300.,.01,.01]], dtype=np.float32)
+    expected = quats_to_covariances(quats,scales.astype(np.float64)).astype(np.float32)
+    np.testing.assert_array_equal(visor_safe_covariances(quats,scales),expected)
 
-    scales = np.array([[1e-6, 1e-6, 3267.0], [0.02, 0.03, 0.04]], dtype=np.float32)
-    out = visor_safe_scales(scales)
-    assert float(out.max()) <= 128.0
-    assert float(out[0].max() / max(float(out[0].min()), 1e-8)) <= 128.0 + 1e-4
-    np.testing.assert_allclose(out[1], scales[1], atol=1e-6)
-    # viser's pack uses float16 covariance = R diag(s^2) R^T
-    assert float((out ** 2).max()) < 65504.0
+
+def test_visor_limits_only_overflow_and_preserves_shape():
+    import numpy as np
+    from splat_explorer.rendering.base import quats_to_covariances
+    quats=np.array([[1,0,0,0], [1,0,0,0]],dtype=np.float32)
+    scales=np.array([[1.,2.,3267.],[1e30,2e30,3e30]],dtype=np.float32)
+    before=quats_to_covariances(quats,scales.astype(np.float64))
+    out=visor_safe_covariances(quats,scales)
+    assert np.isfinite(out.astype(np.float16)).all()
+    for original,safe in zip(before,out):
+        np.testing.assert_allclose(safe,original*(65504./np.abs(original).max()),rtol=1e-6)
+
+
+def test_visor_rejects_invalid_values_before_packing():
+    import numpy as np
+    import pytest
+    for invalid in (np.nan,np.inf,-1.):
+        with pytest.raises(ValueError,match='finite'):
+            visor_safe_covariances(np.array([[1.,0,0,0]]),np.array([[invalid,1.,1.]]))

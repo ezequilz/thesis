@@ -469,3 +469,10 @@ python -m splat_explorer.splatfix.cli seva-capture CHECKPOINT
 python -m splat_explorer.splatfix.cli seva-capture CHECKPOINT --view-id 000
 python -m splat_explorer.splatfix.cli edit CHECKPOINT --image-set seva
 ```
+
+For new manual references, choose **54° · SEVA** in the dropdown beside
+**Custom** in Step 1. Viser switches to the 54° horizontal camera profile and
+captures each saved position at 1024 × 576 with matching depth. These new
+checkpoints contain only the SEVA image set; original-FOV RGB and repair slots
+remain empty. The gallery defaults to 54° for these checkpoints, and Step 3
+can repair the captured SEVA references directly without a Step 2 recapture.
