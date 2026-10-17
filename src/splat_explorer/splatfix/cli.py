@@ -73,8 +73,15 @@ def edit_views(cfg, args):
     from .checkpoint import Checkpoint
     from .image_repair import repair_images
     checkpoint = Checkpoint.load(args.checkpoint)
-    repair_images(checkpoint, cfg=cfg)
+    repair_images(checkpoint, cfg=cfg, image_set=args.image_set)
     return checkpoint.root
+
+
+def capture_seva_views(cfg, args):
+    from .oraclegs.captures import capture_checkpoint
+    return capture_checkpoint(args.checkpoint, view_id=args.view_id,
+        url=cfg.get('renderer', {}).get('viser_url'),
+        on_progress=lambda **event: print(event['message'], flush=True)).root
 
 
 def inspect_checkpoint(cfg, args):
@@ -102,7 +109,7 @@ def repair_splat(cfg, args):
             if value is not None:
                 runtime[key] = str(value)
     if method == 'oraclegs':
-        for key in ('oracle_reference_mode', 'oracle_split_mode', 'seva_geometry_guidance', 'oracle_depth_source', 'oracle_initialization', 'oracle_attention_batching', 'seva_resolution', 'seva_fit', 'oracle_adapter', 'oracle_preset', 'oracle_preset_scale', 'oracle_target_frames'):
+        for key in ('oracle_capture_source', 'oracle_reference_mode', 'oracle_split_mode', 'seva_geometry_guidance', 'oracle_depth_source', 'oracle_initialization', 'oracle_attention_batching', 'seva_resolution', 'seva_fit', 'oracle_adapter', 'oracle_preset', 'oracle_preset_scale', 'oracle_target_frames'):
             value = getattr(args, key, None)
             if value is not None:
                 runtime[key] = value
@@ -136,9 +143,15 @@ def _add_stages(parser):
     select.set_defaults(func=select_views)
     edit = stages.add_parser("edit", help="Create missing GPT-image repairs in an existing checkpoint")
     edit.add_argument("checkpoint", type=Path)
+    edit.add_argument("--image-set", choices=("saved", "seva"), default="saved")
     edit.set_defaults(func=edit_views)
+    capture = stages.add_parser("seva-capture", help="Capture reusable SEVA RGB and depth at saved poses")
+    capture.add_argument("checkpoint", type=Path)
+    capture.add_argument("--view-id")
+    capture.set_defaults(func=capture_seva_views)
     repair = stages.add_parser("repair", help="Run the selected reconstruction method locally on a GPU from saved views")
     from .methods import METHODS, DEFAULT_METHOD
+    repair.add_argument("--oracle-capture-source", choices=("seva", "saved"), default="seva")
     repair.add_argument("--seva-fit", choices=("crop", "pad"))
     repair.add_argument("--seva-resolution", choices=("576p", "720p"))
     repair.add_argument("--seva-geometry-guidance", choices=("off", "source_splat"))

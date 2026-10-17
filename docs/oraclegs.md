@@ -425,3 +425,47 @@ does not apply to them. They support both reference-image settings. The legacy
 saved-poses-only adapter requires all-image references. CLI equivalents are
 `--oracle-reference-mode all|single` and
 `--oracle-split-mode single-split|double-split`.
+
+## Reusable 54° SEVA captures
+
+Step 2's camera icon queues `seva_capture`, a local, queue-managed stage. It
+renders each missing view at its saved OpenCV pose, with **1024 × 576** pixels
+and **54° horizontal FOV** (`fx = fy ≈ 1004.86`). RGB comes from Viser; depth
+comes from the existing CPU front-surface rasterizer at the identical camera.
+Keep the capture visor connected. This does not select new poses or edit images.
+
+Each view gains a `seva_capture` record and `views/<id>/seva/` assets, including
+calibration, source fingerprint, RGB/depth hashes and separate repair slots.
+A view is published only after both captures validate. Retries skip completed
+views, including after a partially completed capture job. The per-view button
+captures only that view; the Step 2 icon captures all remaining views. Original
+images, original repairs and saved poses are retained.
+
+Step 3's **Images to repair → SEVA captures** sends those new RGBs to the existing
+GPT-image backend. Repairs and original responses are stored in the SEVA image
+set. The original GPT-image repair prompt and API request remain unchanged.
+The full-resolution response bytes and a full-resolution PNG preview are retained,
+and a separate 1024 × 576 PNG is produced locally by full-frame Lanczos resizing.
+No center crop is applied to SEVA repairs. Raw dimensions, aspect-ratio comparison
+and the x/y resize factors are recorded in `image_repair`. OracleGS reads the
+normalized repair and its matching capture calibration, not the raw response.
+Original-capture editing retains its existing fitting behavior.
+
+New dashboard OracleGS jobs default to `oracle_capture_source: seva`; the
+**Original captures · legacy calibration** selection retains the old path.
+New direct CLI reconstructions likewise default to SEVA. Historical jobs with
+no capture-source field retain their saved-capture behavior. Missing captures
+or missing SEVA repairs fail before staging; original repairs are never silently
+substituted. Run staging only reads these references. When source-depth guidance
+or supervision is selected, it reuses the cached depth rather than rendering it
+again. Depth-guidance, reconstruction, trajectory and image-fitting settings
+remain independent. The optional 720p setting resamples these 576p captures; it
+does not recapture at higher resolution.
+
+CLI:
+
+```sh
+python -m splat_explorer.splatfix.cli seva-capture CHECKPOINT
+python -m splat_explorer.splatfix.cli seva-capture CHECKPOINT --view-id 000
+python -m splat_explorer.splatfix.cli edit CHECKPOINT --image-set seva
+```

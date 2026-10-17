@@ -40,6 +40,8 @@ def fit_reference(image, camera, size, mode, source_box=None):
 
 def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, should_stop=lambda: False):
     options = validate_options(runtime or {})
+    from .captures import select_checkpoint
+    checkpoint = select_checkpoint(checkpoint, options['oracle_capture_source'], edited=mode == 'edited')
     state = readiness(checkpoint)
     if not state['ready']:
         raise ValueError(state['reason'])
@@ -67,7 +69,7 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
         source = checkpoint.image_path(view, repaired=mode == 'edited')
         source_kind, source_box = 'saved_rgb', None
         repair = view.get('image_repair') or {}
-        if mode == 'edited' and repair.get('response_image'):
+        if mode == 'edited' and options['oracle_capture_source'] != 'seva' and repair.get('response_image'):
             source = checkpoint.image_path({'original_rgb':repair['response_image']})
             source_kind = 'full_repair_response'
             resize = repair.get('resize') or {}
@@ -90,7 +92,7 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
                 raise ValueError('Repaired RGB aspect ratio differs from saved camera; refusing to distort calibration')
             iw,ih = (source_box[2]-source_box[0],source_box[3]-source_box[1]) if source_box else image.size
             fit_scale = (max if options['seva_fit'] == 'crop' else min)(width/iw, height/ih)
-            if fit_scale > 1:
+            if fit_scale > 1 and options['oracle_capture_source'] != 'seva':
                 raise ValueError('OracleGS requires saved reference RGBs at least as large as the generation preset')
             fitted, k, affine = fit_reference(image.convert('RGB'),camera,(width,height),options['seva_fit'],source_box=source_box)
             fitted.save(scene/'images'/name)
@@ -153,7 +155,7 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
     manifest = {'seva_task':'img2vid' if segments and not preset_mode and options['oracle_split_mode'] == 'single-split' else 'img2trajvid', 'seva_segments':segments,
                 'seva_frame_order':list(range(len(frames))), 'reconstruction_method':'oraclegs',
                 'mode':mode, 'views':records,
-                'source_checkpoint':str(checkpoint.root), 'camera_convention':'opengl_c2w',
+                'source_checkpoint':str(checkpoint.root), 'reference_capture_profile':checkpoint.manifest.get('reference_capture_profile', 'saved'), 'camera_convention':'opengl_c2w',
                 'source_camera_convention':'opencv_c2w', 'resolution':[width,height], 'requested_resolution':list(requested),
                 **options, 'oracle_path_order':order, 'path_order_source':'explicit' if options['oracle_path_order'] else 'checkpoint-selection-order',
                 'seva_internal_resolution':[width, ((height+63)//64)*64],

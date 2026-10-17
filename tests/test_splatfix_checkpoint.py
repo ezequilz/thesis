@@ -144,7 +144,9 @@ def test_queued_edit_routes_selected_model_through_worker_config(tmp_path, monke
 
     def run_process(argv, log_path, stop, progress):
         worker_cfg = load_config(argv[argv.index('--config') + 1])
-        cli.edit_views(worker_cfg, SimpleNamespace(checkpoint=argv[-1]))
+        cli.edit_views(worker_cfg, SimpleNamespace(
+            checkpoint=argv[argv.index('edit') + 1],
+            image_set=argv[argv.index('--image-set') + 1]))
 
     monkeypatch.setattr(executor, 'run_process', run_process)
     store = SimpleNamespace(get_run=lambda _: SimpleNamespace(state=SimpleNamespace(details={})))

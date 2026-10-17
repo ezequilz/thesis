@@ -68,11 +68,12 @@ def stage_source_geometry(checkpoint, root, manifest, frames, *, should_stop=lam
     validate_source(checkpoint)
     root = Path(root)
     source = Path(checkpoint.manifest['scene_path'])
-    scene = load_scene(source) if use_depth or source.suffix.lower() != '.ply' else None
+    cached_depth = use_depth and all(v.get('source_depth') for v in checkpoint.views)
+    scene = load_scene(source) if (use_depth and not cached_depth) or (use_init and source.suffix.lower() != '.ply') else None
     if use_depth:
         directory = root/'source-depth'
         directory.mkdir()
-        renderer = CpuSplatRenderer(scene)
+        renderer = None if cached_depth else CpuSplatRenderer(scene)
         records = []
         for view, frame in zip(checkpoint.views, frames):
             if should_stop():
@@ -80,8 +81,14 @@ def stage_source_geometry(checkpoint, root, manifest, frames, *, should_stop=lam
             if not np.allclose([frame['cx'],frame['cy']], [frame['w']/2,frame['h']/2], rtol=0,atol=1e-4):
                 raise ValueError('Source-depth supervision requires centered staged intrinsics for the OracleGS renderer')
             camera = camera_from_record(view)
-            depth = renderer.render_depth(camera)
-            inv, valid = fit_depth(depth, conservative_mask(depth), camera.intrinsics, frame)
+            if cached_depth:
+                from .captures import asset_path
+                with np.load(asset_path(checkpoint, view['source_depth']), allow_pickle=False) as cached:
+                    depth, mask = cached['depth'], cached['valid']
+                    inv, valid = fit_depth(depth, mask, camera.intrinsics, frame)
+            else:
+                depth = renderer.render_depth(camera)
+                inv, valid = fit_depth(depth, conservative_mask(depth), camera.intrinsics, frame)
             if not valid.any():
                 raise ValueError('No reliable source depth for '+str(view['id']))
             name = Path(frame['file_path']).stem
@@ -93,7 +100,8 @@ def stage_source_geometry(checkpoint, root, manifest, frames, *, should_stop=lam
             'convention':'inverse_positive_camera_z_scene_units',
             'conversion':'1/z on valid pixels; no normalization or SfM scale fitting',
             'mask':'front-surface coverage >=0.15; 1px erosion; local depth spread <=10%',
-            'renderer':'CpuSplatRenderer.render_depth', 'fallback':'none; invalid pixels excluded',
+            'renderer':'CpuSplatRenderer.render_depth', 'reused_checkpoint_depth':bool(cached_depth),
+            'fallback':'none; invalid pixels excluded',
             'source_fingerprint':checkpoint.manifest.get('source_fingerprint')}
     if use_init:
         if should_stop():

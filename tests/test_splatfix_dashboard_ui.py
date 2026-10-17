@@ -136,12 +136,13 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal($('edit-now').disabled,false);
   cp.edited=cp.target_views;renderCheckpoint();
   assert.equal($('repair-now').disabled,false);
+  assert.equal($('edit-now').disabled,true);assert.equal($('edit-schedule').disabled,true);
   cp.rgb_renderer='cpu_splats';renderCheckpoint();
   assert.equal($('edit-now').disabled,true);assert.equal($('repair-now').disabled,true);
   assert.match($('edit-readiness').textContent,/Recapture.*Viser/);
   $('mode').value='baseline';renderCheckpoint();assert.equal($('repair-now').disabled,false);
   cp.rgb_renderer='viser';$('mode').value='edited';renderCheckpoint();
-  cp.reconstruction_ready=false;cp.reconstruction_readiness='Need two distinct cameras';renderCheckpoint();
+  cp.edited=0;cp.reconstruction_ready=false;cp.reconstruction_readiness='Need two distinct cameras';renderCheckpoint();
   assert.equal($('repair-now').disabled,true);assert.equal($('edit-now').disabled,false);
   assert.match($('repair-readiness').textContent,/two distinct cameras/);
   cp.reconstruction_ready=true;cp.complete=false;renderCheckpoint();
@@ -164,6 +165,22 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(submitted.model,'14b');
   assert.equal(submitted.preparation_from,'prior');
   assert.equal(submitted.resume_from,undefined);
+  selected='/saved/cp';state.jobs=[];busy=false;cp.complete=true;cp.reconstruction_ready=true;
+  $('reconstruction-method').value='oraclegs';$('oracle-capture-source').value='seva';
+  renderCheckpoint();assert.equal($('edit-image-set').value,'seva');
+  assert.equal($('repair-now').disabled,true);assert.equal($('seva-capture').disabled,false);
+  assert.equal(payload('repair').oracle_capture_source,'seva');
+  assert.equal(payload('edit').image_set,'seva');
+  cp.seva_captured=cp.target_views;cp.seva_edited=0;renderCheckpoint();
+  assert.equal($('seva-capture').disabled,true);assert.equal($('edit-now').disabled,false);
+  assert.equal($('repair-now').disabled,true);
+  $('mode').value='baseline';renderCheckpoint();assert.equal($('repair-now').disabled,false);
+  cp.seva_edited=cp.target_views-1;renderCheckpoint();
+  assert.equal($('edit-now').disabled,false);assert.match($('edit-readiness').textContent,/1 images need repair.*already saved and skipped/);
+  $('mode').value='edited';cp.seva_edited=cp.target_views;renderCheckpoint();
+  assert.equal($('edit-now').disabled,true);assert.equal($('edit-schedule').disabled,true);
+  assert.equal($('repair-now').disabled,false);
+  $('oracle-capture-source').value='saved';assert.equal(payload('repair').oracle_capture_source,'saved');
 })()`,context)).catch(error=>{console.error(error);process.exitCode=1});
 '''
     result = subprocess.run([node, '-e', code, str(page)], capture_output=True, text=True)

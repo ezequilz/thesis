@@ -10,8 +10,8 @@ def validate_job(raw):
     if not isinstance(raw, dict):
         raise ValueError('splatfix job must be an object')
     stage = raw.get('stage')
-    if stage not in ('select', 'edit', 'repair', 'benchmark'):
-        raise ValueError('stage must be select, edit, repair or benchmark')
+    if stage not in ('select', 'edit', 'seva_capture', 'repair', 'benchmark'):
+        raise ValueError('stage must be select, edit, seva_capture, repair or benchmark')
     from .resolution import profile_size
     profile = raw.get('resolution_profile', 'training')
     profile_size(profile)
@@ -61,6 +61,16 @@ def validate_job(raw):
         if not checkpoint:
             raise ValueError('Choose an existing checkpoint')
         result['checkpoint'] = checkpoint
+    if stage == 'seva_capture' and raw.get('view_id') is not None:
+        view_id = raw['view_id']
+        if not isinstance(view_id, str) or len(view_id) != 3 or not view_id.isascii() or not view_id.isdigit():
+            raise ValueError('view_id must be a saved three-digit view id')
+        result['view_id'] = view_id
+    if stage == 'edit':
+        image_set = raw.get('image_set', 'saved')
+        if image_set not in ('saved', 'seva'):
+            raise ValueError('image_set must be saved or seva')
+        result['image_set'] = image_set
     if stage == 'repair':
         mode = raw.get('mode', 'edited')
         if mode not in ('baseline', 'edited'):

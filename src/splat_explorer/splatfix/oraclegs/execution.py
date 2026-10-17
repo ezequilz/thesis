@@ -48,7 +48,7 @@ def mirror_previews(lrz, cfg, endpoint, remote, root, *, phase=None):
 
 def job_runtime(cfg, options):
     runtime = {**DEFAULT_RUNTIME, **dict(cfg.get('splatfix', {}).get('oraclegs_runtime', {}))}
-    for key in ('oracle_reference_mode', 'oracle_split_mode', 'seva_geometry_guidance', 'oracle_depth_source', 'oracle_initialization', 'oracle_attention_batching', 'seva_resolution', 'seva_fit', 'oracle_adapter', 'oracle_preset', 'oracle_preset_scale', 'oracle_target_frames', 'oracle_path_order'):
+    for key in ('oracle_capture_source', 'oracle_reference_mode', 'oracle_split_mode', 'seva_geometry_guidance', 'oracle_depth_source', 'oracle_initialization', 'oracle_attention_batching', 'seva_resolution', 'seva_fit', 'oracle_adapter', 'oracle_preset', 'oracle_preset_scale', 'oracle_target_frames', 'oracle_path_order'):
         if key in options:
             runtime[key] = options[key]
     return runtime
@@ -80,9 +80,11 @@ def execute_remote(executor, run_id, options, root, stop, update):
         checkpoint = Checkpoint.load(options['checkpoint'])
         runtime = job_runtime(executor.cfg, options)
         if options['mode'] == 'edited':
-            checkpoint.require_viser_images()
-            for view in checkpoint.views:
-                checkpoint.image_path(view, repaired=True)
+            from .captures import select_checkpoint
+            references = select_checkpoint(checkpoint, runtime.get('oracle_capture_source', 'saved'), edited=True)
+            references.require_viser_images()
+            for view in references.views:
+                references.image_path(view, repaired=True)
         update(phase='inputs', message='Staging saved OracleGS reference RGBs and calibrated cameras')
         # Stage original saved references locally, without recapture.
         import uuid

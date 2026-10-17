@@ -33,12 +33,19 @@ class SplatfixStudio(SceneRunStudio):
                 views = [{**v, 'original_url': self.file_url(cp.image_path(v)),
                           'repaired_url': self.file_url(cp.image_path(v, True)) if v.get('repaired_rgb') else None}
                          for v in cp.views]
+                for view in views:
+                    capture = view.get('seva_capture') or {}
+                    view['seva_original_url'] = self.file_url(cp.image_path(capture)) if capture.get('original_rgb') else None
+                    view['seva_response_url'] = self.file_url(cp.image_path({'original_rgb':capture['original_response_rgb']})) if capture.get('original_response_rgb') else None
+                    view['seva_repaired_url'] = self.file_url(cp.image_path(capture, True)) if capture.get('repaired_rgb') else None
                 distinct = len({tuple(camera_from_record(view).c2w.ravel()) for view in cp.views})
                 method_readiness = {method['id']: get_method(method['id']).readiness(cp)
                                     for method in available_methods()}
                 reconstruction_ready = method_readiness[DEFAULT_METHOD]['ready']
                 reconstruction_reason = method_readiness[DEFAULT_METHOD]['reason']
                 result.append({'id': str(cp.root), 'name': self.checkpoint_name(cp.root), 'storage_name': cp.root.name, 'scene': Path(cp.manifest['scene_path']).name,
+                               'seva_captured': sum(bool(v.get('seva_original_url')) for v in views),
+                               'seva_edited': sum(bool(v.get('seva_repaired_url')) for v in views),
                                'rgb_renderer': cp.manifest.get('metadata', {}).get('renderer', {}).get('backend'),
                                'scene_path': cp.manifest['scene_path'],
                                'created_at': cp.manifest.get('created_at'), 'views': views, 'target_views': cp.target_views,
@@ -100,7 +107,7 @@ class SplatfixStudio(SceneRunStudio):
             if (any(ref and Path(ref).resolve() == root for ref in refs)
                     or root.is_relative_to(Path(run.path).resolve())):
                 raise ValueError('This checkpoint is used by an active or queued run. Cancel or finish that run before deleting it.')
-        repaired = sum(bool(view.get('repaired_rgb')) for view in cp.views)
+        repaired = sum(bool(view.get('repaired_rgb')) + bool((view.get('seva_capture') or {}).get('repaired_rgb')) for view in cp.views)
         if repaired and body.get('confirm_repaired') is not True:
             return {'ok': False, 'requires_confirmation': True, 'repaired': repaired,
                     'checkpoint': str(root), 'name': self.checkpoint_name(root)}
@@ -257,6 +264,8 @@ class SplatfixStudio(SceneRunStudio):
     def create(self, body):
         if not isinstance(body, dict):
             raise ValueError('Request must be an object')
+        if body.get('stage') == 'repair' and body.get('reconstruction_method') == 'oraclegs':
+            body = {'oracle_capture_source':'seva', **body}
         options = validate_job({'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', 'training'), **body})
         scene_id = str(body.get('scene_id') or '')
         if options['stage'] == 'select':
@@ -293,13 +302,26 @@ class SplatfixStudio(SceneRunStudio):
             cp = checkpoints[checkpoint]
             if not cp['complete']:
                 raise ValueError('Finish selecting all views before starting this stage')
-            if (options['stage'] == 'edit' or options.get('mode') == 'edited') and cp['rgb_renderer'] != 'viser':
+            seva_set = options.get('oracle_capture_source') == 'seva' or options.get('image_set') == 'seva'
+            if seva_set:
+                from ..splatfix.oraclegs.captures import select_checkpoint
+                select_checkpoint(Checkpoint.load(checkpoint), 'seva', edited=options.get('mode') == 'edited')
+            if options['stage'] == 'seva_capture':
+                if options.get('view_id') is not None and options['view_id'] not in {v['id'] for v in cp['views']}:
+                    raise ValueError('Unknown saved view')
+                for existing in self.store.list_runs():
+                    opts = existing.config.splatfix
+                    if (existing.config.pipeline == 'splatfix' and opts.get('stage') == 'seva_capture'
+                            and opts.get('checkpoint') == checkpoint
+                            and existing.state.status.value in ('queued', 'waiting_gpu', 'starting', 'running', 'stopping')):
+                        raise ValueError('A SEVA capture job is already queued or active for this checkpoint')
+            if not seva_set and (options['stage'] == 'edit' or options.get('mode') == 'edited') and cp['rgb_renderer'] != 'viser':
                 raise ValueError('Recapture these views in Viser before image editing or edited reconstruction')
             if options['stage'] == 'repair':
                 readiness = cp['reconstruction_methods'][options['reconstruction_method']]
                 if not readiness['ready']:
                     raise ValueError(readiness['reason'])
-            if options['stage'] == 'repair' and options['mode'] == 'edited' and cp['edited'] != cp['target_views']:
+            if options['stage'] == 'repair' and options['mode'] == 'edited' and not seva_set and cp['edited'] != cp['target_views']:
                 raise ValueError('Repair all checkpoint images before GPT-image improved reconstruction')
             options['checkpoint'] = checkpoint
             # The saved camera/RGB source determines provenance, irrespective

@@ -17,22 +17,36 @@ DEFAULT_PROMPT = (
 )
 
 
-def repair_images(checkpoint, *, backend=None, cfg=None, prompt=DEFAULT_PROMPT):
+def repair_images(checkpoint, *, backend=None, cfg=None, prompt=DEFAULT_PROMPT, image_set='saved', view_id=None):
     """Edit missing views, committing each success so retries avoid paid repeats.
 
     The supplied backend is injectable for offline tests. By default this uses
     the repository's GPT image backend. Original response bytes are saved before
     decoding. Images are scaled proportionally and center-cropped to the camera
-    resolution, without padding or stretching.
+    resolution. SEVA retains the full response and resizes locally without cropping;
+    original-capture repairs retain their established center-crop policy.
     Response payloads containing base64 images are deliberately not copied.
     """
     if not isinstance(checkpoint, Checkpoint):
         checkpoint = Checkpoint.load(checkpoint)
     if not checkpoint.complete:
         raise ValueError('Finish selecting all requested views before image repair')
-    checkpoint.require_viser_images()
-    pending = [v for v in checkpoint.views if not v.get('repaired_rgb')]
-    for view in checkpoint.views:
+    if image_set == 'seva':
+        from .oraclegs.captures import validate_capture
+        selected = [v for v in checkpoint.views if view_id is None or v['id'] == view_id]
+        if not selected:
+            raise ValueError('Unknown saved view')
+        views = [validate_capture(checkpoint, v) for v in selected]
+        # Nested records remain owned by the original checkpoint for saving.
+        for original, view in zip(selected, views):
+            view['id'] = original['id']
+    elif image_set == 'saved':
+        checkpoint.require_viser_images()
+        views = checkpoint.views
+    else:
+        raise ValueError('Unknown image set')
+    pending = [v for v in views if not v.get('repaired_rgb')]
+    for view in views:
         if view.get('repaired_rgb'):
             checkpoint.image_path(view, repaired=True)
     if not pending:
@@ -43,7 +57,7 @@ def repair_images(checkpoint, *, backend=None, cfg=None, prompt=DEFAULT_PROMPT):
     for view in pending:
         width, height = view['camera']['width'], view['camera']['height']
         metadata = {'backend': backend.name, 'model': getattr(backend, 'model', backend.name),
-                    'prompt': prompt, 'target_size': [width, height], 'started_at': utc_now()}
+                    'prompt': prompt, 'image_set':image_set, 'target_size': [width, height], 'started_at': utc_now()}
         view['image_repair'] = metadata
         checkpoint.save()
         try:
@@ -52,7 +66,7 @@ def repair_images(checkpoint, *, backend=None, cfg=None, prompt=DEFAULT_PROMPT):
                 raise RuntimeError(result.error or 'Image edit returned no image')
             # Keep the exact response independently of the normalized PNG, even
             # if decoding or resizing fails. The bytes determine the image format.
-            response_relative = f"views/{view['id']}/response.image"
+            response_relative = str(Path(view['original_rgb']).parent / 'response.image')
             response_path = checkpoint.root / response_relative
             response_tmp = response_path.with_suffix('.tmp')
             try:
@@ -65,14 +79,30 @@ def repair_images(checkpoint, *, backend=None, cfg=None, prompt=DEFAULT_PROMPT):
             with Image.open(io.BytesIO(result.images[0])) as edited:
                 image = edited.convert('RGB')
             metadata['response_size'] = list(image.size)
-            scale = max(width / image.width, height / image.height)
-            crop_width, crop_height = width / scale, height / scale
-            left, top = (image.width - crop_width) / 2, (image.height - crop_height) / 2
-            metadata['resize'] = {'method': 'cover_center_crop', 'scale': scale,
-                                  'source_crop_box': [left, top, left + crop_width, top + crop_height]}
-            image = ImageOps.fit(image, (width, height), Image.Resampling.LANCZOS,
-                                 centering=(0.5, 0.5))
-            relative = f"views/{view['id']}/repaired.png"
+            if image_set == 'seva':
+                original_response = Path(view['original_rgb']).parent / 'response-original.png'
+                image.save(checkpoint.root / original_response, format='PNG')
+                view['original_response_rgb'] = str(original_response)
+            if image_set == 'seva':
+                # Keep the model's original bytes above, and resize its full frame
+                # locally. Never crop away image content to force the SEVA canvas.
+                metadata['dimension_check'] = {'input_size':[width,height], 'output_size':list(image.size),
+                    'exact_dimensions':image.size == (width,height),
+                    'same_aspect_ratio':image.width * height == image.height * width,
+                    'policy':'preserve original response; resize full frame locally'}
+                metadata['resize'] = {'method':'resize_full_frame',
+                    'scale_xy':[width/image.width, height/image.height],
+                    'source_crop_box':[0,0,image.width,image.height]}
+                image = image.resize((width,height), Image.Resampling.LANCZOS)
+            else:
+                scale = max(width / image.width, height / image.height)
+                crop_width, crop_height = width / scale, height / scale
+                left, top = (image.width - crop_width) / 2, (image.height - crop_height) / 2
+                metadata['resize'] = {'method': 'cover_center_crop', 'scale': scale,
+                                      'source_crop_box': [left, top, left + crop_width, top + crop_height]}
+                image = ImageOps.fit(image, (width, height), Image.Resampling.LANCZOS,
+                                     centering=(0.5, 0.5))
+            relative = str(Path(view['original_rgb']).parent / 'repaired.png')
             destination = checkpoint.root / relative
             temporary = destination.with_suffix('.tmp')
             try:

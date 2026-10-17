@@ -117,19 +117,25 @@ class SplatfixExecutor:
             cp = Checkpoint.load(options['checkpoint'])
             if not cp.complete:
                 raise ValueError('View selection must finish before GPT-image editing')
-            argv += ['edit', str(cp.root)]
+            if options['stage'] == 'seva_capture':
+                argv += ['seva-capture', str(cp.root)]
+                if options.get('view_id') is not None:
+                    argv += ['--view-id', options['view_id']]
+            else:
+                argv += ['edit', str(cp.root), '--image-set', options.get('image_set', 'saved')]
         def progress():
             paths = list((root / 'checkpoints').glob('*/checkpoint.json')) if options['stage'] == 'select' else [Path(options['checkpoint']) / 'checkpoint.json']
             if paths:
                 manifest = read_json(paths[0], {})
                 views = manifest.get('views', [])
                 selected = len(views)
-                edited = sum(bool(v.get('repaired_rgb')) for v in views)
+                edited = sum(bool((v.get('seva_capture') or {}).get('repaired_rgb') if options.get('image_set') == 'seva' else v.get('repaired_rgb')) for v in views)
+                captured = sum(bool(v.get('seva_capture')) for v in views)
                 previous = getattr(progress, 'counts', None)
-                if previous != (selected, edited):
-                    progress.counts = selected, edited
+                if previous != (selected, edited, captured):
+                    progress.counts = selected, edited, captured
                     update(checkpoint=str(paths[0].parent), selected_views=selected, edited_views=edited,
-                           target_views=manifest.get('target_views'), message=f'{selected} views saved · {edited} images repaired')
+                           target_views=manifest.get('target_views'), message=(f'{captured}/{selected} SEVA captures saved' if options['stage'] == 'seva_capture' else f'{selected} views saved · {edited} images repaired'))
         run_process(argv, root / 'stage.log', stop, progress)
         progress()
         return {'checkpoint': self.store.get_run(run.run_id).state.details.get('checkpoint')}
