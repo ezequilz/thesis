@@ -126,3 +126,31 @@ def test_job_runtime_carries_preset_settings():
     options=validate_options({'oracle_adapter':'per_view_preset','oracle_preset':'shuffle_orbit','oracle_preset_scale':.3})
     runtime=job_runtime({},options)
     assert runtime['oracle_preset']=='shuffle_orbit' and runtime['oracle_preset_scale']==.3
+
+
+def test_80_frame_presets_preserve_intrinsics_and_accept_legacy_roundoff(tmp_path):
+    root = tmp_path/'inputs'
+    manifest = export_inputs(checkpoint(tmp_path,2), root, runtime={
+        'oracle_adapter':'per_view_preset', 'oracle_preset':'shuffle_orbit',
+        'oracle_reference_mode':'single', 'oracle_target_frames':80})
+    path = root/'scene/transforms.json'
+    data = json.loads(path.read_text())
+    frames = data['frames']
+    for segment in manifest['seva_segments']:
+        for i in segment['target_indices']:
+            for key in ('fl_x','fl_y','cx','cy'):
+                assert frames[2+i][key] == frames[segment['from_reference']][key]
+    validate_staged_trajectory(root,manifest)
+
+    def change_cy(delta):
+        frames[3]['cy'] = frames[0]['cy']+delta
+        path.write_text(json.dumps(data))
+        segment = manifest['seva_segments'][0]
+        native = root/segment['input_subdir']/'scene/transforms.json'
+        native.write_text(json.dumps({'frames':[frames[i] for i in segment['frame_order']]}))
+
+    change_cy(5.684341886080802e-14)
+    validate_staged_trajectory(root,manifest)
+    change_cy(.001)
+    with pytest.raises(ValueError,match='path or calibration changed'):
+        validate_staged_trajectory(root,manifest)

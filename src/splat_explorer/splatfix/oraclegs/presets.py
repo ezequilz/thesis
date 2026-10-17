@@ -81,7 +81,11 @@ def validate_preset_staging(inputs, manifest):
         for local, i in enumerate(ids):
             frame, record = frames[n+i], trajectory['frames'][i]
             if (not np.allclose(frame['transform_matrix'],poses[local]@axes,atol=1e-8)
-                    or any(frame[k] != frames[reference][k] for k in ('fl_x','fl_y','cx','cy'))
+                    # Older staging interpolated identical intrinsics, causing
+                    # roundoff (~6e-14 pixels at cy=288). Still reject real drift.
+                    or not np.allclose([frame[k] for k in ('fl_x','fl_y','cx','cy')],
+                                       [frames[reference][k] for k in ('fl_x','fl_y','cx','cy')],
+                                       rtol=0, atol=1e-8)
                     or record['generation_source_reference_index'] != reference
                     or record['segment_index'] != j):
                 raise ValueError('Per-view SEVA preset path or calibration changed')

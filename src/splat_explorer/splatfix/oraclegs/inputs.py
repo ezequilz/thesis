@@ -135,7 +135,8 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
         if not (scene/'images'/name).exists():
             Image.new('RGB',(width,height)).save(scene/'images'/name)
         frames.append({'file_path':'images/'+name, 'w':width, 'h':height,
-                       **{key:(1-alpha)*left[key]+alpha*right[key] for key in ('fl_x','fl_y','cx','cy')},
+                       **{key:left[key] if preset_mode else (1-alpha)*left[key]+alpha*right[key]
+                          for key in ('fl_x','fl_y','cx','cy')},
                        'transform_matrix':(pose@AXES).tolist()})
     n = len(records)
     atomic_json(scene/'transforms.json', {'frames':frames})
