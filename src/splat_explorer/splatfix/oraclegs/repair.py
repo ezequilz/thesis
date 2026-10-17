@@ -17,7 +17,7 @@ DEFAULT_RUNTIME = {'repo':'/workspace/third_party/OracleGS',
     'python':'/workspace/oraclegs-env/bin/python', 'model_python':'/workspace/oraclegs-model-env/bin/python',
     'colmap':'/workspace/oraclegs-model-env/bin/colmap',
     'depth_weights':'/workspace/models/oraclegs/depth_anything_v2_vitl.pth',
-    'seva_fit':'crop', 'auto_setup':True, 'seva_resolution':'576p', 'oracle_adapter':'trajectory', 'oracle_target_frames':80,
+    'oracle_reference_mode':'all', 'oracle_split_mode':'single-split', 'seva_fit':'crop', 'auto_setup':True, 'seva_resolution':'576p', 'oracle_adapter':'trajectory', 'oracle_target_frames':80,
     'seva_geometry_guidance':'off', 'oracle_depth_source':'predicted', 'oracle_initialization':'sfm',
     'oracle_attention_batching':'within_trajectory', 'oracle_path_order':None, 'iterations':22000, 'cap_max':1800000, 'seed':23}
 
@@ -86,7 +86,7 @@ def validate_staged_trajectory(inputs, manifest):
     if manifest['oracle_adapter'] != 'trajectory':
         return
     trajectory = manifest.get('trajectory', {})
-    if (trajectory.get('version') != 5 or
+    if (trajectory.get('version') not in (5, 7) or
             trajectory.get('frame_count_semantics') != 'per-segment-interior-targets'):
         raise ValueError('Legacy OracleGS trajectory: restart the queue manager, then restage a fresh run for independent pairwise generation')
     order = manifest['oracle_path_order']
@@ -98,6 +98,10 @@ def validate_staged_trajectory(inputs, manifest):
             or len(frames) != n+expected or split['train_ids'] != list(range(n))
             or split['test_ids'] != list(range(n,n+expected))):
         raise ValueError('OracleGS staged trajectory count/split disagrees with frames per transition')
+    if trajectory.get('version') == 7:
+        from .splitting import validate_split_staging
+        validate_split_staging(inputs, manifest)
+        return
     if manifest.get('seva_task') != 'img2vid':
         raise ValueError('Pairwise trajectories require ordered SEVA img2vid')
     segments = manifest.get('seva_segments', [])
@@ -132,16 +136,19 @@ def seva_request(inputs, output, manifest, runtime, segment=None):
         'use_traj_prior':True, 'chunk_strategy':'interp-gt', 'chunk_strategy_first_pass':'gt-nearest',
         'cfg':[3.0,2.0], 'seed':runtime['seed'], 'W':width, 'H':height,
         'save_first_pass':True, 'save_input':True, 'replace_or_include_input':task == 'img2vid'}
-    if manifest.get('seva_segments') and manifest.get('oracle_adapter') != 'per_view_preset':
+    if manifest.get('seva_segments') and task == 'img2vid':
         request['ordered_pair_endpoints'] = [len(manifest['views'])-2, len(manifest['views'])+manifest['oracle_target_frames']-1]
     if manifest.get('seva_geometry_guidance', 'off') == 'source_splat':
         asset_root = Path(inputs).parents[1] if manifest.get('seva_segments') else Path(inputs)
         request['source_geometry_guidance'] = {'inputs':str(asset_root), 'strength':0.35}
     if manifest.get('oracle_adapter') == 'per_view_preset':
         preset = segment['preset'] if segment is not None else manifest['oracle_preset']
-        request.update(num_inputs=1, camera_scale=2.0, guider_types=[1,2], replace_or_include_input=True,
+        request.update(num_inputs=segment.get('reference_count', 1) if segment else len(manifest['views']), camera_scale=2.0, guider_types=[1,2], replace_or_include_input=True,
                        cfg=[4.0 if preset == 'orbit' else 3.0, 2.0])
-        if segment is not None and 'source_geometry_guidance' in request:
+    if segment is not None:
+        request['num_inputs'] = segment.get('reference_count', len(manifest['views']))
+        request['replace_or_include_input'] = True
+        if request['num_inputs'] == 1 and 'source_geometry_guidance' in request:
             request['source_geometry_guidance']['source_reference'] = segment['from_reference']
     # Preserve the existing anchor budget; endpoint ordering is a separate change.
     # 720p uses a disclosed padding adapter for the U-Net's 64-pixel stride.
@@ -170,7 +177,10 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         raise InterruptedError('Cancelled before OracleGS setup')
     manifest = json.loads((inputs/'inputs.json').read_text())
     from .backend import validate_options
-    validate_options(runtime)
+    validated = validate_options(runtime)
+    for key in ('oracle_reference_mode', 'oracle_split_mode'):
+        if key in manifest and manifest[key] != validated[key]:
+            raise ValueError(key + ' changed after staging; restage inputs')
     for key, default in [('seva_geometry_guidance', 'off'), ('oracle_depth_source', 'predicted'), ('oracle_initialization', 'sfm')]:
         if manifest.get(key, default) != runtime.get(key, default):
             raise ValueError(key + ' changed after staging; restage inputs')

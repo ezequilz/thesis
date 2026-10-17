@@ -283,9 +283,9 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training
             segment_frames = json.loads((Path(body['data_path'])/'scene/transforms.json').read_text())['frames']
             refs = {f['file_path'] for f in segment_frames if 'ref_' in f['file_path']}
             if adapter == 'per_view_preset':
-                assert len(refs) == body['num_inputs'] == 1
+                assert len(refs) == body['num_inputs'] == count
                 assert refs.issubset({f['file_path'] for f in frames[:count]})
-                assert body['replace_or_include_input'] and len(segment_frames) == 6
+                assert body['replace_or_include_input'] and len(segment_frames) == count+5
             else:
                 assert refs == {f['file_path'] for f in frames[:count]}
                 assert body['num_inputs'] == count

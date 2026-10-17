@@ -1,4 +1,4 @@
-"""Independent, single-reference SEVA Basic-demo preset experiments."""
+"""Independent SEVA Basic-demo preset experiments with selectable references."""
 import json
 import shutil
 from pathlib import Path
@@ -7,12 +7,13 @@ from ..checkpoint import atomic_json
 from .trajectory import PRESET_SOURCE, preset_poses, preset_assignments
 
 
-def stage_preset_segments(root, frames, order, targets, presets):
+def stage_preset_segments(root, frames, order, targets, presets, reference_mode='all'):
     n = len(frames)-len(targets)
     segments = []
     for j, reference in enumerate(order):
         ids = [t['target_index'] for t in targets if t['segment_index'] == j]
-        frame_order = [reference]+[n+i for i in ids]
+        refs = [reference] if reference_mode == 'single' else [i for i in range(n) if i != reference]+[reference]
+        frame_order = refs+[n+i for i in ids]
         relative = f'segments/{j:03d}'
         native = root/relative/'scene'
         (native/'images').mkdir(parents=True)
@@ -20,10 +21,10 @@ def stage_preset_segments(root, frames, order, targets, presets):
         for frame in selected:
             shutil.copyfile(root/'scene'/frame['file_path'], native/frame['file_path'])
         atomic_json(native/'transforms.json', {'frames':selected})
-        atomic_json(native/'train_test_split_1.json', {'train_ids':[0], 'test_ids':list(range(1,len(selected)))})
+        atomic_json(native/f'train_test_split_{len(refs)}.json', {'train_ids':list(range(len(refs))), 'test_ids':list(range(len(refs),len(selected)))})
         segments.append({'index':j, 'from_reference':reference, 'to_reference':reference,
                          'input_subdir':relative, 'target_indices':ids, 'frame_order':frame_order,
-                         'reference_count':1, 'kind':'per-view-preset', 'preset':presets[j]})
+                         'reference_count':len(refs), 'kind':'per-view-preset', 'preset':presets[j]})
     return segments
 
 
@@ -35,7 +36,7 @@ def preset_metadata(options, order, presets, seed):
                                  'lemniscate_degrees':60, 'spiral_radii':[1,1,.5],
                                  'spiral_rotations':2, 'spiral_zrate':.5, 'spiral_bounds':[1,5]},
             'frame_count_semantics':'per-view-targets-start-included-loop-end-excluded',
-            'reference_conditioning':'single-saved-view-per-segment',
+            'reference_conditioning':options['oracle_reference_mode']+'-saved-views-per-segment',
             'generation_schedule':'sequential-independent-segments',
             'frames_per_segment':options['oracle_target_frames'], 'closed':True,
             'disconnected':True, 'intrinsics_policy':'preserve-saved-calibration',
@@ -63,16 +64,17 @@ def validate_preset_staging(inputs, manifest):
     for j, reference in enumerate(order):
         segment = manifest['seva_segments'][j]
         ids = list(range(j*count,(j+1)*count))
-        mapping = [reference]+[n+i for i in ids]
+        refs = [reference] if manifest.get('oracle_reference_mode', 'single') == 'single' else [i for i in range(n) if i != reference]+[reference]
+        mapping = refs+[n+i for i in ids]
         if (segment['index'] != j or segment['input_subdir'] != f'segments/{j:03d}'
                 or segment['from_reference'] != reference or segment['to_reference'] != reference
                 or segment['target_indices'] != ids or segment['frame_order'] != mapping
-                or segment.get('reference_count') != 1 or segment.get('preset') != assigned[j]):
+                or segment.get('reference_count') != len(refs) or segment.get('preset') != assigned[j]):
             raise ValueError('Invalid per-view SEVA reference/target mapping')
         native = root/segment['input_subdir']/'scene'
         if (json.loads((native/'transforms.json').read_text())['frames'] != [frames[i] for i in mapping]
-                or json.loads((native/'train_test_split_1.json').read_text()) !=
-                {'train_ids':[0], 'test_ids':list(range(1,count+1))}):
+                or json.loads((native/f'train_test_split_{len(refs)}.json').read_text()) !=
+                {'train_ids':list(range(len(refs))), 'test_ids':list(range(len(refs),len(refs)+count))}):
             raise ValueError('Per-view SEVA cameras disagree with staged preset')
         poses = preset_poses(np.asarray(frames[reference]['transform_matrix'])@axes,
                              assigned[j], count, manifest['oracle_preset_scale'])

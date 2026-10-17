@@ -46,6 +46,16 @@ Promise.resolve(vm.runInContext(`(async()=>{
   $('benchmark-runs').valid=true;
 
   $('reconstruction-method').value='oraclegs';
+  $('oracle-reference-mode').value='all';
+  $('oracle-split-mode').value='single-split';
+  updateOracleReferenceControls();
+  assert.equal(payload('repair').oracle_reference_mode,'all');
+  $('oracle-reference-mode').value='single';updateOracleReferenceControls();
+  assert.equal($('oracle-split-mode').disabled,true);
+  assert.equal(payload('repair').oracle_split_mode,'double-split');
+  $('oracle-reference-mode').value='all';updateOracleReferenceControls();
+  assert.equal($('oracle-split-mode').disabled,false);
+  assert.equal($('oracle-split-mode').value,'single-split');
   $('oracle-adapter').value='per_view_preset';
   $('oracle-preset').value='shuffle_orbit';
   $('oracle-preset-scale').value='0.25';

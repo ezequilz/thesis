@@ -68,7 +68,7 @@ def test_shuffle_balanced_and_repeatable():
 @pytest.mark.parametrize('preset',['orbit','spiral','lemniscate','shuffle_orbit'])
 def test_six_independent_single_reference_clips(tmp_path,preset):
     cp=checkpoint(tmp_path,6);root=tmp_path/'inputs'
-    runtime={'oracle_adapter':'per_view_preset','oracle_preset':preset,'oracle_preset_scale':.1,'oracle_target_frames':8}
+    runtime={'oracle_reference_mode':'single','oracle_adapter':'per_view_preset','oracle_preset':preset,'oracle_preset_scale':.1,'oracle_target_frames':8}
     manifest=export_inputs(cp,root,runtime=runtime)
     validate_staged_trajectory(root,manifest)
     assert len(manifest['seva_segments']) == 6 and manifest['trajectory']['target_count'] == 48
@@ -93,10 +93,11 @@ def test_six_independent_single_reference_clips(tmp_path,preset):
         validate_staged_trajectory(root,manifest)
 
 
-def test_preset_merge_preserves_subset_gt_and_all_targets(tmp_path):
+@pytest.mark.parametrize('reference_mode',['all','single'])
+def test_preset_merge_preserves_subset_gt_and_all_targets(tmp_path, reference_mode):
     root=tmp_path/'inputs';out=tmp_path/'output'
     manifest=export_inputs(checkpoint(tmp_path,3),root,runtime={'oracle_adapter':'per_view_preset',
-        'oracle_preset':'shuffle_orbit','oracle_path_order':[2,0],'oracle_target_frames':4,'seva_resolution':'720p'})
+        'oracle_reference_mode':reference_mode,'oracle_preset':'shuffle_orbit','oracle_path_order':[2,0],'oracle_target_frames':4,'seva_resolution':'720p'})
     frames=json.loads((root/'scene/transforms.json').read_text())['frames']
     for segment in manifest['seva_segments']:
         dest=out/'seva-segments'/f"{segment['index']:03d}"/'seva/img2trajvid/scene'

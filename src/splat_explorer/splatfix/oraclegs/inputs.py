@@ -1,6 +1,5 @@
 """Stage saved images and calibrated cameras without rendering or image blending."""
 import hashlib
-import shutil
 from pathlib import Path
 import numpy as np
 from PIL import Image
@@ -143,26 +142,14 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
     atomic_json(scene/f'train_test_split_{n}.json', {'train_ids':list(range(n)), 'test_ids':list(range(n,len(frames)))})
     segments = []
     if options['oracle_adapter'] == 'trajectory':
-        for segment, (a,b) in enumerate(zip(order[:-1], order[1:])):
-            targets = [t['target_index'] for t in target_records if t['segment_index'] == segment]
-            relative = f'segments/{segment:03d}'
-            native = root/relative/'scene'
-            (native/'images').mkdir(parents=True)
-            frame_order = [i for i in range(n) if i not in (a,b)]+[a]+[n+i for i in targets]+[b]
-            selected = [frames[i] for i in frame_order]
-            for frame in selected:
-                shutil.copyfile(scene/frame['file_path'], native/frame['file_path'])
-            atomic_json(native/'transforms.json', {'frames':selected})
-            atomic_json(native/f'train_test_split_{n}.json', {
-                'train_ids':[i for i,j in enumerate(frame_order) if j < n],
-                'test_ids':[i for i,j in enumerate(frame_order) if j >= n]})
-            segments.append({'index':segment, 'from_reference':a, 'to_reference':b,
-                             'input_subdir':relative, 'target_indices':targets, 'frame_order':frame_order,
-                             'endpoint_frame_indices':[n-2,len(selected)-1]})
+        from .splitting import segment_layout, stage_segments
+        segments = segment_layout(order, n, options['oracle_target_frames'],
+                                  options['oracle_reference_mode'], options['oracle_split_mode'])
+        stage_segments(root, frames, segments, n)
     if preset_mode:
         from .presets import stage_preset_segments
-        segments = stage_preset_segments(root, frames, order, target_records, assigned_presets)
-    manifest = {'seva_task':'img2vid' if segments and not preset_mode else 'img2trajvid', 'seva_segments':segments,
+        segments = stage_preset_segments(root, frames, order, target_records, assigned_presets, options['oracle_reference_mode'])
+    manifest = {'seva_task':'img2vid' if segments and not preset_mode and options['oracle_split_mode'] == 'single-split' else 'img2trajvid', 'seva_segments':segments,
                 'seva_frame_order':list(range(len(frames))), 'reconstruction_method':'oraclegs',
                 'mode':mode, 'views':records,
                 'source_checkpoint':str(checkpoint.root), 'camera_convention':'opengl_c2w',
@@ -172,7 +159,7 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
                 'resolution_adapter':('vertical-padding-then-crop' if height % 64 else 'calibrated-center-'+options['seva_fit']),
                 'reference_role':'ground_truth', 'source_splat_used_for_initialization':False}
     manifest['trajectory'] = {
-        'version':5, 'interpolation':('seva-gui-pairwise-kochanek-bartels-natural-tension-0'
+        'version':7 if options['oracle_split_mode'] == 'double-split' else 5, 'interpolation':('seva-gui-pairwise-kochanek-bartels-natural-tension-0'
             if options['oracle_adapter'] == 'trajectory' else 'saved-poses'),
         'frame_count_semantics':'per-segment-interior-targets' if segments else 'saved-poses',
         'reference_conditioning':'ordered-endpoints-with-off-path-reference-context' if segments else 'unordered-reference-set',
@@ -183,6 +170,8 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
                      'translation_distance':float(np.linalg.norm(cameras[b].position-cameras[a].position))}
                     for j,(a,b) in enumerate(zip(order[:-1],order[1:]))],
         'frames':target_records}
+    if options['oracle_adapter'] == 'trajectory' and options['oracle_split_mode'] == 'double-split':
+        manifest['trajectory']['reference_conditioning'] = options['oracle_reference_mode']+'-references-inward-halves'
     if preset_mode:
         from .presets import preset_metadata
         manifest['trajectory'].update(preset_metadata(options, order, assigned_presets, preset_seed))

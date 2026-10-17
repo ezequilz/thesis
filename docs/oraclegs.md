@@ -404,3 +404,24 @@ fresh run to use version 5; running jobs cannot acquire it in place. CPU tests
 exercise native SEVA task parsing and first-pass chunking, the ordered dense
 adapter, source assignments, video slicing, merge contracts and source-depth
 selection. A fresh GPU comparison is still required to assess visual quality.
+
+### Reference images and connected-path splitting
+
+On `/splatfix`, OracleGS exposes **Reference all images** (default) and
+**Reference single image** below Input images. All-image mode supplies every
+saved RGB to each SEVA run; single-image mode supplies only that run's source
+RGB. The selected baseline/repaired input mode still determines the RGBs used.
+All saved references remain ground truth for reconstruction.
+
+Connected trajectories default to **Single-split**, preserving whole pairwise
+legs. **Double-split** divides each leg's existing target samples into disjoint
+inward halves and reverses the second half. Six saved views therefore produce
+ten SEVA runs instead of five, preserving the total target count (400 by default).
+Single-image mode enforces double-split, including for API and CLI requests.
+With all-image references, either split is selectable.
+
+Preset trajectories always remain one intact clip per saved view; splitting
+does not apply to them. They support both reference-image settings. The legacy
+saved-poses-only adapter requires all-image references. CLI equivalents are
+`--oracle-reference-mode all|single` and
+`--oracle-split-mode single-split|double-split`.

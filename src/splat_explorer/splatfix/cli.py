@@ -102,7 +102,7 @@ def repair_splat(cfg, args):
             if value is not None:
                 runtime[key] = str(value)
     if method == 'oraclegs':
-        for key in ('seva_geometry_guidance', 'oracle_depth_source', 'oracle_initialization', 'oracle_attention_batching', 'seva_resolution', 'seva_fit', 'oracle_adapter', 'oracle_preset', 'oracle_preset_scale', 'oracle_target_frames'):
+        for key in ('oracle_reference_mode', 'oracle_split_mode', 'seva_geometry_guidance', 'oracle_depth_source', 'oracle_initialization', 'oracle_attention_batching', 'seva_resolution', 'seva_fit', 'oracle_adapter', 'oracle_preset', 'oracle_preset_scale', 'oracle_target_frames'):
             value = getattr(args, key, None)
             if value is not None:
                 runtime[key] = value
@@ -145,6 +145,8 @@ def _add_stages(parser):
     repair.add_argument("--oracle-depth-source", choices=("predicted", "source_splat"))
     repair.add_argument("--oracle-initialization", choices=("sfm", "source_splat"))
     repair.add_argument("--oracle-preset", choices=("orbit", "spiral", "lemniscate", "shuffle_orbit"))
+    repair.add_argument("--oracle-reference-mode", choices=("all", "single"))
+    repair.add_argument("--oracle-split-mode", choices=("single-split", "double-split"))
     repair.add_argument("--oracle-preset-scale", type=float)
     repair.add_argument("--oracle-adapter", choices=("trajectory", "saved_poses", "per_view_preset"))
     repair.add_argument("--oracle-attention-batching", choices=["within_trajectory", "global"], help="VGGT target shuffle scope (default: within_trajectory)")

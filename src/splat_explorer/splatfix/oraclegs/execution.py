@@ -48,7 +48,7 @@ def mirror_previews(lrz, cfg, endpoint, remote, root, *, phase=None):
 
 def job_runtime(cfg, options):
     runtime = {**DEFAULT_RUNTIME, **dict(cfg.get('splatfix', {}).get('oraclegs_runtime', {}))}
-    for key in ('seva_geometry_guidance', 'oracle_depth_source', 'oracle_initialization', 'oracle_attention_batching', 'seva_resolution', 'seva_fit', 'oracle_adapter', 'oracle_preset', 'oracle_preset_scale', 'oracle_target_frames', 'oracle_path_order'):
+    for key in ('oracle_reference_mode', 'oracle_split_mode', 'seva_geometry_guidance', 'oracle_depth_source', 'oracle_initialization', 'oracle_attention_batching', 'seva_resolution', 'seva_fit', 'oracle_adapter', 'oracle_preset', 'oracle_preset_scale', 'oracle_target_frames', 'oracle_path_order'):
         if key in options:
             runtime[key] = options[key]
     return runtime

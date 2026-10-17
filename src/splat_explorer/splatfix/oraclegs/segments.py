@@ -47,7 +47,7 @@ def merge_segments(inputs, output, manifest, *, should_stop=lambda:False):
                 provenance.append({'target_index':global_index-n, 'segment_index':index,
                                    'segment_target_index':segment['target_indices'].index(global_index-n), 'source':str(image.relative_to(output.resolve()))})
     # Explicit view subsets still retain every saved GT image for reconstruction.
-    if manifest['oracle_adapter'] == 'per_view_preset':
+    if manifest['oracle_adapter'] in ('per_view_preset', 'trajectory'):
         width, height = manifest['resolution']
         internal = tuple(manifest['seva_internal_resolution'])
         top = (internal[1]-height)//2

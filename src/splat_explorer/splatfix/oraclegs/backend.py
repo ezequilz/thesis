@@ -4,6 +4,14 @@ from ..checkpoint import camera_from_record
 
 
 def validate_options(raw):
+    reference_mode = raw.get('oracle_reference_mode', 'all')
+    if reference_mode not in ('all', 'single'):
+        raise ValueError('oracle_reference_mode must be all or single')
+    split_mode = raw.get('oracle_split_mode', 'single-split')
+    if split_mode not in ('single-split', 'double-split'):
+        raise ValueError('oracle_split_mode must be single-split or double-split')
+    if reference_mode == 'single':
+        split_mode = 'double-split'
     guidance = raw.get('seva_geometry_guidance', 'off')
     if guidance not in ('off', 'source_splat'):
         raise ValueError('seva_geometry_guidance must be off or source_splat')
@@ -22,6 +30,8 @@ def validate_options(raw):
     adapter = raw.get('oracle_adapter', 'trajectory')
     if adapter not in ('trajectory', 'saved_poses', 'per_view_preset'):
         raise ValueError('oracle_adapter must be trajectory, saved_poses or per_view_preset')
+    if adapter == 'saved_poses' and reference_mode == 'single':
+        raise ValueError('Single-image references require the trajectory or per_view_preset adapter')
     preset = raw.get('oracle_preset', 'spiral')
     if preset not in ('orbit', 'spiral', 'lemniscate', 'shuffle_orbit'):
         raise ValueError('oracle_preset must be orbit, spiral, lemniscate or shuffle_orbit')
@@ -38,7 +48,7 @@ def validate_options(raw):
     if order is not None and (not isinstance(order, list) or len(order) < 2 or
                               any(type(i) is not int or i < 0 for i in order) or len(set(order)) != len(order)):
         raise ValueError('oracle_path_order must contain distinct nonnegative checkpoint view indices')
-    return {'oracle_preset':preset, 'oracle_preset_scale':float(scale), 'seva_geometry_guidance':guidance, 'oracle_depth_source':depth, 'oracle_initialization':initialization, 'oracle_attention_batching':batching, 'seva_fit': fit, 'oracle_adapter': adapter, 'seva_resolution': resolution, 'oracle_target_frames': frames, 'oracle_path_order': order}
+    return {'oracle_reference_mode':reference_mode, 'oracle_split_mode':split_mode, 'oracle_preset':preset, 'oracle_preset_scale':float(scale), 'seva_geometry_guidance':guidance, 'oracle_depth_source':depth, 'oracle_initialization':initialization, 'oracle_attention_batching':batching, 'seva_fit': fit, 'oracle_adapter': adapter, 'seva_resolution': resolution, 'oracle_target_frames': frames, 'oracle_path_order': order}
 
 
 def readiness(checkpoint):
