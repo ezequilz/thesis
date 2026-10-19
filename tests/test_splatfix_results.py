@@ -699,7 +699,10 @@ vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
 const load=()=>vm.runInContext("rows=[{run_id:'test',scene:'Room',status:'error',can_archive:true,metrics:{}},{run_id:'test',scene:'Pass 2',can_archive:true,metrics:{}}];render()",context);
 const click=()=>get('results').onclick({target:{closest:()=>({dataset:{run:'test',action:'delete'}})}});
 (async()=>{
- load();assert.match(get('results').innerHTML,/<div class="delete-area"><button[^>]+data-action="delete"/);
+ load();assert.match(get('results').innerHTML,/<div class="titleline"><h2>Room<\/h2><button[^>]+data-action="delete"[^>]*>[\s\S]*?<\/button><button[^>]+aria-label="Hide run test"/);
+ assert(!get('results').innerHTML.includes('delete-area'));
+ assert.match(html,/\.titleline \.icon-button\{width:24px;height:24px/);
+ assert.match(get('results').innerHTML,/<div class="links"><div class="run-links"><a class="review"[\s\S]*?data-action="archive"[\s\S]*?<\/button><\/div>/);
  assert(!get('results').innerHTML.split('<div class="links">')[1].split('</div>')[0].includes('data-action="delete"'));
  await click();assert.equal(calls,0);assert.equal(prompts,1);
  confirmed=true;fail=true;await click();assert.equal(calls,1);assert.equal(vm.runInContext('rows.length',context),2);assert.equal(get('error').textContent,'Delete failed');
@@ -778,5 +781,44 @@ vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
  assert.match(get('notice').textContent,/Deleted 1/);assert.match(get('error').textContent,/b/);
  get('show-hidden').onclick();assert.equal(get('delete-hidden').hidden,true);await get('delete-hidden').onclick();assert.equal(calls,1);
 })().catch(e=>{console.error(e);process.exitCode=1});
+'''
+    subprocess.run([node, '-e', script, 'src/splat_explorer/web/static/splatfix_results.html'], check=True)
+
+
+def test_results_sort_by_timestamp_and_size():
+    import shutil
+    import subprocess
+    import pytest
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node is required for UI checks')
+    script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const html=fs.readFileSync(process.argv[1],'utf8');
+assert.match(html,/id="sort"[^>]*><option value="newest">Newest first \(default\)/);
+const elements={};const get=id=>elements[id]??={value:'',checked:false,setAttribute(){}};
+const context=vm.createContext({document:{getElementById:get,hidden:true},setInterval(){},fetch:()=>new Promise(()=>{}),assert});
+vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
+vm.runInContext(`
+const make=(id,size,scene)=>({run_id:id,output_size_bytes:size,scene,metrics:{}});
+const old=make('run_20261018_120000',0,'zero'),
+ base=make('run_20261019_120000',1024,'base'),
+ two=make('run_20261019_120000_2',3*1024**3,'two'),
+ ten=make('run_20261019_120000_10',1024,'ten'),
+ unknown=make('run_20261020_120000',null,'unknown');
+rows=[unknown,ten,two,base,old];
+const sortedNames=order=>sortRuns(rows,order).map(r=>r.scene).join(',');
+assert.equal(sortedNames('newest'),'unknown,ten,two,base,zero');
+assert.equal(sortedNames('oldest'),'zero,base,two,ten,unknown');
+assert.equal(sortedNames('largest'),'two,ten,base,zero,unknown');
+assert.equal(sortedNames('smallest'),'zero,ten,base,two,unknown');
+assert.equal(rows[0],unknown);
+const passes=[{...two,scene:'pass1'},{...two,scene:'pass2'}];
+assert.equal(sortRuns(passes,'oldest').map(r=>r.scene).join(','),'pass1,pass2');
+$('sort').value='smallest';$('sort').onchange();
+assert.ok($('results').innerHTML.indexOf('<h2>zero</h2>')<$('results').innerHTML.indexOf('<h2>two</h2>'));
+$('search').value='two';$('search').oninput();assert.ok($('results').innerHTML.includes('<h2>two</h2>'));assert.ok(!$('results').innerHTML.includes('<h2>zero</h2>'));
+assert.equal($('sort').value,'smallest');
+`,context);
 '''
     subprocess.run([node, '-e', script, 'src/splat_explorer/web/static/splatfix_results.html'], check=True)
