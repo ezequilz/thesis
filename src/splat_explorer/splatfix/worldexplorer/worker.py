@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -34,7 +35,9 @@ def model_environment(base):
                HUGGINGFACE_HUB_CACHE=str(home/'hub'), HF_TOKEN_PATH=str(home/'token'),
                PYTHONNOUSERSITE='1', CUDA_HOME=str(cuda),
                PATH=f'{prefix}/bin:{cuda}/bin:' + env['PATH'],
-               LD_LIBRARY_PATH=f'{prefix}/lib:{cuda}/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64',
+               LD_LIBRARY_PATH=f'{prefix}/lib:{cuda}/lib:{cuda}/targets/x86_64-linux/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64',
+               CPATH=f'{cuda}/targets/x86_64-linux/include:{cuda}/include',
+               LIBRARY_PATH=f'{cuda}/targets/x86_64-linux/lib:{cuda}/lib',
                TORCH_EXTENSIONS_DIR=str(base/'worldexplorer-cache/extensions'),
                MAX_JOBS='1', OMP_NUM_THREADS='1', PYTHONUNBUFFERED='1')
     return env
@@ -52,6 +55,19 @@ def inventory(run):
                 files.append({'path':str(path.relative_to(run)), 'size':path.stat().st_size,
                               'sha256':digest.hexdigest()})
     return files
+
+
+def validate_splat(path):
+    with path.open('rb') as stream:
+        raw = stream.read(65536)
+    header, separator, _ = raw.partition(b'end_header')
+    text = header.decode('ascii', errors='replace')
+    if not separator or not text.startswith('ply\n') or not re.search(r'element vertex [1-9][0-9]*\s', text):
+        raise RuntimeError(f'Invalid or empty Gaussian PLY export: {path.name}')
+    fields = {line.split()[-1] for line in text.splitlines() if line.startswith('property ')}
+    required = {'x','y','z','opacity','scale_0','scale_1','scale_2','rot_0','rot_1','rot_2','rot_3'}
+    if not required.issubset(fields):
+        raise RuntimeError(f'PLY export is missing Gaussian properties: {path.name}')
 
 
 def manual_candidates(run):
@@ -110,6 +126,8 @@ def main():
                 splats = [f['path'] for f in files if f['path'].endswith('/splat.ply') and f['size'] > 100]
                 if not splats:
                     raise RuntimeError('Generation exited without an exported splat; retained all diagnostics.')
+                for splat in splats:
+                    validate_splat(run/splat)
                 atomic(run/'artifacts.json', {'files':files, 'splats':splats})
                 state.update(status='completed', phase='complete', splats=splats)
     except Exception as exc:

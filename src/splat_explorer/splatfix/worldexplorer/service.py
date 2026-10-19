@@ -76,6 +76,7 @@ class WorldExplorerService:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self._reconcile_guard = threading.Lock()
+        self._reconcile_again = False
         self._last_reconcile = 0.0
         if auto_sync:
             self.request_reconcile(force=True)
@@ -84,6 +85,8 @@ class WorldExplorerService:
         if not force and time.monotonic()-self._last_reconcile < 60:
             return {'started':False}
         if not self._reconcile_guard.acquire(blocking=False):
+            if force:
+                self._reconcile_again = True
             return {'started':False}
         self._last_reconcile = time.monotonic()
         def execute():
@@ -91,6 +94,9 @@ class WorldExplorerService:
                 self.reconcile()
             finally:
                 self._reconcile_guard.release()
+                if self._reconcile_again:
+                    self._reconcile_again = False
+                    self.request_reconcile(force=True)
         threading.Thread(target=execute, daemon=True, name='worldexplorer-results').start()
         return {'started':True}
 
@@ -229,7 +235,7 @@ print(json.dumps(result))
                 job.pop('error', None)
             heartbeat = result.get('heartbeat.json', {}).get('updated_at', 0)
             if 'exit.json' in result and (result['exit.json']['returncode'] or job['status'] not in ('completed','failed','awaiting_selection')):
-                job.update(status='failed', error=f"Remote launcher exited ({result['exit.json']['returncode']}); inspect log.")
+                job.update(status='failed', error=job.get('error') or f"Remote launcher exited ({result['exit.json']['returncode']}); inspect log.")
             elif result.get('alive') is False and time.time()-heartbeat > 180 and job['status'] not in ('completed','failed','awaiting_selection'):
                 job.update(status='interrupted', error='Launcher exited without completion; outputs remain on DSS.')
             job['log'] = result.get('log', '')

@@ -1298,7 +1298,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not isinstance(body, dict):
                     raise ValueError("Expected an object")
                 if endpoint == "/reconcile":
-                    result = service.request_reconcile()
+                    result = service.request_reconcile(force=body.get("force") is True)
                 elif endpoint == "/jobs":
                     result = service.create(body)
                 elif endpoint == "/expand":

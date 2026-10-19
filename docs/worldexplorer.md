@@ -30,7 +30,10 @@ The saved Hugging Face token is read on LRZ, never copied to this project.
 
 The account's `~/.cache/huggingface` is resolved through the passwd database,
 exactly as OracleGS does, instead of using the redirected container HOME.
-SEVA and compatible cached model blobs are shared. WorldExplorer's modified
+SEVA v1.1 (`modelv1.1.safetensors`) is reused from OracleGS's cache instead of
+WorldExplorer's default v1.0. Setup validates checkpoint keys and tensor shapes
+against WorldExplorer's model; generation subprocesses use the v1.1 checkpoint.
+Other compatible cached model blobs are also shared. WorldExplorer's modified
 SEVA **code** stays separate: substituting OracleGS's SEVA code would lose the
 WorldExplorer global-scene-memory behavior. Metric Hypersim depth and video-depth
 Small weights differ from OracleGS's monocular depth model and must be fetched;

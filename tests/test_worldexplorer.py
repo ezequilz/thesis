@@ -38,6 +38,12 @@ def test_prompt_is_literal_argument_and_safe_path():
     assert service.validate({})['prompt'] == DEFAULT_PROMPT
 
 
+def test_seva_subprocess_uses_shared_checkpoint_adapter():
+    command = 'python model/stable-virtual-camera/demo.py --data_path scenes/x --task img2trajvid'
+    assert runner.seva_command(command) == 'python runner.py --seva --data_path scenes/x --task img2trajvid'
+    assert runner.seva_command('python model/rotate_ply.py result.ply') == 'python model/rotate_ply.py result.ply'
+
+
 def test_detach_command_uses_reserved_gpu_and_no_prompt():
     command = service.launch_command(CFG,ID)
     assert 'nohup' in command and '< /dev/null &' in command
@@ -280,3 +286,30 @@ def test_cleanup_reply_loss_recovers_from_verified_archive(tmp_path,monkeypatch)
     monkeypatch.setattr(api,'_ssh',lambda *a:json.dumps({'missing':True}))
     result=api.refresh(ID)
     assert result['remote_cleaned_at'] and result['status']=='completed'
+
+
+def test_reconcile_is_event_driven_throttled_and_single_flight(tmp_path,monkeypatch):
+    api=service.WorldExplorerService(tmp_path)
+    launched=[]
+    class Thread:
+        def __init__(self,**kwargs): self.target=kwargs['target']
+        def start(self): launched.append(self.target)
+    monkeypatch.setattr(service.threading,'Thread',Thread)
+    assert api.request_reconcile(force=True)=={'started':True}
+    assert api.request_reconcile(force=True)=={'started':False}
+    launched.pop()()
+    # A forced startup/new-run request arriving mid-transfer gets one follow-up.
+    assert len(launched)==1
+    launched.pop()()
+    assert api.request_reconcile()=={'started':False}
+    assert api.request_reconcile(force=True)=={'started':True}
+    launched.pop()()
+    assert not hasattr(api,'_reconcile_loop')
+
+
+def test_completion_rejects_empty_or_non_gaussian_ply(tmp_path):
+    ply=tmp_path/'splat.ply'
+    ply.write_bytes(b'ply\nformat ascii 1.0\nelement vertex 0\nend_header\n')
+    with pytest.raises(RuntimeError,match='empty'): worker.validate_splat(ply)
+    ply.write_bytes(b'ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nend_header\n0\n')
+    with pytest.raises(RuntimeError,match='Gaussian properties'): worker.validate_splat(ply)
