@@ -53,6 +53,7 @@ class ResultCatalog:
         rows = []
         for run in self.studio.store.list_runs():
             record = run.to_dict()
+            record['output_size_bytes'] = self.studio.store.output_size_bytes(run.run_id)
             root = Path(run.path)
             config = record.get('config', {})
             candidates = sorted((root / 'gpu/results').glob('*/result.json'))
@@ -160,6 +161,7 @@ class ResultCatalog:
                 'interruption': result.get('interruption'),
                 'diagnostics_url': self.studio.file_url(manifest.parent / 'benchmark-run.json') if manifest and (manifest.parent / 'benchmark-run.json').is_file() else None,
                 'created_at': record.get('state', {}).get('created_at'), 'status': status,
+                'output_size_bytes': record.get('output_size_bytes'),
                 'mode': options.get('mode') or config.get('repair_type', ''),
                 'model': result.get('model_variant') or options.get('model'),
                 'trajectory': result.get('trajectory_mode'), 'frames': result.get('frame_count'),

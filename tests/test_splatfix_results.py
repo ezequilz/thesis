@@ -63,8 +63,22 @@ def test_result_page_has_review_and_real_metric_fields():
     assert '/api/splatfix/results' in html
     assert 'r.viser_url' in html
     assert 'm.psnr' in html and 'm.ssim' in html and 'm.lpips' in html
+    assert 'formatBytes(r.output_size_bytes)' in html
+    assert 'dim run-size' in html
     review = Path('src/splat_explorer/web/static/scene_run_viser.html').read_text()
     assert 'resultReview' in review and 'highlight.hidden=true' in review
+
+
+def test_catalog_size_uses_job_status_not_completed_manifest(tmp_path):
+    studio, root, _ = setup(tmp_path)
+    studio.store.set_status(root.name, 'running')
+    row = studio.results.entries()[0]
+    assert row['status'] == 'completed'
+    assert row['output_size_bytes'] is None
+    studio.store.set_status(root.name, 'stopped')
+    row = studio.results.entries()[0]
+    assert row['output_size_bytes'] > 0
+    assert row['output_size_bytes'] == json.loads((root / 'output-size.json').read_text())['bytes']
 
 
 def test_saved_checkpoint_original_uses_registered_source(tmp_path):

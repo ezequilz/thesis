@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import socket
+import stat
 import tempfile
 import threading
 import uuid
@@ -37,6 +38,7 @@ EVENTS_NAME = "events.jsonl"
 STOP_NAME = "STOP"
 GPU_LEASE_NAME = ".gpu-lease"
 GPU_OWNER_NAME = "owner.json"
+OUTPUT_SIZE_NAME = "output-size.json"
 RUN_ID_PATTERN = re.compile(r"run_(\d{8})_(\d{6})(?:_(\d+))?")
 
 
@@ -132,6 +134,52 @@ class SceneRunStore:
     ) -> None:
         self.root = Path(root)
         self._clock = clock
+        self._output_size_lock = threading.Lock()
+
+    def output_size_bytes(self, run_id: str) -> int | None:
+        """Snapshot an inactive run's regular files once, persisting across restarts.
+
+        The cache is separate from worker-owned status to avoid overwriting
+        progress. A changed lifecycle state invalidates the snapshot. Symlinks
+        and the cache itself are excluded; failed scans are retried next time.
+        """
+        with self._output_size_lock:
+            run = self.get_run(run_id)
+            if run.state.status not in (RunStatus.COMPLETED, RunStatus.ERROR, RunStatus.STOPPED, RunStatus.GPU_EXPIRED):
+                return None
+            path = Path(run.path)
+            cache = path / OUTPUT_SIZE_NAME
+            revision = [run.state.status.value, run.state.updated_at]
+            try:
+                saved = _read_json(cache)
+                size = saved.get('bytes')
+                if saved.get('revision') == revision and type(size) is int and size >= 0:
+                    return size
+            except (OSError, ValueError):
+                pass
+
+            def scan(directory: Path) -> int:
+                total = 0
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if Path(entry.path) == cache:
+                            continue
+                        info = entry.stat(follow_symlinks=False)
+                        if stat.S_ISDIR(info.st_mode):
+                            total += scan(Path(entry.path))
+                        elif stat.S_ISREG(info.st_mode):
+                            total += info.st_size
+                return total
+
+            try:
+                size = scan(path)
+                current = self.get_run(run_id).state
+                if [current.status.value, current.updated_at] != revision:
+                    return None
+                _atomic_write_json(cache, {'bytes': size, 'revision': revision})
+                return size
+            except OSError:
+                return None
 
     def _ensure_root(self) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)

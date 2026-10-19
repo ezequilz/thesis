@@ -25,6 +25,66 @@ from splat_explorer.scene_runs.store import GPU_OWNER_NAME
 NOW = datetime(2026, 9, 15, 18, 30, 45, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize('status', ['completed', 'error', 'stopped', 'gpu_expired'])
+def test_output_size_persists_without_rescanning(tmp_path, monkeypatch, status):
+    from pathlib import Path
+    from splat_explorer.scene_runs import store as store_module
+
+    store = SceneRunStore(tmp_path / 'runs')
+    run = store.create_run()
+    root = Path(run.path)
+    nested = root / 'gpu/results'
+    nested.mkdir(parents=True)
+    (nested / 'large.ply').write_bytes(b'x' * 2048)
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'external.ply').write_bytes(b'x' * 4096)
+    (nested / 'link').symlink_to(outside, target_is_directory=True)
+    (nested / 'file-link').symlink_to(outside / 'external.ply')
+    (nested / 'broken-link').symlink_to(outside / 'missing')
+    store.set_status(run.run_id, status)
+    expected = sum(p.stat().st_size for p in root.rglob('*') if not p.is_symlink() and p.is_file())
+    assert store.output_size_bytes(run.run_id) == expected
+    saved = json.loads((root / 'output-size.json').read_text())
+    assert saved['bytes'] == expected
+
+    def no_scan(*args):
+        raise AssertionError('cached runs must not be scanned again')
+
+    monkeypatch.setattr(store_module.os, 'scandir', no_scan)
+    assert SceneRunStore(store.root).output_size_bytes(run.run_id) == expected
+
+
+@pytest.mark.parametrize('status', ['queued', 'waiting_gpu', 'starting', 'running', 'stopping'])
+def test_output_size_skips_active_runs(tmp_path, monkeypatch, status):
+    from splat_explorer.scene_runs import store as store_module
+
+    store = SceneRunStore(tmp_path)
+    run = store.create_run()
+    store.set_status(run.run_id, status)
+    monkeypatch.setattr(store_module.os, 'scandir', lambda *_: pytest.fail('active run scanned'))
+    assert store.output_size_bytes(run.run_id) is None
+
+
+def test_output_size_refreshes_after_resumed_run_and_retries_failed_scan(tmp_path, monkeypatch):
+    from splat_explorer.scene_runs import store as store_module
+
+    store = SceneRunStore(tmp_path)
+    run = store.create_run()
+    store.set_status(run.run_id, 'stopped')
+    with monkeypatch.context() as patch:
+        def fail(*args):
+            raise PermissionError('unreadable folder')
+        patch.setattr(store_module.os, 'scandir', fail)
+        assert store.output_size_bytes(run.run_id) is None
+    first = store.output_size_bytes(run.run_id)
+    store.set_status(run.run_id, 'running')
+    assert store.output_size_bytes(run.run_id) is None
+    (store.run_path(run.run_id) / 'new.ply').write_bytes(b'x' * 4096)
+    store.set_status(run.run_id, 'completed')
+    assert store.output_size_bytes(run.run_id) > first + 4096
+
+
 def test_config_defaults_and_validation():
     config = SceneRunConfig()
     assert config.to_dict() == {
