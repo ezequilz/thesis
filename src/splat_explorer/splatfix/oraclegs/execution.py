@@ -182,7 +182,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 break
     # Connection/transfer failures keep the remote identity unresolved, allowing
     # reattachment and transfer retry before the shared lease is released.
-    sync(endpoint + ':' + remote + '/', str(root / 'gpu') + '/')
+    from ..persistence import persist_remote_run
+    persist_remote_run(lrz, cfg, root, run_id, remote)
     update(remote_finished=True)
     if state['status'] == 'stopped' or stop():
         raise InterruptedError('OracleGS stopped; available artifacts downloaded')

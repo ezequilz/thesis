@@ -197,6 +197,10 @@ def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypat
     monkeypatch.setattr(lrz, '_remote_pythonpath_exports', lambda cfg: '')
     monkeypatch.setattr(lrz, 'container_srun_prefix', lambda cfg: 'srun ')
     def ssh(cfg, command, **kwargs):
+        if 'until = time.monotonic() + 30' in command:
+            return SimpleNamespace(returncode=0, stdout='exited', stderr='')
+        if 'shutil.rmtree(p)' in command:
+            return SimpleNamespace(returncode=0, stdout='removed', stderr='')
         commands.append(command)
         if 'nohup' in command:
             launches.append(command)
@@ -339,6 +343,10 @@ def test_benchmark_remote_stages_dataset_and_matched_model(studio, monkeypatch):
     monkeypatch.setattr(lrz, '_remote_pythonpath_exports', lambda cfg: '')
     monkeypatch.setattr(lrz, 'container_srun_prefix', lambda cfg: 'srun ')
     def ssh(cfg, command, **kwargs):
+        if 'until = time.monotonic() + 30' in command:
+            return SimpleNamespace(returncode=0, stdout='exited', stderr='')
+        if 'shutil.rmtree(p)' in command:
+            return SimpleNamespace(returncode=0, stdout='removed', stderr='')
         commands.append(command)
         return SimpleNamespace(returncode=0, stderr='', stdout=json.dumps({'status': 'completed', 'phase': 'finished'}) if 'worker-status.json' in command else '')
     monkeypatch.setattr(lrz, '_ssh_run', ssh)
@@ -429,6 +437,10 @@ def test_executor_mirrors_phase_log_before_completion_without_output_rsync(studi
     monkeypatch.setattr(lrz, 'container_srun_prefix', lambda cfg: 'srun ')
     monkeypatch.setattr(executor.time, 'sleep', lambda _: None)
     def ssh(cfg, command, **kwargs):
+        if 'until = time.monotonic() + 30' in command:
+            return SimpleNamespace(returncode=0, stdout='exited', stderr='')
+        if 'shutil.rmtree(p)' in command:
+            return SimpleNamespace(returncode=0, stdout='removed', stderr='')
         body = ''
         if 'worker-status.json' in command:
             polls.append(command)
@@ -577,6 +589,10 @@ def test_benchmark_executor_dispatches_resume_into_new_job(studio, monkeypatch, 
     monkeypatch.setattr(lrz, '_remote_pythonpath_exports', lambda cfg: '')
     monkeypatch.setattr(lrz, 'container_srun_prefix', lambda cfg: 'srun ')
     def ssh(cfg, command, **kwargs):
+        if 'until = time.monotonic() + 30' in command:
+            return SimpleNamespace(returncode=0, stdout='exited', stderr='')
+        if 'shutil.rmtree(p)' in command:
+            return SimpleNamespace(returncode=0, stdout='removed', stderr='')
         body = ''
         if 'worker-status.json' in command:
             body = json.dumps({'status': 'completed'})
@@ -714,6 +730,10 @@ def test_completed_remote_transfer_failure_retains_diagnostics_and_artifacts(stu
     monkeypatch.setattr(lrz, 'container_srun_prefix', lambda cfg: 'srun ')
     commands = []
     def ssh(cfg, command, **kwargs):
+        if 'until = time.monotonic() + 30' in command:
+            return SimpleNamespace(returncode=0, stdout='exited', stderr='')
+        if 'shutil.rmtree(p)' in command:
+            return SimpleNamespace(returncode=0, stdout='removed', stderr='')
         commands.append(command)
         return SimpleNamespace(returncode=0, stderr='', stdout=json.dumps({
             'status': worker_status, 'phase': 'finished',
@@ -800,6 +820,10 @@ def test_executor_rereads_worker_status_after_launcher_exit(studio, monkeypatch,
     monkeypatch.setattr(lrz, '_mux_run', lambda argv: transfers.append(argv))
     monkeypatch.setattr(executor.time, 'sleep', lambda _: pytest.fail('Exited launcher must not be polled again'))
     def ssh(cfg, command, **kwargs):
+        if 'until = time.monotonic() + 30' in command:
+            return SimpleNamespace(returncode=0, stdout='exited', stderr='')
+        if 'shutil.rmtree(p)' in command:
+            return SimpleNamespace(returncode=0, stdout='removed', stderr='')
         commands.append(command)
         body = ''
         if 'worker-status.json' in command:

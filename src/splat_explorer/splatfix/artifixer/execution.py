@@ -247,8 +247,16 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 'remote_dir': remote_dir, 'excluded_patterns': excludes,
                 'retained': 'RGB renders, opacity, model checkpoints, PLY, evaluation/provenance and logs',
                 'excluded_artifacts_remain_on_remote': True})
-            lrz._mux_run(['rsync', '-az', '--exclude=source/', '--exclude=benchmark-input/', *excludes, '-e', lrz.rsync_ssh_cmd(cfg),
-                          endpoint + ':' + remote_dir + '/', str(root / 'gpu') + '/'])
+            if state.get('status') in ('completed', 'error', 'stopped') and primary_error is None:
+                from ..persistence import persist_remote_run
+                persist_remote_run(lrz, cfg, root, run_id, remote_dir,
+                    excludes=('source/', 'benchmark-input/',
+                              *(['/results/*/prepared/**/depth/'] if benchmark else [])))
+            else:
+                # An interrupted connection can leave the worker active. Pull
+                # what is available, but never authorize remote deletion.
+                lrz._mux_run(['rsync', '-az', '--exclude=source/', '--exclude=benchmark-input/', *excludes, '-e', lrz.rsync_ssh_cmd(cfg),
+                              endpoint + ':' + remote_dir + '/', str(root / 'gpu') + '/'])
         except lrz.RemoteCommandError as exc:
             # Keep the initial SSH error as well as the rsync tail; the UI
             # summary intentionally truncates diagnostics and can hide it.

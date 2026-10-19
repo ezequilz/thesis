@@ -19,7 +19,8 @@ def stage_preset_segments(root, frames, order, targets, presets, reference_mode=
         (native/'images').mkdir(parents=True)
         selected = [frames[i] for i in frame_order]
         for frame in selected:
-            shutil.copyfile(root/'scene'/frame['file_path'], native/frame['file_path'])
+            if not frame.get('camera_only', False):
+                shutil.copyfile(root/'scene'/frame['file_path'], native/frame['file_path'])
         atomic_json(native/'transforms.json', {'frames':selected})
         atomic_json(native/f'train_test_split_{len(refs)}.json', {'train_ids':list(range(len(refs))), 'test_ids':list(range(len(refs),len(selected)))})
         segments.append({'index':j, 'from_reference':reference, 'to_reference':reference,

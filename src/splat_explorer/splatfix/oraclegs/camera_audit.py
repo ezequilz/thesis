@@ -6,6 +6,31 @@ import numpy as np
 AXES = np.diag([1., -1., -1., 1.])
 
 
+def install_camera_only_inputs(demo):
+    """Use SEVA's native None-image support for explicitly camera-only frames.
+
+    Keep output names in our metadata for reconstruction assembly. Legacy
+    staging with actual target PNGs continues to use the upstream parser.
+    """
+    original = demo.get_parser
+    def get_parser(*args, **kwargs):
+        parser = original(*args, **kwargs)
+        scene = Path(kwargs['data_dir'])
+        frames = json.loads((scene/'transforms.json').read_text())['frames']
+        references = {i for split in parser.splits_per_num_input_frames.values()
+                      for i in split['train_ids']}
+        for i, frame in enumerate(frames):
+            if frame.get('camera_only', False):
+                if i in references:
+                    raise ValueError('SEVA reference cannot be camera-only')
+                parser.image_paths[i] = None
+                parser.image_names[i] = None
+            elif not Path(parser.image_paths[i]).is_file():
+                raise FileNotFoundError(f'Missing SEVA image: {parser.image_paths[i]}')
+        return parser
+    demo.get_parser = get_parser
+
+
 def verify_parsed_cameras(data_path, parsed, task='img2trajvid'):
     paths, n, count, input_ids, anchor_ids, poses, intrinsics, anchors, anchor_k = parsed
     scene = Path(data_path)/'scene'
@@ -19,7 +44,8 @@ def verify_parsed_cameras(data_path, parsed, task='img2trajvid'):
     expected_inputs = split['train_ids'] if task == 'img2vid' else list(range(n))
     if count != len(split['test_ids']) or list(input_ids) != expected_inputs:
         raise ValueError('SEVA reference/target split changed before inference')
-    if len(paths) != len(ordered) or any(Path(p).resolve() != (scene/f['file_path']).resolve()
+    if len(paths) != len(ordered) or any((p is not None if f.get('camera_only', False) else
+                                        p is None or Path(p).resolve() != (scene/f['file_path']).resolve())
                                        for p,f in zip(paths,ordered)):
         raise ValueError('SEVA reference image/camera pairing changed before inference')
     def check(actual, wanted, label):

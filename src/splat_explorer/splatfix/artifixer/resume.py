@@ -64,6 +64,23 @@ def _resolve_remote_result(prior, cfg, ssh, *, comparison=False):
     expected = str(PurePosixPath(str(cfg['workspace'])) / 'splatfix-jobs' / prior.run_id)
     if str(PurePosixPath(prior.state.details['remote_dir'])) != expected:
         raise ValueError('Previous benchmark is outside the currently configured remote workspace')
+    # Cleanup makes local archives authoritative. Restore a prior job when a
+    # repeat/resume needs its original container paths again.
+    from ..persistence import RECEIPT
+    from ..jobs import read_json
+    from ..checkpoint import atomic_json
+    receipt_path = Path(prior.path) / RECEIPT
+    receipt = read_json(receipt_path, {})
+    if receipt.get('status') == 'persisted':
+        from ... import repair_lrz as lrz
+        local = Path(prior.path) / 'gpu'
+        if not local.is_dir():
+            raise ValueError('Persisted benchmark archive is missing')
+        ssh('mkdir -p ' + shlex.quote(expected))
+        lrz._mux_run(['rsync', '-azc', '-e', lrz.rsync_ssh_cmd(cfg),
+                      str(local) + '/', f"{cfg['user']}@{cfg['host']}:{expected}/"])
+        receipt['remote_cleanup'] = 'pending'
+        atomic_json(receipt_path, receipt)
     raw = ssh(shlex.join(['python3', '-c', _DISCOVER_RESULT, expected] + (['preparation'] if comparison else [])))
     relative = json.loads(raw).get('relative')
     if not isinstance(relative, str):

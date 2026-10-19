@@ -150,7 +150,13 @@ def seva_request(inputs, output, manifest, runtime, segment=None):
         request['replace_or_include_input'] = True
         if request['num_inputs'] == 1 and 'source_geometry_guidance' in request:
             request['source_geometry_guidance']['source_reference'] = segment['from_reference']
-    # Preserve the existing anchor budget; endpoint ordering is a separate change.
+    if manifest.get('oracle_reference_mode') == 'single':
+        if request['num_inputs'] != 1:
+            raise ValueError('Single-image SEVA conditioning requires exactly one staged reference per trajectory')
+        # Match the native single-image context: one reference + 20 anchors.
+        # num_prior_frames is an upstream minimum; long paths may need more
+        # anchors, sampled in multiple chunks with the same 21-frame context.
+        request.update(T=21, num_prior_frames=20)
     # 720p uses a disclosed padding adapter for the U-Net's 64-pixel stride.
     if manifest['seva_resolution'] == '576p':
         request['L_short'] = 576

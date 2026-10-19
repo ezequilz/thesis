@@ -133,10 +133,10 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
             'reference_index':reference, 'generation_source_reference_index':order[a] if preset_mode or alpha <= .5 else order[a+1],
             'image_name':name,
             'position':pose[:3,3].tolist()})
-        # Placeholders satisfy ReconfusionParser; never used as training labels.
-        if not (scene/'images'/name).exists():
-            Image.new('RGB',(width,height)).save(scene/'images'/name)
+        # Keep the intended output name, but represent unknown RGBs in memory.
+        camera_only = not (scene/'images'/name).exists()
         frames.append({'file_path':'images/'+name, 'w':width, 'h':height,
+                       **({'camera_only':True} if camera_only else {}),
                        **{key:left[key] if preset_mode else (1-alpha)*left[key]+alpha*right[key]
                           for key in ('fl_x','fl_y','cx','cy')},
                        'transform_matrix':(pose@AXES).tolist()})

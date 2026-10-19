@@ -171,6 +171,10 @@ def test_remote_reattach_downloads_before_releasing_lease(tmp_path, monkeypatch)
     state = {'status': 'completed', 'phase': 'finished'}
     monkeypatch.setattr(lrz, 'load_lrz_config', lambda: {'workspace': '/dss', 'user': 'user', 'host': 'host'})
     def ssh(cfg, command, timeout):
+        if 'until = time.monotonic() + 30' in command:
+            return SimpleNamespace(returncode=0, stdout='exited', stderr='')
+        if 'shutil.rmtree(p)' in command:
+            return SimpleNamespace(returncode=0, stdout='removed', stderr='')
         return SimpleNamespace(returncode=0, stderr='', stdout='launched' if 'printf launched' in command else json.dumps(state))
     monkeypatch.setattr(lrz, '_ssh_run', ssh)
     monkeypatch.setattr(lrz, 'rsync_ssh_cmd', lambda cfg: 'ssh')

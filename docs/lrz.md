@@ -308,3 +308,20 @@ First fetch is ~20GB (`image_edit.download: true` or
 - Jobs without `--gres=gpu:N` stay `PD` with `QOSMinGRES`.
 - Login-node sessions older than 30 days are killed.
 - Do not `sudo`.
+
+### SplatFix result persistence and cleanup
+
+OracleGS, G4Splat and ArtiFixer wait for the remote launcher to exit, then
+checksum-sync job artifacts into `outputs/scene-runs/<run-id>/gpu/`. Job-owned
+result-image symlinks are rewritten as relative local links and their targets
+must exist inside the local run before cleanup is authorized. Missing image
+targets or failed downloads retain the remote directory. Shared runtime
+symlinks and disposable caption/metric-alignment input links are not archived
+as standalone dependencies.
+
+`remote-persistence.json` records persistence, verified image links, exclusions
+and remote cleanup status. Failed cleanup is retried before another remote
+SplatFix run. ArtiFixer still excludes staged source/benchmark input copies and
+regenerable benchmark depth diagnostics. Repeat/resume restores persisted prior
+results from the local archive to their original remote path when needed.
+Models and reusable Python/CUDA environments are outside job cleanup.

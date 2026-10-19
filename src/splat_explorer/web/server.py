@@ -189,6 +189,8 @@ class DashboardApp:
         self.scene_runs_ext = SceneRunStudio(self, pipeline="extended")
         from .splatfix_studio import SplatfixStudio
         self.splatfix = SplatfixStudio(self)
+        from ..splatfix.worldexplorer.service import WorldExplorerService
+        self.worldexplorer = WorldExplorerService(Path(cfg.output.dir) / "worldexplorer", auto_sync=True)
         threading.Thread(target=self._load_scene, daemon=True).start()
 
     # --- scene ----------------------------------------------------------------
@@ -816,6 +818,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif path in ("/splatfix/results", "/splatfix/results/viser", "/splatfix/results/run"):
             filename = "scene_run_viser.html" if path.endswith("/viser") else "splatfix_result_detail.html" if path.endswith("/run") else "splatfix_results.html"
             self._send(200, (STATIC_DIR / filename).read_bytes(), "text/html; charset=utf-8")
+        elif path == "/splatfix/worldexplorer":
+            self._send(200, (STATIC_DIR / "worldexplorer.html").read_bytes(), "text/html; charset=utf-8")
         elif path in ("/splatfix", "/splatfix.html"):
             self._send(200, (STATIC_DIR / "splatfix.html").read_bytes(), "text/html; charset=utf-8")
         elif path.startswith("/api/splatfix"):
@@ -1275,7 +1279,44 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"ok": ok, "message": message}, 200 if ok else 409)
 
+    def _serve_worldexplorer(self, path: str, body=None) -> None:
+        try:
+            service = self.app.worldexplorer
+            endpoint = path.removeprefix("/api/splatfix/worldexplorer")
+            if self.command == "GET" and endpoint == "":
+                self._send_json({"jobs": service.jobs()})
+            elif self.command == "GET" and endpoint == "/file":
+                query = parse_qs(urlsplit(self.path).query)
+                target = service.file(query.get("id", [""])[0], query.get("path", [""])[0])
+                self.send_response(200)
+                self.send_header("Content-Type", mimetypes.guess_type(target.name)[0] or "application/octet-stream")
+                self.send_header("Content-Length", str(target.stat().st_size))
+                self.end_headers()
+                with target.open("rb") as stream:
+                    shutil.copyfileobj(stream, self.wfile)
+            elif self.command == "POST" and endpoint in ("/jobs", "/refresh", "/download", "/expand", "/reconcile"):
+                if not isinstance(body, dict):
+                    raise ValueError("Expected an object")
+                if endpoint == "/reconcile":
+                    result = service.request_reconcile()
+                elif endpoint == "/jobs":
+                    result = service.create(body)
+                elif endpoint == "/expand":
+                    result = service.expand(body.get("id"), body.get("selections"))
+                elif endpoint == "/refresh":
+                    result = service.refresh(body.get("id"))
+                else:
+                    result = service.download(body.get("id"))
+                self._send_json(result)
+            else:
+                self._send_json({"error": "not found"}, 404)
+        except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
+            self._send_json({"error": str(exc)}, 400)
+
     def _serve_splatfix(self, path: str, body=None) -> None:
+        if path.startswith("/api/splatfix/worldexplorer"):
+            self._serve_worldexplorer(path, body)
+            return
         try:
             studio = self.app.splatfix
             if self.command == "GET" and path == "/api/splatfix":

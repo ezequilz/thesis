@@ -153,7 +153,7 @@ def pad_seva_inputs(inputs, destination, stride=64):
     w = ((width+stride-1)//stride)*stride
     h = ((height+stride-1)//stride)*stride
     left,top = (w-width)//2,(h-height)//2
-    for relative in {f['file_path'] for f in meta['frames']}:
+    for relative in {f['file_path'] for f in meta['frames'] if not f.get('camera_only', False)}:
         with Image.open(scene/relative) as image:
             padded = Image.new('RGB',(w,h))
             padded.paste(image,(left,top))

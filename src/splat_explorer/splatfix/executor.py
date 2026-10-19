@@ -142,5 +142,8 @@ class SplatfixExecutor:
 
     def _remote(self, run_id, options, root, stop, update):
         from .methods import get_method
+        from .. import repair_lrz as lrz
+        from .persistence import retry_cleanup
+        retry_cleanup(lrz, lrz.load_lrz_config(), Path(root).parent)
         return get_method(options.get('reconstruction_method'), stage=options['stage']).execute_remote(
             self, run_id, options, root, stop, update)

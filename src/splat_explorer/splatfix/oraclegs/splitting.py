@@ -35,7 +35,8 @@ def stage_segments(root, frames, segments, n):
         (native/'images').mkdir(parents=True)
         selected = [frames[i] for i in segment['frame_order']]
         for frame in selected:
-            shutil.copyfile(root/'scene'/frame['file_path'], native/frame['file_path'])
+            if not frame.get('camera_only', False):
+                shutil.copyfile(root/'scene'/frame['file_path'], native/frame['file_path'])
         atomic_json(native/'transforms.json', {'frames':selected})
         atomic_json(native/f"train_test_split_{segment['reference_count']}.json", {
             'train_ids':[i for i,j in enumerate(segment['frame_order']) if j < n],

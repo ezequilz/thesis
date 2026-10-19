@@ -128,6 +128,39 @@ def test_job_runtime_carries_preset_settings():
     assert runtime['oracle_preset']=='shuffle_orbit' and runtime['oracle_preset_scale']==.3
 
 
+@pytest.mark.parametrize('adapter', ['per_view_preset', 'trajectory'])
+@pytest.mark.parametrize('reference_mode,expected_anchors', [('single',20), ('all',15)])
+def test_reference_mode_controls_native_sparse_anchor_budget(tmp_path, adapter, reference_mode, expected_anchors):
+    import math
+    source = Path(__file__).resolve().parents[1]/'src/splat_explorer/splatfix/oraclegs/upstream/seva/seva/eval.py'
+    nodes = [n for n in ast.parse(source.read_text()).body
+             if isinstance(n,ast.FunctionDef) and n.name == 'infer_prior_stats']
+    ns = {'math':math}
+    exec(compile(ast.Module(body=nodes,type_ignores=[]),str(source),'exec'),ns)
+    root = tmp_path/'inputs'
+    manifest = export_inputs(checkpoint(tmp_path,6),root,runtime={
+        'oracle_adapter':adapter, 'oracle_reference_mode':reference_mode,
+        'oracle_split_mode':'double-split', 'oracle_target_frames':80})
+    for segment in manifest['seva_segments']:
+        native = root/segment['input_subdir']/'scene'
+        request = seva_request(native.parent,tmp_path/'out',manifest,DEFAULT_RUNTIME,segment)
+        n = request['num_inputs']
+        frames = json.loads((native/'transforms.json').read_text())['frames']
+        split = json.loads((native/f'train_test_split_{n}.json').read_text())
+        assert len(split['train_ids']) == n
+        assert len(frames) == n+len(split['test_ids'])
+        config = {'T':request.get('T',21), 'options':request.copy()}
+        anchors = ns['infer_prior_stats'](config['T'],n,len(split['test_ids']),config)
+        assert n == (1 if reference_mode == 'single' else 6)
+        assert anchors == expected_anchors
+        assert n+anchors == config['T'] == 21
+        if reference_mode == 'single':
+            assert request['T'] == 21 and request['num_prior_frames'] == 20
+            with pytest.raises(ValueError,match='exactly one staged reference'):
+                seva_request(native.parent,tmp_path/'out',manifest,DEFAULT_RUNTIME,
+                             {**segment,'reference_count':6})
+
+
 def test_80_frame_presets_preserve_intrinsics_and_accept_legacy_roundoff(tmp_path):
     root = tmp_path/'inputs'
     manifest = export_inputs(checkpoint(tmp_path,2), root, runtime={
@@ -154,3 +187,38 @@ def test_80_frame_presets_preserve_intrinsics_and_accept_legacy_roundoff(tmp_pat
     change_cy(.001)
     with pytest.raises(ValueError,match='path or calibration changed'):
         validate_staged_trajectory(root,manifest)
+
+
+@pytest.mark.parametrize('adapter,split', [('per_view_preset','single-split'),
+                                        ('trajectory','single-split'),
+                                        ('trajectory','double-split')])
+def test_camera_only_targets_need_no_staged_pngs(tmp_path, adapter, split):
+    from splat_explorer.splatfix.oraclegs.adapter import pad_seva_inputs
+    from splat_explorer.splatfix.oraclegs.camera_audit import install_camera_only_inputs
+    from types import SimpleNamespace
+    root = tmp_path/'inputs'
+    manifest = export_inputs(checkpoint(tmp_path,3), root, runtime={
+        'oracle_adapter':adapter, 'oracle_split_mode':split,
+        'oracle_target_frames':4, 'seva_resolution':'720p'})
+    validate_staged_trajectory(root,manifest)
+    assert not list(root.rglob('target_*.png'))
+    segment = root/manifest['seva_segments'][0]['input_subdir']
+    padded = tmp_path/'padded'
+    pad_seva_inputs(segment,padded)
+    assert not list(padded.rglob('target_*.png'))
+    scene = padded/'scene'
+    frames = json.loads((scene/'transforms.json').read_text())['frames']
+    split_data = json.loads(next(scene.glob('train_test_split_*.json')).read_text())
+    def parser(**kwargs):
+        return SimpleNamespace(image_paths=[str(scene/f['file_path']) for f in frames],
+                               image_names=[Path(f['file_path']).name for f in frames],
+                               splits_per_num_input_frames={3:split_data})
+    demo = SimpleNamespace(get_parser=parser)
+    install_camera_only_inputs(demo)
+    parsed = demo.get_parser(data_dir=scene)
+    assert all(parsed.image_paths[i] is None for i in split_data['test_ids'])
+    assert all(Path(parsed.image_paths[i]).is_file() for i in split_data['train_ids'])
+    # Missing real reference images must remain an error, never turn into blanks.
+    Path(parsed.image_paths[split_data['train_ids'][0]]).unlink()
+    with pytest.raises(FileNotFoundError, match='Missing SEVA image'):
+        demo.get_parser(data_dir=scene)

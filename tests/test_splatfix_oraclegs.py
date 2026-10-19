@@ -484,7 +484,7 @@ def test_seva_parser_audit_detects_translation_and_image_pairing_errors(tmp_path
     frames = json.loads((root/'scene/transforms.json').read_text())['frames']
     poses = (np.array([f['transform_matrix'] for f in frames])@AXES)[:,:3]
     ks = np.array([[[f['fl_x'],0,f['cx']],[0,f['fl_y'],f['cy']],[0,0,1]] for f in frames])
-    paths = [str(root/'scene'/f['file_path']) for f in frames]
+    paths = [None if f.get('camera_only') else str(root/'scene'/f['file_path']) for f in frames]
     indices = [3,7,10]
     parsed = (paths,3,8,[0,1,2],[3.,6.5,10.],poses,ks,poses[indices],ks[indices])
     assert verify_parsed_cameras(root,parsed)['passed']
@@ -514,7 +514,14 @@ def test_pinned_seva_parser_preserves_reference_pairing_and_translated_path(tmp_
     cp = checkpoint(tmp_path,3)
     root = tmp_path/'inputs'
     export_inputs(cp,root,runtime={'oracle_target_frames':5,'oracle_path_order':[2,0,1]})
-    parser = ns['ReconfusionParser'](str(root/'segments/000/scene'),normalize=False)
+    from types import SimpleNamespace
+    from splat_explorer.splatfix.oraclegs.camera_audit import install_camera_only_inputs
+    demo = SimpleNamespace(get_parser=lambda **kw: ns['ReconfusionParser'](kw['data_dir'], normalize=kw['normalize']))
+    install_camera_only_inputs(demo)
+    parser = demo.get_parser(data_dir=str(root/'segments/000/scene'), normalize=False)
+    assert parser.image_paths[2:7] == [None]*5
+    assert all(Path(parser.image_paths[i]).is_file() for i in [0,1,7])
+    assert not list(root.rglob('target_*.png'))
     assert parser.splits_per_num_input_frames[3]['train_ids'] == [0,1,7]
     assert len(parser.splits_per_num_input_frames[3]['test_ids']) == 5
     for idx, reference in [(0,1),(1,2),(7,0)]:

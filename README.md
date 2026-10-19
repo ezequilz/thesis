@@ -279,3 +279,8 @@ Step-by-step (password login, `sbatch`, `--overlap`, Enroot/NGC import):
 - [x] PLY loading for uncompressed 3DGS exports
 - [ ] Viewer: overlay agent trajectory + camera frustum during episodes
 - [ ] Synthetic artifact injection for controlled benchmarks
+
+### WorldExplorer generative starter
+
+Create new scenes from text at `/splatfix/worldexplorer`, with manual panorama
+selection or unattended generation on LRZ. See [setup and overnight workflow](docs/worldexplorer.md).

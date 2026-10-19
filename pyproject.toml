@@ -42,6 +42,7 @@ image-edit = [
 [project.scripts]
 splat-explorer = "splat_explorer.cli:main"
 splatfix = "splat_explorer.splatfix.cli:main"
+worldexplorer = "splat_explorer.splatfix.worldexplorer.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -52,3 +53,5 @@ where = ["src"]
 "splat_explorer.splatfix.g4splat" = ["*.sh"]
 
 "splat_explorer.splatfix.oraclegs" = ["*.sh", "*.json", "upstream/**/*"]
+
+"splat_explorer.splatfix.worldexplorer" = ["*.sh"]
