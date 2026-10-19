@@ -161,3 +161,20 @@ shared-cache environment and verified downloads. Full scene quality and the
 6–7-hour end-to-end GPU pipeline require a real generation run. This starter
 exports results independently; importing a generated PLY into the existing
 SplatFix reconstruction workflow remains a separate user action.
+
+### SD2 inpainting source recovery
+
+The authors' `stabilityai/stable-diffusion-2-inpainting` repository returns 404.
+We use `sd2-community/stable-diffusion-2-inpainting` at
+`5f74973cbb64c8568780732c17f43eb269d63a0d`. Its 13 required Diffusers files match
+the Git blob IDs and LFS SHA-256 values of the separate original-repository copy
+`alwold/stable-diffusion-2-inpainting` at
+`e8255bd00e6a3d8dd489d2a9f03955eb08262d6e`. This cross-check supports the mirror's
+provenance; the unavailable original repository cannot be queried directly.
+
+`inpainting-lock.json` pins SHA-256 for every loaded file. Downloads stay in the
+shared remote Hugging Face cache, and identical existing model blobs (including
+the SD2 VAE) are reused. The runtime redirects only this exact upstream model
+lookup to the verified local snapshot, using safetensors and the authors' FP16
+loading setting. Setup also loads this pipeline and runs a two-step GPU inpaint
+smoke check; this is not an end-to-end scene quality test.

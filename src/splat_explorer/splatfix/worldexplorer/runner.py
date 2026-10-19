@@ -39,6 +39,10 @@ def main():
     seva.utils.load_model = functools.partial(seva.utils.load_model, weight_name='modelv1.1.safetensors')
     import model.scaffold_generation as scaffold
     import model.scene_expansion as expansion
+    from control.model_assets import verified_inpainting, inpainting_loader
+    if request['operation'] != 'expand':
+        scaffold.StableDiffusionInpaintPipeline = inpainting_loader(
+            scaffold.StableDiffusionInpaintPipeline, verified_inpainting())
     scaffold.create_clean_folder_name = safe_theme
     original = expansion.TrajectoryTransformer.run_command
     def checked(self, command):

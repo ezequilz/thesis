@@ -79,6 +79,19 @@ print('CUDA kernel, model imports and shared SEVA cache checks passed')
 '''
     run(python,'-c',script,repo,cwd=repo,env=env)
     run(python,'-m','pip','check',env=env)
+    # Exercise the previously missing dependency, including an actual GPU step.
+    smoke = '''
+import sys, torch
+sys.path.insert(0,sys.argv[1])
+from model_assets import verified_inpainting
+from diffusers import StableDiffusionInpaintPipeline
+from PIL import Image
+pipe = StableDiffusionInpaintPipeline.from_pretrained(str(verified_inpainting()), torch_dtype=torch.float16, local_files_only=True, use_safetensors=True).to('cuda')
+image = pipe(prompt='a blue room', image=Image.new('RGB',(64,64)), mask_image=Image.new('L',(64,64),255), height=64, width=64, num_inference_steps=2, generator=torch.Generator('cuda').manual_seed(0)).images[0]
+assert image.size == (64,64)
+print('Verified SD2 inpainting checkpoint and GPU inference passed')
+'''
+    run(python,'-c',smoke,Path(__file__).parent,env=env)
     run(prefix/'bin/ns-train','splatfacto-big','--help',env=env)
     run(python,'-c',"from huggingface_hub import hf_hub_download; hf_hub_download('black-forest-labs/FLUX.1-dev','model_index.json'); print('Gated FLUX access passed')",env=env)
     packages = subprocess.check_output([str(python),'-m','pip','freeze'],text=True,env=env)

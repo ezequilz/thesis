@@ -313,3 +313,27 @@ def test_completion_rejects_empty_or_non_gaussian_ply(tmp_path):
     with pytest.raises(RuntimeError,match='empty'): worker.validate_splat(ply)
     ply.write_bytes(b'ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nend_header\n0\n')
     with pytest.raises(RuntimeError,match='Gaussian properties'): worker.validate_splat(ply)
+
+
+def test_inpainting_assets_reject_corruption(tmp_path, monkeypatch):
+    import hashlib
+    from splat_explorer.splatfix.worldexplorer import model_assets
+    root = tmp_path/'snapshot'
+    root.mkdir()
+    target = root/'model_index.json'
+    target.write_bytes(b'good')
+    monkeypatch.setitem(model_assets.INPAINTING, 'files', {'model_index.json': hashlib.sha256(b'good').hexdigest()})
+    assert model_assets.verified_inpainting(lambda **kw: target) == root
+    target.write_bytes(b'bad')
+    with pytest.raises(ValueError, match='checksum mismatch'):
+        model_assets.verified_inpainting(lambda **kw: target)
+
+
+def test_inpainting_adapter_only_redirects_original_source(tmp_path):
+    from splat_explorer.splatfix.worldexplorer import model_assets
+    class Pipeline:
+        @staticmethod
+        def from_pretrained(model, **kwargs): return model, kwargs
+    loader = model_assets.inpainting_loader(Pipeline, tmp_path)
+    assert loader.from_pretrained(model_assets.INPAINTING['original_repo'], torch_dtype='fp16') == (str(tmp_path), {'torch_dtype':'fp16', 'local_files_only':True, 'use_safetensors':True})
+    assert loader.from_pretrained('another/model') == ('another/model', {})

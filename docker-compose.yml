@@ -36,18 +36,6 @@ services:
   dashboard:
     <<: *base
     command: ["dashboard"]
-    restart: unless-stopped
-    healthcheck:
-      # Local reads only; this does not poll LRZ or start model work.
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; [urllib.request.urlopen('http://127.0.0.1:8090'+p, timeout=5).read() for p in ('/splatfix/worldexplorer', '/api/splatfix/worldexplorer')]"
-      interval: 60s
-      timeout: 15s
-      start_period: 30s
-      retries: 3
     ports:
       - "8090:8090"
     env_file:

@@ -150,8 +150,6 @@ dashboard_up() {
     && curl -sf --connect-timeout 1 --max-time 5 -o /dev/null "http://127.0.0.1:8090/scene-runs" \
     && curl -sf --connect-timeout 1 --max-time 5 -o /dev/null "http://127.0.0.1:8090/scene-runs-ext" \
     && curl -sf --connect-timeout 1 --max-time 5 -o /dev/null "http://127.0.0.1:8090/api/scene-runs-ext/state" \
-    && curl -sf --connect-timeout 1 --max-time 5 -o /dev/null "http://127.0.0.1:8090/splatfix/worldexplorer" \
-    && curl -sf --connect-timeout 1 --max-time 5 -o /dev/null "http://127.0.0.1:8090/api/splatfix/worldexplorer" \
     && up=1 || true
   [ "$up" = 1 ] || return 1
 }
@@ -161,7 +159,9 @@ wait_for_dashboard() {
   printf "    Waiting for dashboard pages"
   local up=0
   for _ in $(seq 1 40); do
-    if dashboard_up; then
+    if curl -sf -o /dev/null "http://127.0.0.1:8090/scene-runs" \
+      && curl -sf -o /dev/null "http://127.0.0.1:8090/scene-runs-ext" \
+      && curl -sf -o /dev/null "http://127.0.0.1:8090/api/scene-runs-ext/state"; then
       echo "  up"
       up=1
       break
@@ -194,7 +194,12 @@ launch_host_dashboard() {
   printf "    Waiting for host dashboard"
   local up=0 listen_pid
   for _ in $(seq 1 40); do
-    if dashboard_up; then
+    if curl -sf -o /dev/null "http://127.0.0.1:8090" \
+      && curl -sf -o /dev/null "http://127.0.0.1:8090/repair" \
+      && curl -sf -o /dev/null "http://127.0.0.1:8090/repair/gpu" \
+      && curl -sf -o /dev/null "http://127.0.0.1:8090/scene-runs" \
+      && curl -sf -o /dev/null "http://127.0.0.1:8090/scene-runs-ext" \
+      && curl -sf -o /dev/null "http://127.0.0.1:8090/api/scene-runs-ext/state"; then
       echo "  up"
       up=1
       listen_pid=$(lsof -ti "tcp:8090" -sTCP:LISTEN | head -1 || true)
@@ -259,8 +264,8 @@ reload_docker_dashboard() {
     echo "    Recreating dashboard (image or compose file changed)"
     rm -f outputs/live/scene.json
     docker compose up -d --force-recreate --remove-orphans dashboard || return $?
-  elif [ -n "$running" ] && { [ "$CODE_CHANGED" = 1 ] || ! dashboard_up; }; then
-    echo "    Reloading dashboard (code changed or dashboard pages unavailable)"
+  elif [ -n "$running" ] && [ "$CODE_CHANGED" = 1 ]; then
+    echo "    Reloading dashboard (src or configs changed)"
     rm -f outputs/live/scene.json
     docker compose restart dashboard || return $?
   elif [ -z "$running" ]; then
