@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,53 @@ class ResultCatalog:
         self.cfg = studio.cfg
         self._visor = None
         self._visibility_lock = threading.Lock()
+        self._run_storage_lock = threading.Lock()
+
+    def delete_run(self, run_id):
+        """Permanently remove only the validated inactive run directory."""
+        with self._run_storage_lock:
+            run = self.studio.store.get_run(run_id)
+            if run.state.status.value not in ('completed', 'error', 'stopped', 'gpu_expired'):
+                raise ValueError('Only inactive runs can be deleted')
+            shutil.rmtree(run.path)
+            return {'run_id': run.run_id}
+
+    def delete_hidden_runs(self, run_ids):
+        """Delete the confirmed batch, rechecking visibility and lifecycle."""
+        if not isinstance(run_ids, list) or any(not isinstance(run_id, str) for run_id in run_ids):
+            raise ValueError('run_ids must be a list of run IDs')
+        deleted, skipped, failed = [], [], []
+        with self._visibility_lock:
+            visibility = self.visibility_records()
+            for run_id in dict.fromkeys(run_ids):
+                if not visibility.get(run_id, {}).get('hidden', False):
+                    skipped.append(run_id)
+                    continue
+                try:
+                    self.delete_run(run_id)
+                except (ValueError, FileNotFoundError):
+                    skipped.append(run_id)
+                except OSError:
+                    failed.append(run_id)
+                else:
+                    deleted.append(run_id)
+        return {'deleted': deleted, 'skipped': skipped, 'failed': failed}
+
+    def archive_run(self, run_id):
+        """Move a whole inactive run into local history for manual backup."""
+        with self._run_storage_lock:
+            run = self.studio.store.get_run(run_id)
+            if run.state.status.value not in ('completed', 'error', 'stopped', 'gpu_expired'):
+                raise ValueError('Only inactive runs can be moved to history')
+            history = Path(self.cfg.output.dir) / 'run_history'
+            history.mkdir(parents=True, exist_ok=True)
+            destination = history / run.run_id
+            if destination.exists() or destination.is_symlink():
+                raise ValueError('A run with this ID already exists in run_history')
+            # Same-filesystem rename keeps the entire folder intact and avoids
+            # partial copies. Failure leaves the original run in place.
+            Path(run.path).rename(destination)
+            return {'run_id': run.run_id, 'path': str(destination.resolve())}
 
     def visibility_records(self):
         path = self.studio.root / 'result-visibility.json'
@@ -162,6 +210,7 @@ class ResultCatalog:
                 'diagnostics_url': self.studio.file_url(manifest.parent / 'benchmark-run.json') if manifest and (manifest.parent / 'benchmark-run.json').is_file() else None,
                 'created_at': record.get('state', {}).get('created_at'), 'status': status,
                 'output_size_bytes': record.get('output_size_bytes'),
+                'can_archive': record.get('state', {}).get('status') in ('completed', 'error', 'stopped', 'gpu_expired'),
                 'mode': options.get('mode') or config.get('repair_type', ''),
                 'model': result.get('model_variant') or options.get('model'),
                 'trajectory': result.get('trajectory_mode'), 'frames': result.get('frame_count'),

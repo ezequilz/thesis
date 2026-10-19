@@ -1282,6 +1282,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json(studio.snapshot())
             elif self.command == "GET" and path == "/api/splatfix/results":
                 self._send_json({"results": studio.results.entries()})
+            elif self.command == "POST" and path == "/api/splatfix/results/delete-hidden":
+                if not isinstance(body, dict):
+                    raise ValueError("Request must be an object")
+                try:
+                    result = studio.results.delete_hidden_runs(body.get("run_ids"))
+                except OSError:
+                    self._send_json({"ok": False, "error": "Could not read hidden runs. Please try again."}, 500)
+                    return
+                self._send_json({"ok": not result['failed'], **result})
+            elif self.command == "POST" and path == "/api/splatfix/results/delete":
+                if not isinstance(body, dict):
+                    raise ValueError("Request must be an object")
+                try:
+                    result = studio.results.delete_run(body.get("run_id"))
+                except FileNotFoundError:
+                    self._send_json({"ok": False, "error": "Run not found"}, 404)
+                    return
+                except OSError:
+                    self._send_json({"ok": False, "error": "Could not fully delete run. Some files may have been removed. Check the run folder and its permissions."}, 500)
+                    return
+                self._send_json({"ok": True, **result})
+            elif self.command == "POST" and path == "/api/splatfix/results/archive":
+                if not isinstance(body, dict):
+                    raise ValueError("Request must be an object")
+                try:
+                    result = studio.results.archive_run(body.get("run_id"))
+                except FileNotFoundError:
+                    self._send_json({"ok": False, "error": "Run not found"}, 404)
+                    return
+                except OSError:
+                    self._send_json({"ok": False, "error": "Could not move run to run_history. The original run has been kept in place."}, 500)
+                    return
+                self._send_json({"ok": True, **result})
             elif self.command == "POST" and path == "/api/splatfix/results/visibility":
                 if not isinstance(body, dict):
                     raise ValueError("Request must be an object")

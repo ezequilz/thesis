@@ -562,3 +562,221 @@ def test_completed_pass_keeps_preview_input_provenance_during_download(tmp_path)
     assert gallery['verified_inputs']
     assert gallery['reference_count'] == 1
     assert [frame['index'] for frame in gallery['frames']] == [0, 2]
+
+
+def test_archive_moves_entire_run_and_removes_results(tmp_path):
+    studio, root, result = setup(tmp_path)
+    studio.store.set_status(root.name, 'stopped')
+    assert studio.results.entries()[0]['can_archive'] is True
+    before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    archived = studio.results.archive_run(root.name)
+    destination = tmp_path / 'run_history' / root.name
+    assert archived == {'run_id': root.name, 'path': str(destination)}
+    assert not root.exists()
+    assert {str(p.relative_to(destination)): p.read_bytes() for p in destination.rglob('*') if p.is_file()} == before
+    assert studio.results.entries() == []
+    assert studio.store.list_runs() == []
+
+
+def test_archive_rejects_active_runs_collisions_and_unsafe_ids(tmp_path):
+    import pytest
+    studio, root, _ = setup(tmp_path)
+    for status in ('queued', 'waiting_gpu', 'starting', 'running', 'stopping'):
+        studio.store.set_status(root.name, status)
+        assert studio.results.entries()[0]['can_archive'] is False
+        with pytest.raises(ValueError, match='inactive'):
+            studio.results.archive_run(root.name)
+        assert root.is_dir()
+    studio.store.set_status(root.name, 'completed')
+    destination = tmp_path / 'run_history' / root.name
+    destination.mkdir(parents=True)
+    with pytest.raises(ValueError, match='already exists'):
+        studio.results.archive_run(root.name)
+    assert root.is_dir()
+    for run_id in ('../escape', '', None):
+        with pytest.raises((ValueError, TypeError)):
+            studio.results.archive_run(run_id)
+
+
+def test_archive_endpoint_handles_failure_and_success(tmp_path, monkeypatch):
+    from splat_explorer.web.server import DashboardHandler
+    studio, root, _ = setup(tmp_path)
+    responses = []
+    handler = SimpleNamespace(app=SimpleNamespace(splatfix=studio), command='POST',
+                              _send_json=lambda body, code=200: responses.append((body, code)))
+    endpoint = '/api/splatfix/results/archive'
+    DashboardHandler._serve_splatfix(handler, endpoint, {'run_id': root.name})
+    assert responses[-1][1] == 400
+    studio.store.set_status(root.name, 'error')
+    with monkeypatch.context() as patch:
+        def fail(*args):
+            raise OSError('permission denied')
+        patch.setattr(Path, 'rename', fail)
+        DashboardHandler._serve_splatfix(handler, endpoint, {'run_id': root.name})
+        assert responses[-1][1] == 500
+        assert root.is_dir()
+    DashboardHandler._serve_splatfix(handler, endpoint, {'run_id': root.name})
+    assert responses[-1][1] == 200
+    assert Path(responses[-1][0]['path']).is_dir()
+    DashboardHandler._serve_splatfix(handler, endpoint, {'run_id': root.name})
+    assert responses[-1][1] == 404
+
+
+def test_delete_removes_only_selected_run_without_following_links(tmp_path):
+    studio, root, result = setup(tmp_path)
+    studio.store.set_status(root.name, 'error')
+    other = studio.store.create_run()
+    outside = tmp_path / 'preserved'
+    outside.mkdir()
+    (outside / 'data').write_bytes(b'keep')
+    (result / 'external').symlink_to(outside, target_is_directory=True)
+    assert studio.results.delete_run(root.name) == {'run_id': root.name}
+    assert not root.exists()
+    assert Path(other.path).is_dir()
+    assert (outside / 'data').read_bytes() == b'keep'
+    assert not (tmp_path / 'run_history').exists()
+    assert studio.results.entries() == []
+
+
+def test_delete_rejects_active_and_unsafe_runs(tmp_path):
+    import pytest
+    studio, root, _ = setup(tmp_path)
+    for status in ('queued', 'waiting_gpu', 'starting', 'running', 'stopping'):
+        studio.store.set_status(root.name, status)
+        with pytest.raises(ValueError, match='inactive'):
+            studio.results.delete_run(root.name)
+        assert root.is_dir()
+    for run_id in ('../escape', '', None):
+        with pytest.raises((ValueError, TypeError)):
+            studio.results.delete_run(run_id)
+    alias = studio.root / 'run_20261019_000000'
+    alias.symlink_to(root, target_is_directory=True)
+    with pytest.raises(ValueError, match='unsafe'):
+        studio.results.delete_run(alias.name)
+    assert root.is_dir()
+
+
+def test_delete_endpoint_handles_failure_and_success(tmp_path, monkeypatch):
+    from splat_explorer.web.server import DashboardHandler
+    studio, root, _ = setup(tmp_path)
+    responses = []
+    handler = SimpleNamespace(app=SimpleNamespace(splatfix=studio), command='POST',
+                              _send_json=lambda body, code=200: responses.append((body, code)))
+    endpoint = '/api/splatfix/results/delete'
+    DashboardHandler._serve_splatfix(handler, endpoint, {'run_id': root.name})
+    assert responses[-1][1] == 400
+    studio.store.set_status(root.name, 'error')
+    with monkeypatch.context() as patch:
+        def fail(*args):
+            raise OSError('permission denied')
+        patch.setattr('splat_explorer.web.splatfix_results.shutil.rmtree', fail)
+        DashboardHandler._serve_splatfix(handler, endpoint, {'run_id': root.name})
+        assert responses[-1][1] == 500
+        assert root.is_dir()
+    DashboardHandler._serve_splatfix(handler, endpoint, {'run_id': root.name})
+    assert responses[-1][1] == 200
+    assert not root.exists()
+    DashboardHandler._serve_splatfix(handler, endpoint, {'run_id': root.name})
+    assert responses[-1][1] == 404
+
+
+def test_delete_ui_confirmation_separation_and_failure():
+    import shutil
+    import subprocess
+    import pytest
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node is required for UI checks')
+    script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const html=fs.readFileSync(process.argv[1],'utf8');
+const elements={};const get=id=>elements[id]??={value:'',checked:false,setAttribute(){}};
+let confirmed=false,fail=false,calls=0,prompts=0;
+const context=vm.createContext({document:{getElementById:get,hidden:true},setInterval(){},
+ window:{confirm:message=>{prompts++;assert.match(message,/Permanently delete test/);return confirmed}},
+ fetch:async(url,options)=>{if(!options)return new Promise(()=>{});calls++;assert.equal(url,'/api/splatfix/results/delete');assert.deepEqual(JSON.parse(options.body),{run_id:'test'});return{ok:!fail,json:async()=>fail?{error:'Delete failed'}:{run_id:'test'}}}});
+vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
+const load=()=>vm.runInContext("rows=[{run_id:'test',scene:'Room',status:'error',can_archive:true,metrics:{}},{run_id:'test',scene:'Pass 2',can_archive:true,metrics:{}}];render()",context);
+const click=()=>get('results').onclick({target:{closest:()=>({dataset:{run:'test',action:'delete'}})}});
+(async()=>{
+ load();assert.match(get('results').innerHTML,/<div class="delete-area"><button[^>]+data-action="delete"/);
+ assert(!get('results').innerHTML.split('<div class="links">')[1].split('</div>')[0].includes('data-action="delete"'));
+ await click();assert.equal(calls,0);assert.equal(prompts,1);
+ confirmed=true;fail=true;await click();assert.equal(calls,1);assert.equal(vm.runInContext('rows.length',context),2);assert.equal(get('error').textContent,'Delete failed');
+ fail=false;await click();assert.equal(vm.runInContext('rows.length',context),0);assert.match(get('notice').textContent,/Permanently deleted test/);
+ load();vm.runInContext('rows.forEach(r=>r.can_archive=false);render()',context);await click();assert.equal(calls,2);assert.equal(prompts,3);
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+    subprocess.run([node, '-e', script, 'src/splat_explorer/web/static/splatfix_results.html'], check=True)
+
+
+def test_delete_hidden_batch_rechecks_visibility_status_and_reports_failures(tmp_path, monkeypatch):
+    studio, root, _ = setup(tmp_path)
+    runs = [studio.store.create_run() for _ in range(4)]
+    ids = [root.name] + [r.run_id for r in runs]
+    for run_id in ids:
+        studio.store.set_status(run_id, 'error')
+        studio.results.set_hidden(run_id, True)
+    studio.results.set_hidden(ids[1], False)
+    studio.store.set_status(ids[2], 'running')
+    original = __import__('shutil').rmtree
+    def remove(path):
+        if Path(path).name == ids[3]:
+            raise PermissionError('denied')
+        original(path)
+    monkeypatch.setattr('splat_explorer.web.splatfix_results.shutil.rmtree', remove)
+    result = studio.results.delete_hidden_runs(ids + [ids[0], '../escape'])
+    assert result == {'deleted': [ids[0], ids[4]], 'skipped': [ids[1], ids[2], '../escape'], 'failed': [ids[3]]}
+    for run_id in ids[1:4]:
+        assert studio.store.run_path(run_id).is_dir()
+    assert not root.exists()
+
+
+def test_delete_hidden_endpoint_validates_batch(tmp_path):
+    from splat_explorer.web.server import DashboardHandler
+    studio, root, _ = setup(tmp_path)
+    responses = []
+    handler = SimpleNamespace(app=SimpleNamespace(splatfix=studio), command='POST',
+                              _send_json=lambda body, code=200: responses.append((body, code)))
+    endpoint = '/api/splatfix/results/delete-hidden'
+    for body in (None, {}, {'run_ids': 'all'}, {'run_ids': [None]}):
+        DashboardHandler._serve_splatfix(handler, endpoint, body)
+        assert responses[-1][1] == 400
+    studio.store.set_status(root.name, 'error')
+    studio.results.set_hidden(root.name, True)
+    DashboardHandler._serve_splatfix(handler, endpoint, {'run_ids': [root.name]})
+    assert responses[-1] == ({'ok': True, 'deleted': [root.name], 'skipped': [], 'failed': []}, 200)
+    assert not root.exists()
+
+
+def test_bulk_delete_ui_toggle_confirmation_and_partial_failure():
+    import shutil
+    import subprocess
+    import pytest
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node is required for UI checks')
+    script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const html=fs.readFileSync(process.argv[1],'utf8');
+assert.match(html,/id="delete-hidden"[^>]+hidden>Delete all hidden runs/);
+const elements={};const get=id=>elements[id]??={value:'',checked:false,setAttribute(){}};
+let confirmed=false,calls=0;
+const context=vm.createContext({document:{getElementById:get,hidden:true},setInterval(){},
+ window:{confirm:message=>{assert.match(message,/all 2 inactive hidden runs/);assert.match(message,/search and filters/);return confirmed}},
+ fetch:async(url,options)=>{if(!options)return new Promise(()=>{});calls++;assert.equal(url,'/api/splatfix/results/delete-hidden');assert.deepEqual(JSON.parse(options.body),{run_ids:['a','b']});return{ok:true,json:async()=>({deleted:['a'],skipped:[],failed:['b']})}}});
+vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
+(async()=>{
+ vm.runInContext("rows=[{run_id:'a',hidden:true,can_archive:true},{run_id:'a',hidden:true,can_archive:true},{run_id:'b',hidden:true,can_archive:true},{run_id:'active',hidden:true,can_archive:false},{run_id:'visible',hidden:false,can_archive:true}].map(r=>({...r,metrics:{}}));render()",context);
+ assert.equal(get('delete-hidden').hidden,true);
+ get('show-hidden').onclick();assert.equal(get('delete-hidden').hidden,false);assert.equal(get('delete-hidden').disabled,false);
+ get('search').value='nothing matches';get('search').oninput();
+ await get('delete-hidden').onclick();assert.equal(calls,0);
+ confirmed=true;await get('delete-hidden').onclick();assert.equal(calls,1);
+ assert.equal(vm.runInContext("rows.some(r=>r.run_id==='a')",context),false);
+ assert.equal(vm.runInContext('rows.length',context),3);
+ assert.match(get('notice').textContent,/Deleted 1/);assert.match(get('error').textContent,/b/);
+ get('show-hidden').onclick();assert.equal(get('delete-hidden').hidden,true);await get('delete-hidden').onclick();assert.equal(calls,1);
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+    subprocess.run([node, '-e', script, 'src/splat_explorer/web/static/splatfix_results.html'], check=True)
