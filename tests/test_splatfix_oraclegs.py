@@ -268,7 +268,7 @@ def test_real_upstream_colmap_loader_split_and_attention(tmp_path, worldexplorer
 def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training,count,depth="predicted",initialization="sfm",world_attention=None):
     cp = checkpoint(tmp_path,count)
     inputs,output = tmp_path/'inputs',tmp_path/'run'
-    runtime = {**repair.DEFAULT_RUNTIME, 'oracle_adapter':adapter, 'oracle_depth_source':depth, 'oracle_initialization':initialization}
+    runtime = {**repair.DEFAULT_RUNTIME, 'oracle_reference_mode':'all', 'oracle_adapter':adapter, 'oracle_depth_source':depth, 'oracle_initialization':initialization}
     manifest = export_inputs(cp,inputs,runtime={**runtime,'oracle_target_frames':5})
     if world_attention:
         from test_worldexplorer_source import fixture

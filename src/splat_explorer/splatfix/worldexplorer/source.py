@@ -67,7 +67,11 @@ def source_frames(scene):
                 raise ValueError('WorldExplorer image dimensions disagree with camera calibration')
         pose[:3, :] = transform[:, :3] @ pose[:3, :]
         pose[:3, 3] = scale * (pose[:3, 3] + transform[:, 3])
-        frames.append({**calibrated, 'transform_matrix': pose.tolist(), 'file_path': str(path.resolve())})
+        frames.append({'source_image': str(path.relative_to(root)),
+                       'source_trajectory': path.parent.parent.name,
+                       'source_role': 'scaffold' if path.parent.name == 'input' and path.stem.isdigit() and int(path.stem) < 8 else 'generated' if path.parent.name == 'samples-rgb' else 'context',
+                       'source_frame_index': int(path.stem) if path.stem.isdigit() else None,
+                       **calibrated, 'transform_matrix': pose.tolist(), 'file_path': str(path.resolve())})
     if not frames:
         raise ValueError('WorldExplorer source contains no posed images')
     return {'run_id': root.parent.name, 'scene_path': str(ply), 'camera_convention': 'opengl_c2w',

@@ -38,6 +38,7 @@ def main():
         vae = verified_vae()
         record_vae(request['output'], vae)
     elif args.action == 'seva':
+        memory = request.pop('scene_memory', None)
         endpoints = request.pop('ordered_pair_endpoints', None)
         geometry_guidance = request.pop('source_geometry_guidance', None)
         stride = request.pop('pad_to_stride', None)
@@ -68,6 +69,9 @@ def main():
             from seva_geometry import install_geometry_guidance
             install_geometry_guidance(evaluation, geometry_guidance,
                 Path(request['work_dir']).parent/'seva-geometry-guidance.json')
+        if memory:
+            from scene_memory_runtime import install_scene_memory
+            install_scene_memory(evaluation, demo, memory)
         demo.WORK_DIR = request.pop('work_dir')
         demo.main(**request)
     elif args.action == 'attention':

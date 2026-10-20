@@ -9,8 +9,8 @@ def validate_options(raw):
     if capture_source not in ('saved', 'seva'):
         raise ValueError('oracle_capture_source must be saved or seva')
     reference_mode = raw.get('oracle_reference_mode', 'all')
-    if reference_mode not in ('all', 'single'):
-        raise ValueError('oracle_reference_mode must be all or single')
+    if reference_mode not in ('scene_memory', 'all', 'single'):
+        raise ValueError('oracle_reference_mode must be scene_memory, all or single')
     split_mode = raw.get('oracle_split_mode', 'single-split')
     if split_mode not in ('single-split', 'double-split'):
         raise ValueError('oracle_split_mode must be single-split or double-split')
@@ -39,10 +39,10 @@ def validate_options(raw):
         raise ValueError('oracle_adapter must be trajectory, saved_poses or per_view_preset')
     if adapter == 'saved_poses' and reference_mode == 'single':
         raise ValueError('Single-image references require the trajectory or per_view_preset adapter')
-    preset = raw.get('oracle_preset', 'spiral')
-    if preset not in ('orbit', 'spiral', 'lemniscate', 'shuffle_orbit'):
-        raise ValueError('oracle_preset must be orbit, spiral, lemniscate or shuffle_orbit')
-    scale = raw.get('oracle_preset_scale', 1.0)
+    preset = raw.get('oracle_preset', 'spiral_expanding')
+    if preset not in ('orbit', 'spiral', 'spiral_expanding', 'lemniscate', 'shuffle_orbit'):
+        raise ValueError('oracle_preset must be orbit, spiral, spiral_expanding, lemniscate or shuffle_orbit')
+    scale = raw.get('oracle_preset_scale', 0.25)
     if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not np.isfinite(scale) or scale <= 0:
         raise ValueError('oracle_preset_scale must be a finite positive number in scene units')
     resolution = raw.get('seva_resolution', '576p')

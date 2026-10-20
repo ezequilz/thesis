@@ -22,7 +22,8 @@ def validate_job(raw):
         method = DEFAULT_METHOD if method is None else method
         backend = get_method(method, stage=stage)
         result['reconstruction_method'] = method
-        result.update(backend.validate_options(raw))
+        result.update(backend.validate_options(
+            {'oracle_reference_mode':'scene_memory', **raw} if method == 'oraclegs' else raw))
     scheduled = raw.get('scheduled_at')
     if scheduled:
         instant = datetime.fromisoformat(str(scheduled).replace('Z', '+00:00'))

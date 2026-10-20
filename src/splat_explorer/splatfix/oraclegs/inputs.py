@@ -183,5 +183,9 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
     from ..worldexplorer.source import stage_source
     if stage_source(checkpoint.manifest['scene_path'], root / 'worldexplorer-source'):
         manifest['worldexplorer_source'] = 'worldexplorer-source'
+    if options['oracle_reference_mode'] == 'scene_memory':
+        from .scene_memory import validate_memory_source
+        validate_memory_source(root, manifest)
+        manifest['trajectory']['reference_conditioning'] = '8-scaffold+5-rotation-selected-memory+6-saved; sparse-pass-only'
     atomic_json(root/'inputs.json',manifest)
     return manifest

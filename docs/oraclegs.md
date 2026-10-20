@@ -526,3 +526,40 @@ Reload the queue/server and create a fresh run to apply these changes. Existing
 staged runs keep their saved settings. CPU regression tests cover the real
 upstream camera import order and all depth/initialization combinations; GPU
 loss behavior and visual quality still require a fresh source-guided run.
+
+### Scene-memory references (new-job default)
+
+`oracle_reference_mode=scene_memory` conditions sparse SEVA generation on eight
+fixed WorldExplorer scaffold images, five prior generated views, and the six
+saved references. `mode=edited` is the default: all six saved references are
+GPT-repaired images. Explicit `mode=baseline` substitutes six original captures;
+the two sets are never combined. Scaffold and memory images are generated scene
+context, not additional original RGB captures or repaired ground truth.
+
+The five memory views compete in one pool of original WorldExplorer outputs and
+completed SEVA segments. Selection votes over nearest SO(3) rotation angles, using
+WorldExplorer's trace/arccos distance. Opposite trajectory origins (more than 90°
+away) and each trajectory's first two generated frames are excluded. Selection is
+performed per segment over its target cameras; arbitrary saved trajectories use
+their starting reference orientation instead of WorldExplorer's discrete sector
+IDs. This adapts the paper's memory idea rather than reproducing its entire sampler.
+
+Sparse batches use 27 slots (19 references plus up to eight anchors); the dense
+pass keeps the existing 21-slot interpolation and six-reference handling. Memory
+is conditioning only and does not change exported frame identities or GT labels.
+Per-segment `scene-memory/selection.json` records sources; `conditioning.json`
+records actual conditioning slots. Longer paths can require multiple sparse batches.
+
+This setting requires six calibrated saved views, all eight posed scaffold
+images, and at least five eligible prior generated views. Missing context causes
+an explicit error. Select `oracle_reference_mode=all` (**Repaired images only**)
+to restore the original behavior, or `single` for the existing one-image option.
+Historical staged inputs without this field retain legacy validation semantics.
+
+The default `oracle_preset=spiral_expanding` option (default size: 0.25 scene units per demo unit) keeps the original two-turn
+spiral available as `spiral`. It scales forward/backward translation in the saved
+camera's local Z axis by 1.5, and smoothly grows the canonical spiral radius from
+1.0 to 1.25 during the second turn (smoothstep, reaching 1.25 at the last sampled
+frame). The first turn's radius is unchanged. Cameras continue looking toward
+the original focus; the saved starting camera, intrinsics, frame count, and
+scene-unit size setting are preserved. This expanding path is not closed.

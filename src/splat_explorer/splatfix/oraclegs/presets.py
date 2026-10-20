@@ -35,11 +35,13 @@ def preset_metadata(options, order, presets, seed):
             'preset_scale_scene_units':options['oracle_preset_scale'],
             'preset_parameters':{'orbit_degrees':360, 'focus_distance':10,
                                  'lemniscate_degrees':60, 'spiral_radii':[1,1,.5],
-                                 'spiral_rotations':2, 'spiral_zrate':.5, 'spiral_bounds':[1,5]},
+                                 'spiral_rotations':2, 'spiral_zrate':.5, 'spiral_bounds':[1,5],
+                                 **({'local_forward_multiplier':1.5, 'second_turn_final_radius_multiplier':1.25,
+                                     'radius_growth':'second-turn-smoothstep'} if options['oracle_preset'] == 'spiral_expanding' else {})},
             'frame_count_semantics':'per-view-targets-start-included-loop-end-excluded',
             'reference_conditioning':options['oracle_reference_mode']+'-saved-views-per-segment',
             'generation_schedule':'sequential-independent-segments',
-            'frames_per_segment':options['oracle_target_frames'], 'closed':True,
+            'frames_per_segment':options['oracle_target_frames'], 'closed':options['oracle_preset'] != 'spiral_expanding',
             'disconnected':True, 'intrinsics_policy':'preserve-saved-calibration',
             'segments':[{'index':j,'from_reference':i,'to_reference':i,'preset':presets[j]}
                         for j,i in enumerate(order)]}

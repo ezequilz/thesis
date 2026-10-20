@@ -61,7 +61,7 @@ def preset_poses(start_c2w, preset, count, scale=1.):
     Scale converts one demo unit to scene units; calibration stays unchanged.
     Sampling includes the starting pose and excludes the repeated loop end.
     """
-    if preset not in ('orbit', 'spiral', 'lemniscate'):
+    if preset not in ('orbit', 'spiral', 'spiral_expanding', 'lemniscate'):
         raise ValueError('Unknown SEVA preset')
     if type(count) is not int or count < 2 or not np.isfinite(scale) or scale <= 0:
         raise ValueError('Invalid SEVA preset size or frame count')
@@ -88,10 +88,25 @@ def preset_poses(start_c2w, preset, count, scale=1.):
     else:
         # generate_spiral_path: bounds=[1,5], n_rots=2, zrate=.5.
         t = 2*theta
-        positions = np.column_stack([np.cos(t),np.sin(t),.5*np.sin(t*.5)])
+        radius = np.ones(count)
+        if preset == 'spiral_expanding':
+            # First turn unchanged; smooth growth during turn two, reaching
+            # +25% at the last sampled frame (the loop endpoint is excluded).
+            progress = np.clip((np.arange(count)-count/2)/max(count-1-count/2, 1), 0, 1)
+            radius += .25*progress**2*(3-2*progress)
+        positions = np.column_stack([radius*np.cos(t),radius*np.sin(t),.5*np.sin(t*.5)])
         focal = 1/(.25/.9+.75/25)
         poses = lookat(positions, np.array([0.,0.,focal]), np.array([0.,-1.,0.]))
-        poses = np.linalg.inv(poses[0])[None] @ poses
+        origin = np.linalg.inv(poses[0])
+        poses = origin[None] @ poses
+        if preset == 'spiral_expanding':
+            # Z is forward/backward in the saved camera's OpenCV frame.
+            # Scale after anchoring so lateral movement is unaffected.
+            positions = poses[:,:3,3].copy()
+            positions[:,2] *= 1.5
+            focus = (origin @ np.array([0.,0.,focal,1.]))[:3]
+            up = origin[:3,:3] @ np.array([0.,-1.,0.])
+            poses = lookat(positions, focus, up)
     poses[:,:3,3] *= scale
     poses = np.asarray(start_c2w,dtype=float)[None] @ poses
     poses[0] = start_c2w

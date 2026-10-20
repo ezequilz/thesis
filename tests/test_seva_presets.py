@@ -222,3 +222,49 @@ def test_camera_only_targets_need_no_staged_pngs(tmp_path, adapter, split):
     Path(parsed.image_paths[split_data['train_ids'][0]]).unlink()
     with pytest.raises(FileNotFoundError, match='Missing SEVA image'):
         demo.get_parser(data_dir=scene)
+
+
+def test_expanding_spiral_local_depth_and_smooth_second_turn():
+    from splat_explorer.splatfix.oraclegs.trajectory import preset_poses
+    from scipy.spatial.transform import Rotation
+    count = 80
+    start = np.eye(4)
+    base = preset_poses(start, 'spiral', count)
+    expanded = preset_poses(start, 'spiral_expanding', count)
+    # The first turn changes only saved-camera-local forward translation.
+    np.testing.assert_allclose(expanded[:41,:2,3], base[:41,:2,3], atol=1e-12)
+    np.testing.assert_allclose(expanded[:41,2,3], 1.5*base[:41,2,3], atol=1e-12)
+    # Undo local-Z amplification and the native starting look-at to measure
+    # radius about the original spiral axis, not about the saved camera.
+    focal = 1/(.25/.9+.75/25)
+    forward = np.array([-1.,0.,focal]); forward /= np.linalg.norm(forward)
+    right = np.cross(forward, [0.,-1.,0.]); right /= np.linalg.norm(right)
+    down = np.cross(forward, right)
+    rotation = np.stack([right,down,forward], axis=-1)
+    positions = expanded[:,:3,3].copy(); positions[:,2] /= 1.5
+    canonical = positions @ rotation.T + [1.,0.,0.]
+    radius = np.linalg.norm(canonical[:,:2], axis=1)
+    np.testing.assert_allclose(radius[:41], 1, atol=1e-12)
+    assert radius[-1] == pytest.approx(1.25)
+    assert np.all(np.diff(radius[40:]) > 0)
+    assert np.diff(radius)[40] < .002  # no abrupt radius jump at turn boundary
+    # The extension remains calibrated, equivariant under saved camera poses,
+    # and independent of the user-selected scene-unit scale.
+    start[:3,:3] = Rotation.from_euler('xyz', [20,30,40], degrees=True).as_matrix()
+    start[:3,3] = [3,4,5]
+    moved = preset_poses(start, 'spiral_expanding', count, .3)
+    expected = expanded.copy(); expected[:,:3,3] *= .3
+    np.testing.assert_allclose(moved, start[None] @ expected, atol=1e-12)
+    np.testing.assert_allclose(np.linalg.det(expanded[:,:3,:3]), 1, atol=1e-12)
+    np.testing.assert_allclose(expanded[0], np.eye(4), atol=1e-12)
+
+
+def test_expanding_spiral_stages_and_validates(tmp_path):
+    from splat_explorer.splatfix.oraclegs.inputs import export_inputs
+    from splat_explorer.splatfix.oraclegs.repair import validate_staged_trajectory
+    manifest = export_inputs(checkpoint(tmp_path), tmp_path/'expanded', runtime={
+        'oracle_reference_mode':'all', 'oracle_adapter':'per_view_preset',
+        'oracle_preset':'spiral_expanding', 'oracle_target_frames':80})
+    validate_staged_trajectory(tmp_path/'expanded', manifest)
+    assert manifest['trajectory']['closed'] is False
+    assert manifest['trajectory']['preset_parameters']['local_forward_multiplier'] == 1.5

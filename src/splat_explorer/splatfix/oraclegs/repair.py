@@ -17,7 +17,7 @@ DEFAULT_RUNTIME = {'repo':'/workspace/third_party/OracleGS',
     'python':'/workspace/oraclegs-env/bin/python', 'model_python':'/workspace/oraclegs-model-env/bin/python',
     'colmap':'/workspace/oraclegs-model-env/bin/colmap',
     'depth_weights':'/workspace/models/oraclegs/depth_anything_v2_vitl.pth',
-    'oracle_reference_mode':'all', 'oracle_split_mode':'single-split', 'seva_fit':'crop', 'auto_setup':True, 'seva_resolution':'576p', 'oracle_adapter':'trajectory', 'oracle_target_frames':80,
+    'oracle_reference_mode':'scene_memory', 'oracle_preset':'spiral_expanding', 'oracle_preset_scale':0.25, 'oracle_split_mode':'single-split', 'seva_fit':'crop', 'auto_setup':True, 'seva_resolution':'576p', 'oracle_adapter':'trajectory', 'oracle_target_frames':80,
     'seva_geometry_guidance':'off', 'oracle_depth_source':'predicted', 'oracle_initialization':'sfm',
     'oracle_attention_batching':'within_trajectory', 'oracle_worldexplorer_attention':'weighted', 'oracle_path_order':None, 'iterations':22000, 'cap_max':1800000, 'seed':23}
 
@@ -157,6 +157,8 @@ def seva_request(inputs, output, manifest, runtime, segment=None):
         # num_prior_frames is an upstream minimum; long paths may need more
         # anchors, sampled in multiple chunks with the same 21-frame context.
         request.update(T=21, num_prior_frames=20)
+    if manifest.get('oracle_reference_mode') == 'scene_memory':
+        request.update(T=[27, 21], chunk_strategy_first_pass='gt')
     # 720p uses a disclosed padding adapter for the U-Net's 64-pixel stride.
     if manifest['seva_resolution'] == '576p':
         request['L_short'] = 576
@@ -304,11 +306,18 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
             destination = output/'seva-segments'/f'{index:03d}'
             destination.mkdir(parents=True)
             request = seva_request(inputs/segment['input_subdir'], destination, manifest, runtime, segment=segment)
+            if manifest.get('oracle_reference_mode') == 'scene_memory':
+                from .scene_memory import prepare_memory
+                request['scene_memory'] = prepare_memory(inputs, output, manifest, segment, destination)
             model(f'seva_generation_{index+1:03d}_of_{len(manifest["seva_segments"]):03d}',
                   'seva','seva_repo',request)
         merge_segments(inputs, output, manifest, should_stop=should_stop)
     else:
-        model('seva_generation','seva','seva_repo',seva_request(inputs,output,manifest,runtime))
+        request = seva_request(inputs,output,manifest,runtime)
+        if manifest.get('oracle_reference_mode') == 'scene_memory':
+            from .scene_memory import prepare_memory
+            request['scene_memory'] = prepare_memory(inputs, output, manifest, None, output)
+        model('seva_generation','seva','seva_repo',request)
     assemble(inputs,output)
     attention = dataset/f'synthetic_{n}_attention_maps'
     from .adapter import append_worldexplorer
