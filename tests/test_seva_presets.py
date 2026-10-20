@@ -243,6 +243,9 @@ def test_expanding_spiral_local_depth_and_smooth_second_turn():
     rotation = np.stack([right,down,forward], axis=-1)
     positions = expanded[:,:3,3].copy(); positions[:,2] /= 1.5
     canonical = positions @ rotation.T + [1.,0.,0.]
+    # Across BOTH turns, undoing the 1.5 local-Z multiplier must recover
+    # the native canonical depth sinusoid, even as the XY radius expands.
+    np.testing.assert_allclose(canonical[:,2], .5*np.sin(np.arange(count)*2*np.pi/count), atol=1e-12)
     radius = np.linalg.norm(canonical[:,:2], axis=1)
     np.testing.assert_allclose(radius[:41], 1, atol=1e-12)
     assert radius[-1] == pytest.approx(1.25)

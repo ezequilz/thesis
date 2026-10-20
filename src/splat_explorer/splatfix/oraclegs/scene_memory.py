@@ -14,7 +14,11 @@ from .inputs import fit_reference
 
 def rotation_distances(sources, targets):
     """WorldExplorer/SEVA SO(3) geodesic angle, in degrees."""
-    relative = np.asarray(sources)[:, None, :3, :3] @ np.asarray(targets)[None, :, :3, :3].transpose(0, 1, 3, 2)
+    # SEVA exports 3x4 poses; the WorldExplorer scaffold uses homogeneous
+    # 4x4 poses. Extract their shared rotation block before stacking the pool.
+    source_rotations = np.stack([np.asarray(pose)[:3, :3] for pose in sources])
+    target_rotations = np.stack([np.asarray(pose)[:3, :3] for pose in targets])
+    relative = source_rotations[:, None] @ target_rotations[None].transpose(0, 1, 3, 2)
     return np.degrees(np.arccos(np.clip((np.trace(relative, axis1=2, axis2=3)-1)/2, -1, 1)))
 
 

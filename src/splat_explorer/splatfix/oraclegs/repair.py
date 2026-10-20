@@ -17,7 +17,7 @@ DEFAULT_RUNTIME = {'repo':'/workspace/third_party/OracleGS',
     'python':'/workspace/oraclegs-env/bin/python', 'model_python':'/workspace/oraclegs-model-env/bin/python',
     'colmap':'/workspace/oraclegs-model-env/bin/colmap',
     'depth_weights':'/workspace/models/oraclegs/depth_anything_v2_vitl.pth',
-    'oracle_reference_mode':'scene_memory', 'oracle_preset':'spiral_expanding', 'oracle_preset_scale':0.25, 'oracle_split_mode':'single-split', 'seva_fit':'crop', 'auto_setup':True, 'seva_resolution':'576p', 'oracle_adapter':'trajectory', 'oracle_target_frames':80,
+    'oracle_source_reference':'nearest', 'oracle_reference_mode':'scene_memory', 'oracle_preset':'spiral_expanding', 'oracle_preset_scale':0.25, 'oracle_split_mode':'single-split', 'seva_fit':'crop', 'auto_setup':True, 'seva_resolution':'576p', 'oracle_adapter':'trajectory', 'oracle_target_frames':80,
     'seva_geometry_guidance':'off', 'oracle_depth_source':'predicted', 'oracle_initialization':'sfm',
     'oracle_attention_batching':'within_trajectory', 'oracle_worldexplorer_attention':'weighted', 'oracle_path_order':None, 'iterations':22000, 'cap_max':1800000, 'seed':23}
 
@@ -150,6 +150,16 @@ def seva_request(inputs, output, manifest, runtime, segment=None):
         request['replace_or_include_input'] = True
         if request['num_inputs'] == 1 and 'source_geometry_guidance' in request:
             request['source_geometry_guidance']['source_reference'] = segment['from_reference']
+    if (manifest.get('oracle_adapter') == 'per_view_preset'
+            and manifest.get('oracle_source_reference', 'nearest') == 'fixed_initial'):
+        if segment is None:
+            raise ValueError('Fixed initial source requires a staged preset clip')
+        source = segment['from_reference']
+        request['fixed_initial_source'] = {
+            'frame_index':segment['frame_order'].index(source),
+            'reference_index':source, 'mode':manifest['mode']}
+        if 'source_geometry_guidance' in request:
+            request['source_geometry_guidance']['source_reference'] = source
     if manifest.get('oracle_reference_mode') == 'single':
         if request['num_inputs'] != 1:
             raise ValueError('Single-image SEVA conditioning requires exactly one staged reference per trajectory')
@@ -186,7 +196,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
     manifest = json.loads((inputs/'inputs.json').read_text())
     from .backend import validate_options
     validated = validate_options(runtime)
-    for key in ('oracle_reference_mode', 'oracle_split_mode'):
+    for key in ('oracle_source_reference', 'oracle_reference_mode', 'oracle_split_mode'):
         if key in manifest and manifest[key] != validated[key]:
             raise ValueError(key + ' changed after staging; restage inputs')
     for key, default in [('seva_geometry_guidance', 'off'), ('oracle_depth_source', 'predicted'), ('oracle_initialization', 'sfm')]:

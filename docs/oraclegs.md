@@ -563,3 +563,25 @@ camera's local Z axis by 1.5, and smoothly grows the canonical spiral radius fro
 frame). The first turn's radius is unchanged. Cameras continue looking toward
 the original focus; the saved starting camera, intrinsics, frame count, and
 scene-unit size setting are preserved. This expanding path is not closed.
+
+### Optional fixed initial source for preset clips
+
+`oracle_source_reference=nearest` is the default and preserves prior behavior,
+including queued jobs whose settings or staged manifests omit this field. Native
+SEVA pools the global image embedding across conditioned frames; optional source
+geometry guidance chooses a reference by pose/rotation proximity. There is no
+native exclusive RGB “source” in this mode.
+
+The opt-in `fixed_initial` fallback uses each preset clip's starting saved image
+as the sole input to SEVA's global image embedding in **both** generation passes.
+All other reference RGB latents, masks and cameras remain spatial conditioning;
+this does not add an image or remove the scene-memory references. If source-depth
+guidance is enabled, its source is fixed to the same saved image. This option does
+not enable depth guidance itself. GPT-repaired mode stays the default; explicit
+baseline mode uses the original capture instead, never both. Connected pairwise
+paths retain their existing behavior; this option applies to per-view presets.
+
+This is an explicit conditioning extension, not a guarantee that the model will
+ignore conflicting context. Each clip writes `seva-source-reference.json` with the
+source index, image checksum, input mode and sampling-batch counts. Old manifests
+without the setting are never upgraded implicitly.

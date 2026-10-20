@@ -37,14 +37,27 @@ def test_rotation_metric_and_mixed_pool_exclude_opposite_origins():
         select_context(candidates[:4], [pose(0)], pose(0))
 
 
+def test_rotation_selection_accepts_mixed_seva_and_worldexplorer_pose_shapes():
+    full = [pose(angle) for angle in (0, 10, 20, 30, 40, 50, 60)]
+    mixed = [p[:3] if i % 2 else p for i, p in enumerate(full)]
+    targets = [pose(0), pose(90)[:3]]
+    np.testing.assert_allclose(
+        rotation_distances(mixed, targets),
+        rotation_distances(full, [pose(0), pose(90)]))
+    candidates = [{'transform_matrix':p, 'trajectory_pose':pose(0), 'index':i}
+                  for i, p in enumerate(mixed)]
+    selected = select_context(candidates, targets[:1], pose(0))
+    assert {f['index'] for f in selected} == set(range(5))
+
+
 def stage_fixture(scene, destination):
     destination = Path(destination)
     destination.mkdir(parents=True)
     frames = []
     for i in range(16):
         path = destination/f'{i}.png'
-        Image.new('RGB', (64, 36), (0, i, 0)).save(path)
-        frames.append({'file_path':path.name, 'w':64, 'h':36, 'fl_x':50, 'fl_y':50, 'cx':32, 'cy':18,
+        Image.new('RGB', (576, 576), (0, i, 0)).save(path)
+        frames.append({'file_path':path.name, 'w':576, 'h':576, 'fl_x':450, 'fl_y':450, 'cx':288, 'cy':288,
             'transform_matrix':pose(i*45 if i < 8 else 180), 'sha256':digest_file(path),
             'source_role':'scaffold' if i < 8 else 'generated', 'source_frame_index':i if i < 8 else i-8,
             'source_trajectory':'004_in'})
@@ -80,11 +93,18 @@ def test_memory_staging_uses_exactly_one_saved_rgb_set(tmp_path, monkeypatch, mo
     for i, global_id in enumerate(previous['frame_order']):
         path = folder/f'{i}.png'
         Image.new('RGB', (1024,576), 'yellow').save(path)
-        exported.append({**all_frames[global_id], 'file_path':path.name})
+        exported.append({**all_frames[global_id], 'file_path':path.name,
+                         'transform_matrix':all_frames[global_id]['transform_matrix'][:3]})
     (folder/'transforms.json').write_text(json.dumps({'frames':exported}))
     later = prepare_memory(root, out, manifest, manifest['seva_segments'][1], out/'second')
     assert any(f['memory_source'] == 'seva' for f in later['frames'][8:])
     assert len(later['frames']) == 13
+    for frame in later['frames']:
+        with Image.open(frame['file_path']) as image:
+            assert image.size == (1024, 576)
+        # Square scaffold and wide SEVA images retain centered calibration.
+        np.testing.assert_allclose(np.asarray(frame['K'])[:2, 2], [512, 288])
+    np.testing.assert_allclose(np.diag(later['frames'][0]['K'])[:2], [800, 800])
 
 
 def test_defaults_and_missing_scaffold(tmp_path):

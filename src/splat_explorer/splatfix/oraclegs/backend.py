@@ -11,6 +11,9 @@ def validate_options(raw):
     reference_mode = raw.get('oracle_reference_mode', 'all')
     if reference_mode not in ('scene_memory', 'all', 'single'):
         raise ValueError('oracle_reference_mode must be scene_memory, all or single')
+    source_mode = raw.get('oracle_source_reference', 'nearest')
+    if source_mode not in ('nearest', 'fixed_initial'):
+        raise ValueError('oracle_source_reference must be nearest or fixed_initial')
     split_mode = raw.get('oracle_split_mode', 'single-split')
     if split_mode not in ('single-split', 'double-split'):
         raise ValueError('oracle_split_mode must be single-split or double-split')
@@ -55,7 +58,7 @@ def validate_options(raw):
     if order is not None and (not isinstance(order, list) or len(order) < 2 or
                               any(type(i) is not int or i < 0 for i in order) or len(set(order)) != len(order)):
         raise ValueError('oracle_path_order must contain distinct nonnegative checkpoint view indices')
-    return {'oracle_capture_source':capture_source, 'oracle_reference_mode':reference_mode, 'oracle_split_mode':split_mode, 'oracle_preset':preset, 'oracle_preset_scale':float(scale), 'seva_geometry_guidance':guidance, 'oracle_depth_source':depth, 'oracle_initialization':initialization, 'oracle_attention_batching':batching, 'oracle_worldexplorer_attention':world_attention, 'seva_fit': fit, 'oracle_adapter': adapter, 'seva_resolution': resolution, 'oracle_target_frames': frames, 'oracle_path_order': order}
+    return {'oracle_source_reference':source_mode, 'oracle_capture_source':capture_source, 'oracle_reference_mode':reference_mode, 'oracle_split_mode':split_mode, 'oracle_preset':preset, 'oracle_preset_scale':float(scale), 'seva_geometry_guidance':guidance, 'oracle_depth_source':depth, 'oracle_initialization':initialization, 'oracle_attention_batching':batching, 'oracle_worldexplorer_attention':world_attention, 'seva_fit': fit, 'oracle_adapter': adapter, 'seva_resolution': resolution, 'oracle_target_frames': frames, 'oracle_path_order': order}
 
 
 def readiness(checkpoint):

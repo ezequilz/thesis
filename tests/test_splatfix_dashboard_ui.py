@@ -52,6 +52,12 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('repair').oracle_attention_batching,'global');
   $('oracle-worldexplorer-attention').value='unweighted';
   assert.equal(payload('repair').oracle_worldexplorer_attention,'unweighted');
+  assert.equal(payload('repair').oracle_source_reference,'nearest');
+  $('oracle-source-reference').value='fixed_initial';
+  assert.equal(payload('repair').oracle_source_reference,'fixed_initial');
+  $('oracle-source-reference').value='nearest';
+  $('oracle-reference-mode').value='scene_memory';
+  assert.equal(payload('repair').oracle_reference_mode,'scene_memory');
   $('oracle-reference-mode').value='all';
   $('oracle-split-mode').value='single-split';
   updateOracleReferenceControls();
@@ -221,7 +227,7 @@ def test_result_gallery_polling_stops_after_images_or_terminal_state():
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0];
 const elements=new Map();
-const get=id=>{if(!elements.has(id))elements.set(id,{addEventListener(){},querySelector(){return{}},setAttribute(){},open:false});return elements.get(id)};
+const get=id=>{if(!elements.has(id))elements.set(id,{value:'',textContent:'',innerHTML:'',addEventListener(){},querySelector(){return{}},querySelectorAll(){return[]},before(){},after(){},replaceWith(){},setAttribute(){},open:false});return elements.get(id)};
 let calls=0,timer=null,lastDelay=null;
 let result={run_id:'run',status:'running',kind:'ArtiFixer3D',metrics:{},gallery:{frames:[]}};
 const document={getElementById:get,querySelectorAll:()=>[],hidden:false};
@@ -232,6 +238,7 @@ const context=vm.createContext({document,location:{search:'?id=run'},URLSearchPa
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
  vm.runInContext(source,context);await flush();
+ assert.equal(get('error').textContent,'');
  assert.equal(calls,1);assert.equal(typeof timer,'function');
  document.hidden=true;timer();await flush();assert.equal(calls,1);
  document.hidden=false;
@@ -248,6 +255,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
  result={...result,g4splat:{input_staging:{status:'exporting'},source_depth:{enabled:true},gate:{},
    views:[],view_count:0,depth_scale:{},generation:[],artifacts:[],fitting:[]}};
  await get('refresh').onclick();assert.equal(lastDelay,3000);
+ assert.equal(get('error').textContent,'');
  assert.match(get('g4Debug').innerHTML,/Local source-depth staging: exporting/);
  result={...result,status:'completed'};
  await get('refresh').onclick();assert.equal(timer,null);
@@ -255,4 +263,15 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
  await get('refresh').onclick();assert.equal(timer,null);
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''
-    subprocess.run([node, '-e', code, str(page)], check=True, capture_output=True, text=True)
+    result = subprocess.run([node, '-e', code, str(page)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_dashboard_new_defaults():
+    import re
+    page = Path(__file__).resolve().parents[1] / 'src/splat_explorer/web/static/splatfix.html'
+    html = page.read_text()
+    for element, expected in [('mode', 'edited'), ('oracle-reference-mode', 'scene_memory'), ('oracle-preset', 'spiral_expanding'), ('oracle-source-reference', 'nearest')]:
+        select = re.search(r'<select id="'+element+r'"[^>]*>(.*?)</select>', html).group(1)
+        assert re.search(r'<option value="([^"]+)"', select).group(1) == expected
+    assert re.search(r'id="oracle-preset-scale"[^>]*value="0.25"', html)

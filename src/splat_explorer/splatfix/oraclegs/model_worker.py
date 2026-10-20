@@ -38,6 +38,7 @@ def main():
         vae = verified_vae()
         record_vae(request['output'], vae)
     elif args.action == 'seva':
+        fixed_source = request.pop('fixed_initial_source', None)
         memory = request.pop('scene_memory', None)
         endpoints = request.pop('ordered_pair_endpoints', None)
         geometry_guidance = request.pop('source_geometry_guidance', None)
@@ -65,6 +66,10 @@ def main():
                 demo=demo, data_path=request['data_path'])
         install_camera_audit(demo, request['data_path'],
                              Path(request['work_dir']).parent/'seva-camera-audit.json', request['task'])
+        if fixed_source:
+            from source_reference import install_fixed_source
+            install_fixed_source(evaluation, request['data_path'], fixed_source,
+                Path(request['work_dir']).parent/'seva-source-reference.json')
         if geometry_guidance:
             from seva_geometry import install_geometry_guidance
             install_geometry_guidance(evaluation, geometry_guidance,
