@@ -48,23 +48,30 @@ they are cached once and symlinked into WorldExplorer's source checkout.
 With the project's venv activated, the requested `python worldexplorer.py generate
 "…"` spelling works as well. An installed package also exposes `worldexplorer`.
 Optional flags: `--mode automatic|fast|manual`, `--translation-scaling 3.0`, and
-`--num-images-for-vggt 40`. The original prompt is stored verbatim and passed as a
+`--num-images-for-vggt 64`. The original prompt is stored verbatim and passed as a
 literal CLI argument. A bounded ASCII folder slug prevents shell/path parsing
 issues in upstream's internally assembled commands.
 
 The VGGT budget is for generated views **in addition to** the eight scaffold
-views, as defined by the authors. The integration accepts 32–100 so every one
-of the 32 trajectories can contribute. Sampling retains the authors' algorithm:
-divide the budget by the trajectory count, sort numeric frame names, then take
-every `frame_count // per_trajectory_budget` frame starting with the first.
+views, as defined by the authors. The pinned upstream CLI defaults to 40 and
+recommends increasing the budget according to available GPU memory; 64 is our
+integration minimum/default, not an author-prescribed value. We accept 64–100.
+Sampling retains the authors' algorithm: divide the budget by the trajectory
+count, sort numeric frame names, then take every
+`frame_count // per_trajectory_budget` frame starting with the first.
 Integer rounding makes this an approximate budget, not a strict image cap.
-The default 40 selects one generated frame per trajectory plus eight inputs.
-Before copying images, the adapter checks the selected camera-center spread.
-If the stride samples have effectively coincident centers, it replaces each
-trajectory's first sample with its farthest translated view from the scaffold
-origin, retaining the same image count. This avoids fitting VGGT's scale to
-only the panorama origin. Rotation-only trajectories with no usable baseline
-fail before VGGT runs; non-finite camera centers are also rejected.
+
+For 32 trajectories, budgets below 64 select only the starting frames, which
+share the panorama center in the failed run. A budget of 64 samples translated
+frames as well: that run selects 68 generated views plus eight scaffold views
+(76 total). A budget of 100 selects 124 generated views plus eight scaffold
+views (132 total), increasing GPU memory demand. Higher is optional, not a
+verified requirement for this fix.
+
+Before copying images, the adapter rejects selections with effectively
+coincident camera centers or non-finite centers. It does not substitute frames
+or change the authors' stride policy. This guards against collapsing the VGGT
+point cloud during camera-center scale alignment.
 
 The runtime adapter fixes two upstream path assumptions: input images are
 identified by their immediate `input` directory, and trajectories are grouped
@@ -149,9 +156,10 @@ alignment, Gaussian training and export code. It extracts the suffix of the
 pinned upstream `TrajectoryTransformer.run` at the checked
 `select_images_for_vggt` boundary; an unknown boundary fails explicitly. It does
 not regenerate panorama/trajectory images. Training starts fresh from the
-VGGT initialization; this is not optimizer-checkpoint continuation. Changing
-the generation parameters or resuming partially generated trajectories is not
-supported by this recovery path.
+VGGT initialization; this is not optimizer-checkpoint continuation. Recovery and expansion raise legacy VGGT budgets below 64 to 64 in the new
+request, preserving higher budgets and the archived source request. Other
+generation parameters remain unchanged. Resuming partially generated
+trajectories is not supported by this recovery path.
 
 After reconnecting VPN/SSH and restarting the local dashboard, open the WorldExplorer page. Finished runs synchronize automatically; **Refresh
 remote** remains available. CLI equivalents:

@@ -86,17 +86,9 @@ def select_images_for_vggt(scene_root, max_images=100):
     full_spread = spread(list(centers))
     minimum_spread = max(1e-8, full_spread * 1e-6)
     if spread(selected) <= minimum_spread:
-        origin = centers[inputs[0] if inputs else selected[0]]
-        for paths in trajectories.values():
-            first = min(paths, key=lambda p: int(p.stem))
-            farthest = max(paths, key=lambda p: math.dist(centers[p], origin))
-            if farthest not in selected:
-                selected[selected.index(first)] = farthest
-        if spread(selected) <= minimum_spread:
-            raise ValueError('VGGT alignment requires translated camera views; '
-                             'selected trajectories have no usable camera baseline')
-        print('VGGT camera centers coincide: replaced trajectory start frames '
-              'with translated views for scale alignment')
+        raise ValueError('VGGT alignment requires translated camera views; '
+                         'selected trajectories have no usable camera baseline. '
+                         'Increase the VGGT image budget to include translated frames.')
 
     # Keep upstream's filename contract for find_pose_in_transforms.
     names = [f'{p.parent.parent.name}_{p.parent.name}_{p.name}' for p in selected]

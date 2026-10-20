@@ -12,7 +12,7 @@ import shutil
 import time
 import sys
 import uuid
-from . import DEFAULT_PROMPT, REVISION
+from . import DEFAULT_PROMPT, REVISION, MIN_VGGT_IMAGES
 from .worker import atomic
 from ... import repair_lrz as lrz
 
@@ -48,9 +48,9 @@ def validate(body):
     scale = float(body.get('translation_scaling', 3.0))
     if not math.isfinite(scale) or not 0 < scale <= 20:
         raise ValueError('Translation scaling must be > 0 and <= 20')
-    images = int(body.get('num_images_for_vggt', 40))
-    if not 32 <= images <= 100:
-        raise ValueError('VGGT image budget must be 32–100 to sample all 32 trajectories')
+    images = int(body.get('num_images_for_vggt', MIN_VGGT_IMAGES))
+    if not MIN_VGGT_IMAGES <= images <= 100:
+        raise ValueError('VGGT image budget must be 64–100 to sample beyond the start of all 32 trajectories')
     return dict(operation=operation, prompt=prompt.strip(), mode=mode,
                 translation_scaling=scale, num_images_for_vggt=images, revision=REVISION)
 
@@ -342,7 +342,9 @@ print(json.dumps(result))
         if active:
             return active[0]
         payload = verified_payload(path/'results', run_id, job['archive_sha256'])
-        return self.create({**job['request'], 'operation':'resume'}, recovery=payload)
+        request = {**job['request'], 'operation':'resume',
+                   'num_images_for_vggt':max(MIN_VGGT_IMAGES, job['request']['num_images_for_vggt'])}
+        return self.create(request, recovery=payload)
 
     @serialized
     def expand(self, run_id, selections):
@@ -364,7 +366,8 @@ print(json.dumps(result))
             if hashlib.sha256(source.read_bytes()).hexdigest() != records[relative]['sha256']:
                 raise ValueError('Selected image changed since generation; download again')
             scaffold[index] = source
-        return self.create({**job['request'], 'operation':'expand'}, scaffold=scaffold,
+        return self.create({**job['request'], 'operation':'expand',
+                            'num_images_for_vggt':max(MIN_VGGT_IMAGES, job['request']['num_images_for_vggt'])}, scaffold=scaffold,
                            selection={'source_run':run_id, 'images':selected,
                                       'sha256':{k:records[v]['sha256'] for k,v in selected.items()}})
 

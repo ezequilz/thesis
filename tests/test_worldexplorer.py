@@ -219,14 +219,19 @@ def test_manual_scaffold_preserves_four_originals_and_groups(tmp_path):
     assert '--translation-scaling' not in args
 
 
-def test_manual_selection_submits_eight_verified_images(tmp_path,monkeypatch):
+@pytest.mark.parametrize('budget', [40, 64, 100])
+def test_manual_selection_submits_eight_verified_images(tmp_path,monkeypatch,budget):
     api,root,body=manual_job(tmp_path)
+    body['request']['num_images_for_vggt'] = budget
+    worker.atomic(root/'job.json', body)
     chosen={k:v[1] for k,v in body['candidates']['groups'].items()}
     received={}
     def create(request,**kwargs): received.update(request=request,**kwargs); return {'id':'new-run'}
     monkeypatch.setattr(api,'create',create)
     assert api.expand(ID,chosen)['id']=='new-run'
     assert received['request']['operation']=='expand'
+    assert received['request']['num_images_for_vggt'] == max(64, budget)
+    assert json.loads((root/'job.json').read_text())['request']['num_images_for_vggt'] == budget
     assert len(received['scaffold'])==8
     assert received['selection']['source_run']==ID
     assert received['scaffold']['000'].read_bytes()==b'original-0'

@@ -103,10 +103,12 @@ def test_unknown_upstream_boundary_is_rejected():
         recovery.continuation_method(test_unknown_upstream_boundary_is_rejected, {})
 
 
-def test_service_resume_requires_verification_and_preserves_settings(tmp_path, monkeypatch):
+@pytest.mark.parametrize('budget', [40, 64, 100])
+def test_service_resume_requires_verification_and_preserves_settings(tmp_path, monkeypatch, budget):
     root, digest = archive(tmp_path)
     api = service.WorldExplorerService(tmp_path)
     job = dict(id=ID, status='failed', request=service.validate({'operation': 'expand'}))
+    job['request']['num_images_for_vggt'] = budget
     worker.atomic(root.parent/'job.json', job)
     with pytest.raises(ValueError, match='archive'):
         api.resume(ID)
@@ -118,8 +120,10 @@ def test_service_resume_requires_verification_and_preserves_settings(tmp_path, m
     request, kwargs = calls[0]
     assert request['operation'] == 'resume'
     assert request['translation_scaling'] == job['request']['translation_scaling']
+    assert request['num_images_for_vggt'] == max(64, budget)
     assert kwargs['recovery']['source_run'] == ID
     assert json.loads((root.parent/'job.json').read_text())['status'] == 'failed'
+    assert json.loads((root.parent/'job.json').read_text())['request']['num_images_for_vggt'] == budget
 
 
 def test_resume_deduplicates_uncertain_submission(tmp_path, monkeypatch):

@@ -2,7 +2,7 @@
 import argparse
 import json
 from pathlib import Path
-from . import DEFAULT_PROMPT
+from . import DEFAULT_PROMPT, MIN_VGGT_IMAGES
 from .service import WorldExplorerService
 
 
@@ -16,7 +16,7 @@ def main():
     generate.add_argument('prompt', nargs='?', default=DEFAULT_PROMPT)
     generate.add_argument('--mode', choices=('automatic','fast','manual'), default='automatic')
     generate.add_argument('--translation-scaling',type=float,default=3.0)
-    generate.add_argument('--num-images-for-vggt',type=int,default=40)
+    generate.add_argument('--num-images-for-vggt',type=int,default=MIN_VGGT_IMAGES)
     for name in ('status','download','resume'):
         sub.add_parser(name).add_argument('id')
     expand = sub.add_parser('expand')

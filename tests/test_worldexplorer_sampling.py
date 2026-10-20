@@ -88,16 +88,20 @@ def set_panorama_centers(root, *, translated=True):
     path.write_text(json.dumps(data))
 
 
-def test_coincident_starts_use_translated_views_without_increasing_budget(tmp_path):
+def test_coincident_starts_rejected_and_higher_budget_keeps_authors_stride(tmp_path):
     root = scene(tmp_path, [79]*24+[78]*8)
     set_panorama_centers(root)
-    runner.select_images_for_vggt(root, 40)
+    with pytest.raises(ValueError, match='no usable camera baseline'):
+        runner.select_images_for_vggt(root, 40)
+    assert not (root/'selected_for_vggt').exists()
+    runner.select_images_for_vggt(root, 64)
     selected = list((root/'selected_for_vggt').iterdir())
-    assert len(selected) == 40
+    assert len(selected) == 96
     assert sum('_input_' in p.name for p in selected) == 8
     for index in range(32):
-        last = 78 if index < 24 else 77
-        assert (root/'selected_for_vggt'/f'{index:03}_in_samples-rgb_{last:03}.png').exists()
+        expected = (0, 39, 78) if index < 24 else (0, 39)
+        assert {p.name for p in selected if p.name.startswith(f'{index:03}_in_samples')} == {
+            f'{index:03}_in_samples-rgb_{n:03}.png' for n in expected}
 
 
 def test_rotation_only_trajectories_fail_before_replacing_selection(tmp_path):
@@ -110,7 +114,7 @@ def test_rotation_only_trajectories_fail_before_replacing_selection(tmp_path):
     assert {p.name: p.read_bytes() for p in (root/'selected_for_vggt').iterdir()} == before
 
 
-@pytest.mark.parametrize('budget', [8, 31])
+@pytest.mark.parametrize('budget', [8, 31, 32, 40, 63])
 def test_reject_insufficient_budget_before_gpu_submission(budget):
     with pytest.raises(ValueError, match='all 32 trajectories'):
         service.validate({'num_images_for_vggt': budget})
