@@ -237,3 +237,42 @@ def verify_sfm_cameras(inputs, output):
             raise ValueError(f'SfM reprojection drift for {name}: {error} pixels')
         errors.append({'image':name,'max_pixel_error':error})
     (output/'camera-alignment.json').write_text(json.dumps({'passed':True,'references':errors},indent=2))
+
+
+def append_worldexplorer(inputs, output, n):
+    """Add original posed RGBs only after generation and attention are complete."""
+    from ..worldexplorer.source import load_staged
+    inputs, output = Path(inputs), Path(output)
+    manifest = json.loads((inputs / 'inputs.json').read_text())
+    if not manifest.get('worldexplorer_source'):
+        return n, []
+    data = load_staged(inputs / manifest['worldexplorer_source'])
+    dataset = output / 'dataset'
+    sparse = dataset / 'sparse' / str(n)
+    references = json.loads((dataset / 'reference_names.json').read_text())
+    camera_ids = [int(line.split()[0]) for line in (sparse / 'cameras.txt').read_text().splitlines()
+                  if line.strip() and not line.startswith('#')]
+    lines = [line for line in (sparse / 'images.txt').read_text().splitlines() if not line.startswith('#')]
+    image_ids = [int(line.split()[0]) for line in lines[::2] if line.strip()]
+    names = []
+    with (sparse / 'cameras.txt').open('a') as cameras, (sparse / 'images.txt').open('a') as images:
+        for index, frame in enumerate(data['frames']):
+            path = Path(frame['file_path'])
+            name = path.name
+            if name in references or (dataset / 'images' / name).exists():
+                raise ValueError('WorldExplorer source image name collides with reconstruction inputs')
+            shutil.copyfile(path, dataset / 'images' / name)
+            camera, image = colmap_lines(frame, max(image_ids) + index + 1, max(camera_ids) + index + 1, name)
+            cameras.write(camera + '\n')
+            images.write(image + '\n')
+            names.append(name)
+    total = n + len(names)
+    # Upstream uses num_train_views both to select folders and to cap GT views.
+    sparse.rename(dataset / 'sparse' / str(total))
+    for suffix in ('', '_attention_maps'):
+        (dataset / f'synthetic_{n}{suffix}').rename(dataset / f'synthetic_{total}{suffix}')
+    (dataset / 'reference_names.json').write_text(json.dumps(references + names))
+    (output / 'worldexplorer-supervision.json').write_text(json.dumps({
+        'run_id': data['run_id'], 'original_count': len(names), 'reference_names': names,
+        'camera_convention': data['camera_convention'], 'normalization': data['normalization']}, indent=2))
+    return total, names

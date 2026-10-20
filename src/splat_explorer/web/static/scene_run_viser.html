@@ -91,7 +91,7 @@ function render() {
   const other = showing === "original" ? "repaired" : "original";
   const otherReady = Boolean(state?.[other]);
   $("view-nav").hidden = !state?.view_count;
-  $("view-index").textContent = `View ${(state?.view_index ?? 0)+1} / ${state?.view_count || 0}`;
+  $("view-index").textContent = `View ${(state?.view_index ?? 0)+1} / ${state?.view_count || 0}${state?.view_label ? ' · '+state.view_label : ''}`;
   $("view-index").title = state?.view_label || "";
   $("view-prev").disabled = $("view-next").disabled = pending || status !== "ready" || state?.view_count < 2;
   highlight.disabled = pending || status !== "ready" || !state?.highlight_available;

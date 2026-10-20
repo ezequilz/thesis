@@ -89,17 +89,21 @@ def set_panorama_centers(root, *, translated=True):
 
 
 def test_coincident_starts_rejected_and_higher_budget_keeps_authors_stride(tmp_path):
-    root = scene(tmp_path, [79]*24+[78]*8)
+    # Actual frame counts from the failed run (trajectories have unequal lengths).
+    lengths = [134]*14 + [44]*9 + [30]*3 + [8, 23, 45, 19, 26, 37]
+    root = scene(tmp_path, lengths)
     set_panorama_centers(root)
     with pytest.raises(ValueError, match='no usable camera baseline'):
         runner.select_images_for_vggt(root, 40)
     assert not (root/'selected_for_vggt').exists()
     runner.select_images_for_vggt(root, 64)
     selected = list((root/'selected_for_vggt').iterdir())
-    assert len(selected) == 96
+    assert len(selected) == 76
     assert sum('_input_' in p.name for p in selected) == 8
     for index in range(32):
-        expected = (0, 39, 78) if index < 24 else (0, 39)
+        expected = {134:(0, 67), 44:(0, 22), 30:(0, 15), 8:(0, 4),
+                    23:(0, 11, 22), 45:(0, 22, 44), 19:(0, 9, 18),
+                    26:(0, 13), 37:(0, 18, 36)}[lengths[index]]
         assert {p.name for p in selected if p.name.startswith(f'{index:03}_in_samples')} == {
             f'{index:03}_in_samples-rgb_{n:03}.png' for n in expected}
 

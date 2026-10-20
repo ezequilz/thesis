@@ -671,6 +671,25 @@ def unique_supervision(trajectory, references):
     return result, mapping
 
 
+def append_worldexplorer_supervision(request, transforms, supervision):
+    if request.get('worldexplorer_source'):
+        # This worker runs with a deliberately isolated PYTHONPATH.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'worldexplorer_bundle', Path(__file__).parents[1] / 'worldexplorer/bundle.py')
+        bundle = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bundle)
+        load_staged = bundle.load_staged
+        originals = load_staged(request['worldexplorer_source'])
+        for frame in originals['frames']:
+            index = len(transforms['frames'])
+            transforms['frames'].append(frame)
+            supervision['selected_indices'].append(index)
+            supervision['groups'].append({'reference': frame['file_path'], 'source_index': None})
+        supervision['worldexplorer_original_count'] = len(originals['frames'])
+        supervision['distillation_frame_count'] = len(transforms['frames'])
+
+
 def distill(root, request, trajectory):
     if request.get('source_ply'):
         import hashlib
@@ -694,6 +713,7 @@ def distill(root, request, trajectory):
     render_transforms_path = root / 'render_transforms_opengl.json'
     render_transforms_path.write_text(json.dumps(render_transforms, indent=2))
     transforms, supervision = unique_supervision(trajectory, request['references'])
+    append_worldexplorer_supervision(request, transforms, supervision)
     (root / 'supervision.json').write_text(json.dumps(supervision, indent=2))
     cameras, images = [], []
     selected = supervision['selected_indices']
@@ -712,7 +732,7 @@ def distill(root, request, trajectory):
         name = f'anchor_{index:05d}.png'
         (source / 'images' / name).symlink_to(Path(reference).resolve())
         transforms['frames'][frame_index]['file_path'] = f'images/{name}'
-        cameras.append(official.opencv_camera_from_mapping(index + 1, transforms))
+        cameras.append(official.opencv_camera_from_mapping(index + 1, {**transforms, **transforms['frames'][frame_index]}))
         qvec, tvec = official.colmap_pose_from_transforms_frame(transforms['frames'][frame_index], np.eye(4))
         images.append((index + 1, qvec, tvec, index + 1, name))
     official.write_colmap_cameras(sparse / 'cameras.bin', cameras)

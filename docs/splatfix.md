@@ -882,3 +882,21 @@ The authors recommend orbit/spiral/lemniscate to show scene depth in their
 [usage guide](https://github.com/Stability-AI/stable-virtual-camera/blob/fe19948e9b7bea261ab2db780a59656131404a83/docs/GR_USAGE.md).
 We preserve saved calibration instead of the demo's assumed 54° field of view;
 this integration is not a claim to reproduce a particular highlight video.
+
+### WorldExplorer source scenes
+
+Exported WorldExplorer runs with saved camera metadata appear automatically in
+scene selection as `WorldExplorer · <run id> · <export timestamp>`. The base PLY
+and every image in that run's `img2trajvid/transforms.json` stay linked through
+the checkpoint's source scene path. Stage 4 stages a checksummed copy of these
+original RGBs and maps their OpenGL poses through the exact export's Nerfstudio
+`dataparser_transforms.json` transform and scale.
+
+ArtiFixer and OracleGS add these images as original RGB supervision alongside
+new generated views and the existing GPT-repaired references, for both source
+splat and fresh initialization. Original images retain their resolution and
+intrinsics. They do not enter GPT editing, diffusion conditioning, or the
+OracleGS synthetic attention pass. OracleGS uses RGB supervision for these
+additional originals; depth supervision remains attached to the selected
+reference views. Missing images or normalization metadata stop staging instead
+of silently omitting source views. G4Splat does not use this integration.

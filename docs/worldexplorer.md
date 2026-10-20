@@ -203,6 +203,18 @@ The dashboard provides local PLY download links and an artifact browser after
 synchronization; no separate transfer button is required. CLI `download` can
 explicitly trigger the same verified synchronization and cleanup. Manual scaffold
 selection continues from the verified local candidates after remote cleanup.
+WorldExplorer generation runs also appear on `/splatfix/results`. Their shared
+run-details page groups saved images by folder and uses the existing full-screen
+gallery (arrow keys and wheel navigation), video playback, searchable logs and
+TensorBoard charts. **Review splat** opens the normal results Viser renderer.
+Review starts at scaffold camera `000`; the top-right arrows step through the
+scaffold cameras, then trajectory frames in numeric order. Saved Nerfstudio
+dataparser rotation, translation and scale map the cameras into the native PLY
+coordinates. If that matching metadata is unavailable, the viewer uses its
+usual overview instead of guessing camera coordinates.
+These pages read local files only; videos remain on the original generation run
+when a recovery copied only images. Hide/restore is supported; deletion and moving
+WorldExplorer runs to history are not exposed by this results integration.
 Use `--output PATH` before the subcommand if your dashboard uses an output directory
 other than the default `outputs` (pass its `worldexplorer` child).
 

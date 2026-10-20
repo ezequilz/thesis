@@ -321,15 +321,17 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         if not source.is_file():
             raise ValueError(f'Missing attention map for {image.name}')
         shutil.copyfile(source,attention/image.name)
-    args = training_args(dataset,output/'model',n,runtime)
-    geometry_request = {'source_geometry_report':str(output/'source-geometry-runtime.json'),
+    from .adapter import append_worldexplorer
+    training_n, original_names = append_worldexplorer(inputs, output, n)
+    args = training_args(dataset,output/'model',training_n,runtime)
+    geometry_request = {'rgb_only_references': original_names, 'source_geometry_report':str(output/'source-geometry-runtime.json'),
                         'source_depth':str(inputs/'source-depth') if manifest.get('oracle_depth_source') == 'source_splat' else None,
                         'source_initialization':str(inputs/'source-initialization.ply') if manifest.get('source_initialization') else None}
     if manifest.get('oracle_depth_source') == 'source_splat':
         args[args.index('--depths')+1] = ''
     if manifest.get('source_initialization'):
         args += ['--sh_degree', str(manifest['source_initialization']['sh_degree'])]
-    if manifest['oracle_adapter'] in ('trajectory', 'per_view_preset'):
+    if original_names or manifest['oracle_adapter'] in ('trajectory', 'per_view_preset'):
         model('reconstruction','train','repo',{'references':str(dataset/'reference_names.json'),'argv':args, **geometry_request},training=True)
     else:
         model('reconstruction','script','repo',{'script':'train.py','argv':args, **geometry_request},training=True)

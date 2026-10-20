@@ -180,5 +180,8 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
         manifest['trajectory'].update(preset_metadata(options, order, assigned_presets, preset_seed))
     from .source_geometry import stage_source_geometry
     stage_source_geometry(checkpoint, root, manifest, frames[:n], should_stop=should_stop)
+    from ..worldexplorer.source import stage_source
+    if stage_source(checkpoint.manifest['scene_path'], root / 'worldexplorer-source'):
+        manifest['worldexplorer_source'] = 'worldexplorer-source'
     atomic_json(root/'inputs.json',manifest)
     return manifest

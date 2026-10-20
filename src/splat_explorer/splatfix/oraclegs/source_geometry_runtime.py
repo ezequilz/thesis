@@ -41,7 +41,7 @@ def install_source_geometry(request):
         def load(args, index, info, scale, synthetic_scene):
             # No predicted-depth decoding, quantization, or scale heuristic.
             camera = original(args,index,info._replace(depth_path='',depth_params=None),scale,synthetic_scene)
-            if not info.is_synthetic:
+            if not info.is_synthetic and info.image_name not in request.get('rgb_only_references', []):
                 inverse, valid = load_depth(directory/(Path(info.image_name).stem+'.npz'),
                                             (camera.image_height,camera.image_width))
                 camera.invdepthmap = torch.as_tensor(inverse[None],device=camera.original_image.device)

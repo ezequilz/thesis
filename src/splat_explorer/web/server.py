@@ -765,7 +765,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_video_file(self, target: Path) -> None:
-        """Stream saved MP4 artifacts, including the byte ranges used for seeking."""
+        """Stream saved videos, including the byte ranges used for seeking."""
         with target.open("rb") as source:
             size = target.stat().st_size
             start, end = 0, size - 1
@@ -789,7 +789,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     return
             self.send_response(206 if partial else 200)
-            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Type", mimetypes.guess_type(target.name)[0] or "video/mp4")
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Length", str(end - start + 1))
             self.send_header("Cache-Control", "no-store")
@@ -1288,6 +1288,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif self.command == "GET" and endpoint == "/file":
                 query = parse_qs(urlsplit(self.path).query)
                 target = service.file(query.get("id", [""])[0], query.get("path", [""])[0])
+                if target.suffix.lower() in ('.mp4', '.webm', '.mov'):
+                    self._send_video_file(target)
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", mimetypes.guess_type(target.name)[0] or "application/octet-stream")
                 self.send_header("Content-Length", str(target.stat().st_size))

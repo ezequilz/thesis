@@ -141,6 +141,11 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 if source.exists():
                     sync(str(source), endpoint + ':' + remote_dir + '/source/')
                 remote_scene = container_dir + '/source/' + source.name
+            from ..worldexplorer.source import stage_source
+            originals = stage_source(source, root / 'worldexplorer-source')
+            if originals:
+                sync(originals + '/', endpoint + ':' + remote_dir + '/worldexplorer-source/')
+                runtime['worldexplorer_source'] = container_dir + '/worldexplorer-source'
             runtime['scene_path'] = remote_scene
             request = {'checkpoint': container_dir + '/checkpoint', 'output': container_dir + '/results',
                        'runtime': runtime, **{k: options[k] for k in ('mode', 'frames', 'span_fraction')}}

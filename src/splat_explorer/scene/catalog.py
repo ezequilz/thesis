@@ -210,6 +210,10 @@ def list_scenes(cfg) -> list[SceneSpec]:
     for extra in discover_scenes(scan_root, default_up="+y", default_lod=default_lod):
         add(extra)
 
+    from ..splatfix.worldexplorer.source import discover
+    for generated in discover(cfg.get("output", {}).get("dir", "outputs")):
+        add(generated)
+
     return entries
 
 

@@ -83,7 +83,8 @@ class ResultCatalog:
     def set_hidden(self, run_id, hidden):
         if not isinstance(run_id, str) or type(hidden) is not bool:
             raise ValueError('run_id and a boolean hidden value are required')
-        if not any(run.run_id == run_id for run in self.studio.store.list_runs()):
+        if (not any(run.run_id == run_id for run in self.studio.store.list_runs())
+                and not any(row['run_id'] == run_id for row in self.entries())):
             raise ValueError('Run not found')
         with self._visibility_lock:
             records = self.visibility_records()
@@ -175,6 +176,8 @@ class ResultCatalog:
             if original.is_file() or repaired.is_file():
                 rows.append(self._row(record['run_id'], record, original if original.is_file() else None,
                     repaired if repaired.is_file() else None, {}, {}, None, None))
+        from .worldexplorer_details import entries as worldexplorer_entries
+        rows.extend(worldexplorer_entries(self))
         visibility = self.visibility_records()
         for row in rows:
             row['hidden'] = visibility.get(row['run_id'], {}).get('hidden', False)
@@ -289,6 +292,9 @@ class ResultCatalog:
         row = self.detail(key)
         if row is None:
             return None
+        if row['kind'] == 'WorldExplorer':
+            from .worldexplorer_details import run_detail
+            return run_detail(self, row)
         manifest = row.pop('_manifest')
         row.pop('_paths')
         gallery = {'frames': [], 'reference_count': None, 'verified_inputs': False,
@@ -490,6 +496,9 @@ class ResultCatalog:
         row = self.detail(key)
         if not row:
             return []
+        if row['kind'] == 'WorldExplorer':
+            from .worldexplorer_details import review_views
+            return review_views(self, row)
         if row['_manifest']:
             derivative = row['_manifest'].parent / 'checkpoint'
             if (derivative / 'checkpoint.json').is_file():

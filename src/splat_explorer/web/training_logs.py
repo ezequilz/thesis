@@ -11,10 +11,10 @@ from ..splatfix.jobs import read_json
 _lock = threading.Lock()
 
 
-def export_training_logs(root):
+def export_training_logs(root, *, event_subdir='artifixer3d/runs'):
     """Decode only event files belonging to this result, without touching originals."""
     root = Path(root).resolve()
-    files = sorted(p for p in (root / 'artifixer3d' / 'runs').rglob('events.out.tfevents.*')
+    files = sorted(p for p in (root / event_subdir).rglob('events.out.tfevents.*')
                    if p.is_file() and p.resolve().is_relative_to(root))
     if not files:
         return [], None, None
