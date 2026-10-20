@@ -175,7 +175,7 @@ def build_details(studio, manifest, result):
     for p in synthetic:
         p['attention_url'] = link(_safe(root, f'dataset/synthetic_{n}_attention_maps/' + p['name']) or
                                   _safe(root, 'attention-raw/synth_' + p['name']))
-        p['role'] = 'Synthetic at saved pose' if p['name'].startswith('ref_') else 'Synthetic at intermediate pose'
+        p['role'] = 'WorldExplorer synthetic' if p['name'].startswith('worldexplorer_') else 'Synthetic at saved pose' if p['name'].startswith('ref_') else 'Synthetic at intermediate pose'
     # Both the released extractor and our batching adapter call the authors'
     # save_attention_maps; expose its RGB/plasma grids without re-rendering them.
     attention_plan = data('attention-chunks.json')

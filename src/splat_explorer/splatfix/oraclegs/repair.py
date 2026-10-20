@@ -19,7 +19,7 @@ DEFAULT_RUNTIME = {'repo':'/workspace/third_party/OracleGS',
     'depth_weights':'/workspace/models/oraclegs/depth_anything_v2_vitl.pth',
     'oracle_reference_mode':'all', 'oracle_split_mode':'single-split', 'seva_fit':'crop', 'auto_setup':True, 'seva_resolution':'576p', 'oracle_adapter':'trajectory', 'oracle_target_frames':80,
     'seva_geometry_guidance':'off', 'oracle_depth_source':'predicted', 'oracle_initialization':'sfm',
-    'oracle_attention_batching':'within_trajectory', 'oracle_path_order':None, 'iterations':22000, 'cap_max':1800000, 'seed':23}
+    'oracle_attention_batching':'within_trajectory', 'oracle_worldexplorer_attention':'weighted', 'oracle_path_order':None, 'iterations':22000, 'cap_max':1800000, 'seed':23}
 
 
 def validate_runtime(runtime):
@@ -222,6 +222,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         'attention_layers':[0,22], 'attention_weights':[0.25,0.75],
         'attention_policy':'all-references-nearest-segment-endpoint-v1',
         'attention_batching':runtime['oracle_attention_batching'],
+        'worldexplorer_attention':manifest.get('oracle_worldexplorer_attention', 'weighted'),
         'schedule':'released train.py (differs from Beta schedule in paper)',
         'held_out_evaluation':'Unavailable: generated target images are not held-out GT',
         'graceful_stop':'In-memory stop-only hook after completed optimizer/MCMC iteration; atomic PLY export; 240s timeout',
@@ -310,21 +311,25 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         model('seva_generation','seva','seva_repo',seva_request(inputs,output,manifest,runtime))
     assemble(inputs,output)
     attention = dataset/f'synthetic_{n}_attention_maps'
-    from .attention import plan_chunks
-    chunks = plan_chunks(manifest, mode=runtime['oracle_attention_batching'], seed=runtime['seed'])
-    atomic_json(output/'attention-chunks.json', {'policy':recipe['attention_policy'], 'batching':runtime['oracle_attention_batching'], 'seed':runtime['seed'], 'chunks':chunks})
+    from .adapter import append_worldexplorer
+    training_n, original_names = append_worldexplorer(inputs, output, n)
+    weighted_world = manifest.get('oracle_worldexplorer_attention', 'weighted') == 'weighted'
+    from .attention import plan_chunks, worldexplorer_targets
+    extra = worldexplorer_targets(inputs, output, manifest) if weighted_world and original_names else []
+    chunks = plan_chunks(manifest, extra_targets=extra, mode=runtime['oracle_attention_batching'], seed=runtime['seed'])
+    atomic_json(output/'attention-chunks.json', {'policy':recipe['attention_policy'], 'worldexplorer_attention':recipe['worldexplorer_attention'], 'worldexplorer_source_policy':'nearest-camera-center-direction-tiebreak', 'batching':runtime['oracle_attention_batching'], 'seed':runtime['seed'], 'chunks':chunks})
     model('vggt_attention','attention','vggt_repo',{'image_dir':str(output/'combined'),
           'output_dir':str(output/'attention-raw'), 'chunks':chunks, 'seed':runtime['seed']})
     attention.mkdir()
     for image in (dataset/f'synthetic_{n}').glob('*.png'):
+        if not weighted_world and image.name in original_names:
+            continue
         source = output/'attention-raw'/('synth_'+image.name)
         if not source.is_file():
             raise ValueError(f'Missing attention map for {image.name}')
         shutil.copyfile(source,attention/image.name)
-    from .adapter import append_worldexplorer
-    training_n, original_names = append_worldexplorer(inputs, output, n)
     args = training_args(dataset,output/'model',training_n,runtime)
-    geometry_request = {'unweighted_synthetic': original_names, 'source_geometry_report':str(output/'source-geometry-runtime.json'),
+    geometry_request = {'unweighted_synthetic': [] if weighted_world else original_names, 'source_geometry_report':str(output/'source-geometry-runtime.json'),
                         'source_depth':str(inputs/'source-depth') if manifest.get('oracle_depth_source') == 'source_splat' else None,
                         'source_initialization':str(inputs/'source-initialization.ply') if manifest.get('source_initialization') else None}
     if manifest.get('oracle_depth_source') == 'source_splat':

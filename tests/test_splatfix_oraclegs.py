@@ -265,11 +265,17 @@ def test_real_upstream_colmap_loader_split_and_attention(tmp_path, worldexplorer
 @pytest.mark.parametrize('adapter',['trajectory','saved_poses','per_view_preset'])
 @pytest.mark.parametrize('stop_training',[False,True])
 @pytest.mark.parametrize('count',[2,6])
-def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training,count,depth="predicted",initialization="sfm"):
+def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training,count,depth="predicted",initialization="sfm",world_attention=None):
     cp = checkpoint(tmp_path,count)
     inputs,output = tmp_path/'inputs',tmp_path/'run'
     runtime = {**repair.DEFAULT_RUNTIME, 'oracle_adapter':adapter, 'oracle_depth_source':depth, 'oracle_initialization':initialization}
     manifest = export_inputs(cp,inputs,runtime={**runtime,'oracle_target_frames':5})
+    if world_attention:
+        from test_worldexplorer_source import fixture
+        from splat_explorer.splatfix.worldexplorer.source import stage_source
+        stage_source(fixture(tmp_path), inputs/'worldexplorer-source')
+        manifest.update(worldexplorer_source='worldexplorer-source', oracle_worldexplorer_attention=world_attention)
+        (inputs/'inputs.json').write_text(json.dumps(manifest))
     frames = json.loads((inputs/'scene/transforms.json').read_text())['frames']
     phases = []
     requested = [False]
@@ -327,11 +333,12 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training
                 Image.new('L',(37,37),128).save(output/'attention-raw'/p.name)
         elif phase == 'reconstruction':
             body = json.loads(Path(argv[-1]).read_text())
-            assert argv[-3] == ('train' if adapter in ('trajectory','per_view_preset') else 'script')
+            assert argv[-3] == ('train' if world_attention or adapter in ('trajectory','per_view_preset') else 'script')
             assert '--synth_attention_dir' in body['argv']
             assert body['argv'][body['argv'].index('--lambda_lpips')+1]=='0.3'
             assert '--gt_synth_schedule' in body['argv'] and '--depths' in body['argv']
-            assert len(list((dataset/f'synthetic_{count}_attention_maps').glob('*.png'))) == len(frames)-count
+            assert len(list((dataset/f'synthetic_{count}_attention_maps').glob('*.png'))) == len(frames)-count+(2 if world_attention == 'weighted' else 0)
+            assert len(body['unweighted_synthetic']) == (2 if world_attention == 'unweighted' else 0)
             assert bool(body['source_depth']) == (depth == 'source_splat')
             assert bool(body['source_initialization']) == (initialization == 'source_splat')
             assert body['argv'][body['argv'].index('--depths')+1] == ('' if depth == 'source_splat' else 'depths')
@@ -631,3 +638,10 @@ def test_pair_interpolation_cannot_be_bent_by_other_reference_cameras():
     for a,b in zip(first,changed):
         np.testing.assert_array_equal(a[-1],b[-1])
         np.testing.assert_allclose(a[-1][:3,3], [4*a[2],0,0], atol=1e-12)
+
+
+@pytest.mark.parametrize('world_attention', ['weighted', 'unweighted'])
+@pytest.mark.parametrize('adapter', ['trajectory', 'saved_poses'])
+def test_worldexplorer_attention_pipeline(tmp_path, monkeypatch, world_attention, adapter):
+    test_full_pipeline_stage_contract(tmp_path, monkeypatch, adapter, False, 2,
+                                      world_attention=world_attention)

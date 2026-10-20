@@ -263,19 +263,21 @@ def append_worldexplorer(inputs, output, n):
     with (sparse / 'cameras.txt').open('a') as cameras, (sparse / 'images.txt').open('a') as images:
         for index, frame in enumerate(data['frames']):
             path = Path(frame['file_path'])
-            name = path.name
+            name = path.stem + '.png'
             if name in references or (dataset / 'images' / name).exists() or (dataset / f'synthetic_{n}' / name).exists():
                 raise ValueError('WorldExplorer source image name collides with reconstruction inputs')
-            shutil.copyfile(path, dataset / 'images' / name)
+            with Image.open(path) as rgb:
+                rgb.convert('RGB').save(dataset / 'images' / name)
             # The upstream reader needs both the dataset placeholder and a
             # synthetic RGB; the reference filter drops the placeholder camera.
-            shutil.copyfile(path, dataset / f'synthetic_{n}' / name)
+            shutil.copyfile(dataset / 'images' / name, dataset / f'synthetic_{n}' / name)
             camera, image = colmap_lines(frame, max(image_ids) + index + 1, max(camera_ids) + index + 1, name)
             cameras.write(camera + '\n')
             images.write(image + '\n')
             names.append(name)
     (output / 'worldexplorer-supervision.json').write_text(json.dumps({
         'run_id': data['run_id'], 'original_count': len(names), 'synthetic_names': names,
-        'sampling_pool': 'synthetic', 'attention_policy': 'unweighted-no-vggt-maps',
+        'sampling_pool': 'synthetic',
+        'attention_policy': manifest.get('oracle_worldexplorer_attention', 'weighted'),
         'camera_convention': data['camera_convention'], 'normalization': data['normalization']}, indent=2))
     return n, names

@@ -46,6 +46,12 @@ Promise.resolve(vm.runInContext(`(async()=>{
   $('benchmark-runs').valid=true;
 
   $('reconstruction-method').value='oraclegs';
+  $('oracle-worldexplorer-attention').value='weighted';
+  $('oracle-attention-batching').value='global';
+  assert.equal(payload('repair').oracle_worldexplorer_attention,'weighted');
+  assert.equal(payload('repair').oracle_attention_batching,'global');
+  $('oracle-worldexplorer-attention').value='unweighted';
+  assert.equal(payload('repair').oracle_worldexplorer_attention,'unweighted');
   $('oracle-reference-mode').value='all';
   $('oracle-split-mode').value='single-split';
   updateOracleReferenceControls();

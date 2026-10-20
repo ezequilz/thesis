@@ -78,7 +78,9 @@ def test_runner_exports_only_the_assigned_source_map(tmp_path,monkeypatch,mode):
     from types import SimpleNamespace
     from splat_explorer.splatfix.oraclegs.attention import run_attention
     m = manifest(5)
-    chunks = plan_chunks(m,mode=mode)
+    extra = [{'image_name':'worldexplorer_000000.png', 'target_index':25,
+              'segment_index':5, 'reference_index':2, 'alpha':0.0}]
+    chunks = plan_chunks(m,mode=mode,extra_targets=extra)
     inputs,output = tmp_path/'combined',tmp_path/'attention'
     inputs.mkdir()
     for c in chunks:
@@ -119,7 +121,7 @@ def test_runner_exports_only_the_assigned_source_map(tmp_path,monkeypatch,mode):
     monkeypatch.setitem(sys.modules,'visualize_attn',upstream)
     run_attention({'seed':23,'image_dir':str(inputs),'output_dir':str(output),'chunks':chunks})
     assert len(calls) == 2*len(chunks)
-    assert len(list(output.glob('synth_*.png'))) == 25
+    assert len(list(output.glob('synth_*.png'))) == 26
     for c in chunks:
         for name in c['target_images']:
             assert float((output/name).read_text()) == pytest.approx(c['source_reference_index']+.165)
@@ -127,3 +129,21 @@ def test_runner_exports_only_the_assigned_source_map(tmp_path,monkeypatch,mode):
     (inputs/'ref_000005.png').unlink()
     with pytest.raises(ValueError,match='chunk|input'):
         run_attention({'seed':23,'image_dir':str(inputs),'output_dir':str(output),'chunks':chunks})
+
+
+def test_worldexplorer_global_shuffle_and_options():
+    m = manifest(96)
+    extra = [{'image_name':f'worldexplorer_{i:06d}.png', 'target_index':480+i,
+              'segment_index':5+i%6, 'reference_index':i%6, 'alpha':0.0} for i in range(2528)]
+    chunks = plan_chunks(m, mode='global', extra_targets=extra)
+    assert Counter(i for c in chunks for i in c['target_indices']) == Counter(range(3008))
+    assert all(len(c['image_names']) <= 96 for c in chunks)
+    assert any(any('worldexplorer_' in n for n in c['context_target_images']) and
+               any('target_' in n for n in c['context_target_images']) for c in chunks)
+    assert chunks == plan_chunks(m, mode='global', extra_targets=extra)
+    assert chunks != plan_chunks(m, mode='global', extra_targets=extra, seed=24)
+    for mode in ['weighted', 'unweighted']:
+        assert job_runtime({}, validate_options({'oracle_worldexplorer_attention':mode}))['oracle_worldexplorer_attention'] == mode
+    assert validate_options({})['oracle_worldexplorer_attention'] == 'weighted'
+    with pytest.raises(ValueError, match='oracle_worldexplorer_attention'):
+        validate_options({'oracle_worldexplorer_attention':'bad'})

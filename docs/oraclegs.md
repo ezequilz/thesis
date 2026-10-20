@@ -15,11 +15,28 @@ OracleGS is an independent reconstruction method under `src/splat_explorer/splat
 ## Separate adapter options
 
 For WorldExplorer source scenes, original generated images join the SEVA
-synthetic sampling pool after generation and attention processing. Only saved
-repair references remain GT. WorldExplorer images retain their calibrated
-cameras and use the upstream unweighted synthetic loss without depth loss;
-they have no VGGT attention maps. New SEVA outputs retain required attention
-weighting. Dataset folder counts continue to reflect the repaired GT count.
+synthetic sampling pool. Only saved repair references remain GT. The dashboard's
+**WorldExplorer image attention** defaults to **Include in VGGT attention**
+(`oracle_worldexplorer_attention: weighted`); **Unweighted synthetic supervision**
+(`unweighted`) retains the previous behavior. CLI: `--oracle-worldexplorer-attention`.
+
+Weighted mode stages both sources before VGGT extraction. **Shuffle across all
+generated images (SEVA + WorldExplorer)** (`oracle_attention_batching: global`)
+shuffles their union deterministically using the run seed. Each context contains
+all repaired references and at most 96 total images. Every target receives one
+published attention map. SEVA query assignment stays unchanged; WorldExplorer
+uses the nearest repaired camera center in normalized scene coordinates, breaking
+ties by viewing direction and then reference index. This is a geometric heuristic,
+not an overlap or quality guarantee. With within-trajectory grouping, SEVA keeps
+its trajectory groups and WorldExplorer is grouped by assigned repaired reference.
+
+WorldExplorer images retain their calibrated cameras and resolution and receive
+no depth loss. Weighted mode requires their VGGT maps for the original synthetic
+losses; unweighted mode uses the upstream unweighted synthetic loss. New SEVA
+outputs always require attention maps. Dataset folder counts continue to reflect
+the repaired GT count. The mode and target/source assignments are recorded in the
+recipe, WorldExplorer supervision report, and attention plan. Use a fresh run
+with the updated dashboard/worker code; archived results are not recomputed.
 
 `oracle_adapter: trajectory` is the requested six-reference-plus-intermediates configuration. The official COLMAP reader expects a dataset RGB at every target pose and would skip a target without one. Dataset assembly supplies generated RGBs at intermediate target entries, then a narrowly scoped reader adapter removes these entries from the **GT camera list before training selection**. The original synthetic camera objects and all loss/attention code remain untouched. At saved poses, repaired reference RGBs stay in `images/`, and generated RGBs go in `synthetic_N/`. The adapter never promotes generated RGBs to GT.
 

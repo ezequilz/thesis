@@ -28,6 +28,9 @@ def validate_options(raw):
     batching = raw.get('oracle_attention_batching', 'within_trajectory')
     if batching not in ('within_trajectory', 'global'):
         raise ValueError('oracle_attention_batching must be within_trajectory or global')
+    world_attention = raw.get('oracle_worldexplorer_attention', 'weighted')
+    if world_attention not in ('weighted', 'unweighted'):
+        raise ValueError('oracle_worldexplorer_attention must be weighted or unweighted')
     fit = raw.get('seva_fit', 'crop')
     if fit not in ('crop', 'pad'):
         raise ValueError('seva_fit must be crop or pad')
@@ -52,7 +55,7 @@ def validate_options(raw):
     if order is not None and (not isinstance(order, list) or len(order) < 2 or
                               any(type(i) is not int or i < 0 for i in order) or len(set(order)) != len(order)):
         raise ValueError('oracle_path_order must contain distinct nonnegative checkpoint view indices')
-    return {'oracle_capture_source':capture_source, 'oracle_reference_mode':reference_mode, 'oracle_split_mode':split_mode, 'oracle_preset':preset, 'oracle_preset_scale':float(scale), 'seva_geometry_guidance':guidance, 'oracle_depth_source':depth, 'oracle_initialization':initialization, 'oracle_attention_batching':batching, 'seva_fit': fit, 'oracle_adapter': adapter, 'seva_resolution': resolution, 'oracle_target_frames': frames, 'oracle_path_order': order}
+    return {'oracle_capture_source':capture_source, 'oracle_reference_mode':reference_mode, 'oracle_split_mode':split_mode, 'oracle_preset':preset, 'oracle_preset_scale':float(scale), 'seva_geometry_guidance':guidance, 'oracle_depth_source':depth, 'oracle_initialization':initialization, 'oracle_attention_batching':batching, 'oracle_worldexplorer_attention':world_attention, 'seva_fit': fit, 'oracle_adapter': adapter, 'seva_resolution': resolution, 'oracle_target_frames': frames, 'oracle_path_order': order}
 
 
 def readiness(checkpoint):

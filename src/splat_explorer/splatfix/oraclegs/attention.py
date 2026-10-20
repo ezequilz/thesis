@@ -5,7 +5,7 @@ import shutil
 import random
 
 
-def plan_chunks(manifest, max_images=96, *, mode="within_trajectory", seed=23):
+def plan_chunks(manifest, max_images=96, *, mode="within_trajectory", seed=23, extra_targets=()):
     """Shuffle target contexts, repeat every reference, and assign endpoint queries.
 
     Distance is trajectory parameter distance to its endpoints, not a global
@@ -19,7 +19,7 @@ def plan_chunks(manifest, max_images=96, *, mode="within_trajectory", seed=23):
         raise ValueError('Attention chunks require unique references and room for targets')
     segments = {s['index']:s for s in manifest['trajectory']['segments']}
     groups, seen = {}, set()
-    for frame in manifest['trajectory']['frames']:
+    for frame in [*manifest['trajectory']['frames'], *extra_targets]:
         name = 'synth_'+frame['image_name']
         if name in seen or Path(name).name != name:
             raise ValueError('Invalid or duplicate attention target')
@@ -27,9 +27,9 @@ def plan_chunks(manifest, max_images=96, *, mode="within_trajectory", seed=23):
         alpha = frame['alpha']
         if not math.isfinite(alpha) or not 0 <= alpha <= 1:
             raise ValueError('Invalid attention trajectory position')
-        segment = segments[frame['segment_index']]
         source = frame.get('reference_index')
         if source is None:
+            segment = segments[frame['segment_index']]
             source = segment['from_reference' if alpha <= .5 else 'to_reference']
         if not 0 <= source < len(references):
             raise ValueError('Attention source is not a saved reference')
@@ -57,6 +57,36 @@ def plan_chunks(manifest, max_images=96, *, mode="within_trajectory", seed=23):
     if not chunks:
         raise ValueError('Attention plan contains no targets')
     return chunks
+
+
+def worldexplorer_targets(inputs, output, manifest):
+    """Stage attention RGBs and assign nearest-position repaired references.
+
+    Camera direction breaks position ties. WorldExplorer contexts are grouped
+    by assigned reference unless global shuffling mixes both image sources.
+    """
+    import json
+    import numpy as np
+    from PIL import Image
+    from ..worldexplorer.source import load_staged
+    inputs, output = Path(inputs), Path(output)
+    data = load_staged(inputs / manifest['worldexplorer_source'])
+    refs = json.loads((inputs/'scene/transforms.json').read_text())['frames'][:len(manifest['views'])]
+    poses = [np.asarray(f['transform_matrix']) for f in refs]
+    offset = max(f['target_index'] for f in manifest['trajectory']['frames']) + 1
+    segment_offset = max(s['index'] for s in manifest['trajectory']['segments']) + 1
+    targets = []
+    for index, frame in enumerate(data['frames']):
+        pose = np.asarray(frame['transform_matrix'])
+        source = min(range(len(poses)), key=lambda i: (
+            float(np.linalg.norm(poses[i][:3,3]-pose[:3,3])),
+            -float(np.dot(poses[i][:3,2], pose[:3,2])), i))
+        name = Path(frame['file_path']).stem + '.png'
+        with Image.open(frame['file_path']) as image:
+            image.convert('RGB').save(output/'combined'/('synth_'+name))
+        targets.append({'image_name':name, 'target_index':offset+index,
+            'segment_index':segment_offset+source, 'reference_index':source, 'alpha':0.0})
+    return targets
 
 
 def run_attention(request):

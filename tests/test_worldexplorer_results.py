@@ -171,10 +171,14 @@ fetch:()=>new Promise(()=>{}),clearTimeout(){},setTimeout(){},assert});
 vm.runInContext(fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0],context);
 vm.runInContext(`
 const r={worldexplorer:{image_groups:[{name:'selected',frames:[{name:'first.png',label:'First',url:'/first',index:0},{name:'second.png',label:'Second',url:'/second',index:1}]},{name:'trajectory',frames:[{name:'third.png',label:'Third',url:'/third',index:0}]}],videos:[{name:'clip',url:'/clip.mp4'}]}};
-showWorld(r);assert.equal(frames.length,2);assert.equal($('worldMedia').hidden,false);
+showWorld(r);assert.equal(frames.length,3);assert.equal(worldGroup,'');assert.equal($('worldMedia').hidden,false);
+assert.equal(frames.map(f=>f.index).join(','),'0,1,2');
 choose(0,true);assert.equal($('lightbox').open,true);assert.equal($('full').src,'/first');
-$('next').onclick();assert.equal($('full').src,'/second');assert.equal($('next').disabled,true);
+$('next').onclick();assert.equal($('full').src,'/second');assert.equal($('next').disabled,false);
+$('next').onclick();assert.equal($('full').src,'/third');assert.equal($('next').disabled,true);
 $('worldGroup').value='trajectory';$('worldGroup').onchange();assert.equal(frames.length,1);assert.equal($('full').src,'/third');
+showWorld(r);assert.equal(worldGroup,'trajectory');assert.equal(frames.length,1);
+$('worldGroup').value='';$('worldGroup').onchange();assert.equal(frames.length,3);
 assert.ok($('worldVideoList').innerHTML.includes('preload="none"'));
 assert.equal(needsGalleryPolling({kind:'WorldExplorer',status:'running'}),true);
 assert.equal(needsGalleryPolling({kind:'WorldExplorer',status:'completed',repaired:true}),false);
