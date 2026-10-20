@@ -298,6 +298,48 @@ class ResultCatalog:
         row['original_rgb_images'] = []
         row['stage_comparison'] = None
         row['comparison_gallery'] = []
+        # Keep full logs separate from the bounded live-worker snapshot.
+        run_root = (self.studio.root / row['run_id']).resolve()
+        candidates = list(run_root.glob('*.log')) + list((run_root / 'gpu').glob('*.log'))
+        decoded_names = {}
+        if manifest:
+            result_root = manifest.parent.absolute()
+            candidates += [p for p in result_root.rglob('*.log')
+                           if '.training-metrics' not in p.parts and p.resolve().is_relative_to(result_root.resolve())]
+            from .training_logs import export_training_logs
+            try:
+                exports, chart, error = export_training_logs(result_root)
+            except OSError as exc:
+                exports, chart, error = [], None, f'Training metric export unavailable: {exc}'
+            for source, exported in exports:
+                candidates.append(exported)
+                decoded_names[exported] = str(source.relative_to(run_root)) + ' (decoded scalars)'
+            if chart:
+                row['training_metrics'] = {
+                    'url': self.studio.file_url(chart),
+                    'modified': chart.stat().st_mtime_ns,
+                    'name': 'ArtiFixer · TensorBoard training scalars',
+                    'format': 'scalars',
+                }
+            if error:
+                row['training_metrics_error'] = error
+        else:
+            candidates += list((run_root / 'gpu/results').glob('*/*.log'))
+        row['logs'] = []
+        seen = set()
+        for path in sorted(candidates, key=lambda p: (p.name == 'live-stage.log', str(p))):
+            resolved = path.resolve()
+            if resolved in seen or not resolved.is_relative_to(run_root) or not resolved.is_file():
+                continue
+            seen.add(resolved)
+            stat = resolved.stat()
+            row['logs'].append({
+                'name': decoded_names.get(path, str(path.relative_to(run_root))),
+                'url': self.studio.file_url(resolved),
+                'partial': path.name == 'live-stage.log',
+                'size': stat.st_size,
+                'modified': stat.st_mtime_ns,
+            })
         if row['kind'] == 'OracleGS' or (manifest and read_json(manifest, {}).get('reconstruction_method') == 'oraclegs'):
             from .oraclegs_details import build_details
             pending = manifest or self.studio.root / row['run_id'] / 'gpu/results/oraclegs/result.json'

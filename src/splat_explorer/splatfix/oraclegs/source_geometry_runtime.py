@@ -1,4 +1,5 @@
 """Optional in-memory adapters; pinned upstream files stay unchanged."""
+import json
 from pathlib import Path
 import numpy as np
 
@@ -21,8 +22,19 @@ def initialize_gaussians(model, path, spatial_lr_scale):
 
 
 def install_source_geometry(request):
+    report = {'depth_source': 'source_splat' if request.get('source_depth') else 'predicted',
+              'reference_views': [], 'initialization': None}
+    def publish():
+        if request.get('source_geometry_report'):
+            path = Path(request['source_geometry_report'])
+            temporary = path.with_suffix('.tmp')
+            temporary.write_text(json.dumps(report, indent=2))
+            temporary.replace(path)
     if request.get('source_depth'):
         import torch
+        # scene.__init__ imports camera_utils, which imports scene.cameras.
+        # Enter through scene first to avoid partially initialized camera_utils.
+        import scene
         import utils.camera_utils as cameras
         original = cameras.loadCam
         directory = Path(request['source_depth'])
@@ -35,6 +47,10 @@ def install_source_geometry(request):
                 camera.invdepthmap = torch.as_tensor(inverse[None],device=camera.original_image.device)
                 camera.depth_mask = torch.as_tensor(valid[None],device=camera.original_image.device,dtype=camera.original_image.dtype)
                 camera.depth_reliable = True
+                report['reference_views'].append({'image': info.image_name,
+                    'width': camera.image_width, 'height': camera.image_height,
+                    'valid_fraction': float(valid.mean()), 'depth_reliable': True})
+                publish()
             return camera
         cameras.loadCam = load
     if request.get('source_initialization'):
@@ -42,4 +58,6 @@ def install_source_geometry(request):
         path = request['source_initialization']
         def create(self, pcd, spatial_lr_scale):
             initialize_gaussians(self,path,spatial_lr_scale)
+            report['initialization'] = {'source': path, 'gaussian_count': int(self.get_xyz.shape[0])}
+            publish()
         GaussianModel.create_from_pcd = create

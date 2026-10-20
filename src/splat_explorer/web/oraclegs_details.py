@@ -210,6 +210,8 @@ def build_details(studio, manifest, result):
               'depth_alignment','seva_generation','vggt_attention','reconstruction']
     if inputs.get('oracle_depth_source') == 'source_splat':
         phases = [p for p in phases if p not in ('reference_depth', 'depth_alignment')]
+    if data('geometry-check.json').get('colmap_skipped'):
+        phases = [p for p in phases if not p.startswith('sfm_')]
     commands = recipe.get('commands', [])
     attempted = [('seva_generation' if (c.get('phase') or '').startswith('seva_generation_') else c.get('phase')) for c in commands]
     current = state.get('phase')
@@ -232,6 +234,7 @@ def build_details(studio, manifest, result):
     artifacts = []
     for name, label in [('recipe.json','Recipe, revisions and commands'), ('camera-alignment.json','Camera alignment gate'),
                         ('geometry-check.json','SfM and depth gate'),
+                        ('source-geometry-runtime.json','Source geometry actually loaded by trainer'),
                         ('attention-chunks.json','Attention chunk and source assignments'),
                         ('seva-camera-audit.json','SEVA parsed camera audit'),
                         ('seva-conditioning-audit.json','SEVA diffusion translation and ray audit'), ('seva-geometry-guidance.json','SEVA source geometry guidance'), ('seva_generation-request.json','SEVA parameters'),

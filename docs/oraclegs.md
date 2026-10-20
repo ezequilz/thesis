@@ -476,3 +476,29 @@ captures each saved position at 1024 × 576 with matching depth. These new
 checkpoints contain only the SEVA image set; original-FOV RGB and repair slots
 remain empty. The gallery defaults to 54° for these checkpoints, and Step 3
 can repair the captured SEVA references directly without a Step 2 recapture.
+
+### Source depth without triangulation
+
+Select **Reconstruction depth supervision → Source-splat depth** to replace
+monocular depth and its SfM alignment with staged camera-Z inverse depth. This
+is independent of **SEVA geometry guidance**, which only affects generation.
+Select **Reconstruction initialization → Existing source splat** as well to
+skip COLMAP feature extraction, matching, triangulation and export entirely.
+The adapter writes the saved cameras in COLMAP format with an empty point set;
+the trainer loads the staged source Gaussians. With SfM initialization selected,
+triangulation is still required to initialize the reconstruction.
+
+The source-depth runtime imports `scene` before camera utilities to avoid the
+upstream circular import. `source-geometry-runtime.json`, linked in diagnostics,
+records reference names, dimensions, valid fractions and loaded Gaussian count
+as the trainer actually consumes them. It is distinct from the staging gate.
+The upstream `model/input.ply` remains a dataset placeholder, not proof of the
+actual initialization. Source depth retains scene units, calibrated image fitting
+and invalid-pixel masks; no predicted-depth fallback is used. Its front-surface
+estimate is a geometry prior, not exactly the alpha-composited inverse depth
+rendered by the training rasterizer.
+
+Reload the queue/server and create a fresh run to apply these changes. Existing
+staged runs keep their saved settings. CPU regression tests cover the real
+upstream camera import order and all depth/initialization combinations; GPU
+loss behavior and visual quality still require a fresh source-guided run.

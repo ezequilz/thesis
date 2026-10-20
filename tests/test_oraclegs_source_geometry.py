@@ -97,13 +97,16 @@ def test_source_depth_runtime_preserves_mask_and_excludes_synthetic(tmp_path,mon
     def load(*args):
         originals.append(args[2])
         return SimpleNamespace(image_height=1,image_width=2,original_image=SimpleNamespace(device='cpu',dtype=np.float32))
+    monkeypatch.setitem(sys.modules,'scene',SimpleNamespace())
     module=SimpleNamespace(loadCam=load)
     monkeypatch.setitem(sys.modules,'utils',SimpleNamespace(camera_utils=module))
     monkeypatch.setitem(sys.modules,'utils.camera_utils',module)
     monkeypatch.setitem(sys.modules,'torch',SimpleNamespace(as_tensor=lambda value,**kw:np.asarray(value)))
-    install_source_geometry({'source_depth':str(tmp_path)})
+    install_source_geometry({'source_depth':str(tmp_path), 'source_geometry_report':str(tmp_path/'runtime.json')})
     camera=module.loadCam(None,0,info_type('ref.png',False,'prediction.png',{'scale':999}),1,False)
     assert camera.depth_reliable
+    report = json.loads((tmp_path/'runtime.json').read_text())
+    assert report['reference_views'] == [{'image':'ref.png', 'width':2, 'height':1, 'valid_fraction':.5, 'depth_reliable':True}]
     np.testing.assert_array_equal(camera.invdepthmap,[[[.5,0]]])
     np.testing.assert_array_equal(camera.depth_mask,[[[True,False]]])
     assert originals[0].depth_path=='' and originals[0].depth_params is None

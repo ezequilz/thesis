@@ -344,11 +344,12 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training
     if adapter == 'per_view_preset':
         generations = [f'seva_generation_{i+1:03d}_of_{count:03d}' for i in range(count)]
     depth_phases = ['reference_depth','depth_alignment'] if depth == 'predicted' else []
-    assert phases == ['model_access','sfm_features','sfm_matching','sfm_triangulation','sfm_export',
+    sfm_phases = [] if depth == initialization == 'source_splat' else ['sfm_features','sfm_matching','sfm_triangulation','sfm_export']
+    assert phases == ['model_access',*sfm_phases,
                       *depth_phases,*generations,'vggt_attention','reconstruction']
     assert Path(result['splat_path']).exists()
     recipe = json.loads((output/'recipe.json').read_text())
-    assert len(recipe['commands'])==7+len(depth_phases)+len(generations)
+    assert len(recipe['commands'])==3+len(sfm_phases)+len(depth_phases)+len(generations)
     assert 'Only saved reference' in recipe['gt_policy']
 
 

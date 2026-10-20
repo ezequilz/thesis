@@ -17,7 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # Debug viewer (browser-based, no GPU needed)
-viewer = ["viser>=0.2.7"]
+viewer = ["viser>=0.2.7", "tensorboard>=2.16,<3"]
 # Real 3DGS rasterization. Requires an NVIDIA GPU + CUDA toolchain.
 # torch must be installed first (gsplat compiles CUDA kernels against it).
 gpu = ["torch>=2.1", "gsplat>=1.4"]

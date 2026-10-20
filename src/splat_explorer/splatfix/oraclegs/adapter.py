@@ -45,6 +45,23 @@ def known_model(inputs, output):
     (known/'points3D.txt').write_text('')
 
 
+def source_camera_model(inputs, output):
+    """Camera-only COLMAP-format dataset; source Gaussians supply initialization."""
+    inputs, output = Path(inputs), Path(output)
+    manifest = json.loads((inputs/'inputs.json').read_text())
+    frames = json.loads((inputs/'scene/transforms.json').read_text())['frames'][:len(manifest['views'])]
+    sparse = output/'dataset/sparse/0'
+    sparse.mkdir(parents=True)
+    cameras, images = [], []
+    for index, frame in enumerate(frames, 1):
+        camera, image = colmap_lines(frame, index, index, Path(frame['file_path']).name)
+        cameras.append(camera)
+        images.append(image)
+    (sparse/'cameras.txt').write_text('\n'.join(cameras)+'\n')
+    (sparse/'images.txt').write_text('\n'.join(images)+'\n')
+    (sparse/'points3D.txt').write_text('')
+
+
 def verify_exported_cameras(frames, exported, manifest):
     if len(frames) != len(exported):
         raise ValueError('SEVA output camera count does not match staged cameras')

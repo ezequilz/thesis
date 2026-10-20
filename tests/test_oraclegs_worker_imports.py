@@ -30,3 +30,33 @@ assert 'splines' not in sys.modules
     assert completed.returncode == 0, completed.stderr
     status = json.loads((tmp_path/'worker-status.json').read_text())
     assert status['status'] == 'stopped'
+
+
+def test_source_depth_imports_real_upstream_camera_modules_without_cycle(tmp_path):
+    """Keep the actual scene/camera_utils import cycle; stub only CUDA dependencies."""
+    upstream = Path(__file__).resolve().parents[1]/'src/splat_explorer/splatfix/oraclegs/upstream/oraclegs'
+    script = '''
+import sys, types
+from splat_explorer.splatfix.oraclegs.source_geometry_runtime import install_source_geometry
+sys.path.insert(0, sys.argv[1])
+def stub(name, **attrs):
+    module = types.ModuleType(name)
+    module.__dict__.update(attrs)
+    sys.modules[name] = module
+stub('torch')
+stub('cv2')
+stub('utils.system_utils', searchForMaxIteration=None)
+stub('scene.dataset_readers', sceneLoadTypeCallbacks={})
+stub('scene.gaussian_model', GaussianModel=type('GaussianModel', (), {}))
+stub('scene.cameras', Camera=None)
+stub('arguments', ModelParams=None)
+stub('utils.general_utils', PILtoTorch=None)
+stub('utils.graphics_utils', fov2focal=None)
+install_source_geometry({'source_depth': sys.argv[2]})
+from scene import Scene
+from utils.camera_utils import cameraList_from_camInfos
+assert Scene is not None and callable(cameraList_from_camInfos)
+'''
+    completed = subprocess.run([sys.executable, '-c', script, str(upstream), str(tmp_path)],
+                               capture_output=True, text=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr

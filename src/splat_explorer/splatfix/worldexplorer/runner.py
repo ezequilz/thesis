@@ -2,6 +2,7 @@
 import hashlib
 import functools
 import json
+import math
 from pathlib import Path
 import re
 import runpy
@@ -42,12 +43,17 @@ def select_images_for_vggt(scene_root, max_images=100):
         raise ValueError('VGGT generated-image budget must be a positive integer')
     root = Path(scene_root)
     frames = json.loads((root/'transforms.json').read_text())['frames']
-    inputs, trajectories = [], {}
+    inputs, trajectories, centers = [], {}, {}
     for frame in frames:
         path = Path(frame['file_path'])
         # The pinned merger emits absolute paths; also accept scene-relative paths.
         if not path.is_absolute():
             path = root/path
+        matrix = frame['transform_matrix']
+        center = tuple(float(matrix[i][3]) for i in range(3))
+        if not all(math.isfinite(value) for value in center):
+            raise ValueError(f'Non-finite camera center: {path}')
+        centers[path] = center
         if path.parent.name == 'input':
             inputs.append(path)
         elif path.parent.name == 'samples-rgb':
@@ -68,6 +74,29 @@ def select_images_for_vggt(scene_root, max_images=100):
         # A short trajectory can only contribute its available frames.
         stride = max(1, len(paths) // allowed_per_trajectory)
         selected.extend(paths[::stride])
+
+    # With one sample per trajectory, upstream selects only frame 000.
+    # Those cameras share the panorama origin: fitting a similarity transform
+    # to their centers collapses VGGT's point cloud to effectively zero scale.
+    def spread(paths):
+        return math.sqrt(sum((max(centers[p][i] for p in paths) -
+                              min(centers[p][i] for p in paths)) ** 2
+                             for i in range(3)))
+
+    full_spread = spread(list(centers))
+    minimum_spread = max(1e-8, full_spread * 1e-6)
+    if spread(selected) <= minimum_spread:
+        origin = centers[inputs[0] if inputs else selected[0]]
+        for paths in trajectories.values():
+            first = min(paths, key=lambda p: int(p.stem))
+            farthest = max(paths, key=lambda p: math.dist(centers[p], origin))
+            if farthest not in selected:
+                selected[selected.index(first)] = farthest
+        if spread(selected) <= minimum_spread:
+            raise ValueError('VGGT alignment requires translated camera views; '
+                             'selected trajectories have no usable camera baseline')
+        print('VGGT camera centers coincide: replaced trajectory start frames '
+              'with translated views for scale alignment')
 
     # Keep upstream's filename contract for find_pose_in_transforms.
     names = [f'{p.parent.parent.name}_{p.parent.name}_{p.name}' for p in selected]

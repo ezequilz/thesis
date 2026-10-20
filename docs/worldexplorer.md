@@ -59,6 +59,12 @@ divide the budget by the trajectory count, sort numeric frame names, then take
 every `frame_count // per_trajectory_budget` frame starting with the first.
 Integer rounding makes this an approximate budget, not a strict image cap.
 The default 40 selects one generated frame per trajectory plus eight inputs.
+Before copying images, the adapter checks the selected camera-center spread.
+If the stride samples have effectively coincident centers, it replaces each
+trajectory's first sample with its farthest translated view from the scaffold
+origin, retaining the same image count. This avoids fitting VGGT's scale to
+only the panorama origin. Rotation-only trajectories with no usable baseline
+fail before VGGT runs; non-finite camera centers are also rejected.
 
 The runtime adapter fixes two upstream path assumptions: input images are
 identified by their immediate `input` directory, and trajectories are grouped

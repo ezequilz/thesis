@@ -535,7 +535,32 @@ const context=vm.createContext({document:{getElementById:get},location,URLSearch
 ResizeObserver:class{observe(){}},
 fetch:()=>new Promise(()=>{}),clearTimeout(){},setTimeout(){},assert});
 vm.runInContext(fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0],context);
-vm.runInContext(`
+vm.runInContext(String.raw`
+assert.equal(cleanLog('\x1b[31mERROR\x1b[0m\r\nnext\rprogress'),'ERROR\nnext\nprogress');
+$('logSearch').value='<script>';
+$('logContent').querySelectorAll=()=>[];
+logText='ERROR <script>alert(1)</script> & details';
+renderLog();
+assert.ok($('logContent').innerHTML.includes('<mark>&lt;script&gt;</mark>'));
+assert.ok(!$('logContent').innerHTML.includes('<script>'));
+assert.equal($('logMatches').textContent,'1 matches');
+$('logSearch').value='missing';renderLog();
+assert.equal($('logMatches').textContent,'0 matches');
+assert.equal($('logNext').disabled,true);
+const parsed=parseTrainingLog('Training progress: 5%|x| 1090/22000 [00:27<09:35, 36.33it/s, Loss=0.0506246, Synthetic Loss=0.3610111, Depth=0.0007515]\rTraining progress: 5%|x| 1090/22000 [00:28<09:35, 36.33it/s, Loss=0.0445616, Synthetic Loss=0.3573269, Depth=0.0004918]\nTraining progress: 6%|x| 1100/22000 [1:02:03<09:35, 35.14it/s, Loss=4e-2, Synthetic Loss=0.37, Depth=1e-5]\nnoise');
+assert.equal(parsed.length,2);assert.equal(parsed[0].loss,0.0445616);assert.equal(parsed[0].seconds,28);assert.equal(parsed[0].synthetic,0.3573269);assert.equal(parsed[0].speed,36.33);assert.equal(parsed[1].seconds,3723);assert.equal(parsed[1].depth,0.00001);
+trainingPoints=parsed;$('trainingAxis').value='seconds';renderTraining();
+assert.ok($('trainingPlots').innerHTML.includes('Elapsed training time (min)'));
+assert.ok(!$('trainingPlots').innerHTML.includes('NaN'));
+$('trainingAxis').value='iteration';trainingPoints=parsed.slice(0,1);renderTraining();
+assert.ok($('trainingPlots').innerHTML.includes('<circle'));
+assert.ok(!$('trainingPlots').innerHTML.includes('NaN'));
+trainingMetrics=[['loss/l1/train','loss/l1/train'],['num_particles/train','Particles']];
+trainingPoints=[{iteration:1,seconds:0,'loss/l1/train':.5,'num_particles/train':20},{iteration:2,seconds:10,'loss/l1/train':.25,'num_particles/train':30}];
+$('trainingAxis').value='seconds';renderTraining();
+assert.ok($('trainingPlots').innerHTML.includes('loss/l1/train'));
+assert.ok($('trainingPlots').innerHTML.includes('>Count</text>'));
+assert.ok(!$('trainingPlots').innerHTML.includes('NaN'));
 const chain={chain_total:2,chain_position:1,chain_runs:[{detail_url:'/pass1'},{detail_url:'/pass2'}]};
 showChain(chain);assert.equal($('chainPrev').disabled,true);assert.equal($('chainNext').disabled,false);
 moveChain(1);assert.equal(location.href,'/pass2');
@@ -822,3 +847,46 @@ assert.equal($('sort').value,'smallest');
 `,context);
 '''
     subprocess.run([node, '-e', script, 'src/splat_explorer/web/static/splatfix_results.html'], check=True)
+
+
+def test_detail_lists_full_logs_separately_from_cached_tail(tmp_path):
+    studio, root, result = setup(tmp_path)
+    (root / 'gpu/stage.log').write_text('Full worker output\n' * 10000)
+    (root / 'gpu/live-stage.log').write_text('Tail only')
+    (result / 'reconstruction.log').write_text('Training output')
+    outside = tmp_path / 'outside.log'
+    outside.write_text('Unrelated private log')
+    (result / 'escape.log').symlink_to(outside)
+    sibling = result.parent / 'other-result'
+    sibling.mkdir()
+    (sibling / 'other.log').write_text('Different result')
+    detail = studio.results.run_detail(studio.results.entries()[0]['id'])
+    logs = detail['logs']
+    assert {log['name'] for log in logs} == {
+        'gpu/stage.log', 'gpu/live-stage.log',
+        'gpu/results/benchmark_1.3b_abc/reconstruction.log',
+    }
+    full = next(log for log in logs if log['name'] == 'gpu/stage.log')
+    assert full['size'] > 65536
+    assert not full['partial']
+    assert logs[-1]['partial']
+    assert all(log['url'] and log['modified'] for log in logs)
+
+
+def test_artifixer_detail_includes_nested_logs_and_tensorboard_metrics(tmp_path):
+    from test_training_logs import write_events
+    studio, root, result = setup(tmp_path)
+    directory = result / 'artifixer3d/runs/splatfix/splatfix'
+    directory.mkdir(parents=True)
+    (directory / 'training.log').write_text('Nested training output')
+    write_events(directory, [(1, 100, {'loss/l1/train': .25}),
+                             (2, 110, {'loss/l1/train': .125})])
+    detail = studio.results.run_detail(studio.results.entries()[0]['id'])
+    assert any(log['name'].endswith('/training.log') for log in detail['logs'])
+    decoded = next(log for log in detail['logs'] if log['name'].endswith('(decoded scalars)'))
+    from urllib.parse import parse_qs, urlparse
+    log_path = parse_qs(urlparse(decoded['url']).query)['path'][0]
+    assert 'loss/l1/train=0.125' in studio.allowed_file(log_path).read_text()
+    assert detail['training_metrics']['format'] == 'scalars'
+    chart_path = parse_qs(urlparse(detail['training_metrics']['url']).query)['path'][0]
+    assert json.loads(studio.allowed_file(chart_path).read_text())['points'][-1]['seconds'] == 10

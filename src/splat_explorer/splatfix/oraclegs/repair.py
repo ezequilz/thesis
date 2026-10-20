@@ -258,20 +258,27 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         env += [key+'='+value for key,value in huggingface_environment().items()]
         stage(name,env+[python,'-u',HERE/'model_worker.py',action,runtime[repo_key],request],training=training)
     model('model_access','assets','seva_repo',{'output':str(output/'vae-provenance.json')})
-    colmap = runtime['colmap']
-    db = output/'database.db'
-    stage('sfm_features',[colmap,'feature_extractor','--database_path',db,'--image_path',dataset/'images',
-          '--ImageReader.camera_model','PINHOLE','--ImageReader.single_camera_per_image','1'])
-    known_model(inputs,output)
-    stage('sfm_matching',[colmap,'exhaustive_matcher','--database_path',db])
     sparse = dataset/'sparse/0'
-    sparse.mkdir(parents=True)
-    stage('sfm_triangulation',[colmap,'point_triangulator','--database_path',db,'--image_path',dataset/'images',
-          '--input_path',output/'known','--output_path',sparse,
-          '--Mapper.ba_refine_focal_length','0','--Mapper.ba_refine_principal_point','0',
-          '--Mapper.ba_refine_extra_params','0','--Mapper.fix_existing_images','1',
-          '--Mapper.tri_ignore_two_view_tracks','0','--refine_intrinsics','0'])
-    stage('sfm_export',[colmap,'model_converter','--input_path',sparse,'--output_path',sparse,'--output_type','TXT'])
+    source_only = (manifest.get('oracle_depth_source') == 'source_splat' and
+                   manifest.get('oracle_initialization') == 'source_splat')
+    if source_only:
+        from .adapter import source_camera_model
+        source_camera_model(inputs, output)
+    else:
+        colmap = runtime['colmap']
+        db = output/'database.db'
+        stage('sfm_features',[colmap,'feature_extractor','--database_path',db,'--image_path',dataset/'images',
+              '--ImageReader.camera_model','PINHOLE','--ImageReader.single_camera_per_image','1'])
+        known_model(inputs,output)
+        stage('sfm_matching',[colmap,'exhaustive_matcher','--database_path',db])
+        sparse = dataset/'sparse/0'
+        sparse.mkdir(parents=True)
+        stage('sfm_triangulation',[colmap,'point_triangulator','--database_path',db,'--image_path',dataset/'images',
+              '--input_path',output/'known','--output_path',sparse,
+              '--Mapper.ba_refine_focal_length','0','--Mapper.ba_refine_principal_point','0',
+              '--Mapper.ba_refine_extra_params','0','--Mapper.fix_existing_images','1',
+              '--Mapper.tri_ignore_two_view_tracks','0','--refine_intrinsics','0'])
+        stage('sfm_export',[colmap,'model_converter','--input_path',sparse,'--output_path',sparse,'--output_type','TXT'])
     verify_sfm_cameras(inputs,output)
     if manifest.get('oracle_depth_source', 'predicted') == 'predicted':
         model('reference_depth','depth','depth_repo',{'images':str(dataset/'images'),'output':str(dataset/'depths'),
@@ -286,7 +293,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
             raise ValueError('Sparse triangulation produced no points for SfM initialization')
         atomic_json(output/'geometry-check.json', {
             'triangulated_points':point_count,
-            'passed':True, 'depth_source':'source_splat',
+            'passed':True, 'depth_source':'source_splat', 'colmap_skipped':source_only,
             'scope':'Validated staged camera-Z inverse depth and masks; no monocular prediction or SfM depth alignment',
             'views':manifest['source_depth']['views']})
     if manifest.get('seva_segments'):
@@ -315,7 +322,8 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
             raise ValueError(f'Missing attention map for {image.name}')
         shutil.copyfile(source,attention/image.name)
     args = training_args(dataset,output/'model',n,runtime)
-    geometry_request = {'source_depth':str(inputs/'source-depth') if manifest.get('oracle_depth_source') == 'source_splat' else None,
+    geometry_request = {'source_geometry_report':str(output/'source-geometry-runtime.json'),
+                        'source_depth':str(inputs/'source-depth') if manifest.get('oracle_depth_source') == 'source_splat' else None,
                         'source_initialization':str(inputs/'source-initialization.ply') if manifest.get('source_initialization') else None}
     if manifest.get('oracle_depth_source') == 'source_splat':
         args[args.index('--depths')+1] = ''

@@ -1,5 +1,6 @@
 """Regression coverage for the authors' trajectory sampling contract."""
 import json
+from pathlib import Path
 
 import pytest
 
@@ -20,7 +21,9 @@ def scene(tmp_path, lengths):
             for number in range(count):
                 image = directory/f'{number:03}.png'
                 image.write_bytes(f'{index}/{folder}/{number}'.encode())
-                frames.append({'file_path': str(image)})
+                frames.append({'file_path': str(image), 'transform_matrix':
+                               [[1, 0, 0, index], [0, 1, 0, number],
+                                [0, 0, 1, 0], [0, 0, 0, 1]]})
     (root/'transforms.json').write_text(json.dumps({'frames': frames}))
     return root
 
@@ -70,6 +73,40 @@ def test_missing_source_preserves_previous_selection(tmp_path):
     (root/'000_in/samples-rgb/000.png').unlink()
     with pytest.raises(FileNotFoundError):
         runner.select_images_for_vggt(root, 1)
+    assert {p.name: p.read_bytes() for p in (root/'selected_for_vggt').iterdir()} == before
+
+
+def set_panorama_centers(root, *, translated=True):
+    path = root/'transforms.json'
+    data = json.loads(path.read_text())
+    for frame in data['frames']:
+        image = Path(frame['file_path'])
+        # Real trajectories begin at the same center (up to floating point noise).
+        x = int(image.stem) if translated and image.parent.name == 'samples-rgb' else 0
+        frame['transform_matrix'][0][3] = x
+        frame['transform_matrix'][1][3] = 1e-15 * int(image.stem)
+    path.write_text(json.dumps(data))
+
+
+def test_coincident_starts_use_translated_views_without_increasing_budget(tmp_path):
+    root = scene(tmp_path, [79]*24+[78]*8)
+    set_panorama_centers(root)
+    runner.select_images_for_vggt(root, 40)
+    selected = list((root/'selected_for_vggt').iterdir())
+    assert len(selected) == 40
+    assert sum('_input_' in p.name for p in selected) == 8
+    for index in range(32):
+        last = 78 if index < 24 else 77
+        assert (root/'selected_for_vggt'/f'{index:03}_in_samples-rgb_{last:03}.png').exists()
+
+
+def test_rotation_only_trajectories_fail_before_replacing_selection(tmp_path):
+    root = scene(tmp_path, [4, 4])
+    runner.select_images_for_vggt(root, 2)
+    before = {p.name: p.read_bytes() for p in (root/'selected_for_vggt').iterdir()}
+    set_panorama_centers(root, translated=False)
+    with pytest.raises(ValueError, match='no usable camera baseline'):
+        runner.select_images_for_vggt(root, 2)
     assert {p.name: p.read_bytes() for p in (root/'selected_for_vggt').iterdir()} == before
 
 
