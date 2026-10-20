@@ -70,7 +70,7 @@ def test_artifixer_appends_originals_without_replacing_repaired_references(tmp_p
     assert transforms['frames'][2]['fl_x'] == 10
 
 
-def test_oracle_appends_originals_and_avoids_upstream_gt_cap(tmp_path):
+def test_oracle_appends_originals_to_synthetic_pool(tmp_path):
     from splat_explorer.splatfix.oraclegs.adapter import append_worldexplorer
     inputs = tmp_path / 'inputs'
     stage_source(fixture(tmp_path), inputs / 'worldexplorer-source')
@@ -86,7 +86,12 @@ def test_oracle_appends_originals_and_avoids_upstream_gt_cap(tmp_path):
     (sparse / 'images.txt').write_text('1 1 0 0 0 0 0 0 1 repaired.png\n\n')
     (dataset / 'reference_names.json').write_text('["repaired.png"]')
     total, names = append_worldexplorer(inputs, output, 1)
-    assert total == 3 and len(names) == 2
-    assert json.loads((dataset / 'reference_names.json').read_text()) == ['repaired.png', *names]
-    assert (dataset / 'synthetic_3_attention_maps').is_dir()
-    assert 'worldexplorer_000001.png' in (dataset / 'sparse/3/images.txt').read_text()
+    assert total == 1 and len(names) == 2
+    assert json.loads((dataset / 'reference_names.json').read_text()) == ['repaired.png']
+    assert (dataset / 'synthetic_1_attention_maps').is_dir()
+    assert 'worldexplorer_000001.png' in (sparse / 'images.txt').read_text()
+    for name in names:
+        assert (dataset / 'images' / name).read_bytes() == (dataset / 'synthetic_1' / name).read_bytes()
+    report = json.loads((output / 'worldexplorer-supervision.json').read_text())
+    assert report['sampling_pool'] == 'synthetic'
+    assert report['synthetic_names'] == names

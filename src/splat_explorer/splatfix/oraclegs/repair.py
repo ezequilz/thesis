@@ -324,7 +324,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
     from .adapter import append_worldexplorer
     training_n, original_names = append_worldexplorer(inputs, output, n)
     args = training_args(dataset,output/'model',training_n,runtime)
-    geometry_request = {'rgb_only_references': original_names, 'source_geometry_report':str(output/'source-geometry-runtime.json'),
+    geometry_request = {'unweighted_synthetic': original_names, 'source_geometry_report':str(output/'source-geometry-runtime.json'),
                         'source_depth':str(inputs/'source-depth') if manifest.get('oracle_depth_source') == 'source_splat' else None,
                         'source_initialization':str(inputs/'source-initialization.ply') if manifest.get('source_initialization') else None}
     if manifest.get('oracle_depth_source') == 'source_splat':

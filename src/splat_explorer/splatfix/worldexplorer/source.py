@@ -1,5 +1,8 @@
 """WorldExplorer reconstruction supervision in the exported splat's coordinates."""
 import json
+import errno
+import os
+import uuid
 import shutil
 from pathlib import Path
 
@@ -71,6 +74,30 @@ def source_frames(scene):
             'normalization': parser, 'frames': frames}
 
 
+def link_source_image(source, destination):
+    """Share immutable archived RGB bytes; retain a portable regular-file path.
+
+    Consumers must never edit staged source images in place. Renaming/deleting
+    either run is safe because hard links retain the bytes independently.
+    """
+    source, destination = Path(source), Path(destination)
+    if destination.exists() and source.samefile(destination):
+        return
+    temporary = destination.with_name('.' + destination.name + '.' + uuid.uuid4().hex + '.link')
+    try:
+        os.link(source, temporary)
+        os.replace(temporary, destination)
+    except OSError as exc:
+        if exc.errno not in (errno.EXDEV, errno.EPERM, errno.EACCES, errno.ENOTSUP):
+            raise
+        # Cross-device staging cannot share an inode. Copy to a new file so
+        # replacing a previously linked destination cannot mutate its source.
+        shutil.copyfile(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def stage_source(scene, destination):
     data = source_frames(scene)
     if data is None:
@@ -80,7 +107,7 @@ def stage_source(scene, destination):
     for i, frame in enumerate(data['frames']):
         source = Path(frame['file_path'])
         name = f'images/worldexplorer_{i:06d}{source.suffix.lower()}'
-        shutil.copyfile(source, destination / name)
+        link_source_image(source, destination / name)
         frame.update(file_path=name, sha256=digest_file(destination / name))
     atomic_json(destination / 'transforms.json', data)
     return str(destination.resolve())

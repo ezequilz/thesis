@@ -14,6 +14,13 @@ OracleGS is an independent reconstruction method under `src/splat_explorer/splat
 
 ## Separate adapter options
 
+For WorldExplorer source scenes, original generated images join the SEVA
+synthetic sampling pool after generation and attention processing. Only saved
+repair references remain GT. WorldExplorer images retain their calibrated
+cameras and use the upstream unweighted synthetic loss without depth loss;
+they have no VGGT attention maps. New SEVA outputs retain required attention
+weighting. Dataset folder counts continue to reflect the repaired GT count.
+
 `oracle_adapter: trajectory` is the requested six-reference-plus-intermediates configuration. The official COLMAP reader expects a dataset RGB at every target pose and would skip a target without one. Dataset assembly supplies generated RGBs at intermediate target entries, then a narrowly scoped reader adapter removes these entries from the **GT camera list before training selection**. The original synthetic camera objects and all loss/attention code remain untouched. At saved poses, repaired reference RGBs stay in `images/`, and generated RGBs go in `synthetic_N/`. The adapter never promotes generated RGBs to GT.
 
 `oracle_adapter: saved_poses` generates only at the saved path poses. All target poses have real repaired reference images, so the original dataset loader runs without the reader adapter. This is an unmodified-loader diagnostic option, not a reproduction of the paper's benchmark splits or a substitute for the requested full trajectory.

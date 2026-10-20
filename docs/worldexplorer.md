@@ -249,3 +249,16 @@ the SD2 VAE) are reused. The runtime redirects only this exact upstream model
 lookup to the verified local snapshot, using safetensors and the authors' FP16
 loading setting. Setup also loads this pipeline and runs a two-step GPU inpaint
 smoke check; this is not an end-to-end scene quality test.
+
+### Reusing source images in repair runs
+
+OracleGS/ArtiFixer staging shares the archived WorldExplorer source RGBs through
+hard links on the same filesystem, instead of duplicating the entire image set
+for every repair. Treat these staged RGBs as immutable; replace files atomically
+if a transformation is needed. Camera metadata remains specific to each repair,
+and checksums still validate supervision. Cross-filesystem staging falls back to
+a copy. OracleGS result persistence seeds its input-image mirror from the staged
+set before checksum-based rsync, avoiding another download of unchanged RGBs.
+Deleting or moving the original archive does not break existing hard links.
+The repair run size counts internal hard links once and excludes bytes shared
+with files outside the run. GPU uploads still require a remote copy.

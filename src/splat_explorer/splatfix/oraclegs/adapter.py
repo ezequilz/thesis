@@ -181,15 +181,20 @@ def pad_seva_inputs(inputs, destination, stride=64):
     return str(destination),w,h
 
 
-def reference_only_ground_truth(cameras, references):
+def reference_only_ground_truth(cameras, references, unweighted_synthetic=()):
     """Drop dataset placeholders from the GT set, retain every synthetic camera."""
     references = set(references)
+    unweighted_synthetic = set(unweighted_synthetic)
+    if references & unweighted_synthetic:
+        raise ValueError('WorldExplorer synthetic images cannot be GT references')
     cameras = [c for c in cameras if c.is_synthetic or c.image_name in references]
     if {c.image_name for c in cameras if not c.is_synthetic} != references:
         raise ValueError('OracleGS reference/synthetic split mismatch')
     if not any(c.is_synthetic for c in cameras):
         raise ValueError('OracleGS has no synthetic cameras')
-    if any(c.is_synthetic and not c.attention_map_path for c in cameras):
+    if not unweighted_synthetic <= {c.image_name for c in cameras if c.is_synthetic}:
+        raise ValueError('Missing WorldExplorer synthetic cameras')
+    if any(c.is_synthetic and not c.attention_map_path and c.image_name not in unweighted_synthetic for c in cameras):
         raise ValueError('Missing OracleGS synthetic attention map')
     return cameras
 
@@ -240,7 +245,7 @@ def verify_sfm_cameras(inputs, output):
 
 
 def append_worldexplorer(inputs, output, n):
-    """Add original posed RGBs only after generation and attention are complete."""
+    """Add WorldExplorer RGBs to the synthetic pool, preserving repaired GT."""
     from ..worldexplorer.source import load_staged
     inputs, output = Path(inputs), Path(output)
     manifest = json.loads((inputs / 'inputs.json').read_text())
@@ -259,20 +264,18 @@ def append_worldexplorer(inputs, output, n):
         for index, frame in enumerate(data['frames']):
             path = Path(frame['file_path'])
             name = path.name
-            if name in references or (dataset / 'images' / name).exists():
+            if name in references or (dataset / 'images' / name).exists() or (dataset / f'synthetic_{n}' / name).exists():
                 raise ValueError('WorldExplorer source image name collides with reconstruction inputs')
             shutil.copyfile(path, dataset / 'images' / name)
+            # The upstream reader needs both the dataset placeholder and a
+            # synthetic RGB; the reference filter drops the placeholder camera.
+            shutil.copyfile(path, dataset / f'synthetic_{n}' / name)
             camera, image = colmap_lines(frame, max(image_ids) + index + 1, max(camera_ids) + index + 1, name)
             cameras.write(camera + '\n')
             images.write(image + '\n')
             names.append(name)
-    total = n + len(names)
-    # Upstream uses num_train_views both to select folders and to cap GT views.
-    sparse.rename(dataset / 'sparse' / str(total))
-    for suffix in ('', '_attention_maps'):
-        (dataset / f'synthetic_{n}{suffix}').rename(dataset / f'synthetic_{total}{suffix}')
-    (dataset / 'reference_names.json').write_text(json.dumps(references + names))
     (output / 'worldexplorer-supervision.json').write_text(json.dumps({
-        'run_id': data['run_id'], 'original_count': len(names), 'reference_names': names,
+        'run_id': data['run_id'], 'original_count': len(names), 'synthetic_names': names,
+        'sampling_pool': 'synthetic', 'attention_policy': 'unweighted-no-vggt-maps',
         'camera_convention': data['camera_convention'], 'normalization': data['normalization']}, indent=2))
-    return total, names
+    return n, names

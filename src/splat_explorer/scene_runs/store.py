@@ -149,7 +149,7 @@ class SceneRunStore:
                 return None
             path = Path(run.path)
             cache = path / OUTPUT_SIZE_NAME
-            revision = [run.state.status.value, run.state.updated_at]
+            revision = [run.state.status.value, run.state.updated_at, 2]
             try:
                 saved = _read_json(cache)
                 size = saved.get('bytes')
@@ -157,6 +157,8 @@ class SceneRunStore:
                     return size
             except (OSError, ValueError):
                 pass
+
+            inodes = {}
 
             def scan(directory: Path) -> int:
                 total = 0
@@ -168,13 +170,18 @@ class SceneRunStore:
                         if stat.S_ISDIR(info.st_mode):
                             total += scan(Path(entry.path))
                         elif stat.S_ISREG(info.st_mode):
-                            total += info.st_size
+                            key = (info.st_dev, info.st_ino)
+                            record = inodes.setdefault(key, [info.st_size, info.st_nlink, 0])
+                            record[2] += 1
                 return total
 
             try:
-                size = scan(path)
+                scan(path)
+                # Count internal hard links once; bytes with links outside this
+                # run belong to the shared source, not to this run's outputs.
+                size = sum(size for size, links, seen in inodes.values() if seen >= links)
                 current = self.get_run(run_id).state
-                if [current.status.value, current.updated_at] != revision:
+                if [current.status.value, current.updated_at, 2] != revision:
                     return None
                 _atomic_write_json(cache, {'bytes': size, 'revision': revision})
                 return size

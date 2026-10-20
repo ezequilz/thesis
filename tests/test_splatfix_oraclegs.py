@@ -203,7 +203,8 @@ def test_worker_cancellation_and_failure(tmp_path,monkeypatch):
     assert json.loads((tmp_path/'worker-status.json').read_text())['status'] == 'stopped'
 
 
-def test_real_upstream_colmap_loader_split_and_attention(tmp_path):
+@pytest.mark.parametrize('worldexplorer', [False, True])
+def test_real_upstream_colmap_loader_split_and_attention(tmp_path, worldexplorer):
     # Execute the actual upstream CPU reader in isolation from its CUDA-only
     # module imports. This tests its filename/camera/attention contracts.
     import ast
@@ -219,6 +220,17 @@ def test_real_upstream_colmap_loader_split_and_attention(tmp_path):
     attn.mkdir()
     for p in (root/'synthetic_2').glob('*.png'):
         Image.new('L',(37,37),128).save(attn/p.name)
+    originals = []
+    if worldexplorer:
+        from test_worldexplorer_source import fixture
+        from splat_explorer.splatfix.worldexplorer.source import stage_source
+        from splat_explorer.splatfix.oraclegs.adapter import append_worldexplorer
+        stage_source(fixture(tmp_path), source/'worldexplorer-source')
+        manifest = json.loads((source/'inputs.json').read_text())
+        manifest['worldexplorer_source'] = 'worldexplorer-source'
+        (source/'inputs.json').write_text(json.dumps(manifest))
+        n, originals = append_worldexplorer(source, output, 2)
+        assert n == 2
     spec = importlib.util.spec_from_file_location('oracle_colmap_test',repair.HERE/'upstream/oraclegs/scene/colmap_loader.py')
     colmap = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(colmap)
@@ -232,14 +244,22 @@ def test_real_upstream_colmap_loader_split_and_attention(tmp_path):
         colmap.read_extrinsics_text(root/'sparse/2/images.txt'),
         colmap.read_intrinsics_text(root/'sparse/2/cameras.txt'),str(root/'images'),'',None,
         str(root/'synthetic_2'),str(attn),[])
-    cameras = reference_only_ground_truth(raw,['ref_000000.png','ref_000001.png'])
-    assert len([c for c in cameras if c.is_synthetic]) == 5
+    references = json.loads((root/'reference_names.json').read_text())
+    cameras = reference_only_ground_truth(raw, references, originals)
+    assert len([c for c in cameras if c.is_synthetic]) == 5 + len(originals)
     assert len([c for c in cameras if not c.is_synthetic]) == 2
-    assert all(c.attention_map_path for c in cameras if c.is_synthetic)
+    assert all(c.attention_map_path for c in cameras if c.is_synthetic and c.image_name not in originals)
+    assert all(c.is_synthetic and not c.depth_path and not c.attention_map_path
+               for c in cameras if c.image_name in originals)
+    if originals:
+        with pytest.raises(ValueError, match='attention map'):
+            reference_only_ground_truth(raw, references)
+        with pytest.raises(ValueError, match='Missing WorldExplorer'):
+            reference_only_ground_truth([c for c in raw if c.image_name != originals[0]], references, originals)
     (attn/'target_000001.png').unlink()
     bad = [c._replace(attention_map_path='') if c.image_name=='target_000001.png' else c for c in raw]
     with pytest.raises(ValueError,match='attention map'):
-        reference_only_ground_truth(bad,['ref_000000.png','ref_000001.png'])
+        reference_only_ground_truth(bad,references,originals)
 
 
 @pytest.mark.parametrize('adapter',['trajectory','saved_poses','per_view_preset'])

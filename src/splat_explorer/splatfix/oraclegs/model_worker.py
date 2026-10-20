@@ -102,7 +102,8 @@ def main():
         references = set(json.loads(Path(request['references']).read_text()))
         def calibrated_views(*a, **kw):
             from adapter import reference_only_ground_truth
-            return reference_only_ground_truth(original(*a, **kw), references)
+            return reference_only_ground_truth(original(*a, **kw), references,
+                                               request.get('unweighted_synthetic', []))
         readers.readColmapCameras = calibrated_views
         sys.argv = [str(repo/'train.py'), *request['argv']]
         from graceful import run_training

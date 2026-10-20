@@ -896,7 +896,10 @@ ArtiFixer and OracleGS add these images as original RGB supervision alongside
 new generated views and the existing GPT-repaired references, for both source
 splat and fresh initialization. Original images retain their resolution and
 intrinsics. They do not enter GPT editing, diffusion conditioning, or the
-OracleGS synthetic attention pass. OracleGS uses RGB supervision for these
-additional originals; depth supervision remains attached to the selected
+OracleGS synthetic attention pass. OracleGS places these originals in the same
+synthetic sampling pool as its new SEVA outputs, leaving only selected repaired
+references in the GT pool. WorldExplorer images use the upstream unweighted
+synthetic RGB loss (L1, SSIM, LPIPS), since they have no VGGT attention maps;
+new SEVA outputs still require their attention maps. Depth supervision remains attached to the selected
 reference views. Missing images or normalization metadata stop staging instead
 of silently omitting source views. G4Splat does not use this integration.

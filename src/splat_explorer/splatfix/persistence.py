@@ -141,6 +141,23 @@ def persist_remote_run(lrz, cfg, root, run_id, remote, *, excludes=()):
     atomic_json(root / RECEIPT, {'status': 'downloading', 'remote_dir': remote})
     wait_for_exit(lrz, cfg, remote)
     (root / 'gpu').mkdir(exist_ok=True)
+    # Reuse the immutable WorldExplorer RGBs already staged locally. rsync's
+    # checksum comparison skips unchanged inputs and replaces changed files
+    # atomically, so a remote change cannot overwrite the shared source inode.
+    from .worldexplorer.source import link_source_image
+    staging = read_json(root / 'oraclegs-staging.json', {})
+    manifest = staging.get('input_manifest')
+    if manifest:
+        inputs = (root / manifest).resolve().parent
+        if inputs.is_relative_to(root.resolve()):
+            source = inputs / 'worldexplorer-source/images'
+            destination = root / 'gpu/inputs/worldexplorer-source/images'
+            if source.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+                for image in source.iterdir():
+                    target = destination / image.name
+                    if image.is_file() and not image.is_symlink() and not target.exists():
+                        link_source_image(image, target)
     argv = ['rsync', '-azc', '-e', lrz.rsync_ssh_cmd(cfg)]
     argv += ['--exclude=' + pattern for pattern in excludes]
     argv += [f"{cfg['user']}@{cfg['host']}:{remote}/", str(root / 'gpu') + '/']
