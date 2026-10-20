@@ -100,7 +100,7 @@ def main():
     # Patch the bound reference, without modifying the shared upstream checkout.
     expansion.select_images_for_vggt = select_images_for_vggt
     from control.model_assets import verified_inpainting, inpainting_loader
-    if request['operation'] != 'expand':
+    if request['operation'] not in ('expand', 'resume'):
         scaffold.StableDiffusionInpaintPipeline = inpainting_loader(
             scaffold.StableDiffusionInpaintPipeline, verified_inpainting())
     scaffold.create_clean_folder_name = safe_theme
@@ -123,6 +123,16 @@ def main():
         return result
     expansion.subprocess = types.SimpleNamespace(Popen=subprocess.Popen, PIPE=subprocess.PIPE,
                                                  STDOUT=subprocess.STDOUT, run=checked_run)
+    if request['operation'] == 'resume':
+        from control.recovery import continuation_method, rebase_transforms
+        work = rebase_transforms(Path.cwd(), request['resume_scene'], request['source_run'])
+        transformer = expansion.TrajectoryTransformer(
+            expansion.ROOT_DIR, str(work), scene_id=work.name,
+            translation_scaling_factor=request['translation_scaling'],
+            num_images_for_vggt=request['num_images_for_vggt'])
+        print('Resuming saved trajectories: image selection → VGGT → training → export')
+        continuation_method(expansion.TrajectoryTransformer.run, vars(expansion))(transformer)
+        return
     sys.argv = generation_args(request)
     runpy.run_path('worldexplorer.py', run_name='__main__')
 

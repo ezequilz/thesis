@@ -116,7 +116,36 @@ Wait until submission returns a job ID and **Refresh remote** confirms startup.
 `nohup` runs the `srun --overlap` launcher on the login node, with stdin closed and
 logs on DSS. The GPU process does not depend on the laptop, dashboard, VPN or SSH
 ControlMaster remaining connected. Slurm allocation expiry and cluster failures
-still terminate it; there is no automatic resumption of an interrupted pipeline.
+still terminate it; recovery is explicitly submitted as a new run.
+
+### Continue from completed trajectories
+
+After the archive download is verified, failed/interrupted generation runs offer
+**Continue from saved trajectories**. Completed runs offer **Retrain from saved
+trajectories**. CLI:
+
+```sh
+.venv/bin/python worldexplorer.py resume we_20261020_025819_5d494b3a09a5
+```
+
+Recovery checks the archive manifest and SHA-256 of the merged camera transforms
+and every referenced image. All 32 generated trajectories and eight scaffold
+views must exist. Incomplete trajectory stages are rejected before submission.
+Select a running GPU allocation on Compute; recovery uses that current allocation.
+
+A new run receives only the merged transforms and referenced images. Absolute
+image paths are relocated to the new run. The failed run and local archive stay
+unchanged. `source_run` and `recovery.json` record provenance. An active recovery,
+including an uncertain submission, is returned instead of launching a duplicate.
+
+The adapter resumes at image selection, then runs the authors' existing VGGT
+alignment, Gaussian training and export code. It extracts the suffix of the
+pinned upstream `TrajectoryTransformer.run` at the checked
+`select_images_for_vggt` boundary; an unknown boundary fails explicitly. It does
+not regenerate panorama/trajectory images. Training starts fresh from the
+VGGT initialization; this is not optimizer-checkpoint continuation. Changing
+the generation parameters or resuming partially generated trajectories is not
+supported by this recovery path.
 
 After reconnecting VPN/SSH and restarting the local dashboard, open the WorldExplorer page. Finished runs synchronize automatically; **Refresh
 remote** remains available. CLI equivalents:

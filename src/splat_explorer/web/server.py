@@ -1294,7 +1294,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 with target.open("rb") as stream:
                     shutil.copyfileobj(stream, self.wfile)
-            elif self.command == "POST" and endpoint in ("/jobs", "/refresh", "/download", "/expand", "/reconcile"):
+            elif self.command == "POST" and endpoint in ("/jobs", "/refresh", "/download", "/expand", "/resume", "/reconcile"):
                 if not isinstance(body, dict):
                     raise ValueError("Expected an object")
                 if endpoint == "/reconcile":
@@ -1303,6 +1303,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     result = service.create(body)
                 elif endpoint == "/expand":
                     result = service.expand(body.get("id"), body.get("selections"))
+                elif endpoint == "/resume":
+                    result = service.resume(body.get("id"))
                 elif endpoint == "/refresh":
                     result = service.refresh(body.get("id"))
                 else:

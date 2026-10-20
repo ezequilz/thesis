@@ -35,7 +35,7 @@ def validate(body):
     if not isinstance(body, dict):
         raise ValueError('Expected an object')
     operation = body.get('operation', 'generate')
-    if operation not in ('generate', 'setup', 'expand'):
+    if operation not in ('generate', 'setup', 'expand', 'resume'):
         raise ValueError('Unknown operation')
     prompt = body.get('prompt', DEFAULT_PROMPT)
     if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 2000:
@@ -138,10 +138,14 @@ class WorldExplorerService:
         return result.stdout
 
     @serialized
-    def create(self, body, *, scaffold=None, selection=None):
+    def create(self, body, *, scaffold=None, selection=None, recovery=None):
         request = validate(body)
         if request['operation'] == 'expand' and scaffold is None:
             raise ValueError('Expand requires a completed manual selection')
+        if request['operation'] == 'resume':
+            if recovery is None:
+                raise ValueError('Resume requires verified saved trajectories')
+            request.update(resume_scene=recovery['scene'], source_run=recovery['source_run'])
         cfg = lrz.load_lrz_config()
         if not str(cfg['job_id']).isdigit():
             raise ValueError('Select a reserved GPU on /repair/gpu first')
@@ -164,6 +168,10 @@ class WorldExplorerService:
                    status='submitting', created_at=time.time())
         self._save(path, job)
         atomic(path/'request.json', request)
+        if recovery is not None:
+            job['source_run'] = recovery['source_run']
+            atomic(path/'recovery.json', recovery)
+            self._save(path, job)
         if scaffold is not None:
             inputs = path/'input_scaffold'
             inputs.mkdir()
@@ -182,6 +190,17 @@ class WorldExplorerService:
             if scaffold is not None:
                 lrz._mux_run([rsync_binary(),'-az','-e',lrz.rsync_ssh_cmd(cfg),
                               str(path/'input_scaffold'), str(path/'selection.json'),
+                              f"{cfg['user']}@{cfg['host']}:{remote}/"])
+            if recovery is not None:
+                # Only camera metadata and referenced images are needed.
+                # Preserve scene-relative paths without copying model caches/videos.
+                file_list = path/'recovery-files.txt'
+                file_list.write_text('\n'.join(recovery['files'])+'\n')
+                lrz._mux_run([rsync_binary(), '-azc', '--files-from='+str(file_list),
+                              '-e', lrz.rsync_ssh_cmd(cfg), recovery['root']+'/',
+                              f"{cfg['user']}@{cfg['host']}:{remote}/"])
+                lrz._mux_run([rsync_binary(), '-az', '-e', lrz.rsync_ssh_cmd(cfg),
+                              str(path/'recovery.json'),
                               f"{cfg['user']}@{cfg['host']}:{remote}/"])
             # After this point a timeout has an uncertain outcome; do not resubmit.
             job['status'] = 'launch_unknown'
@@ -306,6 +325,24 @@ print(json.dumps(result))
         job['remote_cleaned_at'] = time.time()
         job['persistence'] = 'Verified locally · remote run files removed'
         return self._save(path, job)
+
+    @serialized
+    def resume(self, run_id):
+        from .recovery import verified_payload
+        path = self.directory(run_id)
+        job = json.loads((path/'job.json').read_text())
+        if job['status'] not in ('failed', 'interrupted', 'completed'):
+            raise ValueError('Only a finished run can be resumed or retrained')
+        if not job.get('downloaded_at') or not job.get('archive_sha256'):
+            raise ValueError('Wait for the complete verified archive to finish downloading before resuming')
+        # A repeated click or uncertain submission must not start duplicate work.
+        active = [j for j in self.jobs() if j.get('source_run') == run_id
+                  and j['request']['operation'] == 'resume'
+                  and j['status'] not in ('failed', 'interrupted', 'completed')]
+        if active:
+            return active[0]
+        payload = verified_payload(path/'results', run_id, job['archive_sha256'])
+        return self.create({**job['request'], 'operation':'resume'}, recovery=payload)
 
     @serialized
     def expand(self, run_id, selections):

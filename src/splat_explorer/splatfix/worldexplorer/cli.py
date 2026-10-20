@@ -17,7 +17,7 @@ def main():
     generate.add_argument('--mode', choices=('automatic','fast','manual'), default='automatic')
     generate.add_argument('--translation-scaling',type=float,default=3.0)
     generate.add_argument('--num-images-for-vggt',type=int,default=40)
-    for name in ('status','download'):
+    for name in ('status','download','resume'):
         sub.add_parser(name).add_argument('id')
     expand = sub.add_parser('expand')
     expand.add_argument('id')
@@ -28,6 +28,7 @@ def main():
     elif args.command == 'status': result = service.refresh(args.id)
     elif args.command == 'expand': result = service.expand(args.id, json.loads(args.selection.read_text()))
     elif args.command == 'download': result = service.download(args.id)
+    elif args.command == 'resume': result = service.resume(args.id)
     else:
         result = service.create({**vars(args), 'operation':args.command})
     print(json.dumps(result,indent=2))
