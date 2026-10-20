@@ -49,8 +49,8 @@ def validate(body):
     if not math.isfinite(scale) or not 0 < scale <= 20:
         raise ValueError('Translation scaling must be > 0 and <= 20')
     images = int(body.get('num_images_for_vggt', 40))
-    if not 8 <= images <= 100:
-        raise ValueError('VGGT image budget must be 8–100')
+    if not 32 <= images <= 100:
+        raise ValueError('VGGT image budget must be 32–100 to sample all 32 trajectories')
     return dict(operation=operation, prompt=prompt.strip(), mode=mode,
                 translation_scaling=scale, num_images_for_vggt=images, revision=REVISION)
 
@@ -151,11 +151,6 @@ class WorldExplorerService:
         row = self._ssh(cfg, f"squeue --me --job={cfg['job_id']} -h -o '%t %L'").strip().split()
         if len(row) != 2 or row[0] != 'R':
             raise RuntimeError('Selected allocation is not running')
-        from ...scene_runs.models import parse_slurm_duration
-        remaining = parse_slurm_duration(row[1])
-        hours = 2 if request['operation'] == 'generate' and request['mode'] == 'manual' else 8
-        if request['operation'] != 'setup' and (remaining is None or remaining.total_seconds() < hours*3600):
-            raise RuntimeError(f'This stage requires at least {hours} hours remaining; select a longer reservation.')
         if request['operation'] != 'setup':
             try:
                 self._ssh(cfg, 'test -f '+shlex.quote(cfg['workspace']+'/worldexplorer-ready.json'))

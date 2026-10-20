@@ -15,6 +15,9 @@ for directory, dirs, files in os.walk(root,followlinks=False):
   if p.is_symlink(): files.append(name); dirs.remove(name)
  for name in sorted(files):
   p=parent/name; relative=str(p.relative_to(root))
+  # /workspace targets exist inside Pyxis, but appear as dangling file links
+  # on the login node. Exclude these shared roots in either os.walk category.
+  if parent==root and name in ('model','predefined_trajectories'): continue
   if relative in ('.archive-manifest.json','.archive-manifest.tmp'): continue
   if p.is_symlink():
    target=os.readlink(p)

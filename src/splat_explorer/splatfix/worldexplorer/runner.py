@@ -5,8 +5,10 @@ import json
 from pathlib import Path
 import re
 import runpy
+import shutil
 import subprocess
 import sys
+import tempfile
 import types
 
 
@@ -31,6 +33,62 @@ def seva_command(command):
                            'python runner.py --seva ', 1)
 
 
+def select_images_for_vggt(scene_root, max_images=100):
+    """Authors' per-trajectory stride sampling, plus all scaffold inputs.
+
+    max_images is an approximate generated-view budget, as in upstream.
+    """
+    if isinstance(max_images, bool) or not isinstance(max_images, int) or max_images < 1:
+        raise ValueError('VGGT generated-image budget must be a positive integer')
+    root = Path(scene_root)
+    frames = json.loads((root/'transforms.json').read_text())['frames']
+    inputs, trajectories = [], {}
+    for frame in frames:
+        path = Path(frame['file_path'])
+        # The pinned merger emits absolute paths; also accept scene-relative paths.
+        if not path.is_absolute():
+            path = root/path
+        if path.parent.name == 'input':
+            inputs.append(path)
+        elif path.parent.name == 'samples-rgb':
+            trajectories.setdefault(path.parent, []).append(path)
+        else:
+            raise ValueError(f'Unexpected WorldExplorer image folder: {path}')
+    if not trajectories:
+        raise ValueError(f'No generated trajectory frames in {root}/transforms.json')
+
+    allowed_per_trajectory = max_images // len(trajectories)
+    if allowed_per_trajectory == 0:
+        raise ValueError(f'VGGT image budget must be at least {len(trajectories)} '
+                         'to sample every trajectory')
+    selected = list(inputs)
+    for paths in trajectories.values():
+        paths = sorted(paths, key=lambda p: int(p.stem))
+        # Retain upstream's floor division and first-frame stride sampling.
+        # A short trajectory can only contribute its available frames.
+        stride = max(1, len(paths) // allowed_per_trajectory)
+        selected.extend(paths[::stride])
+
+    # Keep upstream's filename contract for find_pose_in_transforms.
+    names = [f'{p.parent.parent.name}_{p.parent.name}_{p.name}' for p in selected]
+    if len(set(names)) != len(names):
+        raise ValueError('VGGT selected image filenames collide')
+    output = root/'selected_for_vggt'
+    if output.is_symlink():
+        raise ValueError('VGGT selection directory must not be a symlink')
+    # Prepare completely before replacing a previous selection.
+    with tempfile.TemporaryDirectory(prefix='.vggt-selection-', dir=root) as temporary:
+        staging = Path(temporary)/'images'
+        staging.mkdir()
+        for source, name in zip(selected, names):
+            shutil.copy2(source, staging/name)
+        if output.exists():
+            shutil.rmtree(output)
+        staging.rename(output)
+    print(f'Selected {len(selected)-len(inputs)} generated views across '
+          f'{len(trajectories)} trajectories, plus {len(inputs)} input views')
+
+
 def main():
     request = json.loads(Path('request.json').read_text())
     # OracleGS already caches the compatible SEVA v1.1 checkpoint.
@@ -39,6 +97,8 @@ def main():
     seva.utils.load_model = functools.partial(seva.utils.load_model, weight_name='modelv1.1.safetensors')
     import model.scaffold_generation as scaffold
     import model.scene_expansion as expansion
+    # Patch the bound reference, without modifying the shared upstream checkout.
+    expansion.select_images_for_vggt = select_images_for_vggt
     from control.model_assets import verified_inpainting, inpainting_loader
     if request['operation'] != 'expand':
         scaffold.StableDiffusionInpaintPipeline = inpainting_loader(

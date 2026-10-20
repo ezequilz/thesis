@@ -182,14 +182,16 @@ def test_http_routes_and_streamed_artifact(tmp_path):
     assert handler.wfile.getvalue() == b'ply\n'
 
 
-def test_short_allocation_rejected_before_upload(tmp_path,monkeypatch):
+def test_short_allocation_allowed(tmp_path,monkeypatch):
     api=service.WorldExplorerService(tmp_path)
     monkeypatch.setattr(api,'request_reconcile',lambda **kwargs:None)
     monkeypatch.setattr(service.lrz,'load_lrz_config',lambda:CFG)
     monkeypatch.setattr(service.lrz,'lrz_session_alive',lambda _:True)
     monkeypatch.setattr(api,'_ssh',lambda *a:'R 00:30:00')
-    with pytest.raises(RuntimeError,match='at least 8 hours'): api.create({})
-    assert not api.jobs()
+    monkeypatch.setattr(service.lrz,'_mux_run',lambda *a,**kw:None)
+    result=api.create({})
+    assert result['status']=='submitted'
+    assert len(api.jobs())==1
 
 
 def manual_job(tmp_path):
@@ -337,3 +339,18 @@ def test_inpainting_adapter_only_redirects_original_source(tmp_path):
     loader = model_assets.inpainting_loader(Pipeline, tmp_path)
     assert loader.from_pretrained(model_assets.INPAINTING['original_repo'], torch_dtype='fp16') == (str(tmp_path), {'torch_dtype':'fp16', 'local_files_only':True, 'use_safetensors':True})
     assert loader.from_pretrained('another/model') == ('another/model', {})
+
+
+def test_archive_excludes_container_only_links_but_rejects_external_results(tmp_path):
+    import sys
+    from splat_explorer.splatfix.worldexplorer.archive import MANIFEST_SCRIPT
+    run = tmp_path/'run'; run.mkdir()
+    worker.atomic(run/'exit.json', {'returncode':0})
+    for name in ('model', 'predefined_trajectories'):
+        (run/name).symlink_to('/nonexistent-container-workspace/'+name, target_is_directory=True)
+    subprocess.run([sys.executable, '-c', MANIFEST_SCRIPT, str(run)], check=True, capture_output=True)
+    records=json.loads((run/'.archive-manifest.json').read_text())['files']
+    assert {r['path'] for r in records} == {'exit.json'}
+    (run/'result.png').symlink_to('/nonexistent-container-workspace/image.png')
+    result=subprocess.run([sys.executable, '-c', MANIFEST_SCRIPT, str(run)], capture_output=True, text=True)
+    assert result.returncode and 'External result link: result.png' in result.stderr

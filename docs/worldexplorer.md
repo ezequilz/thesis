@@ -52,6 +52,23 @@ Optional flags: `--mode automatic|fast|manual`, `--translation-scaling 3.0`, and
 literal CLI argument. A bounded ASCII folder slug prevents shell/path parsing
 issues in upstream's internally assembled commands.
 
+The VGGT budget is for generated views **in addition to** the eight scaffold
+views, as defined by the authors. The integration accepts 32–100 so every one
+of the 32 trajectories can contribute. Sampling retains the authors' algorithm:
+divide the budget by the trajectory count, sort numeric frame names, then take
+every `frame_count // per_trajectory_budget` frame starting with the first.
+Integer rounding makes this an approximate budget, not a strict image cap.
+The default 40 selects one generated frame per trajectory plus eight inputs.
+
+The runtime adapter fixes two upstream path assumptions: input images are
+identified by their immediate `input` directory, and trajectories are grouped
+by their enclosing trajectory directory rather than the shared `samples-rgb`
+name. This prevents `input_scaffold` in a scene name from excluding every frame.
+Empty generated sets and insufficient budgets raise explicit errors; short
+trajectories use stride one. Repeat selection replaces the derived selection
+folder so old frames cannot enter VGGT. These fixes do not change generation,
+VGGT inference/alignment, training, or export.
+
 For the one-shot quick-start command, the CLI explicitly selects
 **automatic** mode, so generation proceeds through panorama creation, 32 SEVA
 trajectory videos, VGGT alignment, splatfacto-big training and PLY export without
@@ -86,9 +103,8 @@ run uses the current allocation, not the old scaffold job's allocation.
 CLI: after downloading the scaffold, write a JSON object mapping the four indices
 to their relative paths listed in `candidates.json`, then run
 `python worldexplorer.py expand RUN_ID --selection choices.json`.
-Manual scaffold submission requires two hours left; expansion requires eight.
 
-Full-pipeline/expansion submission requires eight hours remaining on the selected reservation. Allocate
+Submission has no minimum remaining-time requirement on the selected reservation. Allocate
 more for a first generation's model downloads. WorldExplorer does not extend the
 reservation or allocate a second GPU. Use the GPU exclusively: a per-allocation
 lock prevents two WorldExplorer jobs from overlapping, but existing reconstruction
