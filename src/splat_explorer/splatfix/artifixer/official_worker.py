@@ -69,6 +69,45 @@ def regularized_trainer_class(base):
 
 
 @contextmanager
+def shared_distillation_cameras(official):
+    """Share exact calibrations before upstream allocates per-camera ray grids.
+
+    The authors' materializer emits a camera per image. Thousands of original
+    WorldExplorer frames then duplicate tens of GiB of CPU rays (and GPU rays
+    per loader). Camera IDs describe intrinsics, not poses: sharing identical
+    records preserves every observation, pose, and selected/override index.
+    """
+    write_cameras = official.write_colmap_cameras
+    write_images = official.write_colmap_images
+    mappings = {}
+
+    def cameras(path, records):
+        unique, keys, mapping = [], {}, {}
+        for camera in records:
+            key = (camera.model, camera.width, camera.height,
+                   tuple(float(value) for value in camera.params))
+            if key not in keys:
+                keys[key] = camera.id
+                unique.append(camera)
+            mapping[camera.id] = keys[key]
+        write_cameras(path, unique)
+        mappings[Path(path).parent] = mapping
+        print(f'SPLATFIX_SHARED_CAMERAS: {len(records)} records -> '
+              f'{len(unique)} exact calibrations; all frames retained', flush=True)
+
+    def images(path, records):
+        mapping = mappings[Path(path).parent]
+        write_images(path, [(image_id, qvec, tvec, mapping[camera_id], name)
+                            for image_id, qvec, tvec, camera_id, name in records])
+
+    official.write_colmap_cameras, official.write_colmap_images = cameras, images
+    try:
+        yield
+    finally:
+        official.write_colmap_cameras, official.write_colmap_images = write_cameras, write_images
+
+
+@contextmanager
 def reconstruction_settings(profile='artifixer', *, source_ply=None):
     validate_regularization(profile)
     if profile == 'artifixer' and source_ply is None:
@@ -752,7 +791,7 @@ def distill(root, request, trajectory):
     # Authors entry point, with the selected loss policy shared by both arms.
     # No resume checkpoint, custom fitter, SH truncation, or compositing.
     profile = request.get('runtime', {}).get('regularization_profile', 'artifixer')
-    with reconstruction_settings(profile, source_ply=request.get('source_ply')):
+    with shared_distillation_cameras(official), reconstruction_settings(profile, source_ply=request.get('source_ply')):
         checkpoint, reused = official.train_artifixer3d(
             scene, paths, artifixer_frames_dir=predictions,
             base_checkpoint=None, config_name=ARTIFIXER3D_CONFIG,

@@ -9,6 +9,16 @@ from splat_explorer.splatfix import graceful_worker as graceful
 from splat_explorer.splatfix.repair import run_worker
 
 
+@pytest.mark.parametrize('code, expected', [
+    ('import os, signal; os.kill(os.getpid(), signal.SIGKILL)', 'SIGKILL'),
+    ('raise SystemExit(3)', 'exit code 3'),
+])
+def test_worker_failure_reports_exit_status(tmp_path, code, expected):
+    with pytest.raises(RuntimeError, match=expected):
+        run_worker([sys.executable, '-c', code], cwd=tmp_path, env=os.environ.copy(),
+                   log_path=tmp_path / 'infer.log', should_stop=lambda: False)
+
+
 def test_hook_saves_once_at_boundary_only_when_stopped(tmp_path):
     calls = []
     class Trainer:

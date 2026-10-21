@@ -404,7 +404,12 @@ def run_worker(command, *, cwd, env, log_path, should_stop):
             if stop_started is not None or should_stop():
                 raise InterruptedError('Splatfix repair stopped; available checkpoint/PLY and diagnostics preserved')
             if process.returncode:
-                raise RuntimeError(f'ArtiFixer worker failed: {Path(log_path).read_text(errors="replace")[-3000:]}')
+                status = f'exit code {process.returncode}'
+                if process.returncode < 0:
+                    status += f' ({signal.Signals(-process.returncode).name})'
+                if process.returncode == -signal.SIGKILL:
+                    status += '; worker was killed externally; check scheduler/cgroup memory limits'
+                raise RuntimeError(f'ArtiFixer worker failed ({status}): {Path(log_path).read_text(errors="replace")[-3000:]}')
         finally:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
