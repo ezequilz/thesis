@@ -661,5 +661,8 @@ def test_worldexplorer_attention_pipeline(tmp_path, monkeypatch, world_attention
 def test_artifixer_skips_generation_but_runs_attention_and_training(tmp_path, monkeypatch, initialization):
     from test_oraclegs_source_geometry import source_ply
     source_ply(tmp_path/'missing.ply')
+    from splat_explorer.rendering.cpu_splat_renderer import CpuSplatRenderer
+    monkeypatch.setattr(CpuSplatRenderer, 'render_depth', lambda self, camera: np.full((camera.height, camera.width), 4, np.float32))
     test_full_pipeline_stage_contract(tmp_path, monkeypatch, 'saved_poses', False, 6,
+                                      depth='source_splat' if initialization == 'source_splat' else 'predicted',
                                       initialization=initialization, artifixer=True)

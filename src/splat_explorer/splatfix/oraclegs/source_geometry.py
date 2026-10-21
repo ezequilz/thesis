@@ -137,3 +137,36 @@ def validate_assets(root, manifest):
         path = (root/record['path']).resolve()
         if not path.is_relative_to(root) or not path.is_file() or digest(path) != record['sha256']:
             raise ValueError('Source geometry asset missing or checksum mismatch')
+
+
+def stage_saved_pose_depth(root, frames):
+    """Render reference depth from the snapshotted PLY at staged OpenGL poses."""
+    from ...scene import load_scene
+    from ...rendering.base import Camera
+    from ...rendering.cpu_splat_renderer import CpuSplatRenderer
+    from ..g4splat.source_depth import conservative_mask
+    root = Path(root)
+    renderer = CpuSplatRenderer(load_scene(root/'source-initialization.ply'))
+    directory = root/'source-depth'
+    directory.mkdir()
+    records = []
+    for frame in frames:
+        if not np.allclose([frame['cx'], frame['cy']], [frame['w']/2, frame['h']/2], rtol=0, atol=1e-4):
+            raise ValueError('Source-depth supervision requires centered staged intrinsics')
+        pose = np.asarray(frame['transform_matrix']) @ np.diag([1., -1., -1., 1.])
+        camera = Camera(pose[:3, 3], pose[:3, :3], width=frame['w'], height=frame['h'],
+                        fov_deg=float(np.degrees(2*np.arctan(frame['w']/(2*frame['fl_x'])))))
+        depth = renderer.render_depth(camera)
+        inverse, valid = fit_depth(depth, conservative_mask(depth), camera.intrinsics, frame)
+        if not valid.any():
+            raise ValueError('No reliable source depth for '+frame['file_path'])
+        name = Path(frame['file_path']).name
+        path = directory/(Path(name).stem+'.npz')
+        np.savez_compressed(path, invdepth=inverse, valid=valid)
+        records.append({'image':name, 'path':str(path.relative_to(root)),
+                        'sha256':digest(path), 'valid_fraction':float(valid.mean())})
+    return {'version':1, 'views':records,
+            'convention':'inverse_positive_camera_z_scene_units',
+            'conversion':'1/z on valid pixels; no normalization or SfM scale fitting',
+            'mask':'front-surface coverage >=0.15; 1px erosion; local depth spread <=10%',
+            'renderer':'CpuSplatRenderer.render_depth', 'fallback':'none; invalid pixels excluded'}

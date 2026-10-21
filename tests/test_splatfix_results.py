@@ -1199,3 +1199,31 @@ def test_failed_sog_export_keeps_interrupted_run_inputs(tmp_path, monkeypatch):
     assert len(list(root.rglob('*.png'))) == 8
     assert (result / 'checkpoint.pt').exists()
     assert not (root / 'reduction.json').exists()
+
+
+def test_manifestless_stopped_run_retains_checkpoint_artifacts(tmp_path):
+    studio, root, result = setup(tmp_path)
+    (result / 'result.json').unlink()
+    config_path = root / 'config.json'
+    config = json.loads(config_path.read_text())
+    config['splatfix'].update(stage='repair', checkpoint=str(root / 'gpu/checkpoint'))
+    config_path.write_text(json.dumps(config))
+    studio.store.set_status(root.name, 'stopped')
+    checkpoint = root / 'gpu/checkpoint'
+    views = checkpoint / 'views/000'
+    views.mkdir(parents=True)
+    (views / 'repaired.png').write_bytes(b'image')
+    (checkpoint / 'checkpoint.json').write_text('{}')
+    (checkpoint / 'snapshot.pt').write_bytes(b'checkpoint')
+    outside = tmp_path / 'outside.png'
+    outside.write_bytes(b'private')
+    (views / 'escaped.png').symlink_to(outside)
+    detail = studio.results.run_detail(root.name)
+    assert detail['status'] == 'stopped'
+    assert detail['gallery']['frames'] == []
+    saved = detail['saved_artifacts']
+    assert len(saved['image_groups']) == 1
+    assert [p['name'] for p in saved['image_groups'][0]['images']] == ['repaired.png']
+    assert {p['name'] for p in saved['checkpoints']} >= {'checkpoint/checkpoint.json', 'checkpoint/snapshot.pt'}
+    assert studio.allowed_file(str(checkpoint / 'snapshot.pt')) == checkpoint / 'snapshot.pt'
+    assert 'showSavedArtifacts(r)' in Path('src/splat_explorer/web/static/splatfix_result_detail.html').read_text()

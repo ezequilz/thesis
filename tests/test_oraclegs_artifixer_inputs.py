@@ -13,6 +13,13 @@ from splat_explorer.web.splatfix_studio import SplatfixStudio
 from test_oraclegs_source_geometry import source_ply
 
 
+@pytest.fixture(autouse=True)
+def rendered_source_depth(monkeypatch):
+    from splat_explorer.rendering.cpu_splat_renderer import CpuSplatRenderer
+    monkeypatch.setattr(CpuSplatRenderer, 'render_depth',
+                        lambda self, camera: np.full((camera.height, camera.width), 4, np.float32))
+
+
 def fixture(tmp_path):
     root = tmp_path/'source'
     root.mkdir()
@@ -48,6 +55,14 @@ def test_reuse_preserves_camera_and_reference_roles(tmp_path,initialization):
     assert bool(manifest.get('source_initialization')) == (initialization=='source_splat')
     frames=json.loads((inputs/'scene/transforms.json').read_text())['frames']
     assert len(frames)==8
+    assert manifest['oracle_depth_source'] == ('source_splat' if initialization == 'source_splat' else 'predicted')
+    if initialization == 'source_splat':
+        assert len(manifest['source_depth']['views']) == 6
+        for record in manifest['source_depth']['views']:
+            with np.load(inputs/record['path']) as data:
+                assert data['invdepth'].shape == (8,16)
+                assert np.all(data['invdepth'][data['valid']] == .25)
+                assert not data['valid'][0].any()
     assert frames[-1]['fl_x']==10
     np.testing.assert_array_equal(frames[-1]['transform_matrix'], [[1,0,0,7],[0,-1,0,0],[0,0,-1,0],[0,0,0,1]])
     (output/'dataset/images').mkdir(parents=True)
@@ -86,6 +101,7 @@ def test_dashboard_queues_isolated_snapshot_and_rejects_missing_inputs(tmp_path)
     options = queued['config']['splatfix']
     assert options['reconstruction_method']=='oraclegs'
     assert options['oracle_initialization']=='source_splat'
+    assert options['oracle_depth_source']=='source_splat'
     snapshot = Path(options['oracle_artifixer_inputs'])
     assert snapshot != row['_manifest'].parent
     assert (snapshot/'source-initialization.ply').read_bytes() == row['_paths']['original'].read_bytes()
@@ -147,3 +163,23 @@ def test_button_jobs_wait_for_normal_manager_gpu_lease(tmp_path, monkeypatch):
     assert manager.run_once() is True
     assert executed == [first['run_id'], second['run_id']]
     assert store.gpu_lease_owner() is None
+
+
+def test_source_depth_uses_staged_reference_cameras_and_rejects_empty_depth(tmp_path, monkeypatch):
+    from splat_explorer.rendering.cpu_splat_renderer import CpuSplatRenderer
+    studio, row = fixture(tmp_path)
+    seen = []
+    def render(self, camera):
+        seen.append(camera)
+        return np.full((camera.height, camera.width), 4, np.float32)
+    monkeypatch.setattr(CpuSplatRenderer, 'render_depth', render)
+    export_inputs(studio, row, tmp_path/'inputs', 'source_splat')
+    assert len(seen) == 6
+    for index, camera in enumerate(seen):
+        np.testing.assert_allclose(camera.position, [index, 0, 0])
+        np.testing.assert_allclose(camera.rotation, np.eye(3))
+        np.testing.assert_allclose(camera.intrinsics, [[10,0,8],[0,10,4],[0,0,1]])
+    monkeypatch.setattr(CpuSplatRenderer, 'render_depth',
+                        lambda self, camera: np.full((camera.height, camera.width), np.inf, np.float32))
+    with pytest.raises(ValueError, match='No reliable source depth'):
+        export_inputs(studio, row, tmp_path/'invalid', 'source_splat')

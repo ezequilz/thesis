@@ -406,6 +406,25 @@ class ResultCatalog:
         row['comparison_gallery'] = []
         # Keep full logs separate from the bounded live-worker snapshot.
         run_root = (self.studio.root / row['run_id']).resolve()
+        # Checkpoint downloads can precede every result/preview manifest.
+        # Keep these separate from verified reconstruction or inference outputs.
+        row['saved_artifacts'] = {'image_groups': [], 'checkpoints': []}
+        saved = row['saved_artifacts']
+        groups = {}
+        gpu = run_root / 'gpu'
+        for path in sorted(gpu.rglob('*')):
+            if path.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.pt', '.pth', '.ckpt', '.ply', '.json'):
+                continue
+            resolved = path.resolve()
+            if not resolved.is_relative_to(run_root) or not resolved.is_file():
+                continue
+            relative = path.relative_to(gpu)
+            if path.suffix.lower() in ('.pt', '.pth', '.ckpt', '.ply') or path.name == 'checkpoint.json':
+                saved['checkpoints'].append({'name': str(relative), 'url': self.studio.file_url(path)})
+            elif 'checkpoint' in relative.parts and path.suffix.lower() in ('.png', '.jpg', '.jpeg'):
+                name = str(relative.parent)
+                groups.setdefault(name, []).append({'name': path.name, 'url': self.studio.file_url(path)})
+        saved['image_groups'] = [{'name': name, 'images': images} for name, images in groups.items()]
         candidates = list(run_root.glob('*.log')) + list((run_root / 'gpu').glob('*.log'))
         decoded_names = {}
         if manifest:

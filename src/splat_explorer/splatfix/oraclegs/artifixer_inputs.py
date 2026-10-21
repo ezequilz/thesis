@@ -6,7 +6,7 @@ from PIL import Image
 from ..checkpoint import atomic_json
 from ..jobs import read_json
 from .backend import validate_options
-from .source_geometry import digest, inspect_ply
+from .source_geometry import digest, inspect_ply, stage_saved_pose_depth
 
 AXES = np.diag([1., -1., -1., 1.])
 
@@ -84,7 +84,9 @@ def export_inputs(studio, row, destination, initialization):
         reference = min(range(6), key=lambda i: np.linalg.norm(np.asarray(frames[i]['transform_matrix'])[:3,3]-np.asarray(frames[-1]['transform_matrix'])[:3,3]))
         targets.append({'target_index':index, 'image_name':name, 'reference_index':reference,
                         'segment_index':reference, 'alpha':0.0, 'source_sha256':digest(source)})
-    options = validate_options({'oracle_reference_mode':'all', 'oracle_adapter':'saved_poses', 'oracle_initialization':initialization})
+    options = validate_options({'oracle_reference_mode':'all', 'oracle_adapter':'saved_poses',
+                                'oracle_initialization':initialization,
+                                'oracle_depth_source':'source_splat' if initialization == 'source_splat' else 'predicted'})
     manifest = {**options, 'mode':'edited', 'views':views, 'resolution':list(size),
                 'seva_internal_resolution':list(size), 'seva_task':'img2trajvid',
                 'artifixer_source':{'run_id':row['run_id'], 'result_id':row['id'], 'generated_count':len(targets)},
@@ -97,6 +99,7 @@ def export_inputs(studio, row, destination, initialization):
         shutil.copyfile(source, root/'source-initialization.ply')
         manifest['source_initialization'] = {'path':'source-initialization.ply', 'sha256':digest(root/'source-initialization.ply'), 'gaussian_count':count, 'sh_degree':degree}
         manifest['source_splat_used_for_initialization'] = True
+        manifest['source_depth'] = stage_saved_pose_depth(root, frames[:len(views)])
     atomic_json(root/'scene/transforms.json', {'frames':frames})
     atomic_json(root/'inputs.json', manifest)
     return manifest

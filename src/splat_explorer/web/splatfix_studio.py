@@ -141,7 +141,10 @@ class SplatfixStudio(SceneRunStudio):
         if not any(path.is_relative_to(root) for root in roots) or not path.is_file():
             raise ValueError('Artifact is outside the splatfix output roots or missing')
         # Never expose credentials or runtime configuration as artifacts.
-        if path.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.ply', '.json', '.log', '.jsonl', '.mp4'):
+        model_checkpoint = (path.suffix.lower() in ('.pt', '.pth', '.ckpt')
+                            and path.is_relative_to(self.root.resolve())
+                            and 'gpu' in path.relative_to(self.root.resolve()).parts)
+        if not model_checkpoint and path.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.ply', '.json', '.log', '.jsonl', '.mp4'):
             raise ValueError('Unsupported artifact type')
         return path
 
