@@ -955,3 +955,47 @@ videos and downloads. Videos are lossy visual-debugging previews, not substitute
 for original images in training or pixel-level evaluation. Backup & reduce copies
 and verifies the full run before encoding or cleanup; external shared source
 checkpoints are never deleted.
+
+Use **Save inference videos** in the ArtiFixer run-details header to export the
+same verified MP4s without reducing the run. It is available for inactive,
+unreduced runs and processes inference/plus batches across the whole run. Source
+images, PLYs, checkpoints, logs and previews remain intact. Videos appear in run
+details after export, and the stored run size is recalculated. Repeating the action
+rebuilds the same video files rather than adding duplicates.
+
+Interrupted ArtiFixer runs retain their partial PLY at its recorded path, the
+partial-result manifest, stop-state diagnostics and failure/lifecycle records.
+When the registered original is a SOG bundle or directory, reduction exports the
+unfiltered LOD-0 review scene as `original.ply` before removing any inputs. If
+that export fails, all source images remain. Video-only export does not require
+copying or converting the original scene.
+
+
+### Step 4 ArtiFixer reconstruction controls
+
+**Reconstruction images** and **Reconstruction initialization** are independent:
+
+- **All images reconstruction** (`reconstruction_images=all`, default) preserves
+  the existing behavior: saved references, ArtiFixer-generated views, and all
+  archived WorldExplorer images supervise reconstruction.
+- **ArtiFixer3D images only** (`reconstruction_images=distilled`) keeps the saved
+  references and generated views, without staging, uploading, or adding the
+  WorldExplorer source-image archive. Repaired anchors remain direct targets;
+  this does not discard the references used by the authors' distillation recipe.
+- **Original PLY snapshot** (`reconstruction_initialization=full_splat`, default)
+  imports all source Gaussian parameters, including SH, with a fresh optimizer
+  and training schedule.
+- **Fresh reconstruction** (`reconstruction_initialization=point_cloud`)
+  creates new Gaussians using the existing point-cloud initialization path.
+  By default the seed points are source-splat positions and RGB; no original
+  Gaussian scales, rotations, opacity, or SH are imported. This is not a literal
+  zero-point initialization, nor new SfM from the generated images.
+
+Both initializations produce separate output files. Source-splat RGB/opacity
+still condition diffusion in every combination. The 30,000-step author fitting
+recipe and selected regularization profile remain unchanged. Run requests,
+worker runtime, supervision manifests, and completed distillation results record
+these choices; older requests retain the all-images/full-splat defaults.
+
+CLI equivalents: `--reconstruction-images all|distilled` and
+`--reconstruction-initialization full_splat|point_cloud`.

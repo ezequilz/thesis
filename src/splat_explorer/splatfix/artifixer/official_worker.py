@@ -21,6 +21,16 @@ ARTIFIXER3D_CONFIG = 'apps/colmap_3dgut_sparse_mcmc_lpips'
 ARTIFIXER3D_STEPS = 30000
 
 
+def validate_reconstruction_options(raw):
+    images = raw.get('reconstruction_images', 'all')
+    initialization = raw.get('reconstruction_initialization', 'full_splat')
+    if images not in ('all', 'distilled'):
+        raise ValueError('reconstruction_images must be all or distilled')
+    if initialization not in ('full_splat', 'point_cloud'):
+        raise ValueError('reconstruction_initialization must be full_splat or point_cloud')
+    return {'reconstruction_images': images, 'reconstruction_initialization': initialization}
+
+
 REGULARIZATION_PROFILES = ('artifixer', 'base_mcmc')
 
 
@@ -711,6 +721,11 @@ def unique_supervision(trajectory, references):
 
 
 def append_worldexplorer_supervision(request, transforms, supervision):
+    policy = validate_reconstruction_options(request.get('runtime', {}) | {
+        key: request[key] for key in ('reconstruction_images', 'reconstruction_initialization') if key in request})
+    supervision.update(policy, worldexplorer_original_count=0)
+    if policy['reconstruction_images'] == 'distilled':
+        return
     if request.get('worldexplorer_source'):
         # This worker runs with a deliberately isolated PYTHONPATH.
         import importlib.util
@@ -813,6 +828,9 @@ def distill(root, request, trajectory):
         'reconstruction_recipe': reconstruction_recipe(profile, source_ply=bool(request.get('source_ply'))),
         'source_ply_sha256': request.get('source_ply_sha256'),
         'render_dir': str(render_dir), 'supervision_manifest': str(root / 'supervision.json'),
+        'reconstruction_images': supervision['reconstruction_images'],
+        'reconstruction_initialization': supervision['reconstruction_initialization'],
+        'worldexplorer_original_count': supervision['worldexplorer_original_count'],
         'original_frame_count': len(render_transforms['frames']),
         'distillation_frame_count': len(transforms['frames'])}, indent=2))
 

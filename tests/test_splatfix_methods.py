@@ -81,3 +81,22 @@ def test_image_cache_insertion_rejects_non_boolean(value):
     from splat_explorer.splatfix.artifixer.backend import validate_options
     with pytest.raises(ValueError, match='image_cache_insertion'):
         validate_options({'stage': 'repair', 'image_cache_insertion': value})
+
+
+@pytest.mark.parametrize('images', ['all', 'distilled'])
+@pytest.mark.parametrize('initialization', ['full_splat', 'point_cloud'])
+def test_artifixer_reconstruction_choices(images, initialization):
+    job = validate_job({'stage': 'repair', 'checkpoint': 'saved',
+                        'reconstruction_images': images, 'reconstruction_initialization': initialization})
+    assert job['reconstruction_images'] == images
+    assert job['reconstruction_initialization'] == initialization
+    legacy = validate_job({'stage': 'repair', 'checkpoint': 'saved'})
+    assert legacy['reconstruction_images'] == 'all'
+    assert legacy['reconstruction_initialization'] == 'full_splat'
+
+
+@pytest.mark.parametrize('key', ['reconstruction_images', 'reconstruction_initialization'])
+@pytest.mark.parametrize('value', ['typo', None, True])
+def test_artifixer_reconstruction_choices_reject_invalid(key, value):
+    with pytest.raises(ValueError, match=key):
+        validate_job({'stage': 'repair', 'checkpoint': 'saved', key: value})

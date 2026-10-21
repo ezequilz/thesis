@@ -177,7 +177,9 @@ def test_local_selection_dispatches_separate_cli_without_image_edits(studio, mon
     assert studio.store.get_run(job['run_id']).state.status.value == 'completed'
 
 
-def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypatch, tmp_path):
+@pytest.mark.parametrize('images', ['all', 'distilled'])
+@pytest.mark.parametrize('initialization', ['full_splat', 'point_cloud'])
+def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypatch, tmp_path, images, initialization):
     from splat_explorer import repair_lrz as lrz
     from splat_explorer.scene_runs.lrz_transport import LrzSceneRunTransport
     from splat_explorer.splatfix.executor import SplatfixExecutor
@@ -186,7 +188,13 @@ def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypat
     source.write_text('offline source fixture')
     cp.manifest['scene_path'] = str(source)
     cp.save()
-    job = studio.create({'stage': 'repair', 'mode': 'baseline', 'checkpoint': str(cp.root)})
+    staged = []
+    def stage(source, destination):
+        staged.append(source)
+        return str(destination)
+    monkeypatch.setattr('splat_explorer.splatfix.worldexplorer.source.stage_source', stage)
+    job = studio.create({'stage': 'repair', 'mode': 'baseline', 'checkpoint': str(cp.root),
+                         'reconstruction_images': images, 'reconstruction_initialization': initialization})
     commands, transfers, launches = [], [], []
     connection_fails = [True]
     monkeypatch.setattr(lrz, 'load_lrz_config', lambda: {'workspace': '/dss/work', 'user': 'u', 'host': 'h'})
@@ -219,6 +227,10 @@ def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypat
     assert len(launches) == 1
     assert 'splat_explorer.splatfix.job_worker' in launches[0]
     request = json.loads((studio.store.run_path(job['run_id']) / 'worker-request.json').read_text())
+    assert request['runtime']['reconstruction_images'] == images
+    assert request['runtime']['reconstruction_initialization'] == initialization
+    assert len(staged) == (1 if images == 'all' else 0)
+    assert ('worldexplorer_source' in request['runtime']) == (images == 'all')
     assert request['mode'] == 'baseline'
     assert request['checkpoint'].endswith('/checkpoint')
     assert request['runtime']['scene_path'].endswith('/source/source.ply')

@@ -101,3 +101,20 @@ def test_repair_cache_insertion_cli_overrides_config(monkeypatch, tmp_path, flag
     args = parser.parse_args(['splatfix', 'repair', str(tmp_path / 'saved'), '--output', str(tmp_path / 'out'), *([flag] if flag else [])])
     repair_splat(Config({'splatfix': {'runtime': {'image_cache_insertion': True}}}), args)
     assert received['runtime']['image_cache_insertion'] is expected
+
+
+@pytest.mark.parametrize('images', ['all', 'distilled'])
+@pytest.mark.parametrize('initialization', ['full_splat', 'point_cloud'])
+def test_repair_reconstruction_cli_overrides_config(monkeypatch, tmp_path, images, initialization):
+    from splat_explorer.config import Config
+    from splat_explorer.splatfix import repair
+    received = {}
+    monkeypatch.setattr(repair, 'run_repair', lambda *args, **kwargs: received.update(kwargs) or {})
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    args = parser.parse_args(['splatfix', 'repair', str(tmp_path / 'saved'), '--output', str(tmp_path / 'out'),
+                             '--reconstruction-images', images, '--reconstruction-initialization', initialization])
+    repair_splat(Config({'splatfix': {'runtime': {'reconstruction_images': 'all',
+                                                'reconstruction_initialization': 'full_splat'}}}), args)
+    assert received['runtime']['reconstruction_images'] == images
+    assert received['runtime']['reconstruction_initialization'] == initialization

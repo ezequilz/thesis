@@ -95,3 +95,18 @@ def test_oracle_appends_originals_to_synthetic_pool(tmp_path):
     report = json.loads((output / 'worldexplorer-supervision.json').read_text())
     assert report['sampling_pool'] == 'synthetic'
     assert report['synthetic_names'] == names
+
+
+@pytest.mark.parametrize('initialization', ['full_splat', 'point_cloud'])
+def test_artifixer_distilled_only_ignores_even_a_stale_original_bundle(initialization):
+    from splat_explorer.splatfix.artifixer.official_worker import append_worldexplorer_supervision
+    transforms = {'frames': [{'file_path': 'repaired.png'}, {'file_path': 'generated.png'}]}
+    supervision = {'selected_indices': [0], 'distillation_frame_count': 2, 'groups': [
+        {'reference': 'repaired.png', 'source_index': 0}, {'reference': None, 'source_index': 1}]}
+    append_worldexplorer_supervision({'worldexplorer_source': '/missing/old-bundle', 'runtime': {
+        'reconstruction_images': 'distilled', 'reconstruction_initialization': initialization}}, transforms, supervision)
+    assert len(transforms['frames']) == supervision['distillation_frame_count'] == 2
+    assert supervision['selected_indices'] == [0]
+    assert supervision['worldexplorer_original_count'] == 0
+    assert supervision['groups'][0]['reference'] == 'repaired.png'
+    assert supervision['groups'][1]['reference'] is None

@@ -29,6 +29,15 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('select').scene_id,'unrelated-current-scene');
   assert.equal(payload('repair').checkpoint,'/saved/cp');
   assert.equal(payload('repair').mode,'edited');
+  $('artifixer-reconstruction-images').value='all';
+  $('artifixer-reconstruction-initialization').value='full_splat';
+  assert.equal(payload('repair').reconstruction_images,'all');
+  assert.equal(payload('repair').reconstruction_initialization,'full_splat');
+  $('artifixer-reconstruction-images').value='distilled';
+  $('artifixer-reconstruction-initialization').value='point_cloud';
+  assert.equal(payload('repair').reconstruction_images,'distilled');
+  assert.equal(payload('repair').reconstruction_initialization,'point_cloud');
+  assert.equal(payload('benchmark').reconstruction_images,undefined);
   assert.equal(payload('repair').image_cache_insertion,false);
   $('image-cache-insertion').value='on';
   assert.equal(payload('repair').image_cache_insertion,true);
@@ -109,6 +118,8 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.match($('schedule-context').textContent,/Saved camera checkpoint/);
   assert.match($('schedule-context').textContent,/GPT-image improved/);
   const saved=pendingPayload;
+  $('artifixer-reconstruction-images').value='all';
+  $('artifixer-reconstruction-initialization').value='full_splat';
   $('reconstruction-method').value='other-method';
   selected='/different-checkpoint';$('mode').value='baseline';$('regularization-profile').value='artifixer';
   let submitted;
@@ -117,6 +128,8 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(submitted.checkpoint,'/saved/cp');
   assert.equal(submitted.mode,'edited');
   assert.equal(submitted.image_cache_insertion,true);
+  assert.equal(submitted.reconstruction_images,'distilled');
+  assert.equal(submitted.reconstruction_initialization,'point_cloud');
   assert.equal(submitted.reconstruction_method,'artifixer');
   $('reconstruction-method').value='artifixer';
   assert.equal(submitted.regularization_profile,'base_mcmc');

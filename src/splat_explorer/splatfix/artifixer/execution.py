@@ -115,6 +115,12 @@ def execute_remote(executor, run_id, options, root, stop, update):
         runtime['resolution_profile'] = options['resolution_profile']
         runtime['regularization_profile'] = options.get('regularization_profile', 'artifixer')
         runtime['split_mode'] = options.get('split_mode', 'double-split')
+        if not benchmark:
+            from .official_worker import validate_reconstruction_options
+            runtime.update(validate_reconstruction_options(options))
+            # A configured historical bundle must not leak into distilled-only runs.
+            if runtime['reconstruction_images'] == 'distilled':
+                runtime.pop('worldexplorer_source', None)
         runtime['image_cache_insertion'] = options.get('image_cache_insertion', False) if not benchmark else False
         if benchmark:
             from ..jobs import registered_benchmark
@@ -156,7 +162,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
                     sync(str(source), endpoint + ':' + remote_dir + '/source/')
                 remote_scene = container_dir + '/source/' + source.name
             from ..worldexplorer.source import stage_source
-            originals = stage_source(source, root / 'worldexplorer-source')
+            originals = (stage_source(source, root / 'worldexplorer-source')
+                         if runtime['reconstruction_images'] == 'all' else None)
             if originals:
                 sync(originals + '/', endpoint + ':' + remote_dir + '/worldexplorer-source/')
                 runtime['worldexplorer_source'] = container_dir + '/worldexplorer-source'

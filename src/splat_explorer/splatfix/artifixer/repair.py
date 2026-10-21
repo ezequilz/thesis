@@ -29,6 +29,7 @@ DEFAULT_RUNTIME = {
     'resolution_profile': 'training',
     'regularization_profile': 'artifixer',
     'reconstruction_initialization': 'full_splat',
+    'reconstruction_images': 'all',
     'image_cache_insertion': False,
     'repo': '/workspace/third_party/ArtiFixer',
     'python': '/workspace/artifixer-venv/bin/python',
@@ -87,8 +88,8 @@ def validate_runtime(runtime=None):
     from ..resolution import profile_size
     profile_size(cfg['resolution_profile'])
     validate_regularization(cfg['regularization_profile'])
-    if cfg['reconstruction_initialization'] not in ('full_splat', 'point_cloud'):
-        raise ValueError('reconstruction_initialization must be full_splat or point_cloud')
+    from .official_worker import validate_reconstruction_options
+    cfg.update(validate_reconstruction_options(cfg))
     if type(cfg['image_cache_insertion']) is not bool:
         raise ValueError('image_cache_insertion must be a boolean')
     repo = Path(cfg['repo']).resolve()
@@ -496,8 +497,12 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                'reference_sha256': [digest_file(path) for path in references],
                'source_points3d_sha256': digest_file(points), 'trajectory_signature': trajectory['signature']}
     from ..worldexplorer.source import stage_source
-    originals = cfg.get('worldexplorer_source') or stage_source(
-        cfg.get('scene_path') or cp.manifest['scene_path'], root / 'worldexplorer-source')
+    originals = None
+    if cfg.get('reconstruction_images', 'all') == 'all':
+        originals = cfg.get('worldexplorer_source') or stage_source(
+            cfg.get('scene_path') or cp.manifest['scene_path'], root / 'worldexplorer-source')
+    request.update(reconstruction_images=cfg.get('reconstruction_images', 'all'),
+                   reconstruction_initialization=cfg.get('reconstruction_initialization', 'full_splat'))
     if originals:
         request['worldexplorer_source'] = originals
     request.update(initialization or {})

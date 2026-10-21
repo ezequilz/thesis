@@ -28,6 +28,8 @@ def validate_options(raw):
         insertion = raw.get('image_cache_insertion', False)
         if type(insertion) is not bool:
             raise ValueError('image_cache_insertion must be a boolean')
+        from .official_worker import validate_reconstruction_options
+        result.update(validate_reconstruction_options(raw))
         result.update(frames=frames, span_fraction=span, image_cache_insertion=insertion)
     return result
 

@@ -165,11 +165,13 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
             raise ValueError('Result directory escapes run')
         copies.extend(plan['ply_copies'])
         for name in ('result.json', 'partial-result.json', 'inference-preview.json', 'input-preview.json',
-                     'benchmark-run.json', 'published-test-metrics.json', 'request.json'):
+                     'benchmark-run.json', 'published-test-metrics.json', 'request.json',
+                     'failure.json', 'distill.lifecycle.json'):
             if (result / name).is_file():
                 keep.add(result / name)
         for pattern in ('stage-comparison*.jpg', 'stage-comparison.json', 'trajectory-quality.png', 'trajectory-quality.json'):
             keep.update(p for p in result.glob(pattern) if p.is_file() and not p.is_symlink())
+        keep.update(p for p in result.glob('**/stop-state.json') if p.is_file() and not p.is_symlink())
         folders = set(result.glob('**/frames/*/pred'))
         folders.update(plan.get('prediction_dirs', []))
         for folder in sorted(folders):
@@ -189,9 +191,10 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
             if not destination.resolve().is_relative_to(root.resolve()):
                 raise ValueError('Video destination escapes run')
             sequences.append((frames, destination, relative))
-    for source, destination in copies:
-        if not source.is_file() or not destination.resolve().is_relative_to(root.resolve()):
-            raise ValueError('Cannot preserve PLY artifact')
+    if not export_only:
+        for source, destination in copies:
+            if not source.exists() or not destination.resolve().is_relative_to(root.resolve()):
+                raise ValueError('Cannot preserve PLY artifact')
     backup = backup_run(root, history) if history else None
     videos = []
     for frames, destination, relative in sequences:
@@ -209,7 +212,20 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
     for source, destination in copies:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if source != destination:
-            shutil.copy2(source, destination)
+            if source.is_file() and source.suffix.lower() == '.ply':
+                shutil.copy2(source, destination)
+            else:
+                # Catalog originals may be bundled or streamed SOG scenes.
+                # Use the same unfiltered LOD-0 scene as the review viewer.
+                from ..scene import load_scene, save_ply
+                temporary = destination.with_name(destination.stem + '.exporting.ply')
+                try:
+                    save_ply(load_scene(source, min_opacity=0.0, lod_level=0), temporary)
+                    temporary.replace(destination)
+                except Exception as exc:
+                    raise ValueError('Original scene could not be exported to PLY; source images were kept') from exc
+                finally:
+                    temporary.unlink(missing_ok=True)
         elif source.is_symlink():
             raise ValueError('Cannot retain a linked PLY; source files were kept')
         keep.add(destination)

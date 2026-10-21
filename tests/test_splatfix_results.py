@@ -1105,3 +1105,97 @@ def test_artifixer_failed_second_video_keeps_all_source_images(tmp_path, monkeyp
     assert len(list(root.rglob('*.png'))) == 8
     assert (result / 'checkpoint.pt').exists()
     assert not (root / 'reduction.json').exists()
+
+
+def test_save_inference_videos_endpoint_keeps_sources_and_survives_refresh(tmp_path):
+    import shutil
+    import pytest
+    from splat_explorer.web.server import DashboardHandler
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
+        pytest.skip('ffmpeg/ffprobe required')
+    studio, root, result = artifixer_reduction_setup(tmp_path)
+    before = {p: p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    responses = []
+    handler = SimpleNamespace(app=SimpleNamespace(splatfix=studio), command='POST',
+                              _send_json=lambda body, code=200: responses.append((body, code)))
+    DashboardHandler._serve_splatfix(handler, '/api/splatfix/results/save-inference-videos', {'run_id': root.name})
+    report, status = responses[-1]
+    assert status == 200 and len(report['inference_videos']) == 2
+    assert all(path.read_bytes() == data for path, data in before.items())
+    assert not (root / 'reduction.json').exists()
+    assert (result / 'checkpoint.pt').exists()
+    detail = studio.results.run_detail(root.name)
+    assert detail['reduced'] is False and len(detail['inference_videos']) == 2
+    assert len(detail['gallery']['frames']) == 3
+    studio.results.save_inference_videos(root.name)
+    assert len(list(root.rglob('*.mp4'))) == 2
+    assert len(list(root.rglob('*.png'))) == 8
+
+
+def test_save_inference_videos_rejects_active_and_keeps_images_on_failure(tmp_path, monkeypatch):
+    import pytest
+    from splat_explorer.web import run_reduction
+    studio, root, _ = artifixer_reduction_setup(tmp_path)
+    studio.store.set_status(root.name, 'running')
+    with pytest.raises(ValueError, match='finish'):
+        studio.results.save_inference_videos(root.name)
+    studio.store.set_status(root.name, 'completed')
+    def fail(*args):
+        raise ValueError('Encode failed')
+    monkeypatch.setattr(run_reduction, 'encode_inference_video', fail)
+    with pytest.raises(ValueError, match='Encode failed'):
+        studio.results.save_inference_videos(root.name)
+    assert len(list(root.rglob('*.png'))) == 8
+    assert not (root / 'reduction.json').exists()
+
+
+def test_interrupted_artifixer_reduction_exports_sog_original_and_keeps_partial(tmp_path, monkeypatch):
+    import numpy as np
+    from splat_explorer.scene import GaussianScene, load_ply
+    from splat_explorer.web.run_reduction import reduce_artifixer
+    studio, root, result = artifixer_reduction_setup(tmp_path)
+    (result / 'result.json').unlink()
+    (result / 'original.ply').unlink()
+    partial = result / 'distill.interrupted/interrupted.ply'
+    partial.parent.mkdir()
+    (result / 'artifixer3d.ply').rename(partial)
+    (result / 'partial-result.json').write_text(json.dumps({'incomplete': True, 'splat_path': str(partial)}))
+    (partial.parent / 'stop-state.json').write_text('{"step":14311}')
+    source = tmp_path / 'sog-scene'
+    source.mkdir()
+    (source / 'lod-meta.json').write_text('{}')
+    calls = []
+    def load(path, **kwargs):
+        calls.append((path, kwargs))
+        return GaussianScene(means=np.zeros((1,3),dtype=np.float32), scales=np.ones((1,3),dtype=np.float32),
+                             quats=np.array([[1,0,0,0]],dtype=np.float32), opacities=np.ones(1,dtype=np.float32)*.5,
+                             colors=np.ones((1,3),dtype=np.float32)*.5)
+    monkeypatch.setattr('splat_explorer.scene.load_scene', load)
+    def encode(frames, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b'verified video')
+    monkeypatch.setattr('splat_explorer.web.run_reduction.encode_inference_video', encode)
+    reduce_artifixer(root, [{'root':result, 'ply_copies':[(source,result/'original.ply'),(partial,partial)]}])
+    assert calls == [(source, {'min_opacity': 0.0, 'lod_level': 0})]
+    assert len(load_ply(result / 'original.ply').means) == 1
+    assert partial.read_bytes() == b'ply'
+    assert (partial.parent / 'stop-state.json').exists()
+    assert (result / 'partial-result.json').exists()
+    assert (source / 'lod-meta.json').exists()
+
+
+def test_failed_sog_export_keeps_interrupted_run_inputs(tmp_path, monkeypatch):
+    import pytest
+    from splat_explorer.web.run_reduction import reduce_artifixer
+    _, root, result = artifixer_reduction_setup(tmp_path)
+    source = tmp_path / 'source-sog'
+    source.mkdir()
+    def fail(*args, **kwargs):
+        raise ValueError('Invalid scene')
+    monkeypatch.setattr('splat_explorer.scene.load_scene', fail)
+    monkeypatch.setattr('splat_explorer.web.run_reduction.encode_inference_video', lambda *args: None)
+    with pytest.raises(ValueError, match='source images were kept'):
+        reduce_artifixer(root, [{'root':result,'ply_copies':[(source,result/'original.ply')]}])
+    assert len(list(root.rglob('*.png'))) == 8
+    assert (result / 'checkpoint.pt').exists()
+    assert not (root / 'reduction.json').exists()

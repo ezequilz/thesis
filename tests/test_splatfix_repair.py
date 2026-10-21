@@ -118,9 +118,10 @@ def test_missing_edits_fail_before_gpu_or_api_work(tmp_path, monkeypatch):
         repair.run_repair(cp.root, tmp_path / 'repairs')
 
 
+@pytest.mark.parametrize('images', ['all', 'distilled'])
 @pytest.mark.parametrize('initialization', ['full_splat', 'point_cloud'])
 @pytest.mark.parametrize('mode', ['baseline', 'edited'])
-def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, monkeypatch, mode, initialization):
+def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, monkeypatch, mode, initialization, images):
     cp = make_checkpoint(tmp_path)
     mock_scene(monkeypatch)
     if mode == 'edited':
@@ -129,7 +130,7 @@ def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, 
         cp.views[0]['repaired_rgb'] = str(edit.relative_to(cp.root))
         cp.save()
     trajectory_root, trajectory = repair.prepare_trajectory(cp, frames=9, renderer_factory=FakeRenderer)
-    monkeypatch.setattr(repair, 'validate_runtime', lambda runtime: {**repair.DEFAULT_RUNTIME, 'reconstruction_initialization': initialization})
+    monkeypatch.setattr(repair, 'validate_runtime', lambda runtime: {**repair.DEFAULT_RUNTIME, 'reconstruction_initialization': initialization, 'reconstruction_images': images, 'worldexplorer_source': '/old/bundle'})
     phases = []
     def worker(command, **kwargs):
         phase = command[-1]
@@ -138,6 +139,9 @@ def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, 
         req = json.loads((root / 'request.json').read_text())
         assert req['references'] == ([str(cp.image_path(cp.views[0], repaired=True))] if mode == 'edited'
                                      else [str(cp.root / trajectory['anchors'][0]['original_rgb'])])
+        assert req['reconstruction_images'] == images
+        assert req['reconstruction_initialization'] == initialization
+        assert ('worldexplorer_source' in req) == (images == 'all')
         assert req['fit_iterations'] == 30000
         if initialization == 'full_splat':
             assert req['reconstruction_recipe']['initialization'] == 'full_splat_ply'

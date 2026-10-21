@@ -99,6 +99,10 @@ def repair_splat(cfg, args):
     runtime['split_mode'] = getattr(args, 'split_mode', 'double-split')
     if getattr(args, 'image_cache_insertion', None) is not None:
         runtime['image_cache_insertion'] = args.image_cache_insertion
+    if method == 'artifixer':
+        for key in ('reconstruction_images', 'reconstruction_initialization'):
+            if getattr(args, key, None) is not None:
+                runtime[key] = getattr(args, key)
     for key in ("repo", "python", "checkpoint", "model_id", "hf_home", "source_points3d"):
         value = getattr(args, "artifixer_" + key, None)
         if value is not None:
@@ -175,6 +179,10 @@ def _add_stages(parser):
     repair.add_argument("--mode", choices=("edited", "baseline"), default="edited")
     repair.add_argument('--split-mode', choices=('single-split', 'double-split'), default='double-split',
                         help='Generate whole legs or inward from both reference endpoints (default)')
+    repair.add_argument('--reconstruction-images', choices=('all', 'distilled'), default=None,
+                        help='All images (default), or saved references and ArtiFixer targets without WorldExplorer originals')
+    repair.add_argument('--reconstruction-initialization', choices=('full_splat', 'point_cloud'), default=None,
+                        help='Import the original PLY (default), or initialize fresh Gaussians from point positions/colors')
     repair.add_argument('--image-cache-insertion', action=argparse.BooleanOptionalAction, default=None,
                         help='Insert the clean endpoint latent into KV memory before generation (default: off)')
     repair.add_argument("--frames", type=positive_int, default=25,
