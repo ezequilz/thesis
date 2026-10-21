@@ -1,5 +1,6 @@
 """Resolution changes must preserve rays and source provenance, across stages."""
 import struct
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -168,3 +169,50 @@ def test_step4_passes_profile_to_preparation_before_trajectory(tmp_path, monkeyp
     path, = (tmp_path / 'out').glob('*/checkpoint/checkpoint.json')
     prepared = Checkpoint.load(path)
     assert (prepared.views[0]['camera']['width'], prepared.views[0]['camera']['height']) == size
+
+
+def test_artifixer_checkpoint_staging_reused_after_remote_roundtrip(tmp_path, monkeypatch):
+    from splat_explorer.splatfix.resolution import prepare_repair_checkpoint
+    from splat_explorer.splatfix.artifixer.staging_cache import publish_geometry
+    from splat_explorer.splatfix.artifixer.execution import persist_checkpoint_caches
+    import shutil
+    source = tmp_path / 'scene.ply'
+    source.write_text('scene')
+    cp = Checkpoint.create(tmp_path / 'saved', source, target_views=1)
+    cp.add_view(np.zeros((480, 832, 3), np.uint8),
+                Camera(np.zeros(3), np.eye(3), width=832, height=480))
+    cp.views[0]['repaired_rgb'] = 'views/000/repaired.png'
+    Image.new('RGB', (832, 480), 'red').save(cp.root / cp.views[0]['repaired_rgb'])
+    cp.save()
+    remote = tmp_path / 'remote'
+    shutil.copytree(cp.root, remote)
+    calls = []
+    def capture(scene, cameras, destinations, **kwargs):
+        calls.append(cameras)
+        for camera, destination in zip(cameras, destinations):
+            Image.new('RGB', (camera.width, camera.height), 'yellow').save(destination)
+    monkeypatch.setattr('splat_explorer.splatfix.viser_capture.capture_rgb', capture)
+    first = prepare_repair_checkpoint(Checkpoint.load(remote), tmp_path / 'first', reuse_artifixer_inputs=True)
+    trajectory = first.root / 'trajectories/saved'
+    trajectory.mkdir(parents=True)
+    (trajectory / 'trajectory.json').write_text('{"cameras": "saved poses"}')
+    (trajectory / 'frame.png').write_bytes(b'cached trajectory RGB')
+    publish_geometry(first)
+    persist_checkpoint_caches(remote, cp.root)
+    Image.new('RGB', (832, 480), 'blue').save(cp.root / cp.views[0]['repaired_rgb'])
+    second = prepare_repair_checkpoint(cp, tmp_path / 'second', reuse_artifixer_inputs=True)
+    assert len(calls) == 1
+    assert second.image_path(second.views[0]).read_bytes() == first.image_path(first.views[0]).read_bytes()
+    assert Image.open(second.image_path(second.views[0], repaired=True)).getpixel((0, 0)) == (0, 0, 255)
+    assert (second.root / 'trajectories/saved/frame.png').read_bytes() == b'cached trajectory RGB'
+    prepare_repair_checkpoint(cp, tmp_path / '720', '720p', reuse_artifixer_inputs=True)
+    assert len(calls) == 2
+    cp.views[0]['camera']['position'][0] = 1.
+    cp.views[0]['camera'].pop('c2w')
+    prepare_repair_checkpoint(cp, tmp_path / 'moved', reuse_artifixer_inputs=True)
+    assert len(calls) == 3
+    cache = Path(second.manifest['metadata']['artifixer_input_cache'])
+    (cache / '00000.png').write_bytes(b'corrupt')
+    cp.views[0]['camera']['position'][0] = 0.
+    with pytest.raises(ValueError, match='checksum'):
+        prepare_repair_checkpoint(cp, tmp_path / 'corrupt', reuse_artifixer_inputs=True)

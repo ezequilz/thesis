@@ -213,6 +213,19 @@ scaling and center cropping, without padding or stretching. Legacy checkpoints
 without a saved response use their repaired PNG as a fallback. Source checkpoints
 and full responses remain unchanged; no additional GPT call is needed.
 
+ArtiFixer stores reusable source captures under the saved checkpoint's
+`artifixer-inputs/<signature>/` directory, including a capture manifest and camera
+records. The signature includes the source fingerprint, calibrated cameras,
+resolution profile and scene-loading settings. Completed trajectory RGBs,
+opacity/depth, camera transforms, scale alignment and caption caches are published
+there as preparation proceeds and restored into subsequent run-local checkpoints.
+LRZ downloads return these caches to the original saved checkpoint for the next
+run. Edited targets are read fresh, so changing an edit does not recapture the
+source. Different interpolation recipes retain separate trajectory signatures.
+Checksums reject damaged caches. Captures of the newly reconstructed ArtiFixer3D+
+scene still run per reconstruction; source/checkpoint uploads to LRZ also remain.
+Existing checkpoints populate this cache on their next run.
+
 Photographic benchmark inputs use a separate bounds-based policy: fit within
 the profile without upscaling, uniformly scale, then symmetrically crop fewer
 than 16 output pixels per dimension for alignment. Intrinsics and COLMAP image

@@ -17,7 +17,7 @@ DEFAULT_RUNTIME = {'repo':'/workspace/third_party/OracleGS',
     'python':'/workspace/oraclegs-env/bin/python', 'model_python':'/workspace/oraclegs-model-env/bin/python',
     'colmap':'/workspace/oraclegs-model-env/bin/colmap',
     'depth_weights':'/workspace/models/oraclegs/depth_anything_v2_vitl.pth',
-    'oracle_source_reference':'nearest', 'oracle_reference_mode':'scene_memory', 'oracle_preset':'spiral_expanding', 'oracle_preset_scale':0.25, 'oracle_split_mode':'single-split', 'seva_fit':'crop', 'auto_setup':True, 'seva_resolution':'576p', 'oracle_adapter':'trajectory', 'oracle_target_frames':160,
+    'oracle_source_reference':'nearest', 'oracle_reference_mode':'scene_memory', 'oracle_preset':'spiral_expanding', 'oracle_preset_scale':0.25, 'oracle_split_mode':'single-split', 'seva_fit':'crop', 'auto_setup':True, 'seva_resolution':'576p', 'oracle_adapter':'trajectory', 'oracle_target_frames':240,
     'seva_geometry_guidance':'off', 'oracle_depth_source':'predicted', 'oracle_initialization':'sfm',
     'oracle_attention_batching':'within_trajectory', 'oracle_worldexplorer_attention':'weighted', 'oracle_path_order':None, 'iterations':22000, 'cap_max':1800000, 'seed':23}
 

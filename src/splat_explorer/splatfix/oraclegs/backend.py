@@ -51,7 +51,7 @@ def validate_options(raw):
     resolution = raw.get('seva_resolution', '576p')
     if resolution not in ('576p', '720p'):
         raise ValueError('seva_resolution must be 576p or 720p')
-    frames = raw.get('oracle_target_frames', 160)
+    frames = raw.get('oracle_target_frames', 240)
     if type(frames) is not int or not 2 <= frames <= 1000:
         raise ValueError('oracle_target_frames must be an integer from 2 to 1000')
     order = raw.get('oracle_path_order')

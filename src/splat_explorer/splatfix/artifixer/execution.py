@@ -13,6 +13,20 @@ def persist_checkpoint_caches(downloaded, checkpoint_root):
     import tempfile
     from .repair import digest_file
     downloaded, checkpoint_root = Path(downloaded), Path(checkpoint_root)
+    inputs = downloaded / 'artifixer-inputs'
+    if inputs.is_dir():
+        for entry in inputs.iterdir():
+            if entry.is_dir() and not entry.is_symlink() and (entry / 'captures.json').is_file():
+                target = checkpoint_root / 'artifixer-inputs' / entry.name
+                target.mkdir(parents=True, exist_ok=True)
+                metadata = json.loads((entry / 'captures.json').read_text())
+                for index, expected in enumerate(metadata['sha256']):
+                    image = entry / f'{index:05d}.png'
+                    if image.is_symlink() or digest_file(image) != expected:
+                        raise ValueError('Saved ArtiFixer capture checksum mismatch')
+                    shutil.copy2(image, target / image.name)
+                persist_checkpoint_caches(entry, target)
+                atomic_json(target / 'captures.json', metadata)
     trajectories = downloaded / 'trajectories'
     if trajectories.is_dir():
         # Metric alignment lives inside each trajectory. Its measurement image

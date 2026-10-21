@@ -245,6 +245,8 @@ def prepare_trajectory(checkpoint, *, frames=25, span_fraction=.04,
     paths = {entry[key] for entry in records for key in ('rgb', 'opacity')} | {manifest['points3d']} | {anchor['depth'] for anchor in anchors}
     manifest['sha256'] = {path: digest_file(cp.root / path) for path in sorted(paths)}
     atomic_json(root / 'trajectory.json', manifest)
+    from .staging_cache import publish_geometry
+    publish_geometry(cp)
     return root, manifest
 
 
@@ -350,6 +352,8 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
         paths = {entry[key] for entry in records for key in ('rgb', 'opacity')} | {manifest['points3d']} | {anchor['depth'] for anchor in anchor_records}
         manifest['sha256'] = {path: digest_file(cp.root / path) for path in sorted(paths)}
         atomic_json(root / 'trajectory.json', manifest)
+        from .staging_cache import publish_geometry
+        publish_geometry(cp)
     except Exception:
         shutil.rmtree(root)
         raise
@@ -450,7 +454,7 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
     root = Path(output_dir).resolve() / f'{mode}_{uuid.uuid4().hex[:12]}'
     root.mkdir(parents=True, exist_ok=False)
     cp = prepare_repair_checkpoint(cp, root / 'checkpoint', cfg['resolution_profile'],
-                                   scene_path=cfg.get('scene_path'), should_stop=should_stop)
+                                   scene_path=cfg.get('scene_path'), should_stop=should_stop, reuse_artifixer_inputs=True)
     references = [str(cp.image_path(view, repaired=mode == 'edited')) for view in cp.views]
     on_progress({'phase': 'anchor_geometry' if trajectory_mode == 'authors_orbit' else 'trajectory'})
     if trajectory_mode == 'authors_orbit':
@@ -563,3 +567,6 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
     except Exception as exc:
         atomic_json(root / 'failure.json', {'error': str(exc), 'type': type(exc).__name__})
         raise
+    finally:
+        from .staging_cache import publish_geometry
+        publish_geometry(cp)

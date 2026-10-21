@@ -1050,3 +1050,26 @@ def test_distillation_rejects_changed_initialization_before_loading_gpu(tmp_path
     Path(request['source_ply']).write_bytes(b'changed')
     with pytest.raises(ValueError, match='changed since preparation'):
         distill(tmp_path, request, {})
+
+
+def test_checkpoint_owned_geometry_replays_without_renderer(tmp_path, monkeypatch):
+    from splat_explorer.splatfix.resolution import prepare_repair_checkpoint
+    cp = make_checkpoint(tmp_path)
+    mock_scene(monkeypatch)
+    def capture(scene, cameras, destinations, **kwargs):
+        for camera, destination in zip(cameras, destinations):
+            Image.new('RGB', (camera.width, camera.height), 'yellow').save(destination)
+    monkeypatch.setattr('splat_explorer.splatfix.viser_capture.capture_rgb', capture)
+    first = prepare_repair_checkpoint(cp, tmp_path / 'first', reuse_artifixer_inputs=True)
+    class Renderer:
+        def __init__(self, scene):
+            pass
+        def render(self, camera):
+            return (np.zeros((camera.height, camera.width, 3), np.uint8),
+                    np.ones((camera.height, camera.width), np.float32),
+                    np.ones((camera.height, camera.width), np.float32))
+    _, original = repair.prepare_saved_path(first, renderer_factory=Renderer)
+    second = prepare_repair_checkpoint(cp, tmp_path / 'second', reuse_artifixer_inputs=True)
+    monkeypatch.setattr(repair, 'capture_rgb', lambda *a, **kw: pytest.fail('Must reuse captured trajectory'))
+    _, replay = repair.prepare_saved_path(second, renderer_factory=lambda *a: pytest.fail('Must reuse geometry'))
+    assert replay == original

@@ -150,7 +150,7 @@ def prepare_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE):
 
 
 def prepare_repair_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE, *,
-                              scene_path=None, should_stop=lambda: False):
+                              scene_path=None, should_stop=lambda: False, reuse_artifixer_inputs=False):
     """Prepare exact-size step-4 cameras and recapture their source RGBs.
 
     Work in a run-local derivative. GPT references start from the original
@@ -205,8 +205,16 @@ def prepare_repair_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE, *,
                 'source_kind': 'full_response' if response else 'legacy_repaired_rgb',
                 'method': 'cover_center_crop', 'target_size': [width, height]}
     metadata = manifest.setdefault('metadata', {})
-    capture_rgb(source, cameras, destinations, up_axis=metadata.get('up_axis', '-y'),
-                lod_level=metadata.get('scene_load', {}).get('lod_level', 0), should_stop=should_stop)
+    def capture():
+        capture_rgb(source, cameras, destinations, up_axis=metadata.get('up_axis', '-y'),
+                    lod_level=metadata.get('scene_load', {}).get('lod_level', 0), should_stop=should_stop)
+    if reuse_artifixer_inputs:
+        from .artifixer.staging_cache import capture_inputs, restore_geometry
+        cache = capture_inputs(checkpoint, cameras, destinations, capture, profile=profile)
+        restore_geometry(cache, root)
+        metadata['artifixer_input_cache'] = str(cache)
+    else:
+        capture()
     for path in destinations:
         with Image.open(path) as image:
             if image.size != (width, height):
