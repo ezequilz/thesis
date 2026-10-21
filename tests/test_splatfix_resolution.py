@@ -172,6 +172,8 @@ def test_step4_passes_profile_to_preparation_before_trajectory(tmp_path, monkeyp
 
 
 def test_artifixer_checkpoint_staging_reused_after_remote_roundtrip(tmp_path, monkeypatch):
+    import hashlib
+    monkeypatch.delattr(hashlib, 'file_digest', raising=False)  # LRZ uses Python 3.10.
     from splat_explorer.splatfix.resolution import prepare_repair_checkpoint
     from splat_explorer.splatfix.artifixer.staging_cache import publish_geometry
     from splat_explorer.splatfix.artifixer.execution import persist_checkpoint_caches

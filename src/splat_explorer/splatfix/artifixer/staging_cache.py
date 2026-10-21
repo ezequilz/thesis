@@ -12,8 +12,11 @@ from ..checkpoint import atomic_json, camera_to_record
 
 
 def digest(path):
+    result = hashlib.sha256()
     with Path(path).open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            result.update(block)
+    return result.hexdigest()
 
 
 def capture_inputs(checkpoint, cameras, destinations, capture, *, profile):

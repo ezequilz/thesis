@@ -693,8 +693,11 @@ def append_worldexplorer_supervision(request, transforms, supervision):
 def distill(root, request, trajectory):
     if request.get('source_ply'):
         import hashlib
+        digest = hashlib.sha256()
         with Path(request['source_ply']).open('rb') as stream:
-            actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+            for block in iter(lambda: stream.read(1024 * 1024), b''):
+                digest.update(block)
+        actual = digest.hexdigest()
         if actual != request.get('source_ply_sha256'):
             raise ValueError('Source initialization PLY changed since preparation')
     import numpy as np

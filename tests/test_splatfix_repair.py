@@ -170,6 +170,8 @@ def test_worker_calls_authors_fresh_reconstruction_and_exports_only_that_model(t
     """Exercise the actual adapter and its file/camera contract without CUDA."""
     import sys
     import types
+    import hashlib
+    monkeypatch.delattr(hashlib, 'file_digest', raising=False)  # LRZ uses Python 3.10.
     from splat_explorer.splatfix.official_worker import distill
     from splat_explorer.splatfix.checkpoint import camera_from_record
 
@@ -1042,7 +1044,9 @@ def test_repair_captures_viser_rgb_instead_of_selection_or_cuda_rgb(tmp_path, mo
             repair.prepare_saved_path(cp)
 
 
-def test_distillation_rejects_changed_initialization_before_loading_gpu(tmp_path):
+def test_distillation_rejects_changed_initialization_before_loading_gpu(tmp_path, monkeypatch):
+    import hashlib
+    monkeypatch.delattr(hashlib, 'file_digest', raising=False)  # LRZ uses Python 3.10.
     from splat_explorer.splatfix.official_worker import distill
     source = tmp_path / 'scene.ply'
     write_initialization_ply(source)
