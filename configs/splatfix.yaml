@@ -14,7 +14,7 @@ splatfix:
     auto_setup: true
     seva_resolution: 576p
     oracle_adapter: trajectory
-    oracle_target_frames: 80  # per consecutive viewpoint pair, including endpoints
+    oracle_target_frames: 160  # per consecutive viewpoint pair, including endpoints
     iterations: 22000
     cap_max: 1800000
     # Isolated environments; see docs/oraclegs.md for setup and protocol.

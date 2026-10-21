@@ -165,7 +165,7 @@ def _add_stages(parser):
     repair.add_argument("--oracle-adapter", choices=("trajectory", "saved_poses", "per_view_preset"))
     repair.add_argument("--oracle-worldexplorer-attention", choices=["weighted", "unweighted"], help="WorldExplorer VGGT attention (default: weighted)")
     repair.add_argument("--oracle-attention-batching", choices=["within_trajectory", "global"], help="VGGT target shuffle scope (default: within_trajectory)")
-    repair.add_argument("--oracle-target-frames", type=int, help="Generated interior images per consecutive viewpoint pair (default: 80)")
+    repair.add_argument("--oracle-target-frames", type=int, help="Generated interior images per consecutive viewpoint pair (default: 160)")
     repair.add_argument("--g4splat-repo", type=Path)
     repair.add_argument("--g4splat-python", type=Path)
     repair.add_argument("--reconstruction-method", choices=tuple(METHODS), default=DEFAULT_METHOD)

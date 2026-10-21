@@ -472,7 +472,7 @@ def test_full_response_reuses_recorded_camera_crop_without_upscaling(tmp_path):
         export_inputs(cp,tmp_path/'invalid')
 
 
-def test_each_pair_has_80_distinct_outputs_and_exact_endpoints(tmp_path):
+def test_each_pair_has_160_distinct_outputs_and_exact_endpoints(tmp_path):
     from splat_explorer.splatfix.oraclegs.trajectory import keyframe_path
     from splat_explorer.splatfix.checkpoint import camera_from_record
     cp = checkpoint(tmp_path, 6)
@@ -481,10 +481,10 @@ def test_each_pair_has_80_distinct_outputs_and_exact_endpoints(tmp_path):
     for i,c in enumerate(cameras):
         c.position = np.array([np.cos(i), np.sin(i), i/10])
         c.rotation = Rotation.from_euler('y', i*65, degrees=True).as_matrix()
-    path = list(keyframe_path(cameras, list(range(6)), 80))
-    assert len(path) == 400
+    path = list(keyframe_path(cameras, list(range(6)), 160))
+    assert len(path) == 800
     for i in range(5):
-        segment = path[i*80:(i+1)*80]
+        segment = path[i*160:(i+1)*160]
         np.testing.assert_array_equal(segment[0][-1],cameras[i].c2w)
         np.testing.assert_array_equal(segment[-1][-1],cameras[i+1].c2w)
         poses = np.array([x[-1] for x in segment])
@@ -493,13 +493,13 @@ def test_each_pair_has_80_distinct_outputs_and_exact_endpoints(tmp_path):
     root = tmp_path/'staged'
     manifest = export_inputs(cp, root)
     frames = json.loads((root/'scene/transforms.json').read_text())['frames'][6:]
-    assert len(frames) == len({f['file_path'] for f in frames}) == 400
-    assert manifest['trajectory']['target_count'] == 400
+    assert len(frames) == len({f['file_path'] for f in frames}) == 800
+    assert manifest['trajectory']['target_count'] == 800
     for i in range(5):
         native = json.loads((root/f'segments/{i:03d}/scene/transforms.json').read_text())['frames']
         split = json.loads((root/f'segments/{i:03d}/scene/train_test_split_6.json').read_text())
-        assert split['train_ids'] == [0,1,2,3,4,85] and split['test_ids'] == list(range(5,85))
-        assert native[5:85] == frames[i*80:(i+1)*80]
+        assert split['train_ids'] == [0,1,2,3,4,165] and split['test_ids'] == list(range(5,165))
+        assert native[5:165] == frames[i*160:(i+1)*160]
         for j,view in enumerate(cp.views):
             np.testing.assert_allclose(np.asarray(native[manifest['seva_segments'][i]['frame_order'].index(j)]['transform_matrix'])@AXES,view['camera']['c2w'])
 
