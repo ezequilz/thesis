@@ -136,7 +136,7 @@ class SceneRunStore:
         self._clock = clock
         self._output_size_lock = threading.Lock()
 
-    def output_size_bytes(self, run_id: str) -> int | None:
+    def output_size_bytes(self, run_id: str, *, refresh: bool = False) -> int | None:
         """Snapshot an inactive run's regular files once, persisting across restarts.
 
         The cache is separate from worker-owned status to avoid overwriting
@@ -149,11 +149,15 @@ class SceneRunStore:
                 return None
             path = Path(run.path)
             cache = path / OUTPUT_SIZE_NAME
-            revision = [run.state.status.value, run.state.updated_at, 2]
+            def revision_for(state):
+                marker = path / 'reduction.json'
+                return [state.status.value, state.updated_at, 3,
+                        marker.stat().st_mtime_ns if marker.is_file() else None]
+            revision = revision_for(run.state)
             try:
                 saved = _read_json(cache)
                 size = saved.get('bytes')
-                if saved.get('revision') == revision and type(size) is int and size >= 0:
+                if not refresh and saved.get('revision') == revision and type(size) is int and size >= 0:
                     return size
             except (OSError, ValueError):
                 pass
@@ -181,7 +185,7 @@ class SceneRunStore:
                 # run belong to the shared source, not to this run's outputs.
                 size = sum(size for size, links, seen in inodes.values() if seen >= links)
                 current = self.get_run(run_id).state
-                if [current.status.value, current.updated_at, 2] != revision:
+                if revision_for(current) != revision:
                     return None
                 _atomic_write_json(cache, {'bytes': size, 'revision': revision})
                 return size

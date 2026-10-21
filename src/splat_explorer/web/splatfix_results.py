@@ -68,6 +68,61 @@ class ResultCatalog:
             Path(run.path).rename(destination)
             return {'run_id': run.run_id, 'path': str(destination.resolve())}
 
+    def reduce_run(self, run_id, *, backup=False):
+        if type(backup) is not bool:
+            raise ValueError('backup must be a boolean')
+        with self._run_storage_lock:
+            run = self.studio.store.get_run(run_id)
+            if run.state.status.value not in ('completed', 'error', 'stopped', 'gpu_expired'):
+                raise ValueError('Only inactive runs can be reduced')
+            from .run_reduction import reduce_oraclegs, reduce_artifixer
+            before = self.studio.store.output_size_bytes(run.run_id, refresh=True)
+            history = Path(self.cfg.output.dir) / 'run_history' if backup else None
+            rows = [row for row in self.entries(private=True) if row['run_id'] == run_id]
+            if any(row['kind'] == 'OracleGS' for row in rows):
+                report = reduce_oraclegs(Path(run.path), history, before_size_bytes=before)
+            elif rows and all(row['kind'] == 'ArtiFixer3D' for row in rows):
+                plans = self._artifixer_plans(rows)
+                report = reduce_artifixer(Path(run.path), plans, history, before_size_bytes=before)
+            else:
+                raise ValueError('Reduction supports OracleGS and ArtiFixer runs only')
+            after = self.studio.store.output_size_bytes(run.run_id, refresh=True)
+            return {'run_id': run.run_id, **report, 'output_size_bytes': after,
+                    'reduction_saved_bytes': max(0, before - after) if before is not None and after is not None else None}
+
+    def _artifixer_plans(self, rows):
+        plans = []
+        for row in rows:
+            manifest = row['_manifest']
+            if manifest is None:
+                continue
+            result = read_json(manifest, {})
+            copies = [(path, manifest.parent / 'original.ply' if name == 'original' else path)
+                      for name, path in row['_paths'].items() if path is not None]
+            native = self.studio.result_artifact(manifest, result.get('native_splat_path'))
+            if native and native.is_file():
+                copies.append((native, native))
+            predictions = [self.studio.result_artifact(manifest, result.get(key))
+                           for key in ('prediction_frames', 'plus_frames')]
+            plans.append({'root': manifest.parent, 'ply_copies': copies,
+                          'prediction_dirs': [p for p in predictions if p and p.is_dir()]})
+        return plans
+
+    def save_inference_videos(self, run_id):
+        with self._run_storage_lock:
+            run = self.studio.store.get_run(run_id)
+            if run.state.status.value not in ('completed', 'error', 'stopped', 'gpu_expired'):
+                raise ValueError('Wait for the run to finish before saving inference videos')
+            rows = [row for row in self.entries(private=True) if row['run_id'] == run_id]
+            if not rows or any(row['kind'] != 'ArtiFixer3D' for row in rows):
+                raise ValueError('Inference video export supports ArtiFixer runs only')
+            from .run_reduction import reduce_artifixer
+            try:
+                report = reduce_artifixer(Path(run.path), self._artifixer_plans(rows), export_only=True)
+            finally:
+                size = self.studio.store.output_size_bytes(run_id, refresh=True)
+            return {'run_id': run_id, **report, 'output_size_bytes': size}
+
     def visibility_records(self):
         path = self.studio.root / 'result-visibility.json'
         try:
@@ -190,6 +245,9 @@ class ResultCatalog:
     def _row(self, key, record, original, repaired, result, metrics, metrics_file, manifest):
         config = record.get('config', {})
         options = config.get('splatfix', {})
+        before = read_json(self.studio.root / record['run_id'] / 'reduction.json', {}).get('before_size_bytes')
+        after = record.get('output_size_bytes')
+        saved_bytes = max(0, before - after) if type(before) is int and type(after) is int else None
         preview = []
         preview_label = '3D+ image preview'
         if manifest:
@@ -198,6 +256,11 @@ class ResultCatalog:
                 gallery, _ = self._reconstruction_gallery(manifest, result)
                 preview = [frame['url'] for frame in gallery['frames'][:1]]
                 preview_label = 'img 1 preview'
+            if not preview:
+                summary = self.studio.result_artifact(manifest, 'stage-comparison.jpg')
+                if summary and summary.is_file():
+                    preview = [self.studio.file_url(summary)]
+                    preview_label = 'Stage comparison'
         benchmark = read_json(manifest.parent / 'benchmark-run.json', {}) if manifest else {}
         repair_pass = (result.get('repeat_repair') or benchmark.get('repeat_repair') or {}).get('repair_pass', 1)
         status = record.get('state', {}).get('status')
@@ -213,11 +276,14 @@ class ResultCatalog:
                 'diagnostics_url': self.studio.file_url(manifest.parent / 'benchmark-run.json') if manifest and (manifest.parent / 'benchmark-run.json').is_file() else None,
                 'created_at': record.get('state', {}).get('created_at'), 'status': status,
                 'output_size_bytes': record.get('output_size_bytes'),
+                'reduction_saved_bytes': saved_bytes,
+                'reduced': (self.studio.root / record['run_id'] / 'reduction.json').is_file(),
+                'can_reduce': (options.get('reconstruction_method') in ('oraclegs', 'artifixer') or result.get('reconstruction_method') in ('oraclegs', 'artifixer') or (manifest is not None and not options.get('reconstruction_method') and not result.get('reconstruction_method'))) and not (self.studio.root / record['run_id'] / 'reduction.json').exists(),
                 'can_archive': record.get('state', {}).get('status') in ('completed', 'error', 'stopped', 'gpu_expired'),
                 'mode': options.get('mode') or config.get('repair_type', ''),
                 'model': result.get('model_variant') or options.get('model'),
                 'trajectory': result.get('trajectory_mode'), 'frames': result.get('frame_count'),
-                'kind': 'OracleGS' if options.get('reconstruction_method') == 'oraclegs' else 'G4Splat · viewer approximation' if options.get('reconstruction_method') == 'g4splat' else 'ArtiFixer3D' if manifest or options.get('stage') in ('repair', 'benchmark') else 'Scene repair',
+                'kind': 'OracleGS' if options.get('reconstruction_method') == 'oraclegs' or result.get('reconstruction_method') == 'oraclegs' else 'G4Splat · viewer approximation' if options.get('reconstruction_method') == 'g4splat' else 'ArtiFixer3D' if manifest or options.get('stage') in ('repair', 'benchmark') else 'Scene repair',
                 'result_name': manifest.parent.name if manifest else record['run_id'],
                 'original': original is not None, 'repaired': repaired is not None,
                 'viser_url': '/splatfix/results/viser?id=' + quote(key),
@@ -300,6 +366,13 @@ class ResultCatalog:
         gallery = {'frames': [], 'reference_count': None, 'verified_inputs': False,
                    'stage': 'ArtiFixer · reconstruction inputs'}
         row['gallery'] = gallery
+        reduction = read_json(self.studio.root / row['run_id'] / 'reduction.json', {})
+        row['inference_videos'] = []
+        saved_videos = reduction if row['reduced'] else read_json(self.studio.root / row['run_id'] / 'inference-videos.json', {})
+        for video in saved_videos.get('inference_videos', []):
+            path = self.studio.root / row['run_id'] / video['path']
+            if manifest and path.is_file() and path.resolve().is_relative_to(manifest.parent.resolve()):
+                row['inference_videos'].append({**video, 'url': self.studio.file_url(path)})
         row['reference_images'] = []
         row['original_rgb_images'] = []
         row['stage_comparison'] = None
@@ -383,6 +456,8 @@ class ResultCatalog:
             row['comparison_gallery'].append({'url': self.studio.file_url(chart),
                 'title': 'Trajectory and image quality',
                 'caption': metadata.get('caption', 'Camera motion and available per-view evaluation scores.')})
+        if row['reduced'] and reduction.get('method') == 'artifixer':
+            return row
         row['preview_evaluation_status'] = read_json(root / 'preview-evaluation-status.json', {})
         row['evaluation_status'] = read_json(root / 'evaluation-status.json', {})
         def add_reference(path, index, name=None):

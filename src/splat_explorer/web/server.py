@@ -1349,6 +1349,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "Could not fully delete run. Some files may have been removed. Check the run folder and its permissions."}, 500)
                     return
                 self._send_json({"ok": True, **result})
+            elif self.command == "POST" and path == "/api/splatfix/results/save-inference-videos":
+                if not isinstance(body, dict):
+                    raise ValueError("Request must be an object")
+                try:
+                    result = studio.results.save_inference_videos(body.get("run_id"))
+                except FileNotFoundError:
+                    self._send_json({"ok": False, "error": "Run or source images not found"}, 404)
+                    return
+                except OSError:
+                    self._send_json({"ok": False, "error": "Video export failed. Source images were kept."}, 500)
+                    return
+                self._send_json({"ok": True, **result})
+            elif self.command == "POST" and path == "/api/splatfix/results/reduce":
+                if not isinstance(body, dict):
+                    raise ValueError("Request must be an object")
+                try:
+                    result = studio.results.reduce_run(body.get("run_id"), backup=body.get("backup", False))
+                except FileNotFoundError:
+                    self._send_json({"ok": False, "error": "Run or required artifact not found"}, 404)
+                    return
+                except OSError:
+                    self._send_json({"ok": False, "error": "Reduction failed. If backup failed, no files were removed. Otherwise reduction may be partial; check the run and run_history before retrying."}, 500)
+                    return
+                self._send_json({"ok": True, **result})
             elif self.command == "POST" and path == "/api/splatfix/results/archive":
                 if not isinstance(body, dict):
                     raise ValueError("Request must be an object")

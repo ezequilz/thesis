@@ -894,3 +894,214 @@ def test_artifixer_detail_includes_nested_logs_and_tensorboard_metrics(tmp_path)
     assert detail['training_metrics']['format'] == 'scalars'
     chart_path = parse_qs(urlparse(detail['training_metrics']['url']).query)['path'][0]
     assert json.loads(studio.allowed_file(chart_path).read_text())['points'][-1]['seconds'] == 10
+
+
+def reduction_setup(tmp_path):
+    studio, root, previous = setup(tmp_path)
+    import shutil
+    shutil.rmtree(previous)
+    result = root / 'gpu/results/oraclegs'
+    result.mkdir()
+    (result / 'result.json').write_text(json.dumps({'reconstruction_method': 'oraclegs', 'splat_path': str(result / 'oraclegs.ply')}))
+    (result / 'oraclegs.ply').write_bytes(b'final')
+    inputs = root / 'gpu/inputs'
+    inputs.mkdir()
+    (inputs / 'source-initialization.ply').write_bytes(b'original')
+    views = [{'image': f'scene/images/ref_{i}.png', 'camera': {'pose': [1]}} for i in range(6)]
+    (inputs / 'inputs.json').write_text(json.dumps({'views': views, 'trajectory': {'frames': [1, 2]}}))
+    for view in views:
+        p = inputs / view['image']
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b'repaired')
+    for relative in ('dataset/images/input.png', 'dataset/sparse/0/images.txt', 'attention-raw/grid.png', 'model/point_cloud/iteration_1/point_cloud.ply', 'seva/img2trajvid/scene/first-pass/samples-rgb.mp4', 'seva/img2trajvid/scene/samples-rgb/000.png', 'seva/img2trajvid/scene/transforms.json', 'seva/img2trajvid/scene/samples-rgb.mp4', 'train.log'):
+        p = result / relative
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b'content')
+    studio.store.set_status(root.name, 'completed')
+    return studio, root, result
+
+
+def test_reduce_keeps_only_minimal_artifacts_and_refreshes_size(tmp_path):
+    studio, root, result = reduction_setup(tmp_path)
+    studio.store.output_size_bytes(root.name)
+    report = studio.results.reduce_run(root.name)
+    assert report['reference_count'] == 6
+    assert report['backup_path'] is None
+    assert len(list(root.rglob('*.png'))) == 6
+    assert len(list(root.rglob('*.mp4'))) == 1
+    assert sorted(p.name for p in root.rglob('*.ply')) == ['oraclegs.ply', 'original.ply']
+    assert not (result / 'seva/img2trajvid/scene/transforms.json').exists()
+    assert (result / 'train.log').read_bytes() == b'content'
+    assert 'camera' not in json.loads((result / 'recipe.json').read_text())['inputs']['views'][0]
+    assert studio.results.entries()[0]['original'] is True
+    assert studio.results.run_detail(root.name)['oraclegs']['views'][0]['url']
+    assert report['output_size_bytes'] == studio.store.output_size_bytes(root.name)
+    before = json.loads((root / 'reduction.json').read_text())['before_size_bytes']
+    assert report['reduction_saved_bytes'] == max(0, before - report['output_size_bytes'])
+    assert studio.results.entries()[0]['reduction_saved_bytes'] == report['reduction_saved_bytes']
+
+
+def test_backup_reduce_verifies_independent_full_copy(tmp_path):
+    studio, root, result = reduction_setup(tmp_path)
+    before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    report = studio.results.reduce_run(root.name, backup=True)
+    backup = Path(report['backup_path'])
+    assert backup == tmp_path / 'run_history' / root.name
+    assert all((backup / name).read_bytes() == data for name, data in before.items())
+    assert (backup / 'gpu/inputs/source-initialization.ply').stat().st_ino != (result / 'original.ply').stat().st_ino
+
+
+def test_reduce_rejects_active_and_backup_failure_and_keeps_available_references(tmp_path, monkeypatch):
+    import pytest
+    from splat_explorer.web import run_reduction
+    studio, root, result = reduction_setup(tmp_path)
+    studio.store.set_status(root.name, 'running')
+    with pytest.raises(ValueError, match='inactive'):
+        studio.results.reduce_run(root.name)
+    studio.store.set_status(root.name, 'completed')
+    monkeypatch.setattr(run_reduction, 'digest', lambda p: str(p).encode())
+    with pytest.raises(OSError, match='checksum'):
+        studio.results.reduce_run(root.name, backup=True)
+    assert (result / 'attention-raw/grid.png').exists()
+    assert not list((tmp_path / 'run_history').iterdir())
+    (root / 'gpu/inputs/scene/images/ref_0.png').unlink()
+    report = studio.results.reduce_run(root.name)
+    assert report['reference_count'] == 5
+    assert report['missing_references'] == ['ref_0.png']
+    assert len(list(root.rglob('*.png'))) == 5
+
+
+def test_reduce_ui_confirmation_backup_and_size():
+    import shutil
+    import subprocess
+    import pytest
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node is required for UI checks')
+    script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const html=fs.readFileSync(process.argv[1],'utf8');
+const elements={};const get=id=>elements[id]??={value:'',checked:false,setAttribute(){}};
+let confirmed=false,calls=0,backup=false;
+const context=vm.createContext({document:{getElementById:get,hidden:true},setInterval(){},
+ window:{confirm:message=>{assert.match(message,/Remove all other images, poses/);return confirmed}},
+ fetch:async(url,options)=>{if(!options)return new Promise(()=>{});calls++;assert.equal(url,'/api/splatfix/results/reduce');assert.deepEqual(JSON.parse(options.body),{run_id:'test',backup});return{ok:true,json:async()=>({output_size_bytes:1024,reduction_saved_bytes:12992276070,backup_path:backup?'/history/test':null})}}});
+vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
+const load=()=>vm.runInContext("rows=[{run_id:'test',can_reduce:true,can_archive:true,metrics:{}}];render()",context);
+const click=()=>get('results').onclick({target:{closest:()=>({dataset:{run:'test',action:backup?'backup-reduce':'reduce'}})}});
+(async()=>{
+ load();assert.match(get('results').innerHTML,/Backup &amp; reduce/);
+ await click();assert.equal(calls,0);
+ confirmed=true;await click();assert.equal(calls,1);assert.equal(vm.runInContext('rows[0].reduced',context),true);assert.match(get('notice').textContent,/1.0 KiB/);assert.match(get('results').innerHTML,/Reduced -12.1 GiB/);
+ load();backup=true;await click();assert.equal(calls,2);assert.match(get('notice').textContent,/Full backup: \/history\/test/);
+ load();vm.runInContext('rows[0].can_archive=false',context);await click();assert.equal(calls,2);
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+    subprocess.run([node, '-e', script, 'src/splat_explorer/web/static/splatfix_results.html'], check=True)
+
+
+def test_reduce_stopped_oraclegs_without_result_or_plys(tmp_path):
+    studio, root, result = reduction_setup(tmp_path)
+    config = json.loads((root / 'config.json').read_text())
+    config['splatfix'].update(reconstruction_method='oraclegs', stage='repair', checkpoint=str(tmp_path / 'checkpoint'))
+    (root / 'config.json').write_text(json.dumps(config))
+    (result / 'result.json').unlink()
+    (result / 'oraclegs.ply').unlink()
+    (root / 'gpu/inputs/source-initialization.ply').unlink()
+    studio.store.set_status(root.name, 'stopped')
+    assert studio.results.entries()[0]['can_reduce'] is True
+    report = studio.results.reduce_run(root.name)
+    assert report['reduced'] is True
+    assert len(list(root.rglob('*.png'))) == 6
+    assert (result / 'train.log').exists()
+    assert studio.results.entries()[0]['reduced'] is True
+
+
+def test_reduce_legacy_completed_without_original_ply(tmp_path):
+    studio, root, result = reduction_setup(tmp_path)
+    (root / 'gpu/inputs/source-initialization.ply').unlink()
+    assert studio.results.entries()[0]['can_reduce'] is True
+    studio.results.reduce_run(root.name)
+    assert (result / 'oraclegs.ply').exists()
+
+
+def test_reduce_rescans_even_if_dashboard_cached_intermediate_size(tmp_path, monkeypatch):
+    from splat_explorer.web import run_reduction
+    studio, root, _ = reduction_setup(tmp_path)
+    real_reduce = run_reduction.reduce_oraclegs
+    def reduce_with_stale_cache(*args, **kwargs):
+        report = real_reduce(*args, **kwargs)
+        studio.store.output_size_bytes(root.name)
+        cache = root / 'output-size.json'
+        saved = json.loads(cache.read_text())
+        saved['bytes'] = 999999999
+        cache.write_text(json.dumps(saved))
+        return report
+    monkeypatch.setattr(run_reduction, 'reduce_oraclegs', reduce_with_stale_cache)
+    report = studio.results.reduce_run(root.name)
+    assert report['output_size_bytes'] != 999999999
+    assert studio.results.entries()[0]['output_size_bytes'] == report['output_size_bytes']
+
+
+def artifixer_reduction_setup(tmp_path):
+    from PIL import Image
+    studio, root, result = setup(tmp_path)
+    for branch in ('inference', 'plus'):
+        folder = result / branch / 'splatfix/frames/batch_0000/pred'
+        folder.mkdir(parents=True)
+        for index in (10, 2, 0):
+            Image.new('RGB', (33, 25), (index * 20, 30, 80)).save(folder / f'{index}.png')
+    Image.new('RGB', (32, 24)).save(result / 'stage-comparison.jpg')
+    Image.new('RGB', (32, 24)).save(result / 'trajectory-quality.png')
+    (result / 'trajectory-quality.json').write_text('{"caption": "Saved quality chart"}')
+    (result / 'degraded').mkdir()
+    (result / 'degraded/000.png').write_bytes(b'degraded')
+    (result / 'train.log').write_text('training log')
+    (result / 'checkpoint.pt').write_bytes(b'weights')
+    studio.store.set_status(root.name, 'completed')
+    return studio, root, result
+
+
+def test_artifixer_reduce_encodes_both_passes_and_exposes_verified_videos(tmp_path):
+    import shutil
+    import pytest
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
+        pytest.skip('ffmpeg/ffprobe required')
+    studio, root, result = artifixer_reduction_setup(tmp_path)
+    assert studio.results.entries()[0]['can_reduce'] is True
+    report = studio.results.reduce_run(root.name, backup=True)
+    assert len(report['inference_videos']) == 2
+    assert all(v['frame_count'] == 3 and v['frame_names'] == ['0.png', '2.png', '10.png'] for v in report['inference_videos'])
+    assert list(root.rglob('*.png')) == [result / 'trajectory-quality.png']
+    assert (result / 'stage-comparison.jpg').exists()
+    assert not (result / 'checkpoint.pt').exists()
+    assert (result / 'original.ply').exists() and (result / 'artifixer3d.ply').exists()
+    assert (result / 'train.log').read_text() == 'training log'
+    assert len(list(Path(report['backup_path']).rglob('*.png'))) == 8
+    detail = studio.results.run_detail(root.name)
+    assert len(detail['inference_videos']) == 2
+    assert all(v['url'] for v in detail['inference_videos'])
+    assert len(detail['comparison_gallery']) == 2
+    assert detail['comparison_gallery'][1]['caption'] == 'Saved quality chart'
+    assert studio.results.entries()[0]['preview_label'] == 'Stage comparison'
+    assert detail['original_rgb_images'] == []
+    assert detail['gallery']['frames'] == []
+
+
+def test_artifixer_failed_second_video_keeps_all_source_images(tmp_path, monkeypatch):
+    import pytest
+    from splat_explorer.web import run_reduction
+    studio, root, result = artifixer_reduction_setup(tmp_path)
+    calls = []
+    def encode(frames, destination):
+        calls.append(destination)
+        if len(calls) == 2:
+            raise ValueError('Verification failed')
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b'first video')
+    monkeypatch.setattr(run_reduction, 'encode_inference_video', encode)
+    with pytest.raises(ValueError, match='Verification failed'):
+        studio.results.reduce_run(root.name)
+    assert len(list(root.rglob('*.png'))) == 8
+    assert (result / 'checkpoint.pt').exists()
+    assert not (root / 'reduction.json').exists()

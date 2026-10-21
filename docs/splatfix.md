@@ -916,3 +916,42 @@ attention shuffling mixes WorldExplorer and new SEVA targets. New SEVA outputs
 always require their attention maps. Depth supervision remains attached to the selected
 reference views. Missing images or normalization metadata stop staging instead
 of silently omitting source views. G4Splat does not use this integration.
+
+### Reduce OracleGS run storage
+
+All inactive OracleGS runs (completed, stopped, errored or GPU-expired) offer **Reduce** and **Backup & reduce** on the results
+page. Reduction retains the repaired reference images, full `samples-rgb.mp4`
+trajectory videos, original/source and final repaired PLY, logs and essential
+lifecycle/provenance metadata. It removes input/generated image datasets, pose
+exports, sparse videos, attention visualizations and intermediate model checkpoints.
+The retained run remains viewable but cannot be used to resume training.
+
+Backup & reduce first copies the entire run to `outputs/run_history/<run_id>` and
+verifies file contents with SHA-256 before modifying the active copy. Existing
+backups are never overwritten. The backup requires additional local space and can
+be moved manually to an external drive. Reduction refreshes the saved size and
+marks the result Reduced. Shared source checkpoints outside the run are untouched.
+
+Reduction preserves available artifacts on incomplete and older runs even when no
+final or original PLY was produced. A forced disk-size rescan runs after cleanup,
+and the returned size immediately updates every dashboard card for that run.
+
+### Reduce ArtiFixer run storage
+
+ArtiFixer result cards also offer Reduce and Backup & reduce for inactive runs.
+Each saved inference or plus-pass prediction batch becomes a separate H.264 MP4
+at 12 fps, in numeric filename order (CRF 18, browser-compatible YUV420, odd image
+sizes padded to even dimensions). The reduction record saves the source filename
+order. Every video must pass a decoded frame-count check and a complete FFmpeg
+decode before any source images are removed. A failed encode leaves all images
+and checkpoints intact for retrying.
+
+Reduction keeps original and final repaired PLYs (including native final PLYs),
+logs, inference videos, and essential lifecycle/result/evaluation metadata. It
+removes degraded RGBs, prediction images, reference images, pose datasets,
+intermediate training checkpoints. Stage-comparison images and the trajectory-quality
+chart (with their metadata) are retained for compact visual debugging. Run details expose playable
+videos and downloads. Videos are lossy visual-debugging previews, not substitutes
+for original images in training or pixel-level evaluation. Backup & reduce copies
+and verifies the full run before encoding or cleanup; external shared source
+checkpoints are never deleted.
