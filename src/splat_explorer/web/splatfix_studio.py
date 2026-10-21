@@ -265,6 +265,8 @@ class SplatfixStudio(SceneRunStudio):
         return {'ok': True, 'checkpoint': str(cp.root)}
 
     def create(self, body):
+        if isinstance(body, dict) and 'oracle_artifixer_inputs' in body:
+            raise ValueError('Use the result reconstruction action to create an input snapshot')
         if not isinstance(body, dict):
             raise ValueError('Request must be an object')
         if body.get('stage') == 'repair' and body.get('reconstruction_method') == 'oraclegs':

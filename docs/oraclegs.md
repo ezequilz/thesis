@@ -585,3 +585,24 @@ This is an explicit conditioning extension, not a guarantee that the model will
 ignore conflicting context. Each clip writes `seva-source-reference.json` with the
 source index, image checksum, input mode and sampling-batch counts. Old manifests
 without the setting are never upgraded implicitly.
+
+
+### Reconstruct from existing ArtiFixer inference
+
+On an edited ArtiFixer result detail page, **Queue OracleGS reconstruction**
+queues a separate job using the six saved GPT repaired references and all
+available initial inference images. The optional ArtiFixer3D+ outputs are
+excluded. The action requires the saved camera trajectory, reference snapshots,
+and all expected inference outputs to be downloaded.
+
+Initialization defaults to the original starting Gaussian PLY, including its SH
+parameters. **From scratch · OracleGS SfM** uses triangulated points instead.
+Both retain OracleGS reference depth estimation/alignment, VGGT attention, and
+the usual training schedule. SEVA generation is skipped. Input images, cameras,
+and the optional starting PLY are snapshotted before publishing the queue job;
+source-run deletion or reduction does not remove those staged inputs.
+
+These jobs use the normal scene-manager queue and its shared exclusive GPU
+lease. The dashboard only stages inputs and creates a queued run; it does not
+launch GPU work. The manager waits for the current lease owner to finish and
+checks GPU availability before executing each queued reconstruction.

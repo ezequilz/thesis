@@ -22,6 +22,32 @@ class ResultCatalog:
         self._visibility_lock = threading.Lock()
         self._run_storage_lock = threading.Lock()
 
+    def reconstruct_artifixer(self, key, initialization='source_splat'):
+        """Snapshot inputs, then enqueue through the normal manager/GPU lease path."""
+        import tempfile
+        from ..splatfix.oraclegs.artifixer_inputs import export_inputs
+        from ..splatfix.oraclegs.backend import validate_options
+        with self._run_storage_lock:
+            row = self.detail(key)
+            if row is None:
+                raise ValueError('Result not found')
+            snapshots = Path(self.cfg.output.dir) / 'oraclegs-reuse'
+            snapshots.mkdir(exist_ok=True, parents=True)
+            destination = Path(tempfile.mkdtemp(prefix='artifixer-', dir=snapshots))
+            try:
+                manifest = export_inputs(self.studio, row, destination, initialization)
+                options = {'stage':'repair', 'reconstruction_method':'oraclegs', 'mode':'edited',
+                           'checkpoint':row['config'].get('splatfix', {}).get('checkpoint', ''),
+                           'resolution_profile':'training', 'oracle_artifixer_inputs':str(destination.resolve()),
+                           **validate_options(manifest)}
+                run = self.studio.store.create_run({'pipeline':'splatfix', 'splatfix':options,
+                    'scene_id':row['scene'], 'width':manifest['resolution'][0],
+                    'height':manifest['resolution'][1], 'duration_seconds':24*3600})
+            except Exception:
+                shutil.rmtree(destination)
+                raise
+            return run.to_dict()
+
     def delete_run(self, run_id):
         """Permanently remove only the validated inactive run directory."""
         with self._run_storage_lock:
@@ -361,6 +387,7 @@ class ResultCatalog:
         if row['kind'] == 'WorldExplorer':
             from .worldexplorer_details import run_detail
             return run_detail(self, row)
+        source_row = dict(row)
         manifest = row.pop('_manifest')
         row.pop('_paths')
         gallery = {'frames': [], 'reference_count': None, 'verified_inputs': False,
@@ -438,6 +465,12 @@ class ResultCatalog:
             return row
         gallery, allowed = self._reconstruction_gallery(manifest, result)
         row['gallery'] = gallery
+        from ..splatfix.oraclegs.artifixer_inputs import source_assets
+        try:
+            source_assets(self.studio, source_row)
+            row['artifixer_oraclegs'] = {'ready':True, 'original_available':row['original']}
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            row['artifixer_oraclegs'] = {'ready':False, 'reason':str(exc)}
         from ..splatfix.resolution import PROFILE_LABELS
         recorded_request = read_json(root / 'request.json', {})
         profile = (result.get('resolution_policy') or {}).get('profile') or recorded_request.get('resolution_profile')

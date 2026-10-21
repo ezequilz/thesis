@@ -239,6 +239,8 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         'held_out_evaluation':'Unavailable: generated target images are not held-out GT',
         'graceful_stop':'In-memory stop-only hook after completed optimizer/MCMC iteration; atomic PLY export; 240s timeout',
         'runtime':runtime, 'commands':[]}
+    if manifest.get('artifixer_source'):
+        recipe.update(method_variant='artifixer-generated-images', gt_policy='Six GPT repaired references are GT; all ArtiFixer outputs are synthetic', artifixer_source=manifest['artifixer_source'])
     atomic_json(output/'recipe.json',recipe)
     def stage(name, argv, *, training=False):
         if should_stop():
@@ -270,7 +272,8 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
                'LD_LIBRARY_PATH='+str(python.parent.parent/'lib')+':/usr/local/nvidia/lib:/usr/local/nvidia/lib64']
         env += [key+'='+value for key,value in huggingface_environment().items()]
         stage(name,env+[python,'-u',HERE/'model_worker.py',action,runtime[repo_key],request],training=training)
-    model('model_access','assets','seva_repo',{'output':str(output/'vae-provenance.json')})
+    if not manifest.get('artifixer_source'):
+        model('model_access','assets','seva_repo',{'output':str(output/'vae-provenance.json')})
     sparse = dataset/'sparse/0'
     source_only = (manifest.get('oracle_depth_source') == 'source_splat' and
                    manifest.get('oracle_initialization') == 'source_splat')
@@ -309,7 +312,10 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
             'passed':True, 'depth_source':'source_splat', 'colmap_skipped':source_only,
             'scope':'Validated staged camera-Z inverse depth and masks; no monocular prediction or SfM depth alignment',
             'views':manifest['source_depth']['views']})
-    if manifest.get('seva_segments'):
+    if manifest.get('artifixer_source'):
+        from .artifixer_inputs import publish_generated
+        publish_generated(inputs, output, manifest)
+    elif manifest.get('seva_segments'):
         from .segments import merge_segments
         for segment in manifest['seva_segments']:
             index = segment['index']
@@ -355,7 +361,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         args[args.index('--depths')+1] = ''
     if manifest.get('source_initialization'):
         args += ['--sh_degree', str(manifest['source_initialization']['sh_degree'])]
-    if original_names or manifest['oracle_adapter'] in ('trajectory', 'per_view_preset'):
+    if manifest.get('artifixer_source') or original_names or manifest['oracle_adapter'] in ('trajectory', 'per_view_preset'):
         model('reconstruction','train','repo',{'references':str(dataset/'reference_names.json'),'argv':args, **geometry_request},training=True)
     else:
         model('reconstruction','script','repo',{'script':'train.py','argv':args, **geometry_request},training=True)

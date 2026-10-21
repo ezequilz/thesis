@@ -24,6 +24,13 @@ def validate_job(raw):
         result['reconstruction_method'] = method
         result.update(backend.validate_options(
             {'oracle_reference_mode':'scene_memory', **raw} if method == 'oraclegs' else raw))
+    if raw.get('oracle_artifixer_inputs') is not None:
+        snapshot = raw['oracle_artifixer_inputs']
+        if (stage != 'repair' or result.get('reconstruction_method') != 'oraclegs'
+                or raw.get('mode', 'edited') != 'edited'
+                or not isinstance(snapshot, str) or not Path(snapshot).is_absolute()):
+            raise ValueError('Invalid OracleGS ArtiFixer input snapshot')
+        result['oracle_artifixer_inputs'] = snapshot
     scheduled = raw.get('scheduled_at')
     if scheduled:
         instant = datetime.fromisoformat(str(scheduled).replace('Z', '+00:00'))
@@ -59,7 +66,7 @@ def validate_job(raw):
                 result[key] = prior
     else:
         checkpoint = str(raw.get('checkpoint') or '')
-        if not checkpoint:
+        if not checkpoint and not result.get('oracle_artifixer_inputs'):
             raise ValueError('Choose an existing checkpoint')
         result['checkpoint'] = checkpoint
     if stage == 'seva_capture' and raw.get('view_id') is not None:

@@ -208,6 +208,8 @@ def build_details(studio, manifest, result):
         item['overlay_url'] = link(overlay)
     phases = ['setup','sfm_features','sfm_matching','sfm_triangulation','sfm_export','reference_depth',
               'depth_alignment','seva_generation','vggt_attention','reconstruction']
+    if inputs.get('artifixer_source'):
+        phases.remove('seva_generation')
     if inputs.get('oracle_depth_source') == 'source_splat':
         phases = [p for p in phases if p not in ('reference_depth', 'depth_alignment')]
     if data('geometry-check.json').get('colmap_skipped'):

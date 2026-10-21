@@ -77,9 +77,9 @@ def execute_remote(executor, run_id, options, root, stop, update):
     launched = saved.get('remote_dir') and ssh('test ! -d ' + shlex.quote(remote + '/launched') + ' || printf launched').strip()
     if not launched:
         LrzSceneRunTransport(executor.cfg, run_id, root).validate()
-        checkpoint = Checkpoint.load(options['checkpoint'])
+        checkpoint = None if options.get('oracle_artifixer_inputs') else Checkpoint.load(options['checkpoint'])
         runtime = job_runtime(executor.cfg, options)
-        if options['mode'] == 'edited':
+        if options['mode'] == 'edited' and checkpoint is not None:
             from .captures import select_checkpoint
             references = select_checkpoint(checkpoint, runtime.get('oracle_capture_source', 'saved'), edited=True)
             references.require_viser_images()
@@ -92,7 +92,11 @@ def execute_remote(executor, run_id, options, root, stop, update):
         atomic_json(root / 'oraclegs-staging.json', {
             'version': 1, 'input_manifest': str((preparation / 'inputs/inputs.json').relative_to(root)),
             'status': 'exporting', 'adapter': runtime['oracle_adapter']})
-        export_inputs(checkpoint, preparation / 'inputs', options['mode'], runtime=runtime, should_stop=stop)
+        if options.get('oracle_artifixer_inputs'):
+            import shutil
+            shutil.copytree(options['oracle_artifixer_inputs'], preparation / 'inputs')
+        else:
+            export_inputs(checkpoint, preparation / 'inputs', options['mode'], runtime=runtime, should_stop=stop)
         import hashlib
         input_manifest = preparation / 'inputs/inputs.json'
         staging = {'version': 1, 'input_manifest': str(input_manifest.relative_to(root)),

@@ -265,7 +265,7 @@ def test_real_upstream_colmap_loader_split_and_attention(tmp_path, worldexplorer
 @pytest.mark.parametrize('adapter',['trajectory','saved_poses','per_view_preset'])
 @pytest.mark.parametrize('stop_training',[False,True])
 @pytest.mark.parametrize('count',[2,6])
-def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training,count,depth="predicted",initialization="sfm",world_attention=None):
+def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training,count,depth="predicted",initialization="sfm",world_attention=None,artifixer=False):
     cp = checkpoint(tmp_path,count)
     inputs,output = tmp_path/'inputs',tmp_path/'run'
     runtime = {**repair.DEFAULT_RUNTIME, 'oracle_reference_mode':'all', 'oracle_adapter':adapter, 'oracle_depth_source':depth, 'oracle_initialization':initialization}
@@ -277,6 +277,14 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training
         manifest.update(worldexplorer_source='worldexplorer-source', oracle_worldexplorer_attention=world_attention)
         (inputs/'inputs.json').write_text(json.dumps(manifest))
     frames = json.loads((inputs/'scene/transforms.json').read_text())['frames']
+    if artifixer:
+        manifest['artifixer_source'] = {'run_id':'source'}
+        manifest['seva_internal_resolution'] = manifest['resolution']
+        (inputs/'inputs.json').write_text(json.dumps(manifest))
+        for frame in frames:
+            path = inputs/'scene'/frame['file_path']
+            if not path.exists():
+                Image.new('RGB',tuple(manifest['resolution']),'green').save(path)
     phases = []
     requested = [False]
     monkeypatch.setattr(repair,'validate_runtime',lambda _:None)
@@ -333,7 +341,7 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training
                 Image.new('L',(37,37),128).save(output/'attention-raw'/p.name)
         elif phase == 'reconstruction':
             body = json.loads(Path(argv[-1]).read_text())
-            assert argv[-3] == ('train' if world_attention or adapter in ('trajectory','per_view_preset') else 'script')
+            assert argv[-3] == ('train' if artifixer or world_attention or adapter in ('trajectory','per_view_preset') else 'script')
             assert '--synth_attention_dir' in body['argv']
             assert body['argv'][body['argv'].index('--lambda_lpips')+1]=='0.3'
             assert '--gt_synth_schedule' in body['argv'] and '--depths' in body['argv']
@@ -372,12 +380,14 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training
         generations = [f'seva_generation_{i+1:03d}_of_{count:03d}' for i in range(count)]
     depth_phases = ['reference_depth','depth_alignment'] if depth == 'predicted' else []
     sfm_phases = [] if depth == initialization == 'source_splat' else ['sfm_features','sfm_matching','sfm_triangulation','sfm_export']
-    assert phases == ['model_access',*sfm_phases,
+    if artifixer:
+        generations = []
+    assert phases == [*([] if artifixer else ['model_access']),*sfm_phases,
                       *depth_phases,*generations,'vggt_attention','reconstruction']
     assert Path(result['splat_path']).exists()
     recipe = json.loads((output/'recipe.json').read_text())
-    assert len(recipe['commands'])==3+len(sfm_phases)+len(depth_phases)+len(generations)
-    assert 'Only saved reference' in recipe['gt_policy']
+    assert len(recipe['commands'])==(2 if artifixer else 3)+len(sfm_phases)+len(depth_phases)+len(generations)
+    assert ('Six GPT repaired' if artifixer else 'Only saved reference') in recipe['gt_policy']
 
 
 @pytest.mark.parametrize('mode',['crop','pad'])
@@ -645,3 +655,11 @@ def test_pair_interpolation_cannot_be_bent_by_other_reference_cameras():
 def test_worldexplorer_attention_pipeline(tmp_path, monkeypatch, world_attention, adapter):
     test_full_pipeline_stage_contract(tmp_path, monkeypatch, adapter, False, 2,
                                       world_attention=world_attention)
+
+
+@pytest.mark.parametrize('initialization', ['sfm', 'source_splat'])
+def test_artifixer_skips_generation_but_runs_attention_and_training(tmp_path, monkeypatch, initialization):
+    from test_oraclegs_source_geometry import source_ply
+    source_ply(tmp_path/'missing.ply')
+    test_full_pipeline_stage_contract(tmp_path, monkeypatch, 'saved_poses', False, 6,
+                                      initialization=initialization, artifixer=True)
