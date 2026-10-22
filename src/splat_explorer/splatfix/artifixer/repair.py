@@ -299,8 +299,9 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
         anchors = [anchors[0], anchors[-1]]
     reference_views = cp.repair_views
     source_path = str(Path(scene_path).resolve()) if scene_path else cp.manifest['scene_path']
-    from .pipeline_profile import rgb_backend
+    from .pipeline_profile import rgb_backend, geometry_backend
     backend = rgb_backend(runtime or {})
+    geometry = geometry_backend(runtime or {})
     segments = [{'start': 0, 'count': len(cameras)}]
     if orbit:
         segments = [{'indices': s['full_frame_indices'],
@@ -315,8 +316,8 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
               'source': cp.manifest.get('source_fingerprint', cp.manifest['scene_path']),
               'scene_load': cp.manifest.get('metadata', {}).get('scene_load', {}),
               'rgb': [digest_file(cp.image_path(view)) for view in cp.views], 'orbit': orbit}
-    if backend == '3dgut':
-        recipe.update(anchor_rgb_policy='3dgut', upstream_revision=UPSTREAM_REVISION,
+    if geometry == '3dgut':
+        recipe.update(anchor_rgb_policy=backend, upstream_revision=UPSTREAM_REVISION,
                       opacity_policy='native_3dgut_png8', appearance='full_source_ply_sh')
     signature = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
     cache = cp.root / 'trajectories'
@@ -338,7 +339,7 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
         scene = load_scene(source_path, **cp.manifest.get('metadata', {}).get('scene_load', {}))
         if renderer_factory:
             renderer = renderer_factory(scene)
-        elif backend == '3dgut':
+        elif geometry == '3dgut':
             from .native_renderer import NativeRenderer
             renderer = NativeRenderer(source_path, runtime, should_stop)
         else:
@@ -484,10 +485,10 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
             raise ValueError('Authors smooth orbit requires at least two distinct saved camera poses')
         if len(pose_keys) != len(cp.views):
             raise ValueError('Saved anchor poses must be distinct for authors smooth orbit')
-    from .pipeline_profile import rgb_backend, apply_pipeline
+    from .pipeline_profile import rgb_backend, geometry_backend, apply_pipeline
     cfg = apply_pipeline(validate_runtime(runtime))
     backend = rgb_backend(cfg)
-    if backend == '3dgut' and trajectory_mode == 'legacy_local_loops':
+    if geometry_backend(cfg) == '3dgut' and trajectory_mode == 'legacy_local_loops':
         raise ValueError('Legacy local loops require the legacy_gsplat pipeline')
     if cfg.get('prompt_source') == 'original_and_repaired' and mode != 'edited':
         raise ValueError('Original + repaired captioning requires edited input images')
@@ -545,6 +546,10 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         request['input_adaptation'] = ('Source PLY rendered with pinned authors 3DGUT, full SH, native RGB and opacity; '
             'opacity follows authors PNG quantization. Fresh authors ArtiFixer3D fit. '
             'Selected/GPT-edited reference images and source-splat point initialization remain application inputs.')
+    if cfg['artifixer_pipeline'] == 'authors_3dgut_viser_rgb':
+        request['input_adaptation'] = ('Viser RGB paired with pinned authors 3DGUT opacity and auxiliary camera-Z depth; '
+            'opacity follows authors PNG quantization. Fresh authors ArtiFixer3D fit. '
+            'Mixed-renderer application variant; selected/GPT-edited references and source-splat points remain application inputs.')
     from ..worldexplorer.source import stage_checkpoint_source
     originals = None
     if cfg.get('reconstruction_images', 'distilled') == 'all':

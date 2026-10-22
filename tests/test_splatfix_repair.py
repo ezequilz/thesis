@@ -946,7 +946,7 @@ def test_author_orbit_requires_multiple_distinct_anchors_before_runtime(tmp_path
 
 
 @pytest.mark.parametrize('mode', ['baseline', 'edited'])
-@pytest.mark.parametrize('pipeline', ['authors_3dgut', 'legacy_gsplat'])
+@pytest.mark.parametrize('pipeline', ['authors_3dgut', 'authors_3dgut_viser_rgb', 'legacy_gsplat'])
 def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypatch, mode, pipeline):
     from dataclasses import replace
     from splat_explorer.splatfix.checkpoint import camera_from_record
@@ -960,6 +960,8 @@ def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypa
     monkeypatch.setattr(rendering, 'BundleRenderer', FakeRenderer)
     monkeypatch.setattr(repair, 'validate_runtime', lambda _: {**repair.DEFAULT_RUNTIME, 'artifixer_pipeline': pipeline})
     monkeypatch.setattr('splat_explorer.splatfix.artifixer.native_renderer.NativeRenderer', lambda *a, **kw: FakeRenderer(None))
+    plus_captures = []
+    monkeypatch.setattr(repair, 'capture_plus_rgb', lambda *a, **kw: plus_captures.append(True))
     if pipeline == 'authors_3dgut':
         monkeypatch.setattr(repair, 'capture_rgb', lambda *a, **kw: pytest.fail('Native targets must not use Viser'))
         monkeypatch.setattr(repair, 'capture_plus_rgb', lambda *a, **kw: pytest.fail('Native plus must retain upstream RGB'))
@@ -1016,6 +1018,7 @@ def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypa
     monkeypatch.setattr(repair, 'run_worker', worker)
     repair.run_repair(cp.root, tmp_path / 'output', mode=mode)
     assert events == ['scale', 'orbit', 'caption', 'infer', 'distill', 'plus']
+    assert len(plus_captures) == (0 if pipeline == 'authors_3dgut' else 1)
     assert len(set(roots)) == 1
     # This shared cache contains original renders even when the edited arm ran.
     trajectory = json.loads(Path(roots[0]).read_text())
@@ -1093,3 +1096,32 @@ def test_checkpoint_owned_geometry_replays_without_renderer(tmp_path, monkeypatc
     monkeypatch.setattr(repair, 'capture_rgb', lambda *a, **kw: pytest.fail('Must reuse captured trajectory'))
     _, replay = repair.prepare_saved_path(second, renderer_factory=lambda *a: pytest.fail('Must reuse geometry'))
     assert replay == original
+
+
+def test_hybrid_preserves_native_geometry_overwrites_rgb_and_separates_caches(tmp_path, monkeypatch):
+    cp = make_checkpoint(tmp_path)
+    mock_scene(monkeypatch)
+    class Native(FakeRenderer):
+        def render(self, camera):
+            rgb, alpha, depth = super().render(camera)
+            return rgb, alpha * .4, depth * 3
+    monkeypatch.setattr('splat_explorer.splatfix.artifixer.native_renderer.NativeRenderer', lambda *a, **kw: Native(None))
+    from splat_explorer.splatfix import rendering
+    monkeypatch.setattr(rendering, 'BundleRenderer', FakeRenderer)
+    captures = []
+    def capture(source, cameras, paths, **kw):
+        captures.append(1)
+        for path in paths:
+            Image.new('RGB', (32, 32), (123, 123, 123)).save(path)
+    monkeypatch.setattr(repair, 'capture_rgb', capture)
+    roots = []
+    for profile in ['authors_3dgut', 'authors_3dgut_viser_rgb', 'legacy_gsplat']:
+        root, trajectory = repair.prepare_saved_path(cp, runtime={'artifixer_pipeline': profile})
+        roots.append(root)
+        frame = trajectory['frames'][0]
+        native = profile != 'legacy_gsplat'
+        np.testing.assert_allclose(np.load(cp.root / frame['opacity']), .4 if native else 1.)
+        np.testing.assert_allclose(np.load(cp.root / trajectory['anchors'][0]['depth']), 6. if native else 2.)
+        assert np.asarray(Image.open(cp.root / frame['rgb']))[0, 0, 0] == (90 if profile == 'authors_3dgut' else 123)
+    assert len(set(roots)) == 3
+    assert len(captures) == 2

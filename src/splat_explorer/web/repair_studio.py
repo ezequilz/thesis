@@ -173,7 +173,9 @@ class RepairStudio:
             from ..scene_runs.store import SceneRunStore
 
             root = Path(self.app.cfg.output.dir) / "scene-runs"
-            return SceneRunStore(root).gpu_lease_owner()
+            store = SceneRunStore(root)
+            store.recover_abandoned_setup_lease()
+            return store.gpu_lease_owner()
         except Exception:
             logger.exception("Could not inspect scene-run GPU lease")
             return None
@@ -191,6 +193,10 @@ class RepairStudio:
                     owned_job = str(load_lrz_config().get("job_id") or "").strip()
                 if owned_job and owned_job != str(job_id).strip():
                     return
+            if owner.get("run_id") == "gpu-setup":
+                raise RuntimeError(
+                    f"GPU setup is still active; wait for it to finish before {operation}."
+                )
             run_id = owner.get("run_id") or "an active scene-run"
             raise RuntimeError(
                 f"GPU is reserved by {run_id}; stop that scene-run before {operation}."

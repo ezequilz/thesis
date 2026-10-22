@@ -1034,9 +1034,9 @@ These custom controls apply to **Legacy Viser / gsplat**. CLI equivalents:
 ### Default authors rendering and reconstruction
 
 Step 4's **ArtiFixer rendering and reconstruction** setting selects
-`authors_3dgut` (default) or `legacy_gsplat`. It is saved with the job, propagated
+`authors_3dgut` (default), `authors_3dgut_viser_rgb`, or `legacy_gsplat`. It is saved with the job, propagated
 to the GPU worker, and recorded in run provenance. CLI: `--artifixer-pipeline
-authors_3dgut|legacy_gsplat`; config: `splatfix.runtime.artifixer_pipeline`.
+authors_3dgut|authors_3dgut_viser_rgb|legacy_gsplat`; config: `splatfix.runtime.artifixer_pipeline`.
 
 Authors mode imports the original Gaussian PLY with all SH coefficients into the
 pinned 3DGUT implementation. It uses the authors' rendering configuration,
@@ -1062,6 +1062,16 @@ not rerun the paper's initial sparse photographic reconstruction. Native source
 rendering currently requires binary Gaussian PLY with DC-only or degree-3 SH;
 other formats can explicitly select legacy mode. Existing saved worker requests
 without a pipeline field retain their legacy renderer validation.
+
+The third option, **Viser RGB + authors 3DGUT geometry / fitting**
+(`authors_3dgut_viser_rgb`), captures conditioning RGB with Viser while retaining
+the native 3DGUT opacity and auxiliary depth, including opacity quantization and
+camera-Z conversion described above. It uses the same fixed fresh ArtiFixer3D
+fitting recipe as the default. The “+” pass likewise uses Viser RGB with native
+reconstruction opacity. Its trajectory cache is separate from both other modes;
+RGB-only captures can share the Viser capture cache. This mixed-renderer variant
+is an application option, not the authors' original paired-rendering method.
+The default remains `authors_3dgut`; native geometry still requires a supported PLY.
 
 ### Endpoint-only ArtiFixer checkpoints
 

@@ -439,6 +439,18 @@ class SceneRunStore:
         except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
             return None
 
+    def recover_abandoned_setup_lease(self) -> bool:
+        """Recover a setup controller's lock only after its local process died.
+
+        Scene-run leases may protect detached reconstruction and must not be
+        cleared here. A retry of setup verifies remote state before readiness
+        and the allocation deadline are published again.
+        """
+        owner = self.gpu_lease_owner()
+        if not owner or owner.get("run_id") != "gpu-setup":
+            return False
+        return self._recover_stale_local_lease()
+
     def acquire_gpu_lease(
         self,
         run_id: str,

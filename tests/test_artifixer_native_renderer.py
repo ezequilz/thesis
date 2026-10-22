@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from splat_explorer.splatfix.artifixer.native_renderer import expected_camera_z
-from splat_explorer.splatfix.artifixer.pipeline_profile import apply_pipeline, rgb_backend
+from splat_explorer.splatfix.artifixer.pipeline_profile import apply_pipeline, rgb_backend, geometry_backend
 from splat_explorer.splatfix.jobs import validate_job
 
 
@@ -60,3 +60,16 @@ def test_native_capture_cache_cannot_reuse_viser(tmp_path):
     assert len(calls) == 2
     assert capture_inputs(cp, [camera], [destination], capture, profile='720p', renderer='3dgut') == native
     assert len(calls) == 2
+
+
+def test_hybrid_uses_viser_rgb_native_geometry_and_author_fitting():
+    opts = validate_job({'stage': 'repair', 'checkpoint': '/saved/cp',
+                         'artifixer_pipeline': 'authors_3dgut_viser_rgb',
+                         'reconstruction_initialization': 'full_splat',
+                         'reconstruction_images': 'all', 'regularization_profile': 'base_mcmc'})
+    assert rgb_backend(opts) == 'viser'
+    assert geometry_backend(opts) == '3dgut'
+    assert geometry_backend({}) == 'gsplat'
+    assert opts['reconstruction_initialization'] == 'point_cloud'
+    assert opts['reconstruction_images'] == 'distilled'
+    assert opts['regularization_profile'] == 'artifixer'

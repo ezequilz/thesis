@@ -179,7 +179,7 @@ def test_local_selection_dispatches_separate_cli_without_image_edits(studio, mon
 
 @pytest.mark.parametrize('images', ['all', 'distilled'])
 @pytest.mark.parametrize('initialization', ['full_splat', 'point_cloud'])
-@pytest.mark.parametrize('pipeline', ['authors_3dgut', 'legacy_gsplat'])
+@pytest.mark.parametrize('pipeline', ['authors_3dgut', 'authors_3dgut_viser_rgb', 'legacy_gsplat'])
 def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypatch, tmp_path, images, initialization, pipeline):
     from splat_explorer import repair_lrz as lrz
     from splat_explorer.scene_runs.lrz_transport import LrzSceneRunTransport
@@ -229,7 +229,7 @@ def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypat
     assert 'splat_explorer.splatfix.job_worker' in launches[0]
     request = json.loads((studio.store.run_path(job['run_id']) / 'worker-request.json').read_text())
     assert request['runtime']['artifixer_pipeline'] == pipeline
-    if pipeline == 'authors_3dgut':
+    if pipeline != 'legacy_gsplat':
         images, initialization = 'distilled', 'point_cloud'
     assert request['runtime']['reconstruction_images'] == images
     assert request['runtime']['reconstruction_initialization'] == initialization

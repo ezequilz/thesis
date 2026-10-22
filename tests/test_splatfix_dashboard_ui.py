@@ -33,6 +33,9 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('repair').artifixer_pipeline,'authors_3dgut');
   assert.equal($('artifixer-reconstruction-initialization').disabled,true);
   assert.equal($('artifixer-reconstruction-initialization').value,'point_cloud');
+  $('artifixer-pipeline').value='authors_3dgut_viser_rgb';renderArtifixerPipeline();
+  assert.equal(payload('repair').artifixer_pipeline,'authors_3dgut_viser_rgb');
+  assert.equal($('artifixer-reconstruction-initialization').disabled,true);
   $('artifixer-pipeline').value='legacy_gsplat';renderArtifixerPipeline();
   assert.equal(payload('repair').artifixer_pipeline,'legacy_gsplat');
   assert.equal($('artifixer-reconstruction-initialization').disabled,false);
