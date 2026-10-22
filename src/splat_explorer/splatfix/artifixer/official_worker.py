@@ -22,8 +22,8 @@ ARTIFIXER3D_STEPS = 30000
 
 
 def validate_reconstruction_options(raw):
-    images = raw.get('reconstruction_images', 'all')
-    initialization = raw.get('reconstruction_initialization', 'full_splat')
+    images = raw.get('reconstruction_images', 'distilled')
+    initialization = raw.get('reconstruction_initialization', 'point_cloud')
     if images not in ('all', 'distilled'):
         raise ValueError('reconstruction_images must be all or distilled')
     if initialization not in ('full_splat', 'point_cloud'):
@@ -545,8 +545,16 @@ def inference_jobs(request, trajectory, *, plus=False):
     """Explicit output ownership keeps reverse predictions out of reconstruction."""
     anchors = [a['frame_index'] for a in trajectory['anchors']]
     if request.get('repair_policy') != 'endpoints':
+        segments = trajectory['segments']
+        if (request.get('trajectory_mode') == 'authors_orbit'
+                and request.get('runtime', {}).get('split_mode') == 'no-split'):
+            # One temporal sequence in authored trajectory order, with every
+            # saved reference retained as conditioning. Never inherit inward
+            # half-leg direction changes or cache resets from segment metadata.
+            segments = [{'indices': [i for i in range(len(trajectory['frames'])) if i not in anchors],
+                         **({'cache_seed_index': anchors[0]} if anchors else {})}]
         return [(s, list(range(len(anchors))), 'plus' if plus else 'inference')
-                for s in trajectory['segments']]
+                for s in segments]
     if len(anchors) != 2:
         raise ValueError('Endpoint inference requires exactly two repaired references')
     mode = request['runtime'].get('endpoint_reference_mode', 'both')

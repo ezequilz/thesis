@@ -14,7 +14,7 @@ from splat_explorer.splatfix.resolution import (
 
 
 def test_profiles_and_photographic_rays():
-    assert profile_size() == (832, 480)
+    assert profile_size() == (1280, 720)
     assert profile_size('720p') == (1280, 720)
     for profile, expected in [('training', [720, 480]), ('720p', [1072, 720])]:
         plan = resize_plan(1237, 822, profile)
@@ -34,8 +34,8 @@ def test_profiles_and_photographic_rays():
 
 
 def test_native_profile_dimensions_need_no_alignment_resize():
-    assert PROFILE_LABELS['training'] == 'v1 832 x 480 (default)'
-    assert PROFILE_LABELS['720p'] == 'v1 1280 x 720'
+    assert PROFILE_LABELS['training'] == 'v1 832 x 480'
+    assert PROFILE_LABELS['720p'] == 'v1 1280 x 720 (default)'
     for profile in ('training', '720p'):
         width, height = PROFILES[profile]
         assert width % 16 == height % 16 == 0
@@ -55,8 +55,8 @@ def test_existing_checkpoint_derivative_preserves_pose_and_intrinsics(tmp_path):
     plan = resize_plan(1237, 822)
     np.testing.assert_allclose(changed.c2w, camera.c2w)
     np.testing.assert_allclose(changed.intrinsics,
-        [[camera.fx*plan['scale'], 0, 360], [0, camera.fy*plan['scale'], 240], [0,0,1]], rtol=1e-6)
-    assert Image.open(derivative.image_path(derivative.views[0])).size == (720, 480)
+        [[camera.fx*plan['scale'], 0, 536], [0, camera.fy*plan['scale'], 360], [0,0,1]], rtol=1e-6)
+    assert Image.open(derivative.image_path(derivative.views[0])).size == (1072, 720)
     assert (cp.root / 'checkpoint.json').read_bytes() == old_manifest
     assert Image.open(cp.image_path(cp.views[0])).size == (1237, 822)
     assert prepare_checkpoint(derivative, tmp_path / 'unused') is derivative
@@ -74,14 +74,14 @@ def test_colmap_copy_calibrates_pixels_observations_and_keeps_world_points(tmp_p
     dest = tmp_path / 'prepared'; policy = prepare_colmap(source, dest)
     plan = policy['images']['photo.jpg']
     camera = struct.unpack('<QiiQQdddd', (dest / 'sparse/0/cameras.bin').read_bytes())
-    assert camera[3:5] == (720, 480)
+    assert camera[3:5] == (1072, 720)
     np.testing.assert_allclose(camera[5:], calibrate(1162, 1162, 618.25, 410.75, plan))
     data = (dest / 'sparse/0/images.bin').read_bytes()
     assert data[8:72] == pose
     x, y, point = struct.unpack('<ddq', data[-24:])
     np.testing.assert_allclose([x,y], np.array([901,611])*plan['scale']-plan['offset_xy'])
     assert point == 42
-    assert Image.open(dest / 'images/photo.jpg').size == (720, 480)
+    assert Image.open(dest / 'images/photo.jpg').size == (1072, 720)
     for path, data in originals.items():
         assert (source / path).read_bytes() == data
     assert (dest / 'sparse/0/points3D.bin').read_bytes() == originals[next(p for p in originals if p.name=='points3D.bin')]
@@ -207,7 +207,7 @@ def test_artifixer_checkpoint_staging_reused_after_remote_roundtrip(tmp_path, mo
     assert second.image_path(second.views[0]).read_bytes() == first.image_path(first.views[0]).read_bytes()
     assert Image.open(second.image_path(second.views[0], repaired=True)).getpixel((0, 0)) == (0, 0, 255)
     assert (second.root / 'trajectories/saved/frame.png').read_bytes() == b'cached trajectory RGB'
-    prepare_repair_checkpoint(cp, tmp_path / '720', '720p', reuse_artifixer_inputs=True)
+    prepare_repair_checkpoint(cp, tmp_path / 'training', 'training', reuse_artifixer_inputs=True)
     assert len(calls) == 2
     cp.views[0]['camera']['position'][0] = 1.
     cp.views[0]['camera'].pop('c2w')

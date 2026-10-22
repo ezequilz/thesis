@@ -144,8 +144,8 @@ class ManualSelection:
             if not self.checkpoint.views:
                 self.status.content = self.progress() + '\n\nSave at least one position first.'
                 return
-            if self.checkpoint.endpoint_only and not self.checkpoint.complete:
-                self.status.content = self.progress() + '\n\nEndpoint checkpoints require all six positions.'
+            if self.checkpoint.endpoint_only and len(self.checkpoint.views) < 2:
+                self.status.content = self.progress() + '\n\nEndpoint checkpoints require at least two positions.'
                 return
             old_target = self.checkpoint.target_views
             self.checkpoint.manifest['target_views'] = len(self.checkpoint.views)

@@ -186,11 +186,11 @@ This is the early Splatfix resolution setting, not an authors-endorsed preset.
 Only resolution behavior is versioned; other current pipeline settings remain
 in effect. Historical unversioned runs are labelled separately in run details.
 
-**v1 832 x 480 (default)** (`training`) is the default.
-**v1 1280 x 720** (`720p`) is the larger alternative.
+**v1 1280 x 720 (default)** (`720p`) is the default.
+**v1 832 x 480** (`training`) remains available as the smaller alternative.
 
-New Splatfix camera captures render directly at **832 × 480** by default, or
-**1280 × 720** with `splatfix.resolution_profile: 720p`. Both dimensions in each
+New Splatfix camera captures render directly at **1280 × 720** by default, or
+**832 × 480** with `splatfix.resolution_profile: training`. Both dimensions in each
 profile are divisible by 16, so upstream alignment does not resize these frames.
 832 × 480 is 26:15, not exact 16:9; 1280 × 720 is exact 16:9.
 The smaller size follows the [official Wan2.1 T2V-1.3B size configuration](https://github.com/Wan-Video/Wan2.1/blob/main/wan/configs/__init__.py),
@@ -975,17 +975,17 @@ copying or converting the original scene.
 
 **Reconstruction images** and **Reconstruction initialization** are independent:
 
-- **All images reconstruction** (`reconstruction_images=all`, default) preserves
+- **All images reconstruction** (`reconstruction_images=all`) preserves
   the existing behavior: saved references, ArtiFixer-generated views, and all
   archived WorldExplorer images supervise reconstruction.
-- **ArtiFixer3D images only** (`reconstruction_images=distilled`) keeps the saved
+- **ArtiFixer3D images only** (`reconstruction_images=distilled`, default) keeps the saved
   references and generated views, without staging, uploading, or adding the
   WorldExplorer source-image archive. Repaired anchors remain direct targets;
   this does not discard the references used by the authors' distillation recipe.
-- **Original PLY snapshot** (`reconstruction_initialization=full_splat`, default)
+- **Original PLY snapshot** (`reconstruction_initialization=full_splat`)
   imports all source Gaussian parameters, including SH, with a fresh optimizer
   and training schedule.
-- **Fresh reconstruction** (`reconstruction_initialization=point_cloud`)
+- **Fresh reconstruction** (`reconstruction_initialization=point_cloud`, default)
   creates new Gaussians using the existing point-cloud initialization path.
   By default the seed points are source-splat positions and RGB; no original
   Gaussian scales, rotations, opacity, or SH are imported. This is not a literal
@@ -995,17 +995,18 @@ Both initializations produce separate output files. Source-splat RGB/opacity
 still condition diffusion in every combination. The 30,000-step author fitting
 recipe and selected regularization profile remain unchanged. Run requests,
 worker runtime, supervision manifests, and completed distillation results record
-these choices; older requests retain the all-images/full-splat defaults.
+these choices. New runs default to repaired references plus generated views and
+fresh point-cloud initialization; explicitly saved choices remain supported.
 
 CLI equivalents: `--reconstruction-images all|distilled` and
 `--reconstruction-initialization full_splat|point_cloud`.
 
 ### Endpoint-only ArtiFixer checkpoints
 
-In Step 1 choose **Six poses · repair first and last only**. Save all six
+In Step 1 choose **Endpoint repair · first and last only (2+ views)**. Save at least two
 positions in the intended travel order. The horizontal FOV controls now include
 **77°**, including Custom capture. Original RGB and calibrated cameras remain
-saved for every position. Step 3 edits only positions 1 and 6, resuming missing
+saved for every position. Step 3 edits only the first and last positions, resuming missing
 endpoint edits without repeating successful requests.
 
 These checkpoints require edited ArtiFixer reconstruction and automatically use
@@ -1027,3 +1028,25 @@ CLI selection accepts `--repair-policy endpoints --views 6 --horizontal-fov 77`;
 repair accepts `--endpoint-reference-mode both` (default) or `initial`.
 `--split-mode no-split` is also available independently; endpoint checkpoints
 force this mode regardless of a previously selected split setting.
+
+Existing checkpoints with at least two views can use the same workflow: in Step 4 select
+**Image trajectory → Endpoint image trajectory**. This run-only override uses
+just the first and last repaired images even when all views were repaired. It
+preserves the source checkpoint, its images, and its saved camera calibration;
+it does not require recapture or new GPT edits. The run automatically uses
+No split and supports both endpoint reference modes. CLI equivalent:
+`--image-trajectory endpoints`.
+
+For normal ArtiFixer runs, leave **Image trajectory → Use checkpoint type** and
+choose **ArtiFixer trajectory splitting → No split** in Settings. All six saved
+reference images and their poses remain conditioning and reconstruction
+supervision. The usual authored path is processed as one continuous sequence,
+with no per-leg cache resets and no reverse inference run. CLI equivalent:
+`--split-mode no-split` without the endpoint trajectory override.
+
+Endpoint checkpoints accept any integer view count of two or more, without the
+normal selection's 24-view limit. Custom selection may finish once at least two
+positions have been saved. Only the first and last selected views receive GPT
+repairs; all intermediate cameras remain trajectory waypoints and never become
+reference or repaired-image supervision. This also applies to the run-local
+endpoint override on prior checkpoints.

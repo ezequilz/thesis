@@ -26,10 +26,10 @@ from .official_worker import ARTIFIXER3D_CONFIG, ARTIFIXER3D_STEPS, reconstructi
 
 UPSTREAM_REVISION = 'a392c4dfe17459ef9952407accdb9fcdcdddba98'
 DEFAULT_RUNTIME = {
-    'resolution_profile': 'training',
+    'resolution_profile': '720p',
     'regularization_profile': 'artifixer',
-    'reconstruction_initialization': 'full_splat',
-    'reconstruction_images': 'all',
+    'reconstruction_initialization': 'point_cloud',
+    'reconstruction_images': 'distilled',
     'image_cache_insertion': False,
     'repo': '/workspace/third_party/ArtiFixer',
     'python': '/workspace/artifixer-venv/bin/python',
@@ -440,7 +440,8 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
             or (camera_scale is not None and (isinstance(camera_scale, bool)
                 or not np.isfinite(camera_scale) or camera_scale <= 0))):
         raise ValueError('Invalid seed or camera_scale')
-    cp = Checkpoint.load(checkpoint_dir)
+    from .checkpoint_policy import checkpoint_for_run
+    cp = checkpoint_for_run(Checkpoint.load(checkpoint_dir), (runtime or {}).get('image_trajectory', 'checkpoint'))
     if not cp.complete:
         raise ValueError('Finish selecting all requested views before repair')
     if mode == 'edited':
@@ -484,7 +485,7 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         references = [str(cp.root / anchor['original_rgb']) for anchor in trajectory['anchors']]
     initialization = prepare_splat_initialization(
         cfg.get('scene_path') or cp.manifest['scene_path'], root / 'initialization.ply'
-    ) if cfg.get('reconstruction_initialization', 'full_splat') == 'full_splat' else None
+    ) if cfg.get('reconstruction_initialization', 'point_cloud') == 'full_splat' else None
     points = cfg.get('source_points3d') or str(cp.root / trajectory['points3d'])
     request = {'repair_policy': 'endpoints' if cp.endpoint_only else 'all',
                'reconstruction_method': 'artifixer', 'resolution_profile': cfg['resolution_profile'],
@@ -512,11 +513,11 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                'source_points3d_sha256': digest_file(points), 'trajectory_signature': trajectory['signature']}
     from ..worldexplorer.source import stage_source
     originals = None
-    if cfg.get('reconstruction_images', 'all') == 'all':
+    if cfg.get('reconstruction_images', 'distilled') == 'all':
         originals = cfg.get('worldexplorer_source') or stage_source(
             cfg.get('scene_path') or cp.manifest['scene_path'], root / 'worldexplorer-source')
-    request.update(reconstruction_images=cfg.get('reconstruction_images', 'all'),
-                   reconstruction_initialization=cfg.get('reconstruction_initialization', 'full_splat'))
+    request.update(reconstruction_images=cfg.get('reconstruction_images', 'distilled'),
+                   reconstruction_initialization=cfg.get('reconstruction_initialization', 'point_cloud'))
     if originals:
         request['worldexplorer_source'] = originals
     request.update(initialization or {})

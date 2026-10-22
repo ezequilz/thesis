@@ -13,7 +13,7 @@ def validate_job(raw):
     if stage not in ('select', 'edit', 'seva_capture', 'repair', 'benchmark'):
         raise ValueError('stage must be select, edit, seva_capture, repair or benchmark')
     from .resolution import profile_size
-    profile = raw.get('resolution_profile', 'training')
+    profile = raw.get('resolution_profile', '720p')
     profile_size(profile)
     result = {'stage': stage, 'resolution_profile': profile}
     if stage in ('repair', 'benchmark'):
@@ -39,11 +39,14 @@ def validate_job(raw):
         result['scheduled_at'] = instant.astimezone(timezone.utc).isoformat()
     if stage == 'select':
         views = raw.get('views', 6)
-        if type(views) is not int or not 1 <= views <= 24:
-            raise ValueError('views must be an integer between 1 and 24')
         policy = raw.get('repair_policy', 'all')
-        if policy not in ('all', 'endpoints') or (policy == 'endpoints' and views != 6):
-            raise ValueError('Endpoint checkpoints require exactly six views')
+        if policy not in ('all', 'endpoints'):
+            raise ValueError('Unknown checkpoint repair policy')
+        if policy == 'endpoints':
+            if type(views) is not int or views < 2:
+                raise ValueError('Endpoint checkpoints require at least two views')
+        elif type(views) is not int or not 1 <= views <= 24:
+            raise ValueError('views must be an integer between 1 and 24')
         fov = raw.get('horizontal_fov')
         if fov is not None and (type(fov) not in (int, float) or not 0 < fov < 180):
             raise ValueError('Invalid horizontal field of view')

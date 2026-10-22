@@ -513,7 +513,7 @@ def test_old_or_different_resolution_preparation_cannot_be_reused(tmp_path, monk
     source, prior = failed_prepared_run(tmp_path, monkeypatch)
     install_worker(monkeypatch)
     with pytest.raises(ValueError, match='resolution policy differs'):
-        benchmark.run_benchmark(source, tmp_path / 'runs', runtime={'resume_from': str(prior), 'resolution_profile': '720p'})
+        benchmark.run_benchmark(source, tmp_path / 'runs', runtime={'resume_from': str(prior), 'resolution_profile': 'training'})
     path = prior / 'benchmark-run.json'
     old = json.loads(path.read_text()); del old['resolution_policy']; path.write_text(json.dumps(old))
     with pytest.raises(ValueError, match='resolution policy differs'):

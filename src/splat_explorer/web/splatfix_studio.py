@@ -20,7 +20,7 @@ class SplatfixStudio(SceneRunStudio):
         from ..splatfix.resolution import profile_size
         defaults = super().defaults()
         defaults['width'], defaults['height'] = profile_size(
-            self.cfg.get('splatfix', {}).get('resolution_profile', 'training'))
+            self.cfg.get('splatfix', {}).get('resolution_profile', '720p'))
         return defaults
 
     def checkpoints(self):
@@ -224,7 +224,7 @@ class SplatfixStudio(SceneRunStudio):
                 'compute': {'configured': repair_lrz.lrz_configured(), 'label': 'Configured LRZ allocation'},
                 'capture_viewer_port': self.cfg.get('viewer', {}).get('port', 8080),
                 'resolution_profiles': [{'id': key, 'label': PROFILE_LABELS[key], 'width': size[0], 'height': size[1]} for key, size in PROFILES.items()],
-                'defaults': {'reconstruction_method': DEFAULT_METHOD, 'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', 'training'), 'views': 6, 'frames': 25, 'span_fraction': .04,
+                'defaults': {'reconstruction_method': DEFAULT_METHOD, 'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', '720p'), 'views': 6, 'frames': 25, 'span_fraction': .04,
                              'width': self.defaults()['width'], 'height': self.defaults()['height']}}
 
     def start_custom(self, body):
@@ -238,7 +238,7 @@ class SplatfixStudio(SceneRunStudio):
         if not isinstance(body, dict):
             raise ValueError('Request must be an object')
         options = validate_job({
-            'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', 'training'),
+            'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', '720p'),
             **body, 'stage': 'select'})
         scene = next((s for s in self.scenes() if s['id'] == body.get('scene_id')), None)
         if scene is None or not scene.get('path'):
@@ -280,7 +280,7 @@ class SplatfixStudio(SceneRunStudio):
             raise ValueError('Request must be an object')
         if body.get('stage') == 'repair' and body.get('reconstruction_method') == 'oraclegs':
             body = {'oracle_capture_source':'seva', **body}
-        options = validate_job({'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', 'training'), **body})
+        options = validate_job({'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', '720p'), **body})
         scene_id = str(body.get('scene_id') or '')
         if options['stage'] == 'select':
             scenes = {s['id']: s for s in self.scenes()}
@@ -316,7 +316,11 @@ class SplatfixStudio(SceneRunStudio):
             cp = checkpoints[checkpoint]
             if not cp['complete']:
                 raise ValueError('Finish selecting all views before starting this stage')
-            if cp['metadata'].get('repair_policy') == 'endpoints' and options['stage'] == 'repair':
+            endpoint_run = options['stage'] == 'repair' and (cp['metadata'].get('repair_policy') == 'endpoints'
+                            or options.get('image_trajectory') == 'endpoints')
+            if endpoint_run:
+                if len(cp['views']) < 2:
+                    raise ValueError('Endpoint image trajectory requires a completed checkpoint with at least two views')
                 if options['reconstruction_method'] != 'artifixer' or options['mode'] != 'edited':
                     raise ValueError('Endpoint checkpoints require GPT-repaired ArtiFixer runs')
                 options['split_mode'] = 'no-split'
@@ -341,7 +345,8 @@ class SplatfixStudio(SceneRunStudio):
                 readiness = cp['reconstruction_methods'][options['reconstruction_method']]
                 if not readiness['ready']:
                     raise ValueError(readiness['reason'])
-            if options['stage'] == 'repair' and options['mode'] == 'edited' and not seva_set and cp['required_edited'] != cp['repair_target_views']:
+            if options['stage'] == 'repair' and options['mode'] == 'edited' and not seva_set and (any(not v.get('repaired_rgb') for v in [cp['views'][0], cp['views'][-1]])
+                         if endpoint_run else cp['required_edited'] != cp['repair_target_views']):
                 raise ValueError('Repair all checkpoint images before GPT-image improved reconstruction')
             options['checkpoint'] = checkpoint
             # The saved camera/RGB source determines provenance, irrespective

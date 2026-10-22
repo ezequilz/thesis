@@ -56,7 +56,7 @@ def execute(root):
                 pass_progress({'phase': 'validation'})
                 if prior:
                     result = run_repeat_benchmark(prior, request['output'],
-                        resolution_profile=request['runtime'].get('resolution_profile', 'training'),
+                        resolution_profile=request['runtime'].get('resolution_profile', '720p'),
                         regularization_profile=request['runtime'].get('regularization_profile', 'artifixer'),
                         should_stop=stop, on_progress=pass_progress)
                 else:

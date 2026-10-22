@@ -83,7 +83,7 @@ def test_repair_command_passes_only_saved_run_and_runtime(monkeypatch, tmp_path)
                              "--artifixer-repo", "/gpu/official"])
     repair_splat(Config({"splatfix": {"runtime": {"python": "/gpu/python"}}}), args)
     assert received["mode"] == "baseline"
-    assert received["runtime"] == {"repo": "/gpu/official", "python": "/gpu/python", "resolution_profile": "training", "split_mode": "double-split"}
+    assert received["runtime"] == {"repo": "/gpu/official", "python": "/gpu/python", "resolution_profile": "720p", "split_mode": "double-split"}
     assert received["checkpoint"] == tmp_path / "saved"
 
 

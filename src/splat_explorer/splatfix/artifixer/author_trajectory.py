@@ -305,8 +305,8 @@ def build_endpoint_path(poses, intrinsics, metric_scale, *, spacing=.1, renderer
     selected order before concatenating. Only the two endpoint cameras are GT.
     """
     import numpy as np
-    if len(poses) != 6:
-        raise ValueError('Endpoint trajectories require six saved poses')
+    if len(poses) < 2:
+        raise ValueError('Endpoint trajectories require at least two saved poses')
     full = []
     for first, last in zip(poses, poses[1:]):
         leg = build_author_orbit([first, last], intrinsics, metric_scale,

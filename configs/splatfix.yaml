@@ -4,11 +4,11 @@ agent:
   vlm_backend: cli_relay
 
 splatfix:
-  # Default 832x480 follows Wan2.1 1.3B; both dimensions are divisible by 16.
+  # Default 1280x720; both dimensions are divisible by 16.
   # Render directly at this size; existing images use calibrated scale/crop.
-  # Set 720p explicitly for 1280x720 novel camera renders.
+  # Set training explicitly for the smaller 832x480 profile.
   # early_original: v0, original 960x720 captures and uncapped source inputs.
-  resolution_profile: training
+  resolution_profile: 720p
   oraclegs_runtime:
     seva_fit: crop  # pad is the explicit fallback
     auto_setup: true

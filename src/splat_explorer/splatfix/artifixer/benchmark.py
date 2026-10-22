@@ -228,7 +228,7 @@ def _resume_preparation(cfg, input_hashes, names, metadata, upstream_revision):
     old_runtime = old.get('runtime', {})
     from ..resolution import POLICY_VERSION
     policy = old.get('resolution_policy', {})
-    if policy.get('version') != POLICY_VERSION or policy.get('profile') != cfg.get('resolution_profile', 'training'):
+    if policy.get('version') != POLICY_VERSION or policy.get('profile') != cfg.get('resolution_profile', '720p'):
         raise ValueError('Preparation resolution policy differs; start a fresh benchmark')
     if not comparison:
         for key in ('model_variant', 'model_id', 'checkpoint'):
@@ -444,7 +444,7 @@ def run_benchmark(source_dir, output_dir, *, runtime=None, should_stop=lambda: F
                 *[part for key, value in INFERENCE_DEFAULTS.items()
                   for part in ('--' + key, str(value))]]
     try:
-        manifest['resolution_policy'] = prepare_colmap(source / 'colmap', colmap, cfg.get('resolution_profile', 'training'))
+        manifest['resolution_policy'] = prepare_colmap(source / 'colmap', colmap, cfg.get('resolution_profile', '720p'))
         atomic_json(root / 'benchmark-run.json', manifest)
         if resume:
             on_progress({'phase': 'copy_preparation', 'output_dir': str(root), 'resume_from': resume['root']})

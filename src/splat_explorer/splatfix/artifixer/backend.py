@@ -19,6 +19,10 @@ def validate_options(raw):
             raise ValueError('benchmark_runs must be a positive integer')
         result['benchmark_runs'] = runs
     if raw['stage'] == 'repair':
+        from .checkpoint_policy import validate_image_trajectory
+        result['image_trajectory'] = validate_image_trajectory(raw.get('image_trajectory', 'checkpoint'))
+        if result['image_trajectory'] == 'endpoints':
+            result['split_mode'] = 'no-split'
         reference_mode = raw.get('endpoint_reference_mode', 'both')
         if reference_mode not in ('both', 'initial'):
             raise ValueError('endpoint_reference_mode must be both or initial')

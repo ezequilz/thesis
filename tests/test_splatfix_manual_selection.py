@@ -182,3 +182,18 @@ def test_77_degree_horizontal_capture(selection):
     assert camera.fov_deg == pytest.approx(77.)
     assert event.client.camera.fov == pytest.approx(np.radians(77.))
     assert captures[0]['fov'] == pytest.approx(camera.vertical_fov_rad())
+
+
+def test_endpoint_selection_can_finish_after_two_positions(selection):
+    session, event, captures = selection
+    session.checkpoint.manifest['metadata']['repair_policy'] = 'endpoints'
+    session.save_current(event)
+    session.finish(event)
+    assert session.folder is not None
+    assert 'at least two' in session.status.content
+    event.client.camera.position = np.array([4., 2., 3.])
+    session.save_current(event)
+    session.finish(event)
+    assert session.folder is None
+    cp = Checkpoint.load(session.checkpoint.root)
+    assert cp.endpoint_only and cp.complete and cp.target_views == 2

@@ -283,3 +283,20 @@ def test_endpoint_saved_order_with_original_authors_interpolation(original_orbit
     assert np.array_equal(full[0], poses[0])
     assert np.array_equal(full[-1], poses[-1])
     assert len(result['provenance']['segments']) == 1
+
+
+def test_normal_no_split_retains_six_references_and_same_authored_path(original_orbit_renderer):
+    references = [pose(x) for x in (0., .4, .8, 1.2, 1.6, 2.)]
+    continuous = author_trajectory.build_author_orbit(
+        references, K, 1, renderer=original_orbit_renderer, split_mode='no-split')
+    split = author_trajectory.build_author_orbit(
+        references, K, 1, renderer=original_orbit_renderer, split_mode='single-split')
+    assert continuous['full_trajectory'] == split['full_trajectory']
+    assert continuous['trajectory'] == split['trajectory']
+    provenance = continuous['provenance']
+    assert len(provenance['reference_frame_indices']) == 6
+    assert len(provenance['segments']) == 1
+    segment = provenance['segments'][0]
+    assert segment['target_indices'] == list(range(len(continuous['trajectory']['frames'])))
+    assert segment['full_frame_indices'] == [m['full_frame_index'] for m in provenance['frames']]
+    assert segment['cache_seed_full_frame_index'] == provenance['reference_frame_indices'][0]

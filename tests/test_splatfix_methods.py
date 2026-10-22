@@ -91,8 +91,9 @@ def test_artifixer_reconstruction_choices(images, initialization):
     assert job['reconstruction_images'] == images
     assert job['reconstruction_initialization'] == initialization
     legacy = validate_job({'stage': 'repair', 'checkpoint': 'saved'})
-    assert legacy['reconstruction_images'] == 'all'
-    assert legacy['reconstruction_initialization'] == 'full_splat'
+    assert legacy['reconstruction_images'] == 'distilled'
+    assert legacy['resolution_profile'] == '720p'
+    assert legacy['reconstruction_initialization'] == 'point_cloud'
 
 
 @pytest.mark.parametrize('key', ['reconstruction_images', 'reconstruction_initialization'])

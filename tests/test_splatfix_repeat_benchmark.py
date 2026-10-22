@@ -208,7 +208,7 @@ def test_repeat_reuses_already_aligned_references_and_rerenders_repaired_splat(t
         raise InterruptedError('Test stopped at repaired input rendering')
     monkeypatch.setattr(repeat, 'run_worker', stop_after_render)
     with pytest.raises(InterruptedError, match='Test stopped'):
-        repeat.run_repeat_benchmark(prior, tmp_path / 'results')
+        repeat.run_repeat_benchmark(prior, tmp_path / 'results', resolution_profile='training')
     assert len(commands) == 1
     assert Path(commands[0][1]).name == 'repeat_render.py'
     split = Path(commands[0][commands[0].index('--split') + 1])

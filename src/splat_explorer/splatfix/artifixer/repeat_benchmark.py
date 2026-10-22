@@ -124,7 +124,7 @@ def align_repeat_inputs(split, profile):
     return policy
 
 
-def run_repeat_benchmark(prior, output_dir, *, resolution_profile='training', regularization_profile='artifixer', should_stop=lambda: False, on_progress=lambda event: None):
+def run_repeat_benchmark(prior, output_dir, *, resolution_profile='720p', regularization_profile='artifixer', should_stop=lambda: False, on_progress=lambda event: None):
     prior = Path(prior).resolve()
     old = json.loads((prior / 'benchmark-run.json').read_text())
     # Preserve historical dimensions by copying preparation, never re-preprocessing.

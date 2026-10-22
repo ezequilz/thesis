@@ -33,7 +33,7 @@ def select_views(cfg, args):
         renderer_cfg["fov_deg"] = args.horizontal_fov
     from .resolution import profile_size
     renderer_cfg["width"], renderer_cfg["height"] = profile_size(
-        cfg.get("splatfix", {}).get("resolution_profile", "training"))
+        cfg.get("splatfix", {}).get("resolution_profile", "720p"))
     scene = load_scene(scene_path, min_opacity=cfg.scene.min_opacity,
                        lod_level=int(cfg.scene.get("lod_level", 0)))
     renderer = CaptureSession(scene_path, up_axis=cfg.camera.up_axis,
@@ -97,9 +97,11 @@ def repair_splat(cfg, args):
     run_repair = get_method(getattr(args, 'reconstruction_method', None)).run_repair
     method = getattr(args, "reconstruction_method", "artifixer")
     runtime = dict(cfg.get("splatfix", {}).get(method + "_runtime" if method in ("g4splat", "oraclegs") else "runtime", {}))
-    runtime["resolution_profile"] = cfg.get("splatfix", {}).get("resolution_profile", "training")
+    runtime["resolution_profile"] = cfg.get("splatfix", {}).get("resolution_profile", "720p")
     if getattr(args, 'endpoint_reference_mode', None) is not None:
         runtime['endpoint_reference_mode'] = args.endpoint_reference_mode
+    if getattr(args, 'image_trajectory', None) is not None:
+        runtime['image_trajectory'] = args.image_trajectory
     runtime['split_mode'] = getattr(args, 'split_mode', 'double-split')
     if getattr(args, 'image_cache_insertion', None) is not None:
         runtime['image_cache_insertion'] = args.image_cache_insertion
@@ -182,14 +184,16 @@ def _add_stages(parser):
     repair.add_argument("checkpoint", type=Path)
     repair.add_argument("--scene", type=Path, help="Relocated source asset on the GPU host (same content)")
     repair.add_argument("--output", required=True, type=Path, help="Parent directory for isolated reconstruction runs")
+    repair.add_argument("--image-trajectory", choices=("checkpoint", "endpoints"),
+                        help="Use checkpoint policy or endpoint-only forward/reverse inference on two or more saved poses")
     repair.add_argument("--endpoint-reference-mode", choices=("both", "initial"))
     repair.add_argument("--mode", choices=("edited", "baseline"), default="edited")
     repair.add_argument('--split-mode', choices=('single-split', 'double-split', 'no-split'), default='double-split',
-                        help='Generate whole legs or inward from both reference endpoints (default)')
+                        help='Generate one continuous path (no-split), whole legs, or inward halves (default); normal runs retain all references')
     repair.add_argument('--reconstruction-images', choices=('all', 'distilled'), default=None,
-                        help='All images (default), or saved references and ArtiFixer targets without WorldExplorer originals')
+                        help='Saved references and ArtiFixer targets only (default: distilled), or all images including WorldExplorer originals')
     repair.add_argument('--reconstruction-initialization', choices=('full_splat', 'point_cloud'), default=None,
-                        help='Import the original PLY (default), or initialize fresh Gaussians from point positions/colors')
+                        help='Initialize fresh Gaussians from point positions/colors (default: point_cloud), or import the original PLY')
     repair.add_argument('--image-cache-insertion', action=argparse.BooleanOptionalAction, default=None,
                         help='Insert the clean endpoint latent into KV memory before generation (default: off)')
     repair.add_argument("--frames", type=positive_int, default=25,

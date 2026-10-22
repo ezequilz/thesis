@@ -78,7 +78,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
     from ... import repair_lrz as lrz
     from ...scene_runs.lrz_transport import LrzSceneRunTransport
     benchmark = options['stage'] == 'benchmark'
-    cp = None if benchmark else Checkpoint.load(options['checkpoint'])
+    from .checkpoint_policy import checkpoint_for_run
+    cp = None if benchmark else checkpoint_for_run(Checkpoint.load(options['checkpoint']), options.get('image_trajectory', 'checkpoint'))
     if cp is not None and cp.endpoint_only and options['mode'] != 'edited':
         raise ValueError('Endpoint checkpoints require GPT-repaired references')
     if cp is not None and options['mode'] == 'edited':
@@ -117,6 +118,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
         runtime['resolution_profile'] = options['resolution_profile']
         runtime['regularization_profile'] = options.get('regularization_profile', 'artifixer')
         runtime['split_mode'] = 'no-split' if cp is not None and cp.endpoint_only else options.get('split_mode', 'double-split')
+        runtime['image_trajectory'] = options.get('image_trajectory', 'checkpoint')
         runtime['endpoint_reference_mode'] = options.get('endpoint_reference_mode', 'both')
         if not benchmark:
             from .official_worker import validate_reconstruction_options

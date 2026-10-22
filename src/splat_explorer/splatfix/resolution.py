@@ -8,12 +8,12 @@ import struct
 
 from PIL import Image
 
-DEFAULT_PROFILE = 'training'
+DEFAULT_PROFILE = '720p'
 PROFILES = {'training': (832, 480), '720p': (1280, 720), 'early_original': (960, 720)}
 PROFILE_LABELS = {
     'early_original': 'v0 · Early original resolution',
-    'training': 'v1 832 x 480 (default)',
-    '720p': 'v1 1280 x 720',
+    'training': 'v1 832 x 480',
+    '720p': 'v1 1280 x 720 (default)',
 }
 # Invalidate prepared-input caches made with the former 960 x 544 bounds.
 POLICY_VERSION = 2
@@ -115,7 +115,7 @@ def prepare_colmap(source, destination, profile=DEFAULT_PROFILE):
     shutil.copy2(source / 'sparse/0/points3D.bin', sparse / 'points3D.bin')
     return {'version': POLICY_VERSION, 'profile': profile, 'images': image_plans,
             'photographic_policy': 'preserve aspect and calibrated rays; crop less than 16 output pixels per dimension',
-            'training_evidence': 'Default bounds follow Wan2.1 T2V-1.3B 832x480 configuration, not a measured ArtiFixer training optimum. Both profiles are divisible by 16; existing images use uniform scaling and calibrated cropping, never independent axis resizing.'}
+            'training_evidence': 'The training profile follows Wan2.1 T2V-1.3B 832x480 configuration; 1280x720 is the application default, not a measured ArtiFixer training optimum. Both profiles are divisible by 16; existing images use uniform scaling and calibrated cropping, never independent axis resizing.'}
 
 
 def prepare_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE):
