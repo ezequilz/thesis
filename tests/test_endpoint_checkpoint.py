@@ -130,6 +130,26 @@ def test_override_options_and_wrong_view_count(tmp_path):
 
 
 @pytest.mark.parametrize('plus', [False, True])
+@pytest.mark.parametrize('reference_mode', ['both', 'initial'])
+@pytest.mark.parametrize('policy', [None, 'all'])
+def test_endpoint_reference_setting_does_not_change_legacy_double_split(plus, reference_mode, policy):
+    options = validate_job({'stage': 'repair', 'checkpoint': '/saved',
+                            'split_mode': 'double-split', 'endpoint_reference_mode': reference_mode})
+    assert options['split_mode'] == 'double-split'
+    assert options['image_trajectory'] == 'checkpoint'
+    segments = [{'indices': [1, 2], 'seed_index': 0},
+                {'indices': [4, 3], 'seed_index': 5}]
+    trajectory = {'anchors': [{'frame_index': i} for i in [0, 5, 10, 15, 20, 25]],
+                  'segments': segments}
+    request = {'trajectory_mode': 'authors_orbit', 'runtime': options}
+    if policy is not None:
+        request['repair_policy'] = policy
+    jobs = inference_jobs(request, trajectory, plus=plus)
+    assert jobs == [(segment, list(range(6)), 'plus' if plus else 'inference')
+                    for segment in segments]
+
+
+@pytest.mark.parametrize('plus', [False, True])
 def test_normal_no_split_is_one_sequence_with_all_six_references(plus):
     options = validate_job({'stage': 'repair', 'checkpoint': '/saved', 'split_mode': 'no-split'})
     assert options['image_trajectory'] == 'checkpoint'

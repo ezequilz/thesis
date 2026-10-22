@@ -314,15 +314,27 @@ $('repair-policy').addEventListener('change',()=>{
   else{$('views').max='24';if(Number($('views').value)>24)$('views').value='24'}
   $('view-count-help').textContent=endpoints?'2 or more views · only first and last repaired':'1–24 views · default 6';
 });
+let splitModeBeforeEndpoints=null;
+function updateEndpointControls(endpoints){
+  if(endpoints){
+    if(splitModeBeforeEndpoints===null)splitModeBeforeEndpoints=$('split-mode').value||'double-split';
+    $('split-mode').value='no-split';
+  }else if(splitModeBeforeEndpoints!==null){
+    $('split-mode').value=splitModeBeforeEndpoints;
+    splitModeBeforeEndpoints=null;
+  }
+  $('split-mode').disabled=endpoints;
+  $('endpoint-reference-mode').disabled=!endpoints;
+}
 function renderCheckpoint(){
   renderCheckpointGallery();
   const cp=current(), complete=!!cp?.complete, originalsReady=!!cp?.views.length&&cp.views.every(v=>v.original_url), visorReady=cp?.rgb_renderer==='viser'&&originalsReady;
   const nativeEndpoints=cp?.metadata?.repair_policy==='endpoints', endpoints=nativeEndpoints||($('reconstruction-method').value==='artifixer'&&$('image-trajectory').value==='endpoints'), repairTarget=cp?.repair_target_views??cp?.target_views, runTarget=endpoints?2:repairTarget;
-  if(endpoints){$('reconstruction-method').value='artifixer';$('mode').value='edited';if($('edit-image-set').value==='seva')$('edit-image-set').value='saved';$('split-mode').value='no-split';}
+  if(endpoints){$('reconstruction-method').value='artifixer';$('mode').value='edited';if($('edit-image-set').value==='seva')$('edit-image-set').value='saved';}
   $('prior-repair-context-option').disabled=!!nativeEndpoints;
   $('prior-repair-context-option').hidden=!!nativeEndpoints;
   if(nativeEndpoints&&$('endpoint-repair-context').value==='prior_repair')$('endpoint-repair-context').value='initial_repair';
-  $('split-mode').disabled=endpoints;
+  updateEndpointControls(endpoints);
   $('mode').disabled=endpoints;
   const methodId=$('reconstruction-method').value;
   if(methodId!==previousMethod&&methodId==='oraclegs'){$('mode').value='edited';$('edit-image-set').value='seva'}

@@ -31,6 +31,21 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('select').scene_id,'unrelated-current-scene');
   assert.equal(payload('repair').checkpoint,'/saved/cp');
   assert.equal(payload('repair').mode,'edited');
+  // Endpoint selection must not leave legacy checkpoints in no-split mode.
+  for(const split of ['double-split','single-split','no-split']){
+    $('split-mode').value=split;
+    updateEndpointControls(false);
+    assert.equal($('endpoint-reference-mode').disabled,true);
+    updateEndpointControls(true);
+    updateEndpointControls(true); // Rendering twice must not overwrite the saved choice.
+    assert.equal($('split-mode').value,'no-split');
+    assert.equal($('split-mode').disabled,true);
+    assert.equal($('endpoint-reference-mode').disabled,false);
+    updateEndpointControls(false);
+    assert.equal(payload('repair').split_mode,split);
+    assert.equal($('split-mode').disabled,false);
+  }
+  $('split-mode').value='double-split';
   $('artifixer-pipeline').value='authors_3dgut';renderArtifixerPipeline();
   assert.equal(payload('repair').artifixer_pipeline,'authors_3dgut');
   assert.equal($('artifixer-reconstruction-initialization').disabled,true);
