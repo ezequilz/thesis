@@ -13,6 +13,38 @@ from ..checkpoint import atomic_json
 from .bundle import digest_file, load_staged
 
 
+def scene_prompt(scene):
+    """Recover the exact submitted prompt from the archived WorldExplorer request."""
+    from ...scene.catalog import openable_scene_path
+    path = openable_scene_path(scene).resolve()
+    root = next((p for p in path.parents if p.name == 'results' and p.parent.name.startswith('we_')), None)
+    if root is None:
+        return None
+    for request in (root / 'request.json', root.parent / 'request.json'):
+        if request.is_file():
+            prompt = json.loads(request.read_text()).get('prompt')
+            if isinstance(prompt, str) and prompt.strip():
+                return prompt
+    return None
+
+
+def checkpoint_prompt(checkpoint):
+    prompt = checkpoint.manifest.get('metadata', {}).get('worldexplorer_prompt')
+    if not prompt:
+        prompt = scene_prompt(checkpoint.manifest['scene_path'])
+        if prompt:
+            checkpoint.manifest.setdefault('metadata', {})['worldexplorer_prompt'] = prompt
+            # Preserve canonical views when called on an endpoint-only run projection.
+            saved = checkpoint.root / 'checkpoint.json'
+            if saved.is_file():
+                manifest = json.loads(saved.read_text())
+                manifest.setdefault('metadata', {})['worldexplorer_prompt'] = prompt
+                atomic_json(saved, manifest)
+            else:
+                checkpoint.save()
+    return prompt
+
+
 def source_frames(scene):
     """Return every posed source image; never silently discard missing inputs."""
     from ...scene.catalog import openable_scene_path

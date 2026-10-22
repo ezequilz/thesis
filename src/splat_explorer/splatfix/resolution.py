@@ -150,7 +150,8 @@ def prepare_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE):
 
 
 def prepare_repair_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE, *,
-                              scene_path=None, should_stop=lambda: False, reuse_artifixer_inputs=False):
+                              scene_path=None, should_stop=lambda: False, reuse_artifixer_inputs=False,
+                              artifixer_runtime=None):
     """Prepare exact-size step-4 cameras and recapture their source RGBs.
 
     Work in a run-local derivative. GPT references start from the original
@@ -212,12 +213,18 @@ def prepare_repair_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE, *,
                 'source_kind': 'manual_crop' if manual else 'full_response' if response else 'legacy_repaired_rgb',
                 'method': 'cover_center_crop', 'target_size': [width, height]}
     metadata = manifest.setdefault('metadata', {})
+    from .artifixer.pipeline_profile import rgb_backend
+    backend = rgb_backend(artifixer_runtime or {})
     def capture():
-        capture_rgb(source, cameras, destinations, up_axis=metadata.get('up_axis', '-y'),
-                    lod_level=metadata.get('scene_load', {}).get('lod_level', 0), should_stop=should_stop)
+        if backend == '3dgut':
+            from .artifixer.native_renderer import capture_native
+            capture_native(source, cameras, destinations, artifixer_runtime, should_stop)
+        else:
+            capture_rgb(source, cameras, destinations, up_axis=metadata.get('up_axis', '-y'),
+                        lod_level=metadata.get('scene_load', {}).get('lod_level', 0), should_stop=should_stop)
     if reuse_artifixer_inputs:
         from .artifixer.staging_cache import capture_inputs, restore_geometry
-        cache = capture_inputs(checkpoint, cameras, destinations, capture, profile=profile)
+        cache = capture_inputs(checkpoint, cameras, destinations, capture, profile=profile, renderer=backend)
         restore_geometry(cache, root)
         metadata['artifixer_input_cache'] = str(cache)
     else:
@@ -227,6 +234,8 @@ def prepare_repair_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE, *,
             if image.size != (width, height):
                 raise ValueError('Recaptured RGB dimensions differ from selected repair resolution')
     metadata.update(width=width, height=height)
+    if artifixer_runtime is not None:
+        metadata['conditioning_rgb_renderer'] = backend
     metadata['resolution'] = {'version': POLICY_VERSION, 'profile': profile,
                               'target_size': [width, height], 'recaptured': True,
                               'source_checkpoint': str(checkpoint.root)}

@@ -45,7 +45,7 @@ def make_checkpoint(tmp_path):
     scene_path = tmp_path / 'scene.ply'
     write_initialization_ply(scene_path)
     cp = Checkpoint.create(tmp_path / 'runs', scene_path, target_views=1,
-                           metadata={'scene_load': {'min_opacity': .05, 'lod_level': 2},
+                           metadata={'worldexplorer_prompt': 'Synthetic test scene', 'scene_load': {'min_opacity': .05, 'lod_level': 2},
                                      'renderer': {'backend': 'viser'}})
     camera = Camera.look_at(np.array([0., 0., -2.]), np.zeros(3), np.array([0., -1., 0.]), width=32, height=32)
     cp.add_view(np.full((32, 32, 3), 90, np.uint8), camera)
@@ -130,7 +130,7 @@ def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, 
         cp.views[0]['repaired_rgb'] = str(edit.relative_to(cp.root))
         cp.save()
     trajectory_root, trajectory = repair.prepare_trajectory(cp, frames=9, renderer_factory=FakeRenderer)
-    monkeypatch.setattr(repair, 'validate_runtime', lambda runtime: {**repair.DEFAULT_RUNTIME, 'reconstruction_initialization': initialization, 'reconstruction_images': images, 'worldexplorer_source': '/old/bundle'})
+    monkeypatch.setattr(repair, 'validate_runtime', lambda runtime: {**repair.DEFAULT_RUNTIME, 'artifixer_pipeline': 'legacy_gsplat', 'reconstruction_initialization': initialization, 'reconstruction_images': images, 'worldexplorer_source': '/old/bundle'})
     phases = []
     def worker(command, **kwargs):
         phase = command[-1]
@@ -689,7 +689,7 @@ def test_invalid_automatic_scale_never_falls_back_to_one(tmp_path, monkeypatch, 
 
 def test_default_repair_measures_before_inference_and_reuses_identical_scale(tmp_path, monkeypatch):
     cp, trajectory, request = scale_request(tmp_path, monkeypatch)
-    monkeypatch.setattr(repair, 'validate_runtime', lambda runtime: repair.DEFAULT_RUNTIME)
+    monkeypatch.setattr(repair, 'validate_runtime', lambda runtime: {**repair.DEFAULT_RUNTIME, 'artifixer_pipeline': 'legacy_gsplat'})
     phases = []
     def worker(command, **kwargs):
         phase = command[-1]
@@ -755,6 +755,7 @@ def test_caption_cache_originals_only_exact_models_and_both_modes(tmp_path, monk
     import types
     from splat_explorer.splatfix import official_worker as worker
     cp, trajectory, request = scale_request(tmp_path, monkeypatch)
+    request['prompt_source'] = 'original_anchors'
     request['runtime']['model_id'] = 'wan-test'
     trajectory['anchors'] = [{**trajectory['anchors'][0], 'view_id': str(i)} for i in range(anchor_count)]
     model_calls = []
@@ -839,6 +840,7 @@ def test_failed_caption_preparation_can_retry_without_partial_cache(tmp_path, mo
     import types
     from splat_explorer.splatfix import official_worker as worker
     cp, trajectory, request = scale_request(tmp_path, monkeypatch)
+    request['prompt_source'] = 'original_anchors'
     request['runtime']['model_id'] = 'wan-test'
     monkeypatch.setattr(worker, 'caption_model_snapshot',
                         lambda *args, **kwargs: (Path('/frozen'), {'files': []}))
@@ -944,7 +946,8 @@ def test_author_orbit_requires_multiple_distinct_anchors_before_runtime(tmp_path
 
 
 @pytest.mark.parametrize('mode', ['baseline', 'edited'])
-def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize('pipeline', ['authors_3dgut', 'legacy_gsplat'])
+def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypatch, mode, pipeline):
     from dataclasses import replace
     from splat_explorer.splatfix.checkpoint import camera_from_record
     cp = make_checkpoint(tmp_path)
@@ -955,7 +958,11 @@ def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypa
     mock_scene(monkeypatch)
     from splat_explorer.splatfix import rendering
     monkeypatch.setattr(rendering, 'BundleRenderer', FakeRenderer)
-    monkeypatch.setattr(repair, 'validate_runtime', lambda _: repair.DEFAULT_RUNTIME)
+    monkeypatch.setattr(repair, 'validate_runtime', lambda _: {**repair.DEFAULT_RUNTIME, 'artifixer_pipeline': pipeline})
+    monkeypatch.setattr('splat_explorer.splatfix.artifixer.native_renderer.NativeRenderer', lambda *a, **kw: FakeRenderer(None))
+    if pipeline == 'authors_3dgut':
+        monkeypatch.setattr(repair, 'capture_rgb', lambda *a, **kw: pytest.fail('Native targets must not use Viser'))
+        monkeypatch.setattr(repair, 'capture_plus_rgb', lambda *a, **kw: pytest.fail('Native plus must retain upstream RGB'))
     if mode == 'edited':
         for view in cp.views:
             path = cp.image_path(view).with_name('repaired.png')
@@ -981,6 +988,11 @@ def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypa
         path = Path(command[command.index('--request') + 1])
         req = json.loads(path.read_text())
         trajectory = json.loads(Path(req['trajectory']).read_text())
+        expected_backend = '3dgut' if pipeline == 'authors_3dgut' else 'viser'
+        assert trajectory['recipe']['anchor_rgb_policy'] == expected_backend
+        assert req['anchor_rgb_policy'] == expected_backend
+        if phase == 'plus':
+            assert req['plus_rgb_renderer'] == expected_backend
         if mode == 'baseline':
             assert req['references'] == [str(cp.root / a['original_rgb']) for a in trajectory['anchors']]
             assert req['reference_sha256'] == [repair.digest_file(p) for p in req['references']]
@@ -1009,7 +1021,7 @@ def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypa
     trajectory = json.loads(Path(roots[0]).read_text())
     assert [trajectory['frames'][i]['rgb'] for i in [0, 2]] == [a['original_rgb'] for a in trajectory['anchors']]
     assert all(a['original_rgb'] != v['original_rgb'] for a, v in zip(trajectory['anchors'], cp.views))
-    same_root, _ = repair.prepare_saved_path(cp, orbit=trajectory['recipe']['orbit'], renderer_factory=lambda _: pytest.fail('Cache must be shared'))
+    same_root, _ = repair.prepare_saved_path(cp, orbit=trajectory['recipe']['orbit'], renderer_factory=lambda _: pytest.fail('Cache must be shared'), runtime={'artifixer_pipeline': pipeline})
     assert same_root == Path(roots[0]).parent
 
 

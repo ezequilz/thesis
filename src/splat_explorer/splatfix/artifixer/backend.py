@@ -3,6 +3,12 @@ import math
 
 
 def validate_options(raw):
+    from .pipeline_profile import apply_pipeline
+    if raw['stage'] == 'repair':
+        from .official_worker import validate_regularization, validate_reconstruction_options
+        validate_regularization(raw.get('regularization_profile', 'artifixer'))
+        validate_reconstruction_options(raw)
+        raw = apply_pipeline(raw)
     from .official_worker import validate_regularization
     from .author_trajectory import validate_split_mode
     result = {
@@ -19,6 +25,7 @@ def validate_options(raw):
             raise ValueError('benchmark_runs must be a positive integer')
         result['benchmark_runs'] = runs
     if raw['stage'] == 'repair':
+        result['artifixer_pipeline'] = raw['artifixer_pipeline']
         from .checkpoint_policy import validate_image_trajectory
         result['image_trajectory'] = validate_image_trajectory(raw.get('image_trajectory', 'checkpoint'))
         if result['image_trajectory'] == 'endpoints':

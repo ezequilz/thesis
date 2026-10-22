@@ -26,8 +26,10 @@ from .official_worker import ARTIFIXER3D_CONFIG, ARTIFIXER3D_STEPS, reconstructi
 
 UPSTREAM_REVISION = 'a392c4dfe17459ef9952407accdb9fcdcdddba98'
 DEFAULT_RUNTIME = {
+    'artifixer_pipeline': 'authors_3dgut',
     'resolution_profile': '720p',
     'regularization_profile': 'artifixer',
+    'prompt_source': 'worldexplorer',
     'reconstruction_initialization': 'point_cloud',
     'reconstruction_images': 'distilled',
     'image_cache_insertion': False,
@@ -85,6 +87,8 @@ def digest_file(path):
 
 def validate_runtime(runtime=None):
     cfg = {**DEFAULT_RUNTIME, **(runtime or {})}
+    from .pipeline_profile import pipeline_profile
+    pipeline_profile(cfg['artifixer_pipeline'])
     from ..resolution import profile_size
     profile_size(cfg['resolution_profile'])
     validate_regularization(cfg['regularization_profile'])
@@ -252,7 +256,7 @@ def prepare_trajectory(checkpoint, *, frames=25, span_fraction=.04,
 
 
 def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
-                       renderer_factory=None, scene_path=None):
+                       renderer_factory=None, scene_path=None, runtime=None):
     """Render immutable anchors or one authored orbit, shared across both arms.
 
     Anchor preparation is intentionally independent of the orbit: MoGe needs
@@ -295,6 +299,8 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
         anchors = [anchors[0], anchors[-1]]
     reference_views = cp.repair_views
     source_path = str(Path(scene_path).resolve()) if scene_path else cp.manifest['scene_path']
+    from .pipeline_profile import rgb_backend
+    backend = rgb_backend(runtime or {})
     segments = [{'start': 0, 'count': len(cameras)}]
     if orbit:
         segments = [{'indices': s['full_frame_indices'],
@@ -309,6 +315,9 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
               'source': cp.manifest.get('source_fingerprint', cp.manifest['scene_path']),
               'scene_load': cp.manifest.get('metadata', {}).get('scene_load', {}),
               'rgb': [digest_file(cp.image_path(view)) for view in cp.views], 'orbit': orbit}
+    if backend == '3dgut':
+        recipe.update(anchor_rgb_policy='3dgut', upstream_revision=UPSTREAM_REVISION,
+                      opacity_policy='native_3dgut_png8', appearance='full_source_ply_sh')
     signature = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
     cache = cp.root / 'trajectories'
     completed = sorted(cache.glob(signature[:16] + '_*/trajectory.json'))
@@ -327,7 +336,13 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
     lookup = {index: i for i, index in enumerate(anchor_indices)}
     try:
         scene = load_scene(source_path, **cp.manifest.get('metadata', {}).get('scene_load', {}))
-        renderer = (renderer_factory or BundleRenderer)(scene)
+        if renderer_factory:
+            renderer = renderer_factory(scene)
+        elif backend == '3dgut':
+            from .native_renderer import NativeRenderer
+            renderer = NativeRenderer(source_path, runtime, should_stop)
+        else:
+            renderer = BundleRenderer(scene)
         for index, camera in enumerate(cameras):
             if should_stop():
                 raise InterruptedError('Trajectory rendering stopped')
@@ -347,10 +362,11 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
                     'opacity': str(alpha_path.relative_to(cp.root))}
             records.append({'rgb': str(rgb_path.relative_to(cp.root)), 'opacity': str(alpha_path.relative_to(cp.root))})
         write_seed_points(root / 'points3D.bin', scene)
-        capture_rgb(source_path, cameras, [cp.root / frame['rgb'] for frame in records],
-                    up_axis=cp.manifest.get('metadata', {}).get('up_axis', '-y'),
-                    lod_level=cp.manifest.get('metadata', {}).get('scene_load', {}).get('lod_level', 0),
-                    should_stop=should_stop)
+        if backend == 'viser':
+            capture_rgb(source_path, cameras, [cp.root / frame['rgb'] for frame in records],
+                        up_axis=cp.manifest.get('metadata', {}).get('up_axis', '-y'),
+                        lod_level=cp.manifest.get('metadata', {}).get('scene_load', {}).get('lod_level', 0),
+                        should_stop=should_stop)
         manifest = {'schema_version': 3, 'depth_convention': 'expected_camera_z',
                     'camera_convention': 'opencv_c2w', 'signature': signature, 'recipe': recipe,
                     'transforms': {'camera_model': 'OPENCV', **transforms(cameras)},
@@ -366,6 +382,8 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
         shutil.rmtree(root)
         raise
     finally:
+        if renderer is not None and hasattr(renderer, 'close'):
+            renderer.close()
         del renderer
         release_cuda()
     return root, manifest
@@ -466,7 +484,17 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
             raise ValueError('Authors smooth orbit requires at least two distinct saved camera poses')
         if len(pose_keys) != len(cp.views):
             raise ValueError('Saved anchor poses must be distinct for authors smooth orbit')
-    cfg = validate_runtime(runtime)
+    from .pipeline_profile import rgb_backend, apply_pipeline
+    cfg = apply_pipeline(validate_runtime(runtime))
+    backend = rgb_backend(cfg)
+    if backend == '3dgut' and trajectory_mode == 'legacy_local_loops':
+        raise ValueError('Legacy local loops require the legacy_gsplat pipeline')
+    if cfg.get('prompt_source') == 'original_and_repaired' and mode != 'edited':
+        raise ValueError('Original + repaired captioning requires edited input images')
+    if cfg.get('prompt_source') == 'worldexplorer':
+        from ..worldexplorer.source import checkpoint_prompt
+        if not checkpoint_prompt(cp):
+            raise ValueError('Original WorldExplorer prompt is unavailable for this scene')
     cfg = {**cfg, 'split_mode': split_mode}
     if cfg.get('endpoint_reference_mode', 'both') not in ('both', 'initial'):
         raise ValueError('endpoint_reference_mode must be both or initial')
@@ -474,11 +502,12 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
     root = Path(output_dir).resolve() / f'{mode}_{uuid.uuid4().hex[:12]}'
     root.mkdir(parents=True, exist_ok=False)
     cp = prepare_repair_checkpoint(cp, root / 'checkpoint', cfg['resolution_profile'],
-                                   scene_path=cfg.get('scene_path'), should_stop=should_stop, reuse_artifixer_inputs=True)
+                                   scene_path=cfg.get('scene_path'), should_stop=should_stop, reuse_artifixer_inputs=True,
+                                   artifixer_runtime=cfg)
     references = [str(cp.image_path(view, repaired=mode == 'edited')) for view in cp.repair_views]
     on_progress({'phase': 'anchor_geometry' if trajectory_mode == 'authors_orbit' else 'trajectory'})
     if trajectory_mode == 'authors_orbit':
-        trajectory_root, trajectory = prepare_saved_path(cp, should_stop=should_stop, scene_path=cfg.get('scene_path'))
+        trajectory_root, trajectory = prepare_saved_path(cp, should_stop=should_stop, scene_path=cfg.get('scene_path'), runtime=cfg)
     else:
         trajectory_root, trajectory = prepare_trajectory(cp, frames=frames, span_fraction=span_fraction, should_stop=should_stop, scene_path=cfg.get('scene_path'))
     if mode == 'baseline':
@@ -502,7 +531,8 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                'upstream_revision': UPSTREAM_REVISION, 'fit_iterations': ARTIFIXER3D_STEPS,
                'reconstruction_recipe': reconstruction_recipe(cfg.get('regularization_profile', 'artifixer'), source_ply=bool(initialization)),
                'input_adaptation': 'Source splat RGB captured through the harness Viser at every calibrated camera. CUDA supplies only opacity/depth. Edited mode uses edits of Viser captures.',
-               'anchor_rgb_policy': 'viser',
+               'anchor_rgb_policy': backend,
+               'artifixer_pipeline': cfg['artifixer_pipeline'],
                'trajectory_mode': trajectory_mode,
                'inference_target_policy': ('exclude_saved_anchor_indices' if trajectory_mode == 'authors_orbit'
                                            else 'all_segment_frames'),
@@ -511,6 +541,10 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                'native_library_path_active': bool(cfg.get('native_library_dir') and Path(cfg['native_library_dir']).is_dir()),
                'reference_sha256': [digest_file(path) for path in references],
                'source_points3d_sha256': digest_file(points), 'trajectory_signature': trajectory['signature']}
+    if backend == '3dgut':
+        request['input_adaptation'] = ('Source PLY rendered with pinned authors 3DGUT, full SH, native RGB and opacity; '
+            'opacity follows authors PNG quantization. Fresh authors ArtiFixer3D fit. '
+            'Selected/GPT-edited reference images and source-splat point initialization remain application inputs.')
     from ..worldexplorer.source import stage_checkpoint_source
     originals = None
     if cfg.get('reconstruction_images', 'distilled') == 'all':
@@ -521,6 +555,12 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
     if originals:
         request['worldexplorer_source'] = originals
     request.update(initialization or {})
+    request['prompt_source'] = cfg.get('prompt_source', 'worldexplorer')
+    if request['prompt_source'] == 'worldexplorer':
+        from ..worldexplorer.source import checkpoint_prompt
+        request['worldexplorer_prompt'] = checkpoint_prompt(cp)
+        if not request['worldexplorer_prompt']:
+            raise ValueError('Original WorldExplorer prompt is unavailable for this scene')
     atomic_json(root / 'request.json', request)
     env = runtime_environment(cfg)
     try:
@@ -548,7 +588,7 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                 full = json.loads((root / 'orbit-full.json').read_text())
                 poses = np.asarray([frame['transform_matrix'] for frame in full['frames']]) @ np.diag([1., -1., -1., 1.])
                 orbit = {'poses': poses.tolist(), 'provenance': {key: value for key, value in orbit_provenance.items() if key != 'source_transforms'}}
-                trajectory_root, trajectory = prepare_saved_path(cp, orbit=orbit, should_stop=should_stop, scene_path=cfg.get('scene_path'))
+                trajectory_root, trajectory = prepare_saved_path(cp, orbit=orbit, should_stop=should_stop, scene_path=cfg.get('scene_path'), runtime=cfg)
                 if mode == 'baseline':
                     references = [str(cp.root / anchor['original_rgb']) for anchor in trajectory['anchors']]
                     request.update(references=references, reference_sha256=[digest_file(path) for path in references])
@@ -557,9 +597,10 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                 atomic_json(root / 'request.json', request)
                 continue
             if phase == 'plus':
-                capture_plus_rgb(root, trajectory, up_axis=cp.manifest.get('metadata', {}).get('up_axis', '-y'),
-                                 should_stop=should_stop)
-                request['plus_rgb_renderer'] = 'viser'
+                if backend == 'viser':
+                    capture_plus_rgb(root, trajectory, up_axis=cp.manifest.get('metadata', {}).get('up_axis', '-y'),
+                                     should_stop=should_stop)
+                request['plus_rgb_renderer'] = backend
                 atomic_json(root / 'request.json', request)
             run_worker([cfg['python'], str(Path(__file__).with_name('official_worker.py')), '--request', str(root / 'request.json'), '--phase', phase],
                        cwd=cfg['repo'], env=(runtime_environment({**cfg, 'model_hub_offline': False}) if phase == 'caption' else env), log_path=root / f'{phase}.log', should_stop=should_stop)

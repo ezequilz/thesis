@@ -179,7 +179,8 @@ def test_local_selection_dispatches_separate_cli_without_image_edits(studio, mon
 
 @pytest.mark.parametrize('images', ['all', 'distilled'])
 @pytest.mark.parametrize('initialization', ['full_splat', 'point_cloud'])
-def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypatch, tmp_path, images, initialization):
+@pytest.mark.parametrize('pipeline', ['authors_3dgut', 'legacy_gsplat'])
+def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypatch, tmp_path, images, initialization, pipeline):
     from splat_explorer import repair_lrz as lrz
     from splat_explorer.scene_runs.lrz_transport import LrzSceneRunTransport
     from splat_explorer.splatfix.executor import SplatfixExecutor
@@ -193,8 +194,8 @@ def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypat
         staged.append(source)
         return str(destination)
     monkeypatch.setattr('splat_explorer.splatfix.worldexplorer.source.stage_source', stage)
-    job = studio.create({'stage': 'repair', 'mode': 'baseline', 'checkpoint': str(cp.root),
-                         'reconstruction_images': images, 'reconstruction_initialization': initialization})
+    job = studio.create({'stage': 'repair', 'mode': 'baseline', 'prompt_source': 'original_anchors', 'checkpoint': str(cp.root),
+                         'artifixer_pipeline': pipeline, 'reconstruction_images': images, 'reconstruction_initialization': initialization})
     commands, transfers, launches = [], [], []
     connection_fails = [True]
     monkeypatch.setattr(lrz, 'load_lrz_config', lambda: {'workspace': '/dss/work', 'user': 'u', 'host': 'h'})
@@ -227,6 +228,9 @@ def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypat
     assert len(launches) == 1
     assert 'splat_explorer.splatfix.job_worker' in launches[0]
     request = json.loads((studio.store.run_path(job['run_id']) / 'worker-request.json').read_text())
+    assert request['runtime']['artifixer_pipeline'] == pipeline
+    if pipeline == 'authors_3dgut':
+        images, initialization = 'distilled', 'point_cloud'
     assert request['runtime']['reconstruction_images'] == images
     assert request['runtime']['reconstruction_initialization'] == initialization
     assert len(staged) == (1 if images == 'all' else 0)

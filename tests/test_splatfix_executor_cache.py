@@ -102,7 +102,7 @@ def test_remote_caption_returns_to_checkpoint_and_is_staged_for_other_mode(tmp_p
         returncode=0, stderr='', stdout=('exited' if 'until = time.monotonic() + 30' in command else 'removed' if 'shutil.rmtree(p)' in command else json.dumps({'status': 'completed'}) if 'worker-status.json' in command else '')))
     executor = SplatfixExecutor(cfg, store)
     for mode in ('baseline', 'edited'):
-        job = studio.create({'stage': 'repair', 'mode': mode, 'checkpoint': str(cp.root)})
+        job = studio.create({'stage': 'repair', 'mode': mode, 'checkpoint': str(cp.root), 'prompt_source': 'original_anchors'})
         executor.execute(job['run_id'])
         assert store.get_run(job['run_id']).state.status.value == 'completed'
     assert len(staged) == 2

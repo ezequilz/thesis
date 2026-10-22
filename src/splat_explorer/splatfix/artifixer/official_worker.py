@@ -17,6 +17,12 @@ import sys
 # Keep this module standalone: it also runs inside the authors' GPU environment.
 # Allocation and schedules stay upstream. The optional regularization profile
 # inherits only the author base_mcmc loss penalties, not its initialization.
+if __package__:
+    from .pipeline_profile import rgb_backend
+else:
+    from pipeline_profile import rgb_backend
+
+
 ARTIFIXER3D_CONFIG = 'apps/colmap_3dgut_sparse_mcmc_lpips'
 ARTIFIXER3D_STEPS = 30000
 
@@ -28,7 +34,11 @@ def validate_reconstruction_options(raw):
         raise ValueError('reconstruction_images must be all or distilled')
     if initialization not in ('full_splat', 'point_cloud'):
         raise ValueError('reconstruction_initialization must be full_splat or point_cloud')
-    return {'reconstruction_images': images, 'reconstruction_initialization': initialization}
+    prompt_source = raw.get('prompt_source', 'worldexplorer')
+    if prompt_source not in ('original_anchors', 'original_and_repaired', 'worldexplorer'):
+        raise ValueError('Unknown ArtiFixer prompt_source')
+    return {'reconstruction_images': images, 'reconstruction_initialization': initialization,
+            'prompt_source': prompt_source}
 
 
 REGULARIZATION_PROFILES = ('artifixer', 'base_mcmc')
@@ -460,8 +470,25 @@ def caption_model_snapshot(model_id, *, text_only=False):
     return snapshot, {'model_id': model_id, 'revision': snapshot.name, 'files': files}
 
 
+def encode_scene_prompt(prompt, output, model_path, anchor_count):
+    """Use the pinned authors' text encoder and exact HDF5 representation."""
+    import h5py
+    import numpy as np
+    import torch
+    from data_processing.captioning.generate_captions import (
+        get_text_encoder_and_tokenizer, generate_text_embedding,
+    )
+    with torch.inference_mode():
+        encoder, tokenizer = get_text_encoder_and_tokenizer(str(model_path))
+        embedding = generate_text_embedding(prompt, encoder, tokenizer, 512)
+    with h5py.File(output, 'w') as target:
+        dataset = target.create_dataset('anchor_00000.png', data=embedding)
+        dataset.attrs['caption'] = prompt
+        dataset.attrs['image_indices'] = np.arange(anchor_count)
+
+
 def prepare_caption(root, request, trajectory):
-    """Caption original anchors once locally; both modes reuse exactly this HDF5."""
+    """Prepare source-specific, content-addressed authors text conditioning."""
     import fcntl
     import hashlib
     import os
@@ -477,12 +504,34 @@ def prepare_caption(root, request, trajectory):
         if trajectory['sha256'].get(relative) != digest:
             raise ValueError(f'Original caption image changed: {relative}')
         originals.append({'view_id': anchor['view_id'], 'rgb': relative, 'sha256': digest})
-    qwen_path, qwen = caption_model_snapshot(CAPTION_MODEL_ID)
+    prompt_source = validate_reconstruction_options(request.get('runtime', {}) | {
+        key: request[key] for key in ('prompt_source',) if key in request})['prompt_source']
+    prompt = request.get('worldexplorer_prompt')
+    if prompt_source == 'worldexplorer' and (not isinstance(prompt, str) or not prompt.strip()):
+        raise ValueError('Original WorldExplorer prompt is unavailable for this scene')
+    if prompt_source == 'original_and_repaired':
+        if request.get('mode') != 'edited':
+            raise ValueError('Original + repaired captioning requires edited input images')
+        references = request.get('references', [])
+        hashes = request.get('reference_sha256', [])
+        if not references or len(references) != len(hashes):
+            raise ValueError('Repaired caption references and checksums are required')
+        for index, (reference, expected) in enumerate(zip(references, hashes)):
+            path = Path(reference).resolve()
+            relative = str(path.relative_to(cp.resolve()))
+            digest = caption_digest(path)
+            if digest != expected:
+                raise ValueError('Repaired caption reference changed')
+            originals.append({'view_id': f'repaired_{index}', 'rgb': relative, 'sha256': digest})
+    qwen_path, qwen = (caption_model_snapshot(CAPTION_MODEL_ID)
+                       if prompt_source != 'worldexplorer' else (None, None))
     wan_path, wan = caption_model_snapshot(request['runtime']['model_id'], text_only=True)
     recipe = {'version': 1, 'originals': originals, 'upstream_revision': request['upstream_revision'],
               'caption_model': qwen, 'text_encoder': wan,
               'parameters': {'num_frames': None, 'frame_stride': 1, 'dataset_fps': 60,
                              'dataset_downsample_factor': 1, 'text_encoder_max_sequence_length': 512}}
+    if prompt_source != 'original_anchors':
+        recipe.update(prompt_source=prompt_source, worldexplorer_prompt=prompt if prompt_source == 'worldexplorer' else None)
     signature = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
     cache = cp / 'captions'
     cache.mkdir(exist_ok=True)
@@ -506,19 +555,25 @@ def prepare_caption(root, request, trajectory):
                     frames.append({'file_path': name})
                 (source / 'transforms.json').write_text(json.dumps({'frames': frames}))
                 from data_processing.captioning.generate_captions import generate_caption_hdf5
-                generate_caption_hdf5(input_path=source, output_path=temporary / 'caption.h5',
-                    dataset_downsample_factor=1, captioning_model_id=str(qwen_path),
-                    text_encoder_model_id=str(wan_path))
+                if prompt_source == 'worldexplorer':
+                    encode_scene_prompt(prompt, temporary / 'caption.h5', wan_path, len(originals))
+                else:
+                    generate_caption_hdf5(input_path=source, output_path=temporary / 'caption.h5',
+                        dataset_downsample_factor=1, captioning_model_id=str(qwen_path),
+                        text_encoder_model_id=str(wan_path))
                 result = {**validate_caption(temporary / 'caption.h5'), 'recipe': recipe,
                           'signature': signature,
-                          'resolved_model_paths': {'caption_model': str(qwen_path), 'text_encoder': str(wan_path)},
+                          'resolved_model_paths': {'caption_model': str(qwen_path) if qwen_path is not None else None, 'text_encoder': str(wan_path)},
                           'copied_model_files_sha256': {
                               label: {item['path']: caption_digest(path / item['path'])
                                       for item in identity['files'] if item['content_address'] is None}
-                              for label, path, identity in [('caption_model', qwen_path, qwen), ('text_encoder', wan_path, wan)]},
+                              for label, path, identity in [('caption_model', qwen_path, qwen), ('text_encoder', wan_path, wan)] if identity is not None},
                           'model_identity_validation': 'Immutable HF snapshot revision and blob content addresses; copied files hashed only on generation, size/mtime checked on replay',
-                          'provenance': 'unchanged authors local Qwen caption and UMT5 encoding of original saved anchors',
-                          'input_semantics': ('single original image; one caption' if len(originals) == 1 else
+                          'prompt_source': prompt_source,
+                          'provenance': {'original_anchors': 'unchanged authors local Qwen caption and UMT5 encoding of original saved anchors',
+                                         'original_and_repaired': 'authors Qwen/UMT5 on original anchors plus repaired input references',
+                                         'worldexplorer': 'original WorldExplorer scene prompt encoded by authors UMT5'}[prompt_source],
+                          'input_semantics': ('saved scene prompt; no visual captioning' if prompt_source == 'worldexplorer' else 'single original image; one caption' if len(originals) == 1 else
                                               'ordered saved anchors supplied as one video at 60fps; processor controls frame sampling; one caption')}
                 if result['image_indices'] != list(range(len(originals))):
                     raise ValueError('Caption image_indices disagree with original anchors')
@@ -693,6 +748,7 @@ def inference(root, request, trajectory, plus=False):
     if plus:
         result = json.loads((root / 'distillation.json').read_text())
         result.update(repair_policy=request.get('repair_policy', 'all'),
+                      artifixer_pipeline=request.get('artifixer_pipeline', 'legacy_gsplat'),
                       endpoint_reference_mode=cfg.get('endpoint_reference_mode', 'both'),
                       reverse_inference_frames=(str(root / 'inference-back-to-front/splatfix/frames/batch_0000/pred')
                                                 if request.get('repair_policy') == 'endpoints' else None),
@@ -888,13 +944,15 @@ def distill(root, request, trajectory):
 
 def validate_render_sources(request, trajectory):
     """Do not replay pre-GPU-anchor requests through the worker entry point."""
-    if trajectory.get('recipe', {}).get('anchor_rgb_policy') != 'viser':
-        raise ValueError('Unverified trajectory renderer: regenerate this request with Viser captures')
+    expected_backend = rgb_backend(request.get('runtime', {}))
+    if trajectory.get('recipe', {}).get('anchor_rgb_policy') != expected_backend:
+        raise ValueError(f'Unverified trajectory renderer: expected {expected_backend} captures')
     cp = Path(request['checkpoint_root'])
     if request['mode'] == 'baseline':
         expected = [(cp / anchor['original_rgb']).resolve() for anchor in trajectory['anchors']]
         if [Path(path).resolve() for path in request['references']] != expected:
-            raise ValueError('Baseline references must be Viser trajectory captures, not selection previews')
+            renderer_name = 'Viser' if expected_backend == 'viser' else '3DGUT'
+            raise ValueError(f'Baseline references must be {renderer_name} trajectory captures, not selection previews')
     else:
         checkpoint = json.loads((cp / 'checkpoint.json').read_text())
         if checkpoint.get('metadata', {}).get('renderer', {}).get('backend') != 'viser':
@@ -921,8 +979,8 @@ def main():
     sys.path.insert(0, request['runtime']['repo'])
     trajectory = json.loads(Path(request['trajectory']).read_text())
     validate_render_sources(request, trajectory)
-    if args.phase == 'plus' and request.get('plus_rgb_renderer') != 'viser':
-        raise ValueError('ArtiFixer+ requires Viser captures of the reconstructed splat')
+    if args.phase == 'plus' and request.get('plus_rgb_renderer') != rgb_backend(request.get('runtime', {})):
+        raise ValueError('ArtiFixer+ renderer does not match the selected pipeline')
     if args.phase == 'scale':
         measure_scale(args.request.parent, request, trajectory)
     elif args.phase == 'caption':

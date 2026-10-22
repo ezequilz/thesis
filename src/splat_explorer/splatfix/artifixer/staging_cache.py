@@ -19,13 +19,16 @@ def digest(path):
     return result.hexdigest()
 
 
-def capture_inputs(checkpoint, cameras, destinations, capture, *, profile):
+def capture_inputs(checkpoint, cameras, destinations, capture, *, profile, renderer='viser'):
     metadata = checkpoint.manifest.get('metadata', {})
-    recipe = {'version': 1, 'profile': profile, 'renderer': 'viser',
+    recipe = {'version': 1, 'profile': profile, 'renderer': renderer,
               'source': checkpoint.manifest.get('source_fingerprint', checkpoint.manifest['scene_path']),
               'cameras': [camera_to_record(camera) for camera in cameras],
               'up_axis': metadata.get('up_axis', '-y'),
               'scene_load': metadata.get('scene_load', {})}
+    if renderer == '3dgut':
+        from .repair import UPSTREAM_REVISION
+        recipe['upstream_revision'] = UPSTREAM_REVISION
     signature = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
     root = checkpoint.root / 'artifixer-inputs' / signature
     marker = root / 'captures.json'
@@ -60,7 +63,7 @@ def capture_inputs(checkpoint, cameras, destinations, capture, *, profile):
                 if not marker.is_file():
                     raise ValueError('Incomplete saved ArtiFixer capture cache') from exc
                 # Another repair published the same immutable camera recipe.
-                return capture_inputs(checkpoint, cameras, destinations, capture, profile=profile)
+                return capture_inputs(checkpoint, cameras, destinations, capture, profile=profile, renderer=renderer)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)

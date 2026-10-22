@@ -153,7 +153,7 @@ def test_step4_passes_profile_to_preparation_before_trajectory(tmp_path, monkeyp
                            metadata={'renderer': {'backend': 'viser'}})
     cp.add_view(np.zeros((480, 832, 3), np.uint8),
                 Camera(np.zeros(3), np.eye(3), width=832, height=480))
-    monkeypatch.setattr(repair, 'validate_runtime', lambda _: {'resolution_profile': profile})
+    monkeypatch.setattr(repair, 'validate_runtime', lambda _: {'resolution_profile': profile, 'artifixer_pipeline': 'legacy_gsplat'})
     def capture(scene, cameras, destinations, **kwargs):
         for cam, path in zip(cameras, destinations):
             assert (cam.width, cam.height) == size

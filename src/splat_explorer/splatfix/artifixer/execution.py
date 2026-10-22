@@ -86,6 +86,12 @@ def execute_remote(executor, run_id, options, root, stop, update):
         cp.require_viser_images()
     if cp is not None and (not cp.complete or (options['mode'] == 'edited' and any(not v.get('repaired_rgb') for v in cp.repair_views))):
         raise ValueError('Checkpoint is not ready for the requested reconstruction mode')
+    if cp is not None and options.get('prompt_source') == 'worldexplorer':
+        from ..worldexplorer.source import checkpoint_prompt
+        if not checkpoint_prompt(cp):
+            raise ValueError('Original WorldExplorer prompt is unavailable for this scene')
+    if cp is not None and options.get('prompt_source') == 'original_and_repaired' and options['mode'] != 'edited':
+        raise ValueError('Original + repaired captioning requires edited input images')
     cfg = lrz.load_lrz_config()
     saved = executor.store.get_run(run_id).state.details
     # Reattachment only needs DSS/SSH, even if the original allocation expired.
@@ -122,6 +128,12 @@ def execute_remote(executor, run_id, options, root, stop, update):
         runtime['image_trajectory'] = options.get('image_trajectory', 'checkpoint')
         runtime['endpoint_reference_mode'] = options.get('endpoint_reference_mode', 'both')
         if not benchmark:
+            from .pipeline_profile import apply_pipeline
+            # New validated jobs always carry the field. Missing means a saved
+            # historical job, whose renderer and custom recipe must survive.
+            options = apply_pipeline({'artifixer_pipeline': 'legacy_gsplat', **options})
+            runtime['artifixer_pipeline'] = options['artifixer_pipeline']
+            runtime['regularization_profile'] = options['regularization_profile']
             from .official_worker import validate_reconstruction_options
             runtime.update(validate_reconstruction_options(options))
             # A configured historical bundle must not leak into distilled-only runs.
@@ -212,7 +224,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
             executor.store.request_stop(run_id)
             return True
         return stop()
-    capture_mirror = None if benchmark else CaptureMirror(
+    native = options.get('artifixer_pipeline') == 'authors_3dgut'
+    capture_mirror = None if benchmark or native else CaptureMirror(
         root, remote_dir, container_dir, cp, endpoint, ssh, sync,
         url=executor.cfg.get('renderer', {}).get('viser_url') or None, should_stop=capture_stop, progress=update)
     state = {}

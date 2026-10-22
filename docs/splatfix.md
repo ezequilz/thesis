@@ -164,16 +164,17 @@ python -m splat_explorer.splatfix.cli --config configs/splatfix.yaml select \
 The example config uses the existing CliRelay credentials and model settings.
 `.env` is loaded without overwriting environment variables. The default project
 config alone uses a scripted sweep for offline smoke tests; it does not perform
-semantic VLM selection. Selection and saved-view ArtiFixer RGB inputs use the
-harness Viser capture service. Keep the Splatfix dashboard's capture visor visible.
-The manager loads the source scene and captures the requested calibrated poses;
-no VLM is involved during reconstruction. CPU and CUDA RGB fallbacks are disabled.
-CUDA still produces trajectory opacity/depth, not the RGB supplied to inference.
-The reconstructed splat is also captured through Viser before the ArtiFixer+ pass.
+semantic VLM selection. Selection uses the harness Viser capture service; keep
+the capture visor visible for selection. Step 4 defaults to **Authors 3DGUT**:
+the pinned upstream renderer supplies paired source RGB and opacity and retains
+the native reconstructed RGB/opacity for ArtiFixer3D+. It does not need a Viser
+capture connection during reconstruction. No VLM is involved during rendering.
+**Legacy Viser / gsplat** restores Viser RGB with gsplat opacity/depth and the
+Viser RGB replacement before the ArtiFixer3D+ pass.
 
 Editing and edited reconstruction reject checkpoints whose selection renderer is
 not Viser or is unrecorded; regenerate those selections and edits. Baseline repair
-can reuse old camera poses, but captures fresh anchors and trajectories in Viser.
+can reuse old camera poses, but renders fresh anchors with the selected backend.
 Renderer provenance versions invalidate old trajectory, scale and caption caches.
 Published photographic benchmarks retain their separate authors' pipeline.
 
@@ -238,7 +239,7 @@ Other explorer pipelines retain their own resolution settings.
 
 Step 4 creates an isolated checkpoint at the exact selected profile size, even
 when the saved selection used a smaller resolution. Original RGBs are recaptured
-through Viser at the saved poses with a uniformly scaled, center-cropped camera
+through the selected renderer at the saved poses with a uniformly scaled, center-cropped camera
 frustum. Subsequent trajectory captures use these same dimensions and intrinsics.
 Edited references are generated from the saved full GPT response using uniform
 scaling and center cropping, without padding or stretching. Legacy checkpoints
@@ -312,18 +313,15 @@ python -m splat_explorer.splatfix.cli --config configs/splatfix.yaml repair \
 
 Every invocation creates a separate reconstruction directory, so either mode can
 be rerun repeatedly on the same checkpoint. Reconstruction never invokes the external view-selection VLM or image editor.
-First-time caption preparation runs the authors’ local Qwen model on the
-original saved views, then encodes its caption with Wan UMT5. Edited mode requires all saved repairs; baseline works with
-a completed `--select-only` checkpoint.
+Step 4 exposes **ArtiFixer prompt source** independently of reconstruction input images:
 
-The caption stage calls the unchanged `generate_caption_hdf5` helper with
-original anchors in checkpoint order, downsample factor 1, and its remaining
-defaults. Six selected anchors become six submitted video frames at the helper’s
-60 fps setting, producing one scene caption; the Qwen processor controls any
-internal frame sampling. This is a montage of selected views, not a continuous
-recorded video. One anchor uses the helper’s image-caption path. Edited images
-never influence the caption, so baseline and edited runs share its exact
-embedding, including the final plus pass.
+- **authors Qwen3-VL/UMT5 on original anchor captures (baseline)** preserves the existing caption recipe and cache. Original Viser anchors alone determine the caption, including in edited reconstruction mode.
+- **Authors Qwen3-VL/UMT5 on original anchors + repaired GPT input references** passes the ordered original anchors followed by the repaired references used by this run to the same authors’ `generate_caption_hdf5` helper. This requires edited inputs; endpoint runs include only their selected repaired endpoint references.
+- **Original WorldExplorer scene prompt · UMT5 encoding (default)** directly encodes the exact saved scene prompt using the authors’ UMT5 tokenizer and embedding helper, without Qwen caption generation. A missing prompt raises an error rather than falling back.
+
+WorldExplorer already archives the submitted prompt in `request.json`. New checkpoints also store it in `metadata.worldexplorer_prompt`; older checkpoints recover it from the scene’s archived request when selected for this mode. This metadata travels with the checkpoint to remote workers. CLI runs accept `--prompt-source original_anchors|original_and_repaired|worldexplorer`.
+
+Visual captioning retains the authors’ single-image or 60 fps ordered-video preparation, with frame sampling controlled by the Qwen processor. The additional modes have separate content-addressed caption recipes, including repaired-image checksums or the exact scene prompt. Prompt selection does not change MoGe alignment against original rendered geometry; depth is not a direct reconstruction loss.
 
 `captions/<signature>/caption.h5` caches the authors’ uint16-encoded bfloat16
 embedding beside a manifest. The cache key includes ordered original-image
@@ -333,8 +331,7 @@ the caption hash, shape, finite values, and nonempty text; corruption raises an
 error rather than substituting zero conditioning. Hub blob content addresses
 avoid rehashing large model weights. Copied model files without content-addressed
 blobs are hashed once on generation and subsequently checked by size/mtime;
-that validation limitation is recorded in the manifest. Both caption models
-must already be provisioned locally. Snapshot resolution is local-only and
+that validation limitation is recorded in the manifest. Required models must already be provisioned locally (UMT5 only for WorldExplorer prompt mode; Qwen and UMT5 for visual captioning). Snapshot resolution is local-only and
 cache hits neither load models nor contact the Hub. Only the caption subprocess
 allows normal model metadata access; the remaining worker phases retain their
 configured offline policy. These local caption and encoding calls do not send
@@ -1030,8 +1027,41 @@ worker runtime, supervision manifests, and completed distillation results record
 these choices. New runs default to repaired references plus generated views and
 fresh point-cloud initialization; explicitly saved choices remain supported.
 
-CLI equivalents: `--reconstruction-images all|distilled` and
+These custom controls apply to **Legacy Viser / gsplat**. CLI equivalents:
+`--artifixer-pipeline legacy_gsplat --reconstruction-images all|distilled` and
 `--reconstruction-initialization full_splat|point_cloud`.
+
+### Default authors rendering and reconstruction
+
+Step 4's **ArtiFixer rendering and reconstruction** setting selects
+`authors_3dgut` (default) or `legacy_gsplat`. It is saved with the job, propagated
+to the GPU worker, and recorded in run provenance. CLI: `--artifixer-pipeline
+authors_3dgut|legacy_gsplat`; config: `splatfix.runtime.artifixer_pipeline`.
+
+Authors mode imports the original Gaussian PLY with all SH coefficients into the
+pinned 3DGUT implementation. It uses the authors' rendering configuration,
+native `pred_rgb`/`pred_opacity`, RGB PNG rounding and 8-bit opacity export/read
+convention. Both ordinary target channels come from the same renderer. The
+existing inserted starting reference policy still replaces that frame's opacity
+with one. Native ray-distance accumulation is converted to expected camera-Z
+only for the application's auxiliary scale estimation; opacity is not changed
+by that conversion.
+
+Reconstruction uses the upstream fresh 30,000-step sparse MCMC/LPIPS
+ArtiFixer3D recipe with its original regularization settings, references and
+generated views. Native mode fixes initialization to `point_cloud` and images to
+`distilled`; custom initialization, extra images and regularization remain in
+legacy mode. The “+” pass retains the authors' paired reconstruction renders.
+Renderer-specific cache keys prevent reuse of legacy RGB/opacity as native
+inputs. Errors never silently fall back to gsplat.
+
+This switches the rendering and fitting implementation, not the application's
+source-data protocol: selected/GPT-edited references, camera selection, prompt
+options and source-splat point initialization remain application inputs. It does
+not rerun the paper's initial sparse photographic reconstruction. Native source
+rendering currently requires binary Gaussian PLY with DC-only or degree-3 SH;
+other formats can explicitly select legacy mode. Existing saved worker requests
+without a pipeline field retain their legacy renderer validation.
 
 ### Endpoint-only ArtiFixer checkpoints
 
@@ -1082,3 +1112,44 @@ positions have been saved. Only the first and last selected views receive GPT
 repairs; all intermediate cameras remain trajectory waypoints and never become
 reference or repaired-image supervision. This also applies to the run-local
 endpoint override on prior checkpoints.
+
+### ArtiFixer input renderer comparison
+
+The experimental `splat_explorer.splatfix.artifixer.renderer_comparison` command
+compares an existing prepared run with the authors' pinned 3DGUT renderer without
+training a new scene or changing the production renderer. Run it on the GPU host
+where the saved request's paths and authors environment are available:
+
+```bash
+python -m splat_explorer.splatfix.artifixer.renderer_comparison \
+  --request /absolute/path/to/run/request.json \
+  --source-ply /absolute/path/to/original-source.ply \
+  --output /absolute/path/to/new-renderer-comparison \
+  --infer
+```
+
+The source PLY must match the checkpoint fingerprint. The command requires the
+existing caption, references, trajectory and source points; it does not relocate
+downloaded requests automatically. `--infer` runs the same seeded ArtiFixer
+inference for each arm; omit it for rendering and input measurements only.
+The GPU environment needs `gsplat` as well as the pinned 3DGRUT dependencies.
+
+The four arms are `current` (saved Viser RGB/gsplat alpha), `gsplat` (paired RGB
+and alpha), `3dgut` (paired RGB and alpha from the authors' renderer), and
+`opacity_only` (saved RGB with 3DGUT alpha, intentionally mixed for diagnosis).
+Select a subset with `--arms`. The paired arms share the full raw PLY parameters,
+full SH appearance, black background, exact camera calibrations and the authors'
+8-bit opacity export/read convention. Raw float alpha is also retained. References,
+camera scale, prompt, seed and sequence/starter policy remain fixed. Starting
+reference opacity is still overridden by the existing inference worker.
+
+The output contains isolated requests, render pairs, `experiment.json`,
+`input-differences.json`, and, with inference and the current arm enabled,
+`output-differences.json`. MAE and PSNR here measure disagreement, not quality:
+use held-out real images and multi-view/temporal inspection to judge improvement.
+The current arm can additionally differ in SH, filtering and background. Compare
+the two matched arms to isolate rendering more closely. This imports the existing
+source PLY; it does not reproduce the authors' initial sparse reconstruction.
+
+This adapter has local isolation/calibration tests but still requires a CUDA
+smoke test and empirical output comparison before production adoption.

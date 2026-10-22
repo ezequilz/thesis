@@ -29,6 +29,13 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('select').scene_id,'unrelated-current-scene');
   assert.equal(payload('repair').checkpoint,'/saved/cp');
   assert.equal(payload('repair').mode,'edited');
+  $('artifixer-pipeline').value='authors_3dgut';renderArtifixerPipeline();
+  assert.equal(payload('repair').artifixer_pipeline,'authors_3dgut');
+  assert.equal($('artifixer-reconstruction-initialization').disabled,true);
+  assert.equal($('artifixer-reconstruction-initialization').value,'point_cloud');
+  $('artifixer-pipeline').value='legacy_gsplat';renderArtifixerPipeline();
+  assert.equal(payload('repair').artifixer_pipeline,'legacy_gsplat');
+  assert.equal($('artifixer-reconstruction-initialization').disabled,false);
   $('artifixer-reconstruction-images').value='all';
   $('artifixer-reconstruction-initialization').value='full_splat';
   assert.equal(payload('repair').reconstruction_images,'all');

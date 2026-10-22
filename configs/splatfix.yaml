@@ -27,7 +27,9 @@ splatfix:
     repo: /workspace/third_party/G4Splat
     python: /workspace/g4splat-env/bin/python
   runtime:
-    reconstruction_initialization: full_splat  # point_cloud restores the previous fresh-from-points path
+    artifixer_pipeline: authors_3dgut  # legacy_gsplat restores the previous renderer and reconstruction controls
+    prompt_source: worldexplorer
+    reconstruction_initialization: point_cloud  # authors path always uses a fresh fit
     image_cache_insertion: false
     repo: /workspace/third_party/ArtiFixer
     python: /workspace/artifixer-venv/bin/python

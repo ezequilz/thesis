@@ -12,6 +12,8 @@ from .repair import run_repair
 def execute(root):
     root = Path(root)
     request = read_json(root / 'worker-request.json')
+    if request.get('stage') != 'benchmark':
+        request.setdefault('runtime', {}).setdefault('artifixer_pipeline', 'legacy_gsplat')
     def publish(**body):
         atomic_json(root / 'worker-status.json', body)
     def stop():

@@ -133,6 +133,8 @@ class Checkpoint:
                                'metadata': metadata or {}, 'views': []})
         if fingerprint is not None:
             checkpoint.manifest['source_fingerprint'] = fingerprint
+        from .worldexplorer.source import checkpoint_prompt
+        checkpoint_prompt(checkpoint)
         checkpoint.save()
         from .worldexplorer.source import stage_checkpoint_source
         stage_checkpoint_source(checkpoint, root / 'worldexplorer-source')
