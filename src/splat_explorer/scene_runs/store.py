@@ -217,6 +217,7 @@ class SceneRunStore:
         config: SceneRunConfig | Mapping[str, Any] | None = None,
         *,
         now: datetime | None = None,
+        settings_snapshot: Mapping[str, Any] | None = None,
     ) -> SceneRun:
         """Allocate a collision-safe run directory and persist initial state."""
 
@@ -244,6 +245,16 @@ class SceneRunStore:
         )
         try:
             _atomic_write_json(path / CONFIG_NAME, validated.to_dict())
+            if validated.pipeline == "splatfix":
+                snapshot = dict(settings_snapshot or {})
+                _atomic_write_json(path / "settings.json", {
+                    "schema_version": 1,
+                    "run_id": run_id,
+                    "captured_at": timestamp,
+                    "submitted": snapshot.get("submitted"),
+                    "dashboard": snapshot.get("dashboard"),
+                    "effective_config": validated.to_dict(),
+                })
             _atomic_write_json(path / STATUS_NAME, state.to_dict())
             self.append_event(run_id, "created", status=RunStatus.QUEUED.value)
         except BaseException:

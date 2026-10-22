@@ -311,6 +311,8 @@ class SplatfixStudio(SceneRunStudio):
             raise ValueError('Use the result reconstruction action to create an input snapshot')
         if not isinstance(body, dict):
             raise ValueError('Request must be an object')
+        settings_snapshot = {'submitted': {k: v for k, v in body.items() if k != 'dashboard_snapshot'},
+                             'dashboard': body.get('dashboard_snapshot')}
         if body.get('stage') == 'repair' and body.get('reconstruction_method') == 'oraclegs':
             body = {'oracle_capture_source':'seva', **body}
         options = validate_job({'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', '720p'), **body})
@@ -393,7 +395,8 @@ class SplatfixStudio(SceneRunStudio):
         width, height = profile_size(options['resolution_profile'])
         run = self.store.create_run({'pipeline': 'splatfix', 'splatfix': options,
                                      'width': width, 'height': height,
-                                     'scene_id': scene_id, 'duration_seconds': 24 * 3600})
+                                     'scene_id': scene_id, 'duration_seconds': 24 * 3600},
+                                    settings_snapshot=settings_snapshot)
         return run.to_dict()
 
     def cancel(self, run_id):

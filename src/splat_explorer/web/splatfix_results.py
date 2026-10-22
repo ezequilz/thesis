@@ -408,6 +408,9 @@ class ResultCatalog:
         row = self.detail(key)
         if row is None:
             return None
+        settings_path = self.studio.root / row['run_id'] / 'settings.json'
+        row['settings_snapshot'] = read_json(settings_path, None)
+        row['settings_url'] = self.studio.file_url(settings_path) if settings_path.is_file() else None
         if row['kind'] == 'WorldExplorer':
             from .worldexplorer_details import run_detail
             return run_detail(self, row)

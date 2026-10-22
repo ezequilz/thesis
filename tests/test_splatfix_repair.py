@@ -402,9 +402,11 @@ def test_conditioning_matches_official_preparation_pose_contract_without_double_
 @pytest.mark.parametrize('plus', [False, True])
 @pytest.mark.parametrize('trajectory_mode', ['authors_orbit', 'legacy_local_loops'])
 @pytest.mark.parametrize('reference_count', [1, 3, 6])
-@pytest.mark.parametrize('insertion', [False, True])
+@pytest.mark.parametrize('insertion,seeding_override', [
+    (False, None), (True, None), (True, True), (True, False),
+])
 @pytest.mark.parametrize('split_mode', ['single-split', 'double-split'])
-def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeypatch, plus, trajectory_mode, reference_count, split_mode, insertion):
+def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeypatch, plus, trajectory_mode, reference_count, split_mode, insertion, seeding_override):
     if insertion and trajectory_mode != 'authors_orbit':
         pytest.skip('Cache insertion coverage uses the dashboard authored orbit')
     import contextlib
@@ -489,6 +491,11 @@ def test_both_inference_passes_use_authors_opengl_conditioning(tmp_path, monkeyp
             trajectory['segments'][0]['seed_index'] = 0
             trajectory['segments'][1].update(seed_index=reference_count - 1, indices=[8, 7])
     request['runtime']['image_cache_insertion'] = insertion
+    # Preserve the pre-seeding-toggle contract (564e8cc / 3204718): exact-cache
+    # mode must always seed, with identical frames, cameras and cache settings,
+    # even if a saved request contains a contradictory explicit seeding flag.
+    if seeding_override is not None:
+        request['runtime']['initial_image_seeding'] = seeding_override
     installed = []
     monkeypatch.setattr('splat_explorer.splatfix.artifixer.official_worker.install_image_cache_insertion', lambda value: installed.append(value))
     if insertion and split_mode == 'single-split':

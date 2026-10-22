@@ -1182,3 +1182,14 @@ reference conditioning and direct reconstruction supervision.
 retain their per-segment behavior. Per-series `inference-seeding.json` and
 `plus-seeding.json` record effective seeding and cache preservation. Existing
 queued jobs are not rewritten.
+
+Historical compatibility check (2026-10-22): the double-split planner and
+`scene_runs_ext/starter_inference.py` are unchanged from pre-chat commit
+`564e8cc`; the starter sampler also matches `3204718`, preceding
+`run_20261021_204353`. The strongest option retains the original standalone
+clean starter latent, timestep-zero starter KV insertion, seven-latent generated
+blocks, clean timestep-zero refresh after each generated block, one-frame
+attention sink, 21-latent local attention window, and cache reset per series.
+Double-split's explicit `seed_index` alone never enabled this sampler: the
+historical dispatcher installed it only when `image_cache_insertion=true`.
+The new seeding flag cannot disable seeding when cache preservation is enabled.

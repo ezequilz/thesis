@@ -196,9 +196,8 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
                 raise ValueError('Cannot establish numeric inference frame order; source images were kept')
             frames.sort(key=lambda p: (int(p.stem), p.name))
             # Interrupted inference may leave its final output opened but empty.
-            # Retain these artifacts, but they cannot contribute a video frame.
+            # Skip them during encoding and let normal reduction pruning remove them.
             # Nonempty corrupt images still have to pass video verification.
-            keep.update(frames)
             incomplete_frames.extend(str(p.relative_to(root)) for p in frames if p.stat().st_size == 0)
             frames = [p for p in frames if p.stat().st_size > 0]
             if not frames:

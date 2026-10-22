@@ -1107,7 +1107,7 @@ def test_artifixer_reduce_encodes_both_passes_and_exposes_verified_videos(tmp_pa
 
 
 @pytest.mark.parametrize('empty_batch', [False, True])
-def test_artifixer_reduce_preserves_empty_interrupted_frames(tmp_path, empty_batch):
+def test_artifixer_reduce_removes_empty_interrupted_frames(tmp_path, empty_batch):
     import shutil
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
         pytest.skip('ffmpeg/ffprobe required')
@@ -1118,12 +1118,13 @@ def test_artifixer_reduce_preserves_empty_interrupted_frames(tmp_path, empty_bat
             path.unlink()
     empty = folder / '00511.png'
     empty.touch()
-    predictions = {p: p.read_bytes() for p in result.glob('**/pred/*.png')}
+    predictions = {p: p.read_bytes() for p in result.glob('**/pred/*.png') if p != empty}
     report = studio.results.reduce_run(root.name)
     assert report['incomplete_inference_frames'] == [str(empty.relative_to(root))]
     assert len(report['inference_videos']) == (1 if empty_batch else 2)
     assert all(v['frame_count'] == 3 for v in report['inference_videos'])
     assert all('00511.png' not in v['frame_names'] for v in report['inference_videos'])
+    assert not empty.exists()
     assert all(p.read_bytes() == data for p, data in predictions.items())
     assert not (result / 'checkpoint.pt').exists()
     assert json.loads((root / 'reduction.json').read_text())['incomplete_inference_frames'] == report['incomplete_inference_frames']
