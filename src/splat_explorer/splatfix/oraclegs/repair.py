@@ -220,10 +220,14 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         validate_runtime(runtime)
     if (output/'dataset').exists():
         raise ValueError('OracleGS output already contains a dataset; use a fresh isolated run')
+    if should_stop():
+        raise InterruptedError('Cancelled after OracleGS setup')
     n = len(manifest['views'])
     dataset = output/'dataset'
     (dataset/'images').mkdir(parents=True)
     for view in manifest['views']:
+        if should_stop():
+            raise InterruptedError('Cancelled while staging OracleGS references')
         shutil.copyfile(inputs/view['image'],dataset/'images'/Path(view['image']).name)
     lock = json.loads((HERE/'upstream-lock.json').read_text())
     recipe = {'reconstruction_method':'oraclegs','inputs':manifest,
@@ -276,7 +280,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         model('model_access','assets','seva_repo',{'output':str(output/'vae-provenance.json')})
     sparse = dataset/'sparse/0'
     source_only = (manifest.get('oracle_depth_source') == 'source_splat' and
-                   manifest.get('oracle_initialization') == 'source_splat')
+                   manifest.get('oracle_initialization') in ('source_splat', 'point_cloud'))
     if source_only:
         from .adapter import source_camera_model
         source_camera_model(inputs, output)
@@ -314,7 +318,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
             'views':manifest['source_depth']['views']})
     if manifest.get('artifixer_source'):
         from .artifixer_inputs import publish_generated
-        publish_generated(inputs, output, manifest)
+        publish_generated(inputs, output, manifest, should_stop=should_stop)
     elif manifest.get('seva_segments'):
         from .segments import merge_segments
         for segment in manifest['seva_segments']:
@@ -334,10 +338,10 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
             from .scene_memory import prepare_memory
             request['scene_memory'] = prepare_memory(inputs, output, manifest, None, output)
         model('seva_generation','seva','seva_repo',request)
-    assemble(inputs,output)
+    assemble(inputs,output,should_stop=should_stop)
     attention = dataset/f'synthetic_{n}_attention_maps'
     from .adapter import append_worldexplorer
-    training_n, original_names = append_worldexplorer(inputs, output, n)
+    training_n, original_names = append_worldexplorer(inputs, output, n, should_stop=should_stop)
     weighted_world = manifest.get('oracle_worldexplorer_attention', 'weighted') == 'weighted'
     from .attention import plan_chunks, worldexplorer_targets
     extra = worldexplorer_targets(inputs, output, manifest) if weighted_world and original_names else []
@@ -354,12 +358,12 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
             raise ValueError(f'Missing attention map for {image.name}')
         shutil.copyfile(source,attention/image.name)
     args = training_args(dataset,output/'model',training_n,runtime)
-    geometry_request = {'unweighted_synthetic': [] if weighted_world else original_names, 'source_geometry_report':str(output/'source-geometry-runtime.json'),
+    geometry_request = {'oracle_initialization':manifest.get('oracle_initialization', 'sfm'), 'unweighted_synthetic': [] if weighted_world else original_names, 'source_geometry_report':str(output/'source-geometry-runtime.json'),
                         'source_depth':str(inputs/'source-depth') if manifest.get('oracle_depth_source') == 'source_splat' else None,
                         'source_initialization':str(inputs/'source-initialization.ply') if manifest.get('source_initialization') else None}
     if manifest.get('oracle_depth_source') == 'source_splat':
         args[args.index('--depths')+1] = ''
-    if manifest.get('source_initialization'):
+    if manifest.get('oracle_initialization') == 'source_splat':
         args += ['--sh_degree', str(manifest['source_initialization']['sh_degree'])]
     if manifest.get('artifixer_source') or original_names or manifest['oracle_adapter'] in ('trajectory', 'per_view_preset'):
         model('reconstruction','train','repo',{'references':str(dataset/'reference_names.json'),'argv':args, **geometry_request},training=True)

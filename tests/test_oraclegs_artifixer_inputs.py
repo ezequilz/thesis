@@ -46,17 +46,17 @@ def fixture(tmp_path):
     return studio,row
 
 
-@pytest.mark.parametrize('initialization',['sfm','source_splat'])
+@pytest.mark.parametrize('initialization',['sfm','source_splat','point_cloud'])
 def test_reuse_preserves_camera_and_reference_roles(tmp_path,initialization):
     studio,row=fixture(tmp_path)
     inputs=tmp_path/'inputs'; output=tmp_path/'output'
     manifest=export_inputs(studio,row,inputs,initialization)
     validate_assets(inputs,manifest)
-    assert bool(manifest.get('source_initialization')) == (initialization=='source_splat')
+    assert bool(manifest.get('source_initialization')) == (initialization in ('source_splat','point_cloud'))
     frames=json.loads((inputs/'scene/transforms.json').read_text())['frames']
     assert len(frames)==8
-    assert manifest['oracle_depth_source'] == ('source_splat' if initialization == 'source_splat' else 'predicted')
-    if initialization == 'source_splat':
+    assert manifest['oracle_depth_source'] == ('source_splat' if initialization in ('source_splat','point_cloud') else 'predicted')
+    if initialization in ('source_splat','point_cloud'):
         assert len(manifest['source_depth']['views']) == 6
         for record in manifest['source_depth']['views']:
             with np.load(inputs/record['path']) as data:
@@ -91,18 +91,22 @@ def test_missing_reference_and_invalid_initialization_rejected(tmp_path):
         source_assets(studio,row)
 
 
-def test_dashboard_queues_isolated_snapshot_and_rejects_missing_inputs(tmp_path):
+@pytest.mark.parametrize('batching', ['within_trajectory', 'global'])
+@pytest.mark.parametrize('initialization', ['source_splat', 'point_cloud'])
+def test_dashboard_queues_isolated_snapshot_and_rejects_missing_inputs(tmp_path, batching, initialization):
     from test_splatfix_results import setup
     studio, _, _ = setup(tmp_path/'dashboard')
     _, row = fixture(tmp_path)
     row.update(config={'splatfix':{}}, scene='room')
     studio.results.detail = lambda key: row
-    queued = studio.results.reconstruct_artifixer('result')
+    queued = studio.results.reconstruct_artifixer('result', initialization, oracle_attention_batching=batching)
     options = queued['config']['splatfix']
     assert options['reconstruction_method']=='oraclegs'
-    assert options['oracle_initialization']=='source_splat'
+    assert options['oracle_initialization']==initialization
     assert options['oracle_depth_source']=='source_splat'
+    assert options['oracle_attention_batching'] == batching
     snapshot = Path(options['oracle_artifixer_inputs'])
+    assert json.loads((snapshot/'inputs.json').read_text())['oracle_attention_batching'] == batching
     assert snapshot != row['_manifest'].parent
     assert (snapshot/'source-initialization.ply').read_bytes() == row['_paths']['original'].read_bytes()
     before = len(studio.store.list_runs())
@@ -183,3 +187,56 @@ def test_source_depth_uses_staged_reference_cameras_and_rejects_empty_depth(tmp_
                         lambda self, camera: np.full((camera.height, camera.width), np.inf, np.float32))
     with pytest.raises(ValueError, match='No reliable source depth'):
         export_inputs(studio, row, tmp_path/'invalid', 'source_splat')
+
+
+def test_publish_generated_stops_between_files(tmp_path, monkeypatch):
+    from splat_explorer.splatfix.oraclegs import artifixer_inputs
+    studio, row = fixture(tmp_path)
+    inputs, output = tmp_path/'inputs', tmp_path/'output'
+    manifest = export_inputs(studio, row, inputs, 'sfm')
+    copied = []
+    original = artifixer_inputs.shutil.copy2
+    def copy(source, target):
+        result = original(source, target)
+        copied.append(target)
+        return result
+    monkeypatch.setattr(artifixer_inputs.shutil, 'copy2', copy)
+    with pytest.raises(InterruptedError, match='staging ArtiFixer'):
+        publish_generated(inputs, output, manifest, should_stop=lambda:bool(copied))
+    assert len(copied) == 1
+
+
+def test_assembly_stops_before_next_synthetic_image(tmp_path):
+    studio, row = fixture(tmp_path)
+    inputs, output = tmp_path/'inputs', tmp_path/'output'
+    manifest = export_inputs(studio, row, inputs, 'sfm')
+    (output/'dataset/images').mkdir(parents=True)
+    source_camera_model(inputs, output)
+    publish_generated(inputs, output, manifest)
+    synthetic = output/'dataset/synthetic_6'
+    with pytest.raises(InterruptedError, match='assembling OracleGS'):
+        assemble(inputs, output, should_stop=lambda:(synthetic/'target_000006.png').exists())
+    assert (synthetic/'target_000006.png').is_file()
+    assert not (synthetic/'target_000007.png').exists()
+    assert not (output/'dataset/reference_names.json').exists()
+
+
+@pytest.mark.parametrize('batching', ['within_trajectory', 'global'])
+def test_artifixer_attention_groups_follow_selection(tmp_path, batching):
+    studio, row = fixture(tmp_path)
+    path = row['_manifest'].parent/'preview-trajectory.json'
+    trajectory = json.loads(path.read_text())
+    trajectory['transforms']['frames'][7]['transform_matrix'][0][3] = 0
+    atomic_json(path, trajectory)
+    manifest = export_inputs(studio, row, tmp_path/'inputs', 'sfm', oracle_attention_batching=batching)
+    chunks = plan_chunks(manifest, mode=manifest['oracle_attention_batching'])
+    assert all(len(c['reference_images']) == 6 for c in chunks)
+    assert sum(len(c['target_images']) for c in chunks) == 2
+    assert {len(c['segment_indices']) for c in chunks} == ({1} if batching == 'within_trajectory' else {2})
+
+
+def test_invalid_attention_mode_rejected_before_staging(tmp_path):
+    studio, row = fixture(tmp_path)
+    with pytest.raises(ValueError, match='oracle_attention_batching'):
+        export_inputs(studio, row, tmp_path/'inputs', 'sfm', oracle_attention_batching='invalid')
+    assert not (tmp_path/'inputs').exists()

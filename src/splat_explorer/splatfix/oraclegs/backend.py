@@ -26,8 +26,8 @@ def validate_options(raw):
     initialization = raw.get('oracle_initialization', 'sfm')
     if depth not in ('predicted', 'source_splat'):
         raise ValueError('oracle_depth_source must be predicted or source_splat')
-    if initialization not in ('sfm', 'source_splat'):
-        raise ValueError('oracle_initialization must be sfm or source_splat')
+    if initialization not in ('sfm', 'source_splat', 'point_cloud'):
+        raise ValueError('oracle_initialization must be sfm, source_splat, or point_cloud')
     batching = raw.get('oracle_attention_batching', 'within_trajectory')
     if batching not in ('within_trajectory', 'global'):
         raise ValueError('oracle_attention_batching must be within_trajectory or global')

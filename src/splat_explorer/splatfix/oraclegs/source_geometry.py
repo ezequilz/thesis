@@ -58,7 +58,7 @@ def inspect_ply(path):
 def stage_source_geometry(checkpoint, root, manifest, frames, *, should_stop=lambda:False):
     use_depth = (manifest['oracle_depth_source'] == 'source_splat' or
                  manifest.get('seva_geometry_guidance', 'off') == 'source_splat')
-    use_init = manifest['oracle_initialization'] == 'source_splat'
+    use_init = manifest['oracle_initialization'] in ('source_splat', 'point_cloud')
     if not (use_depth or use_init):
         return
     from ..checkpoint import validate_source, camera_from_record
@@ -129,7 +129,7 @@ def validate_assets(root, manifest):
         records = manifest.get('source_depth',{}).get('views',[])
         if {r['image'] for r in records} != {Path(v['image']).name for v in manifest['views']}:
             raise ValueError('Missing source depth assets; restage inputs')
-    if manifest.get('oracle_initialization', 'sfm') == 'source_splat':
+    if manifest.get('oracle_initialization', 'sfm') in ('source_splat', 'point_cloud'):
         if not manifest.get('source_initialization'):
             raise ValueError('Missing source initialization; restage inputs')
         records = [*records,manifest['source_initialization']]

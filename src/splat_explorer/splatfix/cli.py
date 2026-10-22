@@ -160,7 +160,7 @@ def _add_stages(parser):
     repair.add_argument("--seva-resolution", choices=("576p", "720p"))
     repair.add_argument("--seva-geometry-guidance", choices=("off", "source_splat"))
     repair.add_argument("--oracle-depth-source", choices=("predicted", "source_splat"))
-    repair.add_argument("--oracle-initialization", choices=("sfm", "source_splat"))
+    repair.add_argument("--oracle-initialization", choices=("sfm", "source_splat", "point_cloud"))
     repair.add_argument("--oracle-preset", choices=("orbit", "spiral", "spiral_expanding", "lemniscate", "shuffle_orbit"))
     repair.add_argument("--oracle-source-reference", choices=("nearest", "fixed_initial"))
     repair.add_argument("--oracle-reference-mode", choices=("scene_memory", "all", "single"))

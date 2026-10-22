@@ -200,6 +200,7 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
     for frames, destination, relative in sequences:
         encode_inference_video(frames, destination)
         keep.add(destination)
+        keep.update(frames)
         videos.append({'path': str(destination.relative_to(root)), 'name': relative,
                        'frame_count': len(frames), 'fps': 12,
                        'frame_names': [p.name for p in frames]})
@@ -229,7 +230,7 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
         elif source.is_symlink():
             raise ValueError('Cannot retain a linked PLY; source files were kept')
         keep.add(destination)
-    # Every sequence has been verified; only now remove images and intermediates.
+    # Every sequence has been verified; retain predictions and prune other inputs/intermediates.
     (root / 'output-size.json').unlink(missing_ok=True)
     for path in files(root):
         if path not in keep or path.is_symlink():

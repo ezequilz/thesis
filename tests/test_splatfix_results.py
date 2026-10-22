@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from splat_explorer.config import Config
 from splat_explorer.scene_runs.store import SceneRunStore
 from splat_explorer.web.splatfix_studio import SplatfixStudio
@@ -1062,30 +1064,42 @@ def artifixer_reduction_setup(tmp_path):
     return studio, root, result
 
 
-def test_artifixer_reduce_encodes_both_passes_and_exposes_verified_videos(tmp_path):
+@pytest.mark.parametrize('backup', [False, True])
+def test_artifixer_reduce_encodes_both_passes_and_exposes_verified_videos(tmp_path, backup):
     import shutil
     import pytest
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
         pytest.skip('ffmpeg/ffprobe required')
     studio, root, result = artifixer_reduction_setup(tmp_path)
+    predictions = {p: p.read_bytes() for p in result.glob('**/pred/*.png')}
+    (result / 'cameras.json').write_text('{"poses": []}')
     assert studio.results.entries()[0]['can_reduce'] is True
-    report = studio.results.reduce_run(root.name, backup=True)
+    report = studio.results.reduce_run(root.name, backup=backup)
     assert len(report['inference_videos']) == 2
     assert all(v['frame_count'] == 3 and v['frame_names'] == ['0.png', '2.png', '10.png'] for v in report['inference_videos'])
-    assert list(root.rglob('*.png')) == [result / 'trajectory-quality.png']
+    assert set(root.rglob('*.png')) == set(predictions) | {result / 'trajectory-quality.png'}
+    assert all(p.read_bytes() == content for p, content in predictions.items())
+    assert not (result / 'degraded').exists()
+    assert not (result / 'cameras.json').exists()
     assert (result / 'stage-comparison.jpg').exists()
     assert not (result / 'checkpoint.pt').exists()
     assert (result / 'original.ply').exists() and (result / 'artifixer3d.ply').exists()
     assert (result / 'train.log').read_text() == 'training log'
-    assert len(list(Path(report['backup_path']).rglob('*.png'))) == 8
+    if backup:
+        saved = Path(report['backup_path'])
+        assert len(list(saved.rglob('*.png'))) == 8
+        assert (saved / result.relative_to(root) / 'cameras.json').exists()
+        assert (saved / result.relative_to(root) / 'checkpoint.pt').exists()
+    else:
+        assert report['backup_path'] is None
     detail = studio.results.run_detail(root.name)
     assert len(detail['inference_videos']) == 2
     assert all(v['url'] for v in detail['inference_videos'])
     assert len(detail['comparison_gallery']) == 2
     assert detail['comparison_gallery'][1]['caption'] == 'Saved quality chart'
-    assert studio.results.entries()[0]['preview_label'] == 'Stage comparison'
+    assert studio.results.entries()[0]['preview_label'] == 'img 1 preview'
     assert detail['original_rgb_images'] == []
-    assert detail['gallery']['frames'] == []
+    assert [frame['name'] for frame in detail['gallery']['frames']] == ['0.png', '2.png', '10.png']
 
 
 def test_artifixer_failed_second_video_keeps_all_source_images(tmp_path, monkeypatch):

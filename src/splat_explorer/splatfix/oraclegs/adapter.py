@@ -81,7 +81,7 @@ def verify_exported_cameras(frames, exported, manifest):
             raise ValueError('SEVA changed target camera calibration')
 
 
-def assemble(inputs, output):
+def assemble(inputs, output, *, should_stop=lambda:False):
     """Map SEVA output by its documented ordered target indices, never glob guesses."""
     inputs, output = Path(inputs), Path(output)
     manifest = json.loads((inputs/'inputs.json').read_text())
@@ -102,6 +102,8 @@ def assemble(inputs, output):
     combined = output/'combined'
     combined.mkdir()
     for frame in frames[:n]:
+        if should_stop():
+            raise InterruptedError('Cancelled while assembling OracleGS images')
         name = Path(frame['file_path']).name
         shutil.copyfile(inputs/'scene'/frame['file_path'], combined/name)
     # model_converter has preserved SfM observations and point tracks in text.
@@ -113,6 +115,8 @@ def assemble(inputs, output):
     next_cam, next_img = max(camera_ids)+1, max(image_ids)+1
     with (sparse/'cameras.txt').open('a') as cams, (sparse/'images.txt').open('a') as imgs:
         for j, frame in enumerate(frames[n:]):
+            if should_stop():
+                raise InterruptedError('Cancelled while assembling OracleGS images')
             out_frame = exported[n+j]
             raw = Path(out_frame['file_path'])
             path = (generated/raw).resolve()
@@ -244,7 +248,7 @@ def verify_sfm_cameras(inputs, output):
     (output/'camera-alignment.json').write_text(json.dumps({'passed':True,'references':errors},indent=2))
 
 
-def append_worldexplorer(inputs, output, n):
+def append_worldexplorer(inputs, output, n, *, should_stop=lambda:False):
     """Add WorldExplorer RGBs to the synthetic pool, preserving repaired GT."""
     from ..worldexplorer.source import load_staged
     inputs, output = Path(inputs), Path(output)
@@ -262,6 +266,8 @@ def append_worldexplorer(inputs, output, n):
     names = []
     with (sparse / 'cameras.txt').open('a') as cameras, (sparse / 'images.txt').open('a') as images:
         for index, frame in enumerate(data['frames']):
+            if should_stop():
+                raise InterruptedError('Cancelled while assembling WorldExplorer images')
             path = Path(frame['file_path'])
             name = path.stem + '.png'
             if name in references or (dataset / 'images' / name).exists() or (dataset / f'synthetic_{n}' / name).exists():

@@ -247,7 +247,7 @@ const document={getElementById:get,querySelectorAll:()=>[],hidden:false};
 const context=vm.createContext({document,location:{search:'?id=run'},URLSearchParams,
  ResizeObserver:class{observe(){}},
  fetch:async()=>{calls++;return{ok:true,json:async()=>result}},
- setTimeout:(fn,ms)=>{assert.ok([3000,30000].includes(ms));lastDelay=ms;timer=fn;return 1},clearTimeout:()=>{timer=null}});
+ setTimeout:(fn,ms)=>{assert.ok([3000,5000,30000].includes(ms));lastDelay=ms;timer=fn;return 1},clearTimeout:()=>{timer=null}});
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
  vm.runInContext(source,context);await flush();
@@ -260,6 +260,11 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
  assert.match(get('refreshStatus').textContent,/Auto-refresh off/);
  // Manual refresh still retrieves the eventual reconstruction.
  await get('refresh').onclick();assert.equal(calls,3);assert.equal(timer,null);
+ // Cancellation stays live even when the gallery is already complete.
+ result={...result,status:'stopping'};
+ await get('refresh').onclick();assert.equal(typeof timer,'function');assert.equal(lastDelay,5000);
+ result={...result,status:'stopped'};timer();await flush();assert.equal(timer,null);
+
  for(const status of ['completed','error','stopped']){
    result={...result,status,inference_ready:false};await get('refresh').onclick();assert.equal(timer,null);
  }
@@ -274,6 +279,18 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
  await get('refresh').onclick();assert.equal(timer,null);
  result={...result,kind:'ArtiFixer3D',gallery:{frames:[],verified_inputs:true,expected_count:0}};
  await get('refresh').onclick();assert.equal(timer,null);
+ for(const mode of ['within_trajectory','global']){
+   get('oracleInit').value='source_splat';get('oracleAttentionBatching').value=mode;
+   context.fetch=async(url,options)=>{
+     assert.equal(url,'/api/splatfix/results/reconstruct-artifixer');
+     assert.deepEqual(JSON.parse(options.body),{id:'run',initialization:'source_splat',oracle_attention_batching:mode});
+     return {ok:true,json:async()=>({ok:true,run:{run_id:'new-run'}})};
+   };
+   await get('oracleStart').onclick();
+   assert.equal(context.location.href,'/splatfix/results/run?id=new-run');
+   assert.equal(get('oracleStart').disabled,false);
+ }
+
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''
     result = subprocess.run([node, '-e', code, str(page)], capture_output=True, text=True)

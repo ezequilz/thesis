@@ -42,7 +42,7 @@ def test_calibrated_crop_and_padding_do_not_blend_depth_edges():
 
 
 @pytest.mark.parametrize('depth',['predicted','source_splat'])
-@pytest.mark.parametrize('initialization',['sfm','source_splat'])
+@pytest.mark.parametrize('initialization',['sfm','source_splat','point_cloud'])
 def test_source_options_independent_staged_and_verified(tmp_path,monkeypatch,depth,initialization):
     cp = checkpoint(tmp_path,count=2)
     source = Path(cp.manifest['scene_path'])
@@ -54,7 +54,7 @@ def test_source_options_independent_staged_and_verified(tmp_path,monkeypatch,dep
     manifest = export_inputs(cp,root,'edited',runtime=options)
     validate_assets(root,manifest)
     assert bool(manifest.get('source_depth')) == (depth=='source_splat')
-    assert manifest['source_splat_used_for_initialization'] == (initialization=='source_splat')
+    assert manifest['source_splat_used_for_initialization'] == (initialization in ('source_splat','point_cloud'))
     assert job_runtime({},options)['oracle_initialization']==initialization
     if depth=='source_splat':
         record=manifest['source_depth']['views'][0]
@@ -116,7 +116,7 @@ def test_source_depth_runtime_preserves_mask_and_excludes_synthetic(tmp_path,mon
 
 @pytest.mark.parametrize('adapter',['trajectory','saved_poses'])
 @pytest.mark.parametrize('depth,initialization',[
-    ('source_splat','sfm'), ('predicted','source_splat'), ('source_splat','source_splat')])
+    ('source_splat','point_cloud'), ('predicted','point_cloud'), ('source_splat','sfm'), ('predicted','source_splat'), ('source_splat','source_splat')])
 def test_full_pipeline_source_variants(tmp_path,monkeypatch,adapter,depth,initialization):
     import test_splatfix_oraclegs as contracts
     original=contracts.checkpoint
@@ -128,3 +128,41 @@ def test_full_pipeline_source_variants(tmp_path,monkeypatch,adapter,depth,initia
     from splat_explorer.rendering.cpu_splat_renderer import CpuSplatRenderer
     monkeypatch.setattr(CpuSplatRenderer,'render_depth',lambda self,cam:np.full((cam.height,cam.width),4,np.float32))
     contracts.test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,False,2,depth,initialization)
+
+
+def test_fresh_source_initialization_passes_only_positions_and_colors(tmp_path, monkeypatch):
+    import collections
+    path = tmp_path/'source.ply'
+    source = source_ply(path)
+    # The GPU worker provides plyfile; decode the fixture with the local reader here.
+    from splat_explorer.scene.ply_loader import _parse_header
+    def read_ply(filename):
+        with Path(filename).open('rb') as stream:
+            count, props, offset = _parse_header(stream)
+        return {'vertex':np.memmap(filename, dtype=np.dtype(props), mode='r', offset=offset, shape=(count,))}
+    monkeypatch.setitem(sys.modules, 'plyfile', SimpleNamespace(PlyData=SimpleNamespace(read=read_ply)))
+    calls = []
+    class Model:
+        def load_ply(self, path):
+            pytest.fail('Fresh initialization must not load Gaussian parameters')
+
+        def create_from_pcd(self, cloud, spatial_lr_scale):
+            calls.append((cloud, spatial_lr_scale))
+            self.get_xyz = cloud.points
+
+    monkeypatch.setitem(sys.modules, 'scene', SimpleNamespace())
+    monkeypatch.setitem(sys.modules, 'scene.gaussian_model', SimpleNamespace(GaussianModel=Model))
+    monkeypatch.setitem(sys.modules, 'utils', SimpleNamespace())
+    monkeypatch.setitem(sys.modules, 'utils.graphics_utils', SimpleNamespace(
+        BasicPointCloud=collections.namedtuple('BasicPointCloud', 'points colors normals')))
+    monkeypatch.setitem(sys.modules, 'utils.sh_utils', SimpleNamespace(SH2RGB=lambda dc:dc*0.28209479177387814+.5))
+    report = tmp_path/'runtime.json'
+    install_source_geometry({'source_initialization':str(path), 'oracle_initialization':'point_cloud',
+                             'source_geometry_report':str(report)})
+    Model().create_from_pcd(None, 2.5)
+    cloud, scale = calls[0]
+    np.testing.assert_allclose(cloud.points, source.means)
+    np.testing.assert_allclose(cloud.colors, source.colors)
+    np.testing.assert_array_equal(cloud.normals, np.zeros((2,3)))
+    assert scale == 2.5
+    assert json.loads(report.read_text())['initialization']['mode'] == 'point_cloud'

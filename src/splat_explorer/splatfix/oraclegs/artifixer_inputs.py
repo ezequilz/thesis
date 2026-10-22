@@ -49,9 +49,13 @@ def source_assets(studio, row):
     return trajectory, references, predictions
 
 
-def export_inputs(studio, row, destination, initialization):
-    if initialization not in ('source_splat', 'sfm'):
-        raise ValueError('Initialization must be source_splat or sfm')
+def export_inputs(studio, row, destination, initialization, *, oracle_attention_batching='within_trajectory'):
+    if initialization not in ('source_splat', 'point_cloud', 'sfm'):
+        raise ValueError('Initialization must be source_splat, point_cloud, or sfm')
+    options = validate_options({'oracle_reference_mode':'all', 'oracle_adapter':'saved_poses',
+                                'oracle_initialization':initialization,
+                                'oracle_attention_batching':oracle_attention_batching,
+                                'oracle_depth_source':'source_splat' if initialization in ('source_splat', 'point_cloud') else 'predicted'})
     trajectory, references, predictions = source_assets(studio, row)
     root = Path(destination)
     (root/'scene/images').mkdir(parents=True)
@@ -84,14 +88,11 @@ def export_inputs(studio, row, destination, initialization):
         reference = min(range(6), key=lambda i: np.linalg.norm(np.asarray(frames[i]['transform_matrix'])[:3,3]-np.asarray(frames[-1]['transform_matrix'])[:3,3]))
         targets.append({'target_index':index, 'image_name':name, 'reference_index':reference,
                         'segment_index':reference, 'alpha':0.0, 'source_sha256':digest(source)})
-    options = validate_options({'oracle_reference_mode':'all', 'oracle_adapter':'saved_poses',
-                                'oracle_initialization':initialization,
-                                'oracle_depth_source':'source_splat' if initialization == 'source_splat' else 'predicted'})
     manifest = {**options, 'mode':'edited', 'views':views, 'resolution':list(size),
                 'seva_internal_resolution':list(size), 'seva_task':'img2trajvid',
                 'artifixer_source':{'run_id':row['run_id'], 'result_id':row['id'], 'generated_count':len(targets)},
                 'trajectory':{'frames':targets, 'segments':[]}, 'camera_convention':'opengl_c2w'}
-    if initialization == 'source_splat':
+    if initialization in ('source_splat', 'point_cloud'):
         source = row['_paths']['original']
         if source is None:
             raise ValueError('Original starting PLY is unavailable; select from scratch')
@@ -105,7 +106,16 @@ def export_inputs(studio, row, destination, initialization):
     return manifest
 
 
-def publish_generated(inputs, output, manifest):
+def publish_generated(inputs, output, manifest, *, should_stop=lambda:False):
     """Supply the existing assembly boundary without invoking SEVA."""
     destination = Path(output)/'seva'/manifest['seva_task']/'scene'
-    shutil.copytree(Path(inputs)/'scene', destination)
+    source = Path(inputs)/'scene'
+    destination.mkdir(parents=True)
+    for path in sorted(source.rglob('*')):
+        if should_stop():
+            raise InterruptedError('Cancelled while staging ArtiFixer images')
+        target = destination/path.relative_to(source)
+        if path.is_dir():
+            target.mkdir()
+        else:
+            shutil.copy2(path, target)

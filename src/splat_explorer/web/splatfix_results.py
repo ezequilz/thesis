@@ -22,7 +22,7 @@ class ResultCatalog:
         self._visibility_lock = threading.Lock()
         self._run_storage_lock = threading.Lock()
 
-    def reconstruct_artifixer(self, key, initialization='source_splat'):
+    def reconstruct_artifixer(self, key, initialization='source_splat', *, oracle_attention_batching='within_trajectory'):
         """Snapshot inputs, then enqueue through the normal manager/GPU lease path."""
         import tempfile
         from ..splatfix.oraclegs.artifixer_inputs import export_inputs
@@ -35,7 +35,8 @@ class ResultCatalog:
             snapshots.mkdir(exist_ok=True, parents=True)
             destination = Path(tempfile.mkdtemp(prefix='artifixer-', dir=snapshots))
             try:
-                manifest = export_inputs(self.studio, row, destination, initialization)
+                manifest = export_inputs(self.studio, row, destination, initialization,
+                                         oracle_attention_batching=oracle_attention_batching)
                 options = {'stage':'repair', 'reconstruction_method':'oraclegs', 'mode':'edited',
                            'checkpoint':row['config'].get('splatfix', {}).get('checkpoint', ''),
                            'resolution_profile':'training', 'oracle_artifixer_inputs':str(destination.resolve()),

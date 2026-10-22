@@ -56,8 +56,22 @@ def install_source_geometry(request):
     if request.get('source_initialization'):
         from scene.gaussian_model import GaussianModel
         path = request['source_initialization']
+        original_create = GaussianModel.create_from_pcd
+        mode = request.get('oracle_initialization', 'source_splat')
         def create(self, pcd, spatial_lr_scale):
-            initialize_gaussians(self,path,spatial_lr_scale)
-            report['initialization'] = {'source': path, 'gaussian_count': int(self.get_xyz.shape[0])}
+            if mode == 'point_cloud':
+                from plyfile import PlyData
+                from utils.graphics_utils import BasicPointCloud
+                from utils.sh_utils import SH2RGB
+                vertices = PlyData.read(path)['vertex']
+                points = np.column_stack([vertices[key] for key in ('x', 'y', 'z')])
+                dc = np.column_stack([vertices[f'f_dc_{i}'] for i in range(3)])
+                colors = np.clip(SH2RGB(dc), 0., 1.)
+                # Only positions and decoded RGB enter the standard fresh initializer.
+                cloud = BasicPointCloud(points=points, colors=colors, normals=np.zeros_like(points))
+                original_create(self, cloud, spatial_lr_scale)
+            else:
+                initialize_gaussians(self,path,spatial_lr_scale)
+            report['initialization'] = {'source': path, 'mode': mode, 'gaussian_count': int(self.get_xyz.shape[0])}
             publish()
         GaussianModel.create_from_pcd = create

@@ -595,14 +595,46 @@ available initial inference images. The optional ArtiFixer3D+ outputs are
 excluded. The action requires the saved camera trajectory, reference snapshots,
 and all expected inference outputs to be downloaded.
 
-Initialization defaults to the original starting Gaussian PLY, including its SH
-parameters. **From scratch · OracleGS SfM** uses triangulated points instead.
-Both retain OracleGS reference depth estimation/alignment, VGGT attention, and
-the usual training schedule. SEVA generation is skipped. Input images, cameras,
+**Starting PLY + source depth** defaults to the original starting Gaussian PLY,
+including its SH parameters, and depth rendered from that PLY at the six saved
+reference cameras. Invalid depth pixels are masked. This combination bypasses
+COLMAP and predicted-depth estimation/alignment; six repaired views alone may
+have no verified feature matches. **From scratch · SfM + predicted depth** still
+requires triangulation and predicted-depth alignment. Both retain VGGT attention
+and the usual training schedule. SEVA generation is skipped, and original
+WorldExplorer images are not appended. Input images, cameras, source depth,
 and the optional starting PLY are snapshotted before publishing the queue job;
 source-run deletion or reduction does not remove those staged inputs.
+
+The normal OracleGS settings expose the same combination through independent
+**Reconstruction depth supervision → Source-splat depth** and
+**Reconstruction initialization → Existing source splat** controls. Previously
+queued snapshots keep their settings; create a fresh run for this change.
+
+The detail-page **VGGT image shuffling** selector defaults to **Within trajectory /
+reference group** (`within_trajectory`). For reused ArtiFixer images, each group
+contains targets assigned to the same nearest repaired reference. **Across all
+generated images** (`global`) shuffles targets across these groups. Both modes
+include all six repaired references in every attention context; global mode
+still uses bounded batches rather than placing every image in one batch. The
+choice is saved in both the input snapshot and queued run configuration.
 
 These jobs use the normal scene-manager queue and its shared exclusive GPU
 lease. The dashboard only stages inputs and creates a queued run; it does not
 launch GPU work. The manager waits for the current lease owner to finish and
 checks GPU availability before executing each queued reconstruction.
+
+
+### Fresh OracleGS initialization from source points
+
+Both the ArtiFixer result reconstruction form and `/splatfix` offer `point_cloud`
+(**Fresh reconstruction**). Only source positions and decoded DC RGB colors are
+passed to the standard OracleGS point-cloud initializer. Scales are computed from
+point spacing; opacity, rotations, and SH parameters are initialized afresh, with
+a fresh optimizer and the standard training SH degree. Source Gaussian parameters
+remain in the staged snapshot for depth rendering but are not loaded into the model.
+
+The ArtiFixer result form pairs this mode with source depth and skips COLMAP. On
+`/splatfix`, depth remains independent: source depth skips COLMAP for this mode,
+while predicted depth still uses COLMAP for depth alignment. The CLI equivalent
+is `--oracle-initialization point_cloud`. Existing defaults remain unchanged.

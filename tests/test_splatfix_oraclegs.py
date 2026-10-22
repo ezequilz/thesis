@@ -348,8 +348,11 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training
             assert len(list((dataset/f'synthetic_{count}_attention_maps').glob('*.png'))) == len(frames)-count+(2 if world_attention == 'weighted' else 0)
             assert len(body['unweighted_synthetic']) == (2 if world_attention == 'unweighted' else 0)
             assert bool(body['source_depth']) == (depth == 'source_splat')
-            assert bool(body['source_initialization']) == (initialization == 'source_splat')
+            assert bool(body['source_initialization']) == (initialization in ('source_splat', 'point_cloud'))
             assert body['argv'][body['argv'].index('--depths')+1] == ('' if depth == 'source_splat' else 'depths')
+            assert body['oracle_initialization'] == initialization
+            if initialization == 'point_cloud':
+                assert '--sh_degree' not in body['argv']
             if initialization == 'source_splat':
                 assert body['argv'][body['argv'].index('--sh_degree')+1] == '0'
             assert body['stop_control'] == str(output/'SAVE_STOP')
@@ -379,7 +382,7 @@ def test_full_pipeline_stage_contract(tmp_path,monkeypatch,adapter,stop_training
     if adapter == 'per_view_preset':
         generations = [f'seva_generation_{i+1:03d}_of_{count:03d}' for i in range(count)]
     depth_phases = ['reference_depth','depth_alignment'] if depth == 'predicted' else []
-    sfm_phases = [] if depth == initialization == 'source_splat' else ['sfm_features','sfm_matching','sfm_triangulation','sfm_export']
+    sfm_phases = [] if depth == 'source_splat' and initialization in ('source_splat', 'point_cloud') else ['sfm_features','sfm_matching','sfm_triangulation','sfm_export']
     if artifixer:
         generations = []
     assert phases == [*([] if artifixer else ['model_access']),*sfm_phases,
