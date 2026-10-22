@@ -165,7 +165,7 @@ The example config uses the existing CliRelay credentials and model settings.
 `.env` is loaded without overwriting environment variables. The default project
 config alone uses a scripted sweep for offline smoke tests; it does not perform
 semantic VLM selection. Selection uses the harness Viser capture service; keep
-the capture visor visible for selection. Step 4 defaults to **Authors 3DGUT**:
+the capture visor visible for selection. Step 4 defaults to **Authors 3DGUT baseline**:
 the pinned upstream renderer supplies paired source RGB and opacity and retains
 the native reconstructed RGB/opacity for ArtiFixer3D+. It does not need a Viser
 capture connection during reconstruction. No VLM is involved during rendering.
@@ -1033,7 +1033,8 @@ These custom controls apply to **Legacy Viser / gsplat**. CLI equivalents:
 
 ### Default authors rendering and reconstruction
 
-Step 4's **ArtiFixer rendering and reconstruction** setting selects
+Step 4's **ArtiFixer rendering and reconstruction** setting labels the default
+**Authors 3DGUT baseline** and selects
 `authors_3dgut` (default), `authors_3dgut_viser_rgb`, or `legacy_gsplat`. It is saved with the job, propagated
 to the GPU worker, and recorded in run provenance. CLI: `--artifixer-pipeline
 authors_3dgut|authors_3dgut_viser_rgb|legacy_gsplat`; config: `splatfix.runtime.artifixer_pipeline`.
@@ -1163,3 +1164,21 @@ source PLY; it does not reproduce the authors' initial sparse reconstruction.
 
 This adapter has local isolation/calibration tests but still requires a CUDA
 smoke test and empirical output comparison before production adoption.
+
+### Initial reference seeding
+
+New ArtiFixer repair runs default to **Image cache insertion → On · seed initial
+image**. Each series starts with its selected reference RGB and opacity 1,
+including forward and reverse endpoint runs and the forward “+” pass. This
+matches the earlier double-split input-frame seeding; it does not enable the
+stronger exact-latent cache adaptation. **On · seed and preserve initial image in
+cache** additionally enables that adaptation. **Off · reference conditioning
+only** explicitly disables seeding, including for double-split runs, but retains
+reference conditioning and direct reconstruction supervision.
+
+`initial_image_seeding` records this choice separately from `image_cache_insertion`
+(the exact cache-preservation extension). CLI: `--initial-image-seeding` /
+`--no-initial-image-seeding`. Historical worker requests without the new field
+retain their per-segment behavior. Per-series `inference-seeding.json` and
+`plus-seeding.json` record effective seeding and cache preservation. Existing
+queued jobs are not rewritten.

@@ -1106,6 +1106,44 @@ def test_artifixer_reduce_encodes_both_passes_and_exposes_verified_videos(tmp_pa
     assert [frame['name'] for frame in detail['gallery']['frames']] == ['0.png', '2.png', '10.png']
 
 
+@pytest.mark.parametrize('empty_batch', [False, True])
+def test_artifixer_reduce_preserves_empty_interrupted_frames(tmp_path, empty_batch):
+    import shutil
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
+        pytest.skip('ffmpeg/ffprobe required')
+    studio, root, result = artifixer_reduction_setup(tmp_path)
+    folder = result / 'inference/splatfix/frames/batch_0000/pred'
+    if empty_batch:
+        for path in folder.glob('*.png'):
+            path.unlink()
+    empty = folder / '00511.png'
+    empty.touch()
+    predictions = {p: p.read_bytes() for p in result.glob('**/pred/*.png')}
+    report = studio.results.reduce_run(root.name)
+    assert report['incomplete_inference_frames'] == [str(empty.relative_to(root))]
+    assert len(report['inference_videos']) == (1 if empty_batch else 2)
+    assert all(v['frame_count'] == 3 for v in report['inference_videos'])
+    assert all('00511.png' not in v['frame_names'] for v in report['inference_videos'])
+    assert all(p.read_bytes() == data for p, data in predictions.items())
+    assert not (result / 'checkpoint.pt').exists()
+    assert json.loads((root / 'reduction.json').read_text())['incomplete_inference_frames'] == report['incomplete_inference_frames']
+
+
+def test_artifixer_reduce_rejects_nonempty_corrupt_frame(tmp_path):
+    import shutil
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
+        pytest.skip('ffmpeg/ffprobe required')
+    studio, root, result = artifixer_reduction_setup(tmp_path)
+    corrupt = result / 'inference/splatfix/frames/batch_0000/pred/00511.png'
+    corrupt.write_bytes(b'incomplete PNG')
+    predictions = {p: p.read_bytes() for p in result.glob('**/pred/*.png')}
+    with pytest.raises(ValueError):
+        studio.results.reduce_run(root.name)
+    assert all(p.read_bytes() == data for p, data in predictions.items())
+    assert (result / 'checkpoint.pt').exists()
+    assert not (root / 'reduction.json').exists()
+
+
 def test_artifixer_failed_second_video_keeps_all_source_images(tmp_path, monkeypatch):
     import pytest
     from splat_explorer.web import run_reduction

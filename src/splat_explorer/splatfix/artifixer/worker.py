@@ -14,6 +14,7 @@ def execute(root):
     request = read_json(root / 'worker-request.json')
     if request.get('stage') != 'benchmark':
         request.setdefault('runtime', {}).setdefault('artifixer_pipeline', 'legacy_gsplat')
+        request['runtime'].setdefault('initial_image_seeding', None)  # Preserve historical requests.
     def publish(**body):
         atomic_json(root / 'worker-status.json', body)
     def stop():

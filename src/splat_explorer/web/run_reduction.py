@@ -159,6 +159,7 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
     keep.update(p for p in files(root) if not p.is_symlink() and
                 (p.suffix in ('.log', '.jsonl') or p.name.startswith('events.out.tfevents')))
     sequences = []
+    incomplete_frames = []
     copies = []
     for plan in plans:
         result = plan['root']
@@ -194,6 +195,14 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
             if any(not p.stem.isdigit() for p in frames):
                 raise ValueError('Cannot establish numeric inference frame order; source images were kept')
             frames.sort(key=lambda p: (int(p.stem), p.name))
+            # Interrupted inference may leave its final output opened but empty.
+            # Retain these artifacts, but they cannot contribute a video frame.
+            # Nonempty corrupt images still have to pass video verification.
+            keep.update(frames)
+            incomplete_frames.extend(str(p.relative_to(root)) for p in frames if p.stat().st_size == 0)
+            frames = [p for p in frames if p.stat().st_size > 0]
+            if not frames:
+                continue
             relative = str(folder.relative_to(result))
             name = ('plus' if 'plus' in folder.relative_to(result).parts else 'inference') + '-' + hashlib.sha256(relative.encode()).hexdigest()[:12] + '.mp4'
             destination = result / 'inference-videos' / name
@@ -216,7 +225,7 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
     if export_only:
         if not videos:
             raise ValueError('No inference output images are available to encode')
-        report = {'inference_videos': videos}
+        report = {'inference_videos': videos, 'incomplete_inference_frames': incomplete_frames}
         _atomic_write_json(root / 'inference-videos.json', report)
         return report
     if preserve_reconstruction:
@@ -253,6 +262,7 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
             Path(directory).rmdir()
     report = {'reduced': True, 'method': 'artifixer', 'backup_path': backup,
               'before_size_bytes': before_size_bytes, 'inference_videos': videos,
+              'incomplete_inference_frames': incomplete_frames,
               'preserve_reconstruction': preserve_reconstruction}
     _atomic_write_json(root / 'reduction.json', report)
     return report

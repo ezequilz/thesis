@@ -170,3 +170,28 @@ def test_variable_endpoint_count_selection_and_path(tmp_path, count):
     assert [f['transform_matrix'][0][3] for f in frames][::2] == list(range(count))
     assert result['provenance']['reference_frame_indices'] == [0, len(frames)-1]
     assert len(result['provenance']['segments']) == 1
+
+
+@pytest.mark.parametrize('preserve', [False, True])
+def test_endpoint_default_seeds_each_direction_and_plus(preserve):
+    from splat_explorer.splatfix.artifixer.official_worker import initial_seed_index
+    options = validate_job({'stage': 'repair', 'checkpoint': '/saved',
+                            'image_trajectory': 'endpoints', 'image_cache_insertion': preserve})
+    assert options['initial_image_seeding'] is True
+    request = {'repair_policy': 'endpoints', 'runtime': options}
+    trajectory = {'frames': [{}, {}, {}], 'anchors': [{'frame_index': 0}, {'frame_index': 2}]}
+    for plus, expected in [(False, [0, 2]), (True, [0])]:
+        seeds = [initial_seed_index(options, segment, segment['indices'], [0, 2])
+                 for segment, _, _ in inference_jobs(request, trajectory, plus=plus)]
+        assert seeds == expected
+
+
+def test_seed_setting_off_is_explicit_and_historical_segments_keep_behavior():
+    from splat_explorer.splatfix.artifixer.official_worker import initial_seed_index
+    segment = {'indices': [1, 2], 'seed_index': 0}
+    assert initial_seed_index({}, segment, [1, 2], [0]) == 0
+    assert initial_seed_index({'initial_image_seeding': False}, segment, [1, 2], [0]) is None
+    assert initial_seed_index({'initial_image_seeding': False, 'image_cache_insertion': True}, segment, [1, 2], [0]) == 0
+    assert initial_seed_index({}, {'cache_seed_index': 0}, [0, 1], [0]) is None
+    with pytest.raises(ValueError, match='initial_image_seeding'):
+        validate_job({'stage': 'repair', 'checkpoint': '/saved', 'initial_image_seeding': 'on'})

@@ -104,6 +104,8 @@ def repair_splat(cfg, args):
     if getattr(args, 'image_trajectory', None) is not None:
         runtime['image_trajectory'] = args.image_trajectory
     runtime['split_mode'] = getattr(args, 'split_mode', 'double-split')
+    if getattr(args, 'initial_image_seeding', None) is not None:
+        runtime['initial_image_seeding'] = args.initial_image_seeding
     if getattr(args, 'image_cache_insertion', None) is not None:
         runtime['image_cache_insertion'] = args.image_cache_insertion
     if method == 'artifixer':
@@ -200,6 +202,8 @@ def _add_stages(parser):
                         help='Saved references and ArtiFixer targets only (default: distilled), or all images including WorldExplorer originals')
     repair.add_argument('--reconstruction-initialization', choices=('full_splat', 'point_cloud'), default=None,
                         help='Initialize fresh Gaussians from point positions/colors (default: point_cloud), or import the original PLY')
+    repair.add_argument('--initial-image-seeding', action=argparse.BooleanOptionalAction, default=None,
+                        help='Seed each series with its starting reference (default: on)')
     repair.add_argument('--image-cache-insertion', action=argparse.BooleanOptionalAction, default=None,
                         help='Insert the clean endpoint latent into KV memory before generation (default: off)')
     repair.add_argument("--frames", type=positive_int, default=25,

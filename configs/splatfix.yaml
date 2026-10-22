@@ -30,7 +30,8 @@ splatfix:
     artifixer_pipeline: authors_3dgut  # legacy_gsplat restores the previous renderer and reconstruction controls
     prompt_source: worldexplorer
     reconstruction_initialization: point_cloud  # authors path always uses a fresh fit
-    image_cache_insertion: false
+    initial_image_seeding: true  # Seed each series, including both endpoint directions
+    image_cache_insertion: false  # Optional exact latent/cache preservation
     repo: /workspace/third_party/ArtiFixer
     python: /workspace/artifixer-venv/bin/python
     checkpoint: /workspace/models/artifixer/artifixer-1.3b.pt

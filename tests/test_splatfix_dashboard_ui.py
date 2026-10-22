@@ -48,7 +48,11 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('repair').reconstruction_images,'distilled');
   assert.equal(payload('repair').reconstruction_initialization,'point_cloud');
   assert.equal(payload('benchmark').reconstruction_images,undefined);
+  $('image-cache-insertion').value='seed';
+  assert.equal(payload('repair').initial_image_seeding,true);
   assert.equal(payload('repair').image_cache_insertion,false);
+  $('image-cache-insertion').value='off';
+  assert.equal(payload('repair').initial_image_seeding,false);
   $('image-cache-insertion').value='on';
   assert.equal(payload('repair').image_cache_insertion,true);
   assert.equal(payload('benchmark').image_cache_insertion,undefined);

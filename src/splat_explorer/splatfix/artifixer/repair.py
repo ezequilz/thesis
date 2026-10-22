@@ -33,6 +33,7 @@ DEFAULT_RUNTIME = {
     'reconstruction_initialization': 'point_cloud',
     'reconstruction_images': 'distilled',
     'image_cache_insertion': False,
+    'initial_image_seeding': True,
     'repo': '/workspace/third_party/ArtiFixer',
     'python': '/workspace/artifixer-venv/bin/python',
     'checkpoint': '/workspace/models/artifixer/artifixer-1.3b.pt',
@@ -96,6 +97,8 @@ def validate_runtime(runtime=None):
     cfg.update(validate_reconstruction_options(cfg))
     if type(cfg['image_cache_insertion']) is not bool:
         raise ValueError('image_cache_insertion must be a boolean')
+    if cfg.get('initial_image_seeding') is not None and type(cfg['initial_image_seeding']) is not bool:
+        raise ValueError('initial_image_seeding must be a boolean')
     repo = Path(cfg['repo']).resolve()
     for relative in ('model_eval/run_inference.py', 'data_processing/artifixer3d.py',
                      'thirdparty/3DGRUT-ArtiFixer/threedgrut/trainer.py',

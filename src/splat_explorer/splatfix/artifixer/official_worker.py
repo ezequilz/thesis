@@ -630,6 +630,24 @@ def inference_jobs(request, trajectory, *, plus=False):
     return jobs
 
 
+def initial_seed_index(cfg, segment, indices, neighbors):
+    """New runs explicitly select seeding; missing/None preserves old segment policy."""
+    seeding = cfg.get('initial_image_seeding')
+    if seeding is not None and type(seeding) is not bool:
+        raise ValueError('initial_image_seeding must be a boolean')
+    preserve = cfg.get('image_cache_insertion', False)
+    if seeding is False and not preserve:
+        return None
+    seed = segment.get('seed_index')
+    if (seeding or preserve) and seed is None:
+        seed = segment.get('cache_seed_index')
+        if seed is None and indices[0] in neighbors:
+            seed = indices[0]
+        if seed is None:
+            raise ValueError('Initial image seeding requires a trusted endpoint for each series; rebuild the trajectory')
+    return seed
+
+
 def inference(root, request, trajectory, plus=False):
     import numpy as np
     import torch
@@ -679,6 +697,7 @@ def inference(root, request, trajectory, plus=False):
             for s, order, directory in jobs], indent=2))
     render_dir = Path(json.loads((root / 'distillation.json').read_text())['render_dir']) if plus else None
     insertion_audits = []
+    seeding_audits = []
     with torch.inference_mode():
         for segment, reference_order, directory in jobs:
             output = root / directory
@@ -692,14 +711,7 @@ def inference(root, request, trajectory, plus=False):
                 indices = [index for index in indices if index not in neighbors]
             if not indices:
                 continue
-            seed_index = segment.get('seed_index')
-            if insertion and seed_index is None:
-                seed_index = segment.get('cache_seed_index')
-                if seed_index is None and indices[0] in neighbors:
-                    seed_index = indices[0]
-                    indices = indices[1:]
-                if seed_index is None:
-                    raise ValueError('Image cache insertion requires a trusted endpoint for each series; rebuild the trajectory')
+            seed_index = initial_seed_index(cfg, segment, indices, neighbors)
             if seed_index is not None:
                 if seed_index not in neighbors:
                     raise ValueError('Series seed must be a trusted reference camera')
@@ -720,6 +732,10 @@ def inference(root, request, trajectory, plus=False):
                 renders[0] = references[neighbors.index(seed_index)]
                 opacity[0] = 1
                 valid[0] = False  # Trusted anchors supervise reconstruction directly.
+            seeding_audits.append({'output': directory, 'enabled': seed_index is not None,
+                                   'seed_global_index': seed_index, 'cache_preservation': insertion})
+            (root / ('plus-seeding.json' if plus else 'inference-seeding.json')).write_text(
+                json.dumps({'series': seeding_audits}, indent=2))
             item = {'scene_id': 'splatfix', 'rgb_rendered': renders, 'rgb_neighbors': references,
                     'opacity': opacity, 'encoded_prompt': encoded_prompt,
                     'frame_indices': torch.tensor(indices),
@@ -757,6 +773,7 @@ def inference(root, request, trajectory, plus=False):
                       plus_rgb_renderer=request.get('plus_rgb_renderer'),
                       mode=request['mode'], upstream_revision=request['upstream_revision'],
                       image_cache_insertion=insertion,
+                      initial_image_seeding=any(s['enabled'] for s in seeding_audits),
                       inference_target_policy=request.get('inference_target_policy', 'all_segment_frames'),
                       camera_scale=request['camera_scale'],
                       camera_scale_provenance=request.get('camera_scale_provenance'),
