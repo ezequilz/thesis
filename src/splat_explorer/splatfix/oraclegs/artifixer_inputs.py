@@ -55,7 +55,47 @@ def source_assets(studio, row):
     return trajectory, references, predictions
 
 
-def export_inputs(studio, row, destination, initialization, *, oracle_attention_batching='within_trajectory'):
+
+def trajectory_references(studio, row, trajectory, predictions):
+    """Map exported forward predictions to the trusted seed used for generation."""
+    request_path = studio.result_artifact(row['_manifest'], 'request.json')
+    request = read_json(request_path, {}) if request_path else {}
+    anchors = {a['frame_index']: i for i, a in enumerate(trajectory['anchors'])}
+    # Endpoint reconstruction consumes only front-to-back inference. The reverse
+    # output is separate, even when its cameras coincide with these predictions.
+    if len(anchors) == 2 or (request.get('trajectory_mode') == 'authors_orbit'
+                            and request.get('runtime', {}).get('split_mode') == 'no-split'):
+        segments = [{'indices': sorted(predictions), 'cache_seed_index': trajectory['anchors'][0]['frame_index']}]
+    else:
+        segments = trajectory.get('segments', [])
+    assignments = {}
+    for segment_index, segment in enumerate(segments):
+        indices = segment.get('indices')
+        if indices is None:
+            indices = list(range(segment['start'], segment['start'] + segment['count']))
+        seed = segment.get('seed_index', segment.get('cache_seed_index'))
+        if seed is None and indices and indices[0] in anchors:
+            seed = indices[0]  # Historical local loops begin at their repaired anchor.
+        selected = set(indices) & set(predictions)
+        if not selected:
+            continue
+        if seed not in anchors:
+            raise ValueError('ArtiFixer trajectory has no saved repaired seed; select camera proximity for this historical run')
+        for index in selected:
+            if index in assignments:
+                raise ValueError('ArtiFixer prediction belongs to multiple saved trajectories')
+            assignments[index] = (anchors[seed], segment_index)
+    if set(assignments) != set(predictions):
+        raise ValueError('ArtiFixer trajectory reference mapping is incomplete; select camera proximity for this historical run')
+    return assignments
+
+
+def export_inputs(studio, row, destination, initialization, *, oracle_attention_batching='within_trajectory',
+                  oracle_artifixer_input='new_only', oracle_artifixer_reference_assignment='trajectory'):
+    if oracle_artifixer_reference_assignment not in ('trajectory', 'camera_proximity'):
+        raise ValueError('oracle_artifixer_reference_assignment must be trajectory or camera_proximity')
+    if oracle_artifixer_input not in ('new_only', 'original_and_new'):
+        raise ValueError('oracle_artifixer_input must be new_only or original_and_new')
     if initialization not in ('source_splat', 'point_cloud', 'sfm'):
         raise ValueError('Initialization must be source_splat, point_cloud, or sfm')
     options = validate_options({'oracle_reference_mode':'all', 'oracle_adapter':'saved_poses',
@@ -63,6 +103,8 @@ def export_inputs(studio, row, destination, initialization, *, oracle_attention_
                                 'oracle_attention_batching':oracle_attention_batching,
                                 'oracle_depth_source':'source_splat' if initialization in ('source_splat', 'point_cloud') else 'predicted'})
     trajectory, references, predictions = source_assets(studio, row)
+    assignments = (trajectory_references(studio, row, trajectory, predictions)
+                   if oracle_artifixer_reference_assignment == 'trajectory' else None)
     root = Path(destination)
     (root/'scene/images').mkdir(parents=True)
     calibration = trajectory['transforms']
@@ -91,13 +133,21 @@ def export_inputs(studio, row, destination, initialization, *, oracle_attention_
     for index, source in sorted(predictions.items()):
         name = f'target_{index:06d}.png'
         frames.append(stage(source, index, name))
-        reference = min(range(len(references)), key=lambda i: np.linalg.norm(np.asarray(frames[i]['transform_matrix'])[:3,3]-np.asarray(frames[-1]['transform_matrix'])[:3,3]))
+        if assignments is not None:
+            reference, segment_index = assignments[index]
+        else:
+            reference = min(range(len(references)), key=lambda i: np.linalg.norm(np.asarray(frames[i]['transform_matrix'])[:3,3]-np.asarray(frames[-1]['transform_matrix'])[:3,3]))
+            segment_index = reference
         targets.append({'target_index':index, 'image_name':name, 'reference_index':reference,
-                        'segment_index':reference, 'alpha':0.0, 'source_sha256':digest(source)})
-    manifest = {**options, 'mode':'edited', 'views':views, 'resolution':list(size),
+                        'segment_index':segment_index, 'alpha':0.0, 'source_sha256':digest(source)})
+    manifest = {**options, 'oracle_artifixer_reference_assignment':oracle_artifixer_reference_assignment, 'oracle_artifixer_input':oracle_artifixer_input, 'mode':'edited', 'views':views, 'resolution':list(size),
                 'seva_internal_resolution':list(size), 'seva_task':'img2trajvid',
                 'artifixer_source':{'run_id':row['run_id'], 'result_id':row['id'], 'generated_count':len(targets)},
-                'trajectory':{'frames':targets, 'segments':[]}, 'camera_convention':'opengl_c2w'}
+                'trajectory':{'frames':targets, 'segments':[
+                    {'index':i, 'kind':'artifixer_trajectory' if assignments is not None else 'artifixer_reference_group',
+                     'reference_index':next(t['reference_index'] for t in targets if t['segment_index'] == i),
+                     'target_indices':[t['target_index'] for t in targets if t['segment_index'] == i]}
+                    for i in sorted({t['segment_index'] for t in targets})]}, 'camera_convention':'opengl_c2w'}
     if initialization in ('source_splat', 'point_cloud'):
         source = row['_paths']['original']
         if source is None:
@@ -107,6 +157,22 @@ def export_inputs(studio, row, destination, initialization, *, oracle_attention_
         manifest['source_initialization'] = {'path':'source-initialization.ply', 'sha256':digest(root/'source-initialization.ply'), 'gaussian_count':count, 'sh_degree':degree}
         manifest['source_splat_used_for_initialization'] = True
         manifest['source_depth'] = stage_saved_pose_depth(root, frames[:len(views)])
+    if oracle_artifixer_input == 'original_and_new':
+        from ..worldexplorer.source import stage_source, stage_checkpoint_source
+        # A saved original.ply may be a copy; the checkpoint retains archive provenance.
+        checkpoint = row.get('config', {}).get('splatfix', {}).get('checkpoint')
+        checkpoint_path = Path(checkpoint) if checkpoint else None
+        saved = read_json(checkpoint_path if checkpoint_path.is_file() else checkpoint_path/'checkpoint.json', {}) if checkpoint_path else {}
+        if saved:
+            from ..checkpoint import Checkpoint
+            cp_root = checkpoint_path.parent if checkpoint_path.is_file() else checkpoint_path
+            staged = stage_checkpoint_source(Checkpoint(cp_root, saved), root/'worldexplorer-source')
+        else:
+            source = row['_paths']['original']
+            staged = stage_source(source, root/'worldexplorer-source') if source else None
+        if not staged:
+            raise ValueError('Original WorldExplorer images are unavailable for this run; select new images only')
+        manifest['worldexplorer_source'] = 'worldexplorer-source'
     atomic_json(root/'scene/transforms.json', {'frames':frames})
     atomic_json(root/'inputs.json', manifest)
     return manifest

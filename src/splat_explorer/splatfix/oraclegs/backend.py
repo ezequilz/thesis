@@ -4,6 +4,12 @@ from ..checkpoint import camera_from_record
 
 
 def validate_options(raw):
+    assignment = raw.get('oracle_artifixer_reference_assignment')
+    if assignment is not None and assignment not in ('trajectory', 'camera_proximity'):
+        raise ValueError('oracle_artifixer_reference_assignment must be trajectory or camera_proximity')
+    artifixer_input = raw.get('oracle_artifixer_input')
+    if artifixer_input is not None and artifixer_input not in ('new_only', 'original_and_new'):
+        raise ValueError('oracle_artifixer_input must be new_only or original_and_new')
     # Preserve historical jobs without this field; new jobs explicitly select SEVA.
     capture_source = raw.get('oracle_capture_source', 'saved')
     if capture_source not in ('saved', 'seva'):
@@ -58,7 +64,9 @@ def validate_options(raw):
     if order is not None and (not isinstance(order, list) or len(order) < 2 or
                               any(type(i) is not int or i < 0 for i in order) or len(set(order)) != len(order)):
         raise ValueError('oracle_path_order must contain distinct nonnegative checkpoint view indices')
-    return {'oracle_source_reference':source_mode, 'oracle_capture_source':capture_source, 'oracle_reference_mode':reference_mode, 'oracle_split_mode':split_mode, 'oracle_preset':preset, 'oracle_preset_scale':float(scale), 'seva_geometry_guidance':guidance, 'oracle_depth_source':depth, 'oracle_initialization':initialization, 'oracle_attention_batching':batching, 'oracle_worldexplorer_attention':world_attention, 'seva_fit': fit, 'oracle_adapter': adapter, 'seva_resolution': resolution, 'oracle_target_frames': frames, 'oracle_path_order': order}
+    return {**({'oracle_artifixer_reference_assignment':assignment} if assignment is not None else {}),
+            **({'oracle_artifixer_input':artifixer_input} if artifixer_input is not None else {}),
+            'oracle_source_reference':source_mode, 'oracle_capture_source':capture_source, 'oracle_reference_mode':reference_mode, 'oracle_split_mode':split_mode, 'oracle_preset':preset, 'oracle_preset_scale':float(scale), 'seva_geometry_guidance':guidance, 'oracle_depth_source':depth, 'oracle_initialization':initialization, 'oracle_attention_batching':batching, 'oracle_worldexplorer_attention':world_attention, 'seva_fit': fit, 'oracle_adapter': adapter, 'seva_resolution': resolution, 'oracle_target_frames': frames, 'oracle_path_order': order}
 
 
 def readiness(checkpoint):

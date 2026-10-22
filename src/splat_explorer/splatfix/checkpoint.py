@@ -134,6 +134,8 @@ class Checkpoint:
         if fingerprint is not None:
             checkpoint.manifest['source_fingerprint'] = fingerprint
         checkpoint.save()
+        from .worldexplorer.source import stage_checkpoint_source
+        stage_checkpoint_source(checkpoint, root / 'worldexplorer-source')
         return checkpoint
 
     @classmethod

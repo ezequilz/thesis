@@ -30,6 +30,7 @@ def fixture(tmp_path):
         cameras.append({'transform_matrix':pose.tolist()})
     atomic_json(root/'preview-trajectory.json', {'camera_convention':'opencv_c2w',
         'anchors':[{'view_id':str(i), 'frame_index':i} for i in range(6)],
+        'segments':[{'indices':[6,7], 'seed_index':5}],
         'transforms':{'w':32,'h':16,'fl_x':20,'fl_y':20,'cx':16,'cy':8,'frames':cameras}})
     refs=[]
     for i in range(6):
@@ -101,6 +102,7 @@ def test_dashboard_queues_isolated_snapshot_and_rejects_missing_inputs(tmp_path,
     studio.results.detail = lambda key: row
     queued = studio.results.reconstruct_artifixer('result', initialization, oracle_attention_batching=batching)
     options = queued['config']['splatfix']
+    assert options['oracle_artifixer_input'] == 'new_only'
     assert options['reconstruction_method']=='oraclegs'
     assert options['oracle_initialization']==initialization
     assert options['oracle_depth_source']=='source_splat'
@@ -227,6 +229,7 @@ def test_artifixer_attention_groups_follow_selection(tmp_path, batching):
     path = row['_manifest'].parent/'preview-trajectory.json'
     trajectory = json.loads(path.read_text())
     trajectory['transforms']['frames'][7]['transform_matrix'][0][3] = 0
+    trajectory['segments'] = [{'indices':[6], 'seed_index':5}, {'indices':[7], 'seed_index':0}]
     atomic_json(path, trajectory)
     manifest = export_inputs(studio, row, tmp_path/'inputs', 'sfm', oracle_attention_batching=batching)
     chunks = plan_chunks(manifest, mode=manifest['oracle_attention_batching'])
@@ -358,9 +361,180 @@ def test_endpoint_reduce_preserves_both_inference_folders(tmp_path, backup, pres
             assert manifest['artifixer_source']['generated_count'] == 6
             frames = json.loads((destination / 'scene/transforms.json').read_text())['frames']
             assert [frame['transform_matrix'][0][3] for frame in frames] == [0, 7, 1, 2, 3, 4, 5, 6]
-            assert [target['reference_index'] for target in manifest['trajectory']['frames']] == [0, 0, 0, 1, 1, 1]
+            assert [target['reference_index'] for target in manifest['trajectory']['frames']] == [0, 0, 0, 0, 0, 0]
             # Keep the existing forward-only reconstruction contract; never merge reverse RGBs.
             assert Image.open(destination / 'scene/images/target_000003.png').getpixel((0, 0)) == (30, 3, 0)
     else:
         assert not (result / 'preview-trajectory.json').exists()
         assert not (result / 'inference-directions.json').exists()
+
+
+@pytest.mark.parametrize('selection', ['new_only', 'original_and_new'])
+@pytest.mark.parametrize('batching', ['within_trajectory', 'global'])
+def test_input_selection_controls_training_and_attention(tmp_path, selection, batching):
+    from test_worldexplorer_source import fixture as world_fixture
+    from splat_explorer.splatfix.oraclegs.adapter import append_worldexplorer
+    from splat_explorer.splatfix.oraclegs.attention import worldexplorer_targets
+    studio, row = fixture(tmp_path)
+    source = world_fixture(tmp_path)
+    checkpoint = tmp_path/'checkpoint'
+    checkpoint.mkdir()
+    atomic_json(checkpoint/'checkpoint.json', {'scene_path': str(source)})
+    row['config'] = {'splatfix': {'checkpoint': str(checkpoint)}}
+    inputs, output = tmp_path/'inputs', tmp_path/'output'
+    manifest = export_inputs(studio, row, inputs, 'sfm',
+                             oracle_artifixer_input=selection,
+                             oracle_attention_batching=batching)
+    assert manifest['oracle_artifixer_input'] == selection
+    assert bool(manifest.get('worldexplorer_source')) == (selection == 'original_and_new')
+    (output/'dataset/images').mkdir(parents=True)
+    source_camera_model(inputs, output)
+    publish_generated(inputs, output, manifest)
+    assemble(inputs, output)
+    n, names = append_worldexplorer(inputs, output, len(manifest['views']))
+    assert len(names) == (2 if selection == 'original_and_new' else 0)
+    extra = worldexplorer_targets(inputs, output, manifest) if names else []
+    chunks = plan_chunks(manifest, extra_targets=extra, mode=batching)
+    if extra:
+        assert len({f['segment_index'] for f in extra}) == 2
+        assert {f['source_trajectory'] for f in extra} == {'000', '001'}
+        if batching == 'within_trajectory':
+            assert all(len(chunk['segment_indices']) == 1 for chunk in chunks)
+    targets = [name for chunk in chunks for name in chunk['target_images']]
+    synthetic = {p.name for p in (output/f'dataset/synthetic_{n}').glob('*.png')}
+    assert set(targets) == {'synth_'+name for name in synthetic}
+    assert len(targets) == len(synthetic) == 2 + len(names)
+    assert all(len(chunk['reference_images']) == 6 for chunk in chunks)
+    if names:
+        assert min(f['segment_index'] for f in extra) > max(
+            f['segment_index'] for f in manifest['trajectory']['frames'])
+
+
+def test_new_only_default_does_not_require_worldexplorer_archive(tmp_path, monkeypatch):
+    studio, row = fixture(tmp_path)
+    def unexpected(*args):
+        pytest.fail('new images only must not read the WorldExplorer archive')
+    monkeypatch.setattr('splat_explorer.splatfix.worldexplorer.source.stage_source', unexpected)
+    manifest = export_inputs(studio, row, tmp_path/'inputs', 'sfm')
+    assert manifest['oracle_artifixer_input'] == 'new_only'
+    assert 'worldexplorer_source' not in manifest
+
+
+def test_invalid_input_selection_and_missing_originals_rejected(tmp_path):
+    studio, row = fixture(tmp_path)
+    with pytest.raises(ValueError, match='oracle_artifixer_input'):
+        export_inputs(studio, row, tmp_path/'invalid', 'sfm', oracle_artifixer_input='invalid')
+    assert not (tmp_path/'invalid').exists()
+    with pytest.raises(ValueError, match='Original WorldExplorer images are unavailable'):
+        export_inputs(studio, row, tmp_path/'missing', 'sfm', oracle_artifixer_input='original_and_new')
+
+
+@pytest.mark.parametrize('selection', [None, 'new_only', 'original_and_new'])
+@pytest.mark.parametrize('assignment', [None, 'trajectory', 'camera_proximity'])
+def test_reconstruction_endpoint_forwards_input_selection(selection, assignment):
+    from splat_explorer.web.server import DashboardHandler
+    calls, replies = [], []
+    results = SimpleNamespace(reconstruct_artifixer=lambda *args, **kwargs: calls.append((args, kwargs)) or {'run_id': 'queued'})
+    handler = SimpleNamespace(app=SimpleNamespace(splatfix=SimpleNamespace(results=results)),
+                              command='POST', _send_json=lambda body, *args: replies.append(body))
+    body = {'id': 'run'}
+    if selection is not None:
+        body['oracle_artifixer_input'] = selection
+    if assignment is not None:
+        body['oracle_artifixer_reference_assignment'] = assignment
+    DashboardHandler._serve_splatfix(handler, '/api/splatfix/results/reconstruct-artifixer', body)
+    assert calls[0][1]['oracle_artifixer_reference_assignment'] == (assignment or 'trajectory')
+    assert calls[0][1]['oracle_artifixer_input'] == (selection or 'new_only')
+    assert replies == [{'ok': True, 'run': {'run_id': 'queued'}}]
+
+
+def test_combined_selection_survives_queue_normalization(tmp_path):
+    from test_splatfix_results import setup
+    from test_worldexplorer_source import fixture as world_fixture
+    studio, _, _ = setup(tmp_path/'dashboard')
+    _, row = fixture(tmp_path)
+    row.update(config={'splatfix': {}}, scene='room')
+    row['_paths']['original'] = world_fixture(tmp_path)
+    studio.results.detail = lambda key: row
+    run = studio.results.reconstruct_artifixer('result', 'sfm', oracle_artifixer_input='original_and_new')
+    options = run['config']['splatfix']
+    assert options['oracle_artifixer_input'] == 'original_and_new'
+    manifest = json.loads((Path(options['oracle_artifixer_inputs'])/'inputs.json').read_text())
+    assert manifest['oracle_artifixer_input'] == options['oracle_artifixer_input']
+    assert manifest['worldexplorer_source'] == 'worldexplorer-source'
+
+
+@pytest.mark.parametrize('selection,expected', [('trajectory', [1, 1]), ('camera_proximity', [5, 5])])
+@pytest.mark.parametrize('batching', ['within_trajectory', 'global'])
+def test_attention_assignment_uses_generation_seed_or_explicit_proximity(tmp_path, selection, expected, batching):
+    studio, row = fixture(tmp_path)
+    path = row['_manifest'].parent/'preview-trajectory.json'
+    trajectory = json.loads(path.read_text())
+    # Both predictions are spatially nearest reference 5, but generated from 1.
+    trajectory['segments'] = [{'indices':[6], 'seed_index':1}, {'indices':[7], 'cache_seed_index':1}]
+    atomic_json(path, trajectory)
+    manifest = export_inputs(studio, row, tmp_path/'inputs', 'sfm',
+                             oracle_artifixer_reference_assignment=selection)
+    assert [f['reference_index'] for f in manifest['trajectory']['frames']] == expected
+    chunks = plan_chunks(manifest, mode=batching)
+    assert {c['source_image'] for c in chunks} == {f'ref_{expected[0]:06d}.png'}
+    if selection == 'trajectory':
+        assert len(manifest['trajectory']['segments']) == 2
+        assert len(chunks) == (2 if batching == 'within_trajectory' else 1)
+    else:
+        assert len(manifest['trajectory']['segments']) == 1
+
+
+def test_missing_trajectory_mapping_requires_explicit_proximity(tmp_path):
+    studio, row = fixture(tmp_path)
+    path = row['_manifest'].parent/'preview-trajectory.json'
+    trajectory = json.loads(path.read_text())
+    trajectory.pop('segments')
+    atomic_json(path, trajectory)
+    with pytest.raises(ValueError, match='mapping is incomplete'):
+        export_inputs(studio, row, tmp_path/'invalid', 'sfm')
+    assert not (tmp_path/'invalid').exists()
+    manifest = export_inputs(studio, row, tmp_path/'legacy', 'sfm', oracle_artifixer_reference_assignment='camera_proximity')
+    assert manifest['oracle_artifixer_reference_assignment'] == 'camera_proximity'
+
+
+@pytest.mark.parametrize('segment', [{'indices':[6,7], 'seed_index':99},
+                                    {'indices':[6], 'seed_index':0}])
+def test_invalid_trajectory_seed_or_coverage_rejected(tmp_path, segment):
+    studio, row = fixture(tmp_path)
+    path = row['_manifest'].parent/'preview-trajectory.json'
+    trajectory = json.loads(path.read_text())
+    trajectory['segments'] = [segment]
+    atomic_json(path, trajectory)
+    with pytest.raises(ValueError, match='trajectory'):
+        export_inputs(studio, row, tmp_path/'inputs', 'sfm')
+
+
+def test_no_split_assignment_uses_first_repaired_reference(tmp_path):
+    studio, row = fixture(tmp_path)
+    atomic_json(row['_manifest'].parent/'request.json', {
+        'trajectory_mode':'authors_orbit', 'runtime':{'split_mode':'no-split'}})
+    manifest = export_inputs(studio, row, tmp_path/'inputs', 'sfm')
+    assert [f['reference_index'] for f in manifest['trajectory']['frames']] == [0,0]
+
+
+@pytest.mark.parametrize('assignment', ['trajectory', 'camera_proximity'])
+def test_assignment_survives_queue_normalization(tmp_path, assignment):
+    from test_splatfix_results import setup
+    studio, _, _ = setup(tmp_path/'dashboard')
+    _, row = fixture(tmp_path)
+    row.update(config={'splatfix': {}}, scene='room')
+    studio.results.detail = lambda key: row
+    run = studio.results.reconstruct_artifixer('result', 'sfm', oracle_artifixer_reference_assignment=assignment)
+    options = run['config']['splatfix']
+    assert options['oracle_artifixer_reference_assignment'] == assignment
+    manifest = json.loads((Path(options['oracle_artifixer_inputs'])/'inputs.json').read_text())
+    assert manifest['oracle_artifixer_reference_assignment'] == assignment
+
+
+
+def test_invalid_reference_assignment_rejected_before_staging(tmp_path):
+    studio, row = fixture(tmp_path)
+    with pytest.raises(ValueError, match='oracle_artifixer_reference_assignment'):
+        export_inputs(studio, row, tmp_path/'inputs', 'sfm', oracle_artifixer_reference_assignment='invalid')
+    assert not (tmp_path/'inputs').exists()

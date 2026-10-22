@@ -511,11 +511,11 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                'native_library_path_active': bool(cfg.get('native_library_dir') and Path(cfg['native_library_dir']).is_dir()),
                'reference_sha256': [digest_file(path) for path in references],
                'source_points3d_sha256': digest_file(points), 'trajectory_signature': trajectory['signature']}
-    from ..worldexplorer.source import stage_source
+    from ..worldexplorer.source import stage_checkpoint_source
     originals = None
     if cfg.get('reconstruction_images', 'distilled') == 'all':
-        originals = cfg.get('worldexplorer_source') or stage_source(
-            cfg.get('scene_path') or cp.manifest['scene_path'], root / 'worldexplorer-source')
+        originals = cfg.get('worldexplorer_source') or stage_checkpoint_source(
+            cp, root / 'worldexplorer-source')
     request.update(reconstruction_images=cfg.get('reconstruction_images', 'distilled'),
                    reconstruction_initialization=cfg.get('reconstruction_initialization', 'point_cloud'))
     if originals:

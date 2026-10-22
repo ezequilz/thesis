@@ -74,7 +74,12 @@ def source_frames(scene):
                        **calibrated, 'transform_matrix': pose.tolist(), 'file_path': str(path.resolve())})
     if not frames:
         raise ValueError('WorldExplorer source contains no posed images')
-    return {'run_id': root.parent.name, 'scene_path': str(ply), 'camera_convention': 'opengl_c2w',
+    trajectories = {}
+    for index, frame in enumerate(frames):
+        trajectories.setdefault(frame['source_trajectory'], []).append(index)
+    return {'trajectories': [{'index': i, 'name': name, 'frame_indices': indices}
+                             for i, (name, indices) in enumerate(trajectories.items())],
+            'run_id': root.parent.name, 'scene_path': str(ply), 'camera_convention': 'opengl_c2w',
             'normalization': parser, 'frames': frames}
 
 
@@ -115,6 +120,66 @@ def stage_source(scene, destination):
         frame.update(file_path=name, sha256=digest_file(destination / name))
     atomic_json(destination / 'transforms.json', data)
     return str(destination.resolve())
+
+
+def link_bundle(source, destination):
+    """Portable snapshots sharing immutable image AND camera-metadata inodes."""
+    source, destination = Path(source), Path(destination)
+    data = load_staged(source)
+    destination.mkdir(parents=True, exist_ok=True)
+    for frame in data['frames']:
+        relative = Path(frame['file_path']).relative_to(source.resolve())
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        link_source_image(source / relative, target)
+    link_source_image(source / 'transforms.json', destination / 'transforms.json')
+    return str(destination.resolve())
+
+
+def stage_checkpoint_source(checkpoint, destination):
+    """Save source trajectories once, reuse them across checkpoints and jobs.
+
+    The checkpoint-local hard links survive archive/cache deletion and remain
+    portable to remote workers. Old checkpoints are upgraded lazily.
+    """
+    import hashlib
+    import tempfile
+    import fcntl
+    root = Path(checkpoint.root)
+    local = root / 'worldexplorer-source'
+    if not (local / 'transforms.json').is_file():
+        scene = checkpoint.manifest['scene_path']
+        # Ordinary source scenes do not have a WorldExplorer bundle.
+        if not any(p.name == 'results' and p.parent.name.startswith('we_')
+                   for p in Path(scene).resolve().parents):
+            return stage_source(scene, destination)
+        key = hashlib.sha256(str(Path(scene).resolve()).encode()).hexdigest()
+        cache_root = root.parent / 'worldexplorer-sources'
+        cache_root.mkdir(parents=True, exist_ok=True)
+        shared = cache_root / key
+        with (cache_root / (key + '.lock')).open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if not (shared / 'transforms.json').is_file():
+                temporary = Path(tempfile.mkdtemp(prefix='.' + key, dir=cache_root))
+                try:
+                    if not stage_source(scene, temporary):
+                        return None
+                    temporary.rename(shared)
+                finally:
+                    if temporary.exists():
+                        shutil.rmtree(temporary)
+            link_bundle(shared, local)
+    # Record only a portable relative reference, never machine-specific cache paths.
+    if checkpoint.manifest.get('worldexplorer_source') != 'worldexplorer-source':
+        checkpoint.manifest['worldexplorer_source'] = 'worldexplorer-source'
+        # A run may hold an endpoint-only interpretation of the checkpoint.
+        # Persist only this pointer, never overwrite its saved views/policy.
+        saved = json.loads((root / 'checkpoint.json').read_text())
+        saved['worldexplorer_source'] = 'worldexplorer-source'
+        atomic_json(root / 'checkpoint.json', saved)
+    if Path(destination).resolve() == local.resolve():
+        return str(local.resolve())
+    return link_bundle(local, destination)
 
 
 

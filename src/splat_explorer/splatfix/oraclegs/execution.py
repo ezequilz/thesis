@@ -94,7 +94,12 @@ def execute_remote(executor, run_id, options, root, stop, update):
             'status': 'exporting', 'adapter': runtime['oracle_adapter']})
         if options.get('oracle_artifixer_inputs'):
             import shutil
-            shutil.copytree(options['oracle_artifixer_inputs'], preparation / 'inputs')
+            shutil.copytree(options['oracle_artifixer_inputs'], preparation / 'inputs',
+                            ignore=shutil.ignore_patterns('worldexplorer-source'))
+            snapshot_source = Path(options['oracle_artifixer_inputs']) / 'worldexplorer-source'
+            if snapshot_source.is_dir():
+                from ..worldexplorer.source import link_bundle
+                link_bundle(snapshot_source, preparation / 'inputs/worldexplorer-source')
         else:
             export_inputs(checkpoint, preparation / 'inputs', options['mode'], runtime=runtime, should_stop=stop)
         import hashlib

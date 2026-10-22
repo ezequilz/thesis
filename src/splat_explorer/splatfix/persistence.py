@@ -147,17 +147,20 @@ def persist_remote_run(lrz, cfg, root, run_id, remote, *, excludes=()):
     from .worldexplorer.source import link_source_image
     staging = read_json(root / 'oraclegs-staging.json', {})
     manifest = staging.get('input_manifest')
+    bundles = [(root / 'worldexplorer-source', root / 'gpu/worldexplorer-source')]
     if manifest:
         inputs = (root / manifest).resolve().parent
         if inputs.is_relative_to(root.resolve()):
-            source = inputs / 'worldexplorer-source/images'
-            destination = root / 'gpu/inputs/worldexplorer-source/images'
-            if source.is_dir():
-                destination.mkdir(parents=True, exist_ok=True)
-                for image in source.iterdir():
-                    target = destination / image.name
-                    if image.is_file() and not image.is_symlink() and not target.exists():
-                        link_source_image(image, target)
+            bundles.append((inputs / 'worldexplorer-source', root / 'gpu/inputs/worldexplorer-source'))
+    for source, destination in bundles:
+        if not source.is_dir():
+            continue
+        # Camera/trajectory metadata is immutable too, and shares the same lifetime.
+        for item in [source / 'transforms.json', *(source / 'images').glob('*')]:
+            target = destination / item.relative_to(source)
+            if item.is_file() and not item.is_symlink() and not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                link_source_image(item, target)
     argv = ['rsync', '-azc', '-e', lrz.rsync_ssh_cmd(cfg)]
     argv += ['--exclude=' + pattern for pattern in excludes]
     argv += [f"{cfg['user']}@{cfg['host']}:{remote}/", str(root / 'gpu') + '/']

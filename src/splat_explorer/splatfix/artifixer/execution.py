@@ -105,8 +105,9 @@ def execute_remote(executor, run_id, options, root, stop, update):
         if answer.returncode:
             raise RuntimeError((answer.stderr or answer.stdout or 'Remote command failed').strip())
         return answer.stdout
-    def sync(source, destination):
-        lrz._mux_run(['rsync', '-az', '-e', lrz.rsync_ssh_cmd(cfg), source, destination])
+    def sync(source, destination, *, exclude=()):
+        lrz._mux_run(['rsync', '-az', *['--exclude='+p for p in exclude],
+                      '-e', lrz.rsync_ssh_cmd(cfg), source, destination])
     resuming = bool(executor.store.get_run(run_id).state.details.get('remote_dir'))
     if resuming:
         resuming = bool(ssh('test ! -d ' + shlex.quote(remote_dir + '/launched') + ' || printf launched').strip())
@@ -152,7 +153,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
                        'benchmark_runs': options.get('benchmark_runs', 1)}
         else:
             ssh('mkdir -p ' + shlex.quote(remote_dir + '/checkpoint') + ' ' + shlex.quote(remote_dir + '/source'))
-            sync(str(cp.root) + '/', endpoint + ':' + remote_dir + '/checkpoint/')
+            sync(str(cp.root) + '/', endpoint + ':' + remote_dir + '/checkpoint/',
+                 exclude=('worldexplorer-source/',))
             source = Path(cp.manifest['scene_path'])
             from ...scene.catalog import openable_scene_path
             source = openable_scene_path(source)
@@ -166,8 +168,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 if source.exists():
                     sync(str(source), endpoint + ':' + remote_dir + '/source/')
                 remote_scene = container_dir + '/source/' + source.name
-            from ..worldexplorer.source import stage_source
-            originals = (stage_source(source, root / 'worldexplorer-source')
+            from ..worldexplorer.source import stage_checkpoint_source
+            originals = (stage_checkpoint_source(cp, root / 'worldexplorer-source')
                          if runtime['reconstruction_images'] == 'all' else None)
             if originals:
                 sync(originals + '/', endpoint + ':' + remote_dir + '/worldexplorer-source/')

@@ -1353,7 +1353,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not isinstance(body, dict):
                     raise ValueError("Request must be an object")
                 result = studio.results.reconstruct_artifixer(body.get("id"), body.get("initialization", "source_splat"),
-                    oracle_attention_batching=body.get("oracle_attention_batching", "within_trajectory"))
+                    oracle_attention_batching=body.get("oracle_attention_batching", "within_trajectory"),
+                    oracle_artifixer_input=body.get("oracle_artifixer_input", "new_only"),
+                    oracle_artifixer_reference_assignment=body.get("oracle_artifixer_reference_assignment", "trajectory"))
                 self._send_json({"ok": True, "run": result})
             elif self.command == "POST" and path == "/api/splatfix/results/save-inference-videos":
                 if not isinstance(body, dict):

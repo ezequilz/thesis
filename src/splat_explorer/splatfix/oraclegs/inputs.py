@@ -180,8 +180,8 @@ def export_inputs(checkpoint, destination, mode='edited', *, runtime=None, shoul
         manifest['trajectory'].update(preset_metadata(options, order, assigned_presets, preset_seed))
     from .source_geometry import stage_source_geometry
     stage_source_geometry(checkpoint, root, manifest, frames[:n], should_stop=should_stop)
-    from ..worldexplorer.source import stage_source
-    if stage_source(checkpoint.manifest['scene_path'], root / 'worldexplorer-source'):
+    from ..worldexplorer.source import stage_checkpoint_source
+    if stage_checkpoint_source(checkpoint, root / 'worldexplorer-source'):
         manifest['worldexplorer_source'] = 'worldexplorer-source'
     if options['oracle_reference_mode'] == 'scene_memory':
         from .scene_memory import validate_memory_source

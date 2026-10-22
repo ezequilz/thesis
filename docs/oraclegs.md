@@ -589,6 +589,17 @@ without the setting are never upgraded implicitly.
 
 ### Reconstruct from existing ArtiFixer inference
 
+The result-page **Input** selector defaults to **new images only**
+(`oracle_artifixer_input: new_only`): this run's repaired references and
+forward ArtiFixer predictions, with VGGT attention and no original
+WorldExplorer image pool. **original WorldExplorer images + ArtiFixer images**
+(`original_and_new`) additionally snapshots the source WorldExplorer images
+and calibrated cameras from the run's checkpoint provenance, adding them to
+OracleGS's synthetic training pool with VGGT attention. Missing original
+assets fail the combined request rather than silently changing its inputs.
+The starting PLY / source-depth initialization is independent of this choice.
+
+
 On an edited ArtiFixer result detail page, **Queue OracleGS reconstruction**
 queues a separate job using the six saved GPT repaired references and all
 available initial inference images. The optional ArtiFixer3D+ outputs are
@@ -601,8 +612,8 @@ reference cameras. Invalid depth pixels are masked. This combination bypasses
 COLMAP and predicted-depth estimation/alignment; six repaired views alone may
 have no verified feature matches. **From scratch · SfM + predicted depth** still
 requires triangulation and predicted-depth alignment. Both retain VGGT attention
-and the usual training schedule. SEVA generation is skipped, and original
-WorldExplorer images are not appended. Input images, cameras, source depth,
+and the usual training schedule. SEVA generation is skipped; original
+WorldExplorer images are appended only for the combined input choice. Input images, cameras, source depth,
 and the optional starting PLY are snapshotted before publishing the queue job;
 source-run deletion or reduction does not remove those staged inputs.
 
@@ -613,7 +624,15 @@ queued snapshots keep their settings; create a fresh run for this change.
 
 The detail-page **VGGT image shuffling** selector defaults to **Within trajectory /
 reference group** (`within_trajectory`). For reused ArtiFixer images, each group
-contains targets assigned to the same nearest repaired reference. **Across all
+follows the selected attention repaired-reference assignment. **Trajectory**
+(default) uses each saved generation segment’s repaired seed and preserves
+separate segments even when they share a seed. **Camera proximity** retains
+the historical nearest-repaired-camera assignment and grouping. Endpoint
+forward predictions use the initial repaired endpoint; no-split inference
+uses the first repaired reference. Missing or ambiguous trajectory mappings
+fail with an explicit option to select camera proximity. Original
+WorldExplorer targets use their saved generation trajectory groups, with
+nearest-camera repaired references assigned independently. **Across all
 generated images** (`global`) shuffles targets across these groups. Both modes
 include all six repaired references in every attention context; global mode
 still uses bounded batches rather than placing every image in one batch. The
@@ -638,3 +657,23 @@ The ArtiFixer result form pairs this mode with source depth and skips COLMAP. On
 `/splatfix`, depth remains independent: source depth skips COLMAP for this mode,
 while predicted depth still uses COLMAP for depth alignment. The CLI equivalent
 is `--oracle-initialization point_cloud`. Existing defaults remain unchanged.
+
+
+### Reusable WorldExplorer camera and trajectory bundles
+
+WorldExplorer-backed checkpoints retain `worldexplorer-source/transforms.json`
+with every source image's calibrated pose in normalized splat coordinates,
+original trajectory name, frame index, role, and explicit trajectory membership.
+These records come from the archived `scenes/*/img2trajvid/transforms.json` and
+`dataparser_transforms.json`; they are not estimated from ArtiFixer output.
+ArtiFixer's generation segments and repaired seed assignments are recorded
+separately from those source trajectories.
+
+New checkpoints save this bundle automatically. Older checkpoints acquire it
+when staging a reconstruction. Checkpoints sharing a source use one immutable
+bundle in their parent's `worldexplorer-sources` cache. Images and metadata are
+hard-linked into checkpoints and local reconstruction snapshots, so they share
+physical storage and survive deletion of the archive or another checkpoint.
+Cross-filesystem staging falls back to copying. Remote transfer still requires
+bytes on the remote filesystem; the ArtiFixer checkpoint upload excludes this
+bundle to avoid transferring it twice. Existing queued snapshots remain fixed.
