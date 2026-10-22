@@ -51,7 +51,7 @@
 <dialog id="schedule-dialog"><form id="schedule-form"><div class="eyebrow">Plan a stage</div><h2 id="schedule-title">Schedule run</h2><p id="schedule-context" class="note"></p><p>The job will become eligible at this time and start when the shared queue is free. Keep the queue manager running.</p><label for="when">Start after (your local time)</label><input id="when" type="datetime-local" required><div class="row"><button type="button" onclick="document.getElementById('schedule-dialog').close()">Cancel</button><button class="primary" type="submit">Schedule run</button></div></form></dialog>
 <dialog id="delete-dialog" aria-labelledby="delete-title"><form id="delete-form"><h2 id="delete-title">Delete checkpoint?</h2><p id="delete-context"></p><p>This permanently deletes the checkpoint, its saved views and repaired images.</p><p id="delete-error" role="alert"></p><div class="row"><button id="delete-cancel" type="button" onclick="$('delete-dialog').close()">Cancel</button><button id="delete-confirm" class="danger" type="submit">Delete checkpoint</button></div></form></dialog>
 <dialog id="rename-dialog"><form id="rename-form"><h2>Rename checkpoint</h2><p class="note">Choose a recognizable name. Saved cameras, images and run links stay connected.</p><label for="checkpoint-name">Checkpoint name</label><input id="checkpoint-name" required maxlength="120" autocomplete="off"><p id="rename-error" role="alert"></p><div class="row"><button type="button" onclick="$('rename-dialog').close()">Cancel</button><button id="rename-save" class="primary" type="submit">Save name</button></div></form></dialog>
-<dialog id="preview" aria-label="Saved view preview"><div class="preview-toolbar"><span id="preview-caption" class="note" aria-live="polite"></span><div id="preview-display-controls" hidden></div><button id="preview-resize" type="button" onclick="startCrop()" hidden>Resize for input</button><button onclick="document.getElementById('preview').close()">Close</button></div><div id="preview-missing" class="note" hidden>Image not captured for this field of view.</div><img id="preview-image" alt="Selected view preview"><div id="crop-editor" hidden><div class="crop-alignment"><label for="crop-opacity">GPT opacity <output id="crop-opacity-value">65%</output></label><input id="crop-opacity" type="range" min="0" max="100" step="1" value="65" aria-label="GPT opacity over original RGB"><button type="button" onclick="showFullCrop()">Show full repair</button><span class="note">Original RGB stays fixed underneath. Opacity affects the preview only.</span></div><canvas id="crop-canvas" aria-label="Drag the crop rectangle or its corners to resize" role="img"></canvas><div class="crop-actions"><span id="crop-size" class="note" aria-live="polite"></span><button id="crop-cancel" type="button" onclick="stopCrop()">Cancel</button><button id="crop-save" type="button" onclick="saveCrop()">Save crop</button></div></div><div id="preview-navigation" class="preview-navigation" hidden><button id="preview-previous" type="button" onclick="movePreview(-1)" aria-label="Previous view">←</button><button id="preview-next" type="button" onclick="movePreview(1)" aria-label="Next view">→</button></div></dialog><div id="notice" role="status"></div>
+<dialog id="preview" aria-label="Saved view preview"><div class="preview-toolbar"><span id="preview-caption" class="note" aria-live="polite"></span><div id="preview-display-controls" hidden></div><button id="preview-resize" type="button" onclick="startCrop()" hidden>Resize for input</button><button onclick="document.getElementById('preview').close()">Close</button></div><div id="preview-missing" class="note" hidden>Image not captured for this field of view.</div><img id="preview-image" alt="Selected view preview"><div id="crop-editor" hidden><div class="crop-alignment"><label for="crop-opacity">GPT opacity <output id="crop-opacity-value">65%</output></label><input id="crop-opacity" type="range" min="0" max="100" step="1" value="65" aria-label="GPT opacity over original RGB"><button type="button" onclick="flipCropOpacity()">Flip opacity</button><button type="button" onclick="showFullCrop()">Show full repair</button><span class="note">Original RGB stays fixed underneath. Opacity affects the preview only.</span></div><canvas id="crop-canvas" aria-label="Drag the crop rectangle or its corners to resize" role="img"></canvas><div class="crop-actions"><span id="crop-size" class="note" aria-live="polite"></span><button id="crop-cancel" type="button" onclick="stopCrop()">Cancel</button><button id="crop-save" type="button" onclick="saveCrop()">Save crop</button></div></div><div id="preview-navigation" class="preview-navigation" hidden><button id="preview-previous" type="button" onclick="movePreview(-1)" aria-label="Previous view">←</button><button id="preview-next" type="button" onclick="movePreview(1)" aria-label="Next view">→</button></div></dialog><div id="notice" role="status"></div>
 <script>
 let previousMethod='', state={checkpoints:[],jobs:[],scenes:[]}, selected='', pendingStage='', pendingPayload=null, busy=false;
 const $=id=>document.getElementById(id), labels={select:'View finding',seva_capture:'SEVA capture',edit:'Image repair',repair:'Reconstruction',benchmark:'Published dataset benchmark'};
@@ -191,16 +191,22 @@ function drawCrop(){
   const screenScale=c.width/(c.getBoundingClientRect().width||c.width),handle=12*screenScale;
   ctx.strokeStyle='#c6e69b';ctx.lineWidth=2*screenScale;ctx.strokeRect(px,py,pw,ph);ctx.fillStyle='#c6e69b';
   for(const [hx,hy] of [[px,py],[px+pw,py],[px,py+ph],[px+pw,py+ph]])ctx.fillRect(hx-handle/2,hy-handle/2,handle,handle);
-  $('crop-size').textContent=`${w} × ${h} px · 16:9 · minimum 1280 × 720. Drag inside to move; drag corners inward or outward. Preview zooms after release.`;
+  $('crop-size').textContent=`${w} × ${h} px · 16:9 · minimum 1280 × 720. Drag inside to move the GPT image; drag corners inward or outward. Preview zooms after release.`;
 }
-function cropPoint(event){
-  const r=$('crop-canvas').getBoundingClientRect(),{frame:[fx,fy],viewport:[vx,vy],scale:s}=cropTransform();
+function cropPoint(event,transform=cropTransform()){
+  const r=$('crop-canvas').getBoundingClientRect(),{frame:[fx,fy],viewport:[vx,vy],scale:s}=transform;
   return [vx+((event.clientX-r.left)*cropState.info.width/r.width-fx)/s,vy+((event.clientY-r.top)*cropState.info.height/r.height-fy)/s];
 }
-$('crop-opacity').addEventListener('input',()=>{
+function updateCropOpacity(){
   const opacity=Number($('crop-opacity').value);$('crop-opacity-value').textContent=`${opacity}%`;
   if(cropState){cropState.opacity=opacity/100;drawCrop()}
-});
+}
+function flipCropOpacity(){
+  if(!cropState)return;
+  $('crop-opacity').value=Number($('crop-opacity').value)<=50?'100':'0';
+  updateCropOpacity();
+}
+$('crop-opacity').addEventListener('input',updateCropOpacity);
 $('crop-canvas').addEventListener('pointerdown',event=>{
   if(!cropState||cropState.saving)return;
   const [px,py]=cropPoint(event),[x,y,w,h]=cropState.box,tolerance=22*cropState.info.width/$('crop-canvas').getBoundingClientRect().width/cropTransform().scale;
@@ -208,12 +214,19 @@ $('crop-canvas').addEventListener('pointerdown',event=>{
   const corner=corners.find(([cx,cy])=>Math.hypot(px-cx,py-cy)<tolerance);
   if(!corner&&(px<x||px>x+w||py<y||py>y+h))return;
   cropState.zoomRevision=(cropState.zoomRevision||0)+1;
-  cropState.drag={start:[px,py],box:[x,y,w,h],corner};$('crop-canvas').setPointerCapture(event.pointerId);event.preventDefault();
+  cropState.drag={start:[px,py],box:[x,y,w,h],corner,transform:cropTransform()};$('crop-canvas').setPointerCapture(event.pointerId);event.preventDefault();
 });
 $('crop-canvas').addEventListener('pointermove',event=>{
   if(!cropState?.drag)return;
-  const [px,py]=cropPoint(event),{start,box:[x,y,w,h],corner}=cropState.drag,{width:W,height:H}=cropState.info;
-  if(!corner){cropState.box=[Math.max(0,Math.min(W-w,Math.round(x+px-start[0]))),Math.max(0,Math.min(H-h,Math.round(y+py-start[1]))),w,h]}
+  const [px,py]=cropPoint(event,cropState.drag.transform),{start,box:[x,y,w,h],corner,transform}=cropState.drag,{width:W,height:H}=cropState.info;
+  if(!corner){
+    const nx=Math.max(0,Math.min(W-w,Math.round(x-(px-start[0])))),ny=Math.max(0,Math.min(H-h,Math.round(y-(py-start[1]))));
+    cropState.box=[nx,ny,w,h];
+    // Shift source coordinates and viewport together: the frame stays fixed,
+    // while the GPT image follows the pointer over the stationary RGB layer.
+    const [vx,vy,vw,vh]=transform.viewport;
+    cropState.viewport=[vx+nx-x,vy+ny-y,vw,vh];
+  }
   else{
     const sx=corner[2],sy=corner[3],ax=sx===1?x:x+w,ay=sy===1?y:y+h;
     const maxUnits=Math.floor(Math.min((sx===1?W-ax:ax)/16,(sy===1?H-ay:ay)/9));

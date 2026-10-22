@@ -114,8 +114,19 @@ vm.runInContext(`(async()=>{
   $('crop-opacity').value='100';$('crop-opacity').handlers.input();assert.equal(cropState.opacity,1);
   showFullCrop();assert.deepEqual(cropState.viewport,[0,0,1600,900]);
   canvas.handlers.pointerdown(pointer(720,405));
-  canvas.handlers.pointermove(pointer(1800,1000));
+  const frameBefore=cropTransform();
+  canvas.handlers.pointermove(pointer(-500,-500));
   assert.deepEqual(cropState.box,[160,90,1440,810]);
+  assert.deepEqual(cropState.viewport,[160,90,1600,900]);
+  const frameAfter=cropTransform();
+  assert.deepEqual(frameAfter.frame,frameBefore.frame);
+  assert.equal((cropState.box[0]-frameAfter.viewport[0])*frameAfter.scale,0);
+  assert.equal((cropState.box[1]-frameAfter.viewport[1])*frameAfter.scale,0);
+  // A second event uses the original gesture transform, avoiding pan feedback.
+  canvas.handlers.pointermove({clientX:frameBefore.frame[0]/2+720*frameBefore.scale/2,clientY:frameBefore.frame[1]/2+405*frameBefore.scale/2});
+  assert.deepEqual(cropState.box,[0,0,1440,810]);
+  assert.deepEqual(cropState.viewport,[0,0,1600,900]);
+  assert.deepEqual(draws.filter(args=>args[0].kind==='rgb').at(-1).slice(1),rgbBefore);
   canvas.handlers.pointerup();stopCrop();cropTimers.shift()();assert.equal(cropState,null);
   $('preview').close();preview('/standalone');assert.equal($('preview-navigation').hidden,true);
   assert.equal($('preview-display-controls').hidden,true);
