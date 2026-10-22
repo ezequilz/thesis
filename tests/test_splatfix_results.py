@@ -984,19 +984,23 @@ def test_reduce_ui_confirmation_backup_and_size():
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const html=fs.readFileSync(process.argv[1],'utf8');
 const elements={};const get=id=>elements[id]??={value:'',checked:false,setAttribute(){}};
-let confirmed=false,calls=0,backup=false;
+let confirmed=false,calls=0,backup=false,preserve=false;
 const context=vm.createContext({document:{getElementById:get,hidden:true},setInterval(){},
- window:{confirm:message=>{assert.match(message,/Remove all other images, poses/);return confirmed}},
- fetch:async(url,options)=>{if(!options)return new Promise(()=>{});calls++;assert.equal(url,'/api/splatfix/results/reduce');assert.deepEqual(JSON.parse(options.body),{run_id:'test',backup});return{ok:true,json:async()=>({output_size_bytes:1024,reduction_saved_bytes:12992276070,backup_path:backup?'/history/test':null})}}});
+ window:{confirm:message=>{assert.match(message,preserve?/six repaired references/:/Remove all other images, poses/);if(preserve)assert.doesNotMatch(message,/Training cannot be resumed/);return confirmed}},
+ fetch:async(url,options)=>{if(!options)return new Promise(()=>{});calls++;assert.equal(url,'/api/splatfix/results/reduce');assert.deepEqual(JSON.parse(options.body),{run_id:'test',backup,...(preserve?{preserve_reconstruction:true}:{})});return{ok:true,json:async()=>({output_size_bytes:1024,reduction_saved_bytes:12992276070,backup_path:backup?'/history/test':null})}}});
 vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
-const load=()=>vm.runInContext("rows=[{run_id:'test',can_reduce:true,can_archive:true,metrics:{}}];render()",context);
-const click=()=>get('results').onclick({target:{closest:()=>({dataset:{run:'test',action:backup?'backup-reduce':'reduce'}})}});
+const load=()=>vm.runInContext("rows=[{run_id:'test',kind:'ArtiFixer3D',mode:'edited',can_reduce:true,can_archive:true,metrics:{}}];render()",context);
+const click=()=>get('results').onclick({target:{closest:()=>({dataset:{run:'test',action:preserve?'reduce-reconstruction':backup?'backup-reduce':'reduce'}})}});
 (async()=>{
  load();assert.match(get('results').innerHTML,/Backup &amp; reduce/);
  await click();assert.equal(calls,0);
  confirmed=true;await click();assert.equal(calls,1);assert.equal(vm.runInContext('rows[0].reduced',context),true);assert.match(get('notice').textContent,/1.0 KiB/);assert.match(get('results').innerHTML,/Reduced -12.1 GiB/);
  load();backup=true;await click();assert.equal(calls,2);assert.match(get('notice').textContent,/Full backup: \/history\/test/);
- load();vm.runInContext('rows[0].can_archive=false',context);await click();assert.equal(calls,2);
+ load();backup=false;preserve=true;
+ assert.ok(get('results').innerHTML.indexOf('data-action="reduce-reconstruction"')<get('results').innerHTML.indexOf('data-action="reduce"'));
+ confirmed=false;await click();assert.equal(calls,2);
+ confirmed=true;await click();assert.equal(calls,3);
+ load();vm.runInContext('rows[0].can_archive=false',context);await click();assert.equal(calls,3);
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''
     subprocess.run([node, '-e', script, 'src/splat_explorer/web/static/splatfix_results.html'], check=True)

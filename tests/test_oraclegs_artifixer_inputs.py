@@ -240,3 +240,53 @@ def test_invalid_attention_mode_rejected_before_staging(tmp_path):
     with pytest.raises(ValueError, match='oracle_attention_batching'):
         export_inputs(studio, row, tmp_path/'inputs', 'sfm', oracle_attention_batching='invalid')
     assert not (tmp_path/'inputs').exists()
+
+
+@pytest.mark.parametrize('backup', [False, True])
+def test_reduce_keeps_reconstruction_inputs_exportable(tmp_path, backup):
+    import shutil
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
+        pytest.skip('ffmpeg/ffprobe required')
+    from test_splatfix_results import setup
+    studio, run, _ = setup(tmp_path)
+    _, row = fixture(run / 'gpu/results')
+    row['run_id'] = run.name
+    studio.results.entries = lambda **kwargs: [row]
+    studio.store.set_status(run.name, 'completed')
+    result = row['_manifest'].parent
+    (result / 'checkpoint.pt').write_bytes(b'weights')
+    (result / 'input-images/original_rgb_images').mkdir(parents=True)
+    (result / 'input-images/original_rgb_images/0.png').write_bytes(b'input')
+    poses = (result / 'preview-trajectory.json').read_bytes()
+    (result / 'output-poses.json').write_bytes(poses)
+    images = {p: p.read_bytes() for p in result.glob('ref*.png')}
+    images.update({p: p.read_bytes() for p in (result / 'pred').glob('*.png')})
+    report = studio.results.reduce_run(run.name, backup=backup, preserve_reconstruction=True)
+    assert report['preserve_reconstruction'] is True
+    assert report['inference_videos'][0]['frame_count'] == 2
+    assert all(p.read_bytes() == content for p, content in images.items())
+    assert (result / 'output-poses.json').read_bytes() == poses
+    assert not (result / 'checkpoint.pt').exists()
+    assert not (result / 'input-images/original_rgb_images').exists()
+    assert bool(report['backup_path']) == backup
+    # Exercise the actual post-inference reconstruction export after pruning.
+    destination = tmp_path / 'reconstruct'
+    manifest = export_inputs(studio, row, destination, 'sfm')
+    validate_assets(destination, manifest)
+    assert manifest['artifixer_source']['generated_count'] == 2
+    assert len(json.loads((destination / 'scene/transforms.json').read_text())['frames']) == 8
+
+
+def test_reduce_reconstruction_rejects_missing_references_without_pruning(tmp_path):
+    from test_splatfix_results import setup
+    studio, run, _ = setup(tmp_path)
+    _, row = fixture(run / 'gpu/results')
+    row['run_id'] = run.name
+    studio.results.entries = lambda **kwargs: [row]
+    studio.store.set_status(run.name, 'completed')
+    (row['_manifest'].parent / 'ref2.png').unlink()
+    before = {p: p.read_bytes() for p in run.rglob('*') if p.is_file() and p.name != 'output-size.json'}
+    with pytest.raises(ValueError, match='reference images are missing'):
+        studio.results.reduce_run(run.name, preserve_reconstruction=True)
+    assert all(p.read_bytes() == content for p, content in before.items())
+    assert not (run / 'reduction.json').exists()

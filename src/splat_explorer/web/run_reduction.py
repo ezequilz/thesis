@@ -148,7 +148,8 @@ def encode_inference_video(frames, destination):
         temporary.unlink(missing_ok=True)
 
 
-def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, export_only=False):
+def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, export_only=False,
+                     preserve_reconstruction=False):
     """Encode every prediction batch before pruning any source artifacts."""
     if (root / 'reduction.json').exists():
         raise ValueError('This run has already been reduced')
@@ -164,6 +165,14 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
         if not result.resolve().is_relative_to(root.resolve()):
             raise ValueError('Result directory escapes run')
         copies.extend(plan['ply_copies'])
+        if preserve_reconstruction:
+            if not plan.get('trajectory'):
+                raise ValueError('Saved inference trajectory is required to keep reconstruction inputs')
+            for path in plan.get('reconstruction_files', []):
+                if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+                    raise ValueError('Cannot preserve linked or missing reconstruction inputs')
+                keep.add(path)
+            keep.add(result / 'preview-trajectory.json')
         for name in ('result.json', 'partial-result.json', 'inference-preview.json', 'input-preview.json',
                      'benchmark-run.json', 'published-test-metrics.json', 'request.json',
                      'failure.json', 'distill.lifecycle.json'):
@@ -210,6 +219,10 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
         report = {'inference_videos': videos}
         _atomic_write_json(root / 'inference-videos.json', report)
         return report
+    if preserve_reconstruction:
+        for plan in plans:
+            # Canonical snapshot also supports runs whose request referenced another location.
+            _atomic_write_json(plan['root'] / 'preview-trajectory.json', plan['trajectory'])
     for source, destination in copies:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if source != destination:
@@ -239,6 +252,7 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
         if Path(directory) != root and not any(Path(directory).iterdir()):
             Path(directory).rmdir()
     report = {'reduced': True, 'method': 'artifixer', 'backup_path': backup,
-              'before_size_bytes': before_size_bytes, 'inference_videos': videos}
+              'before_size_bytes': before_size_bytes, 'inference_videos': videos,
+              'preserve_reconstruction': preserve_reconstruction}
     _atomic_write_json(root / 'reduction.json', report)
     return report

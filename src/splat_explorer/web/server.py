@@ -1371,7 +1371,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not isinstance(body, dict):
                     raise ValueError("Request must be an object")
                 try:
-                    result = studio.results.reduce_run(body.get("run_id"), backup=body.get("backup", False))
+                    result = studio.results.reduce_run(body.get("run_id"), backup=body.get("backup", False),
+                        preserve_reconstruction=body.get("preserve_reconstruction", False))
                 except FileNotFoundError:
                     self._send_json({"ok": False, "error": "Run or required artifact not found"}, 404)
                     return

@@ -95,9 +95,11 @@ class ResultCatalog:
             Path(run.path).rename(destination)
             return {'run_id': run.run_id, 'path': str(destination.resolve())}
 
-    def reduce_run(self, run_id, *, backup=False):
+    def reduce_run(self, run_id, *, backup=False, preserve_reconstruction=False):
         if type(backup) is not bool:
             raise ValueError('backup must be a boolean')
+        if type(preserve_reconstruction) is not bool:
+            raise ValueError('preserve_reconstruction must be a boolean')
         with self._run_storage_lock:
             run = self.studio.store.get_run(run_id)
             if run.state.status.value not in ('completed', 'error', 'stopped', 'gpu_expired'):
@@ -107,17 +109,20 @@ class ResultCatalog:
             history = Path(self.cfg.output.dir) / 'run_history' if backup else None
             rows = [row for row in self.entries(private=True) if row['run_id'] == run_id]
             if any(row['kind'] == 'OracleGS' for row in rows):
+                if preserve_reconstruction:
+                    raise ValueError('Keeping reconstruction inputs supports ArtiFixer runs only')
                 report = reduce_oraclegs(Path(run.path), history, before_size_bytes=before)
             elif rows and all(row['kind'] == 'ArtiFixer3D' for row in rows):
-                plans = self._artifixer_plans(rows)
-                report = reduce_artifixer(Path(run.path), plans, history, before_size_bytes=before)
+                plans = self._artifixer_plans(rows, preserve_reconstruction=preserve_reconstruction)
+                report = reduce_artifixer(Path(run.path), plans, history, before_size_bytes=before,
+                                         preserve_reconstruction=preserve_reconstruction)
             else:
                 raise ValueError('Reduction supports OracleGS and ArtiFixer runs only')
             after = self.studio.store.output_size_bytes(run.run_id, refresh=True)
             return {'run_id': run.run_id, **report, 'output_size_bytes': after,
                     'reduction_saved_bytes': max(0, before - after) if before is not None and after is not None else None}
 
-    def _artifixer_plans(self, rows):
+    def _artifixer_plans(self, rows, *, preserve_reconstruction=False):
         plans = []
         for row in rows:
             manifest = row['_manifest']
@@ -129,10 +134,20 @@ class ResultCatalog:
             native = self.studio.result_artifact(manifest, result.get('native_splat_path'))
             if native and native.is_file():
                 copies.append((native, native))
-            predictions = [self.studio.result_artifact(manifest, result.get(key))
+            preview = read_json(manifest.parent / 'inference-preview.json', {})
+            predictions = [self.studio.result_artifact(manifest, result.get(key) or preview.get(key))
                            for key in ('prediction_frames', 'plus_frames')]
-            plans.append({'root': manifest.parent, 'ply_copies': copies,
-                          'prediction_dirs': [p for p in predictions if p and p.is_dir()]})
+            plan = {'root': manifest.parent, 'ply_copies': copies,
+                    'prediction_dirs': [p for p in predictions if p and p.is_dir()]}
+            if preserve_reconstruction:
+                from ..splatfix.oraclegs.artifixer_inputs import source_assets
+                trajectory, references, _ = source_assets(self.studio, row)
+                plan['trajectory'] = trajectory
+                plan['reconstruction_files'] = references
+                # Preserve any additional saved input/output camera exports too.
+                for pattern in ('*trajectory*.json', '*transforms*.json', '*poses*.json', '*cameras*.json'):
+                    plan['reconstruction_files'].extend(manifest.parent.rglob(pattern))
+            plans.append(plan)
         return plans
 
     def save_inference_videos(self, run_id):
