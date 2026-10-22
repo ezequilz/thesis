@@ -16,6 +16,27 @@ selected capture set. The option is saved in queued jobs as
 also available through `edit --endpoint-repair-context`. Retries reuse saved
 repairs; completed repairs remain skipped.
 
+### Manual repair framing
+
+In the saved-checkpoint popup, select a GPT image and choose **Resize for input**.
+Drag the rectangle to move it or a corner to resize it. The selection stays 16:9
+and cannot shrink below 1280 × 720 source pixels. **Save crop** preserves the full
+GPT response and prior repair, saves `manual_resized.png` at the selected pixel
+size, and creates resolution-specific derivatives. Reopening the editor always
+loads the full response, so adjustments never accumulate cropping or resampling.
+The opacity slider blends the GPT layer over the original RGB for alignment;
+the RGB stays fixed while the GPT layer pans or zooms. After releasing a crop
+handle, the preview waits 450 ms and fits the selected region into the frame.
+Handles remain editable outward after zooming. **Show full repair** restores the
+full-source view without changing the crop. Opacity and preview zoom are display
+settings only and are never baked into the saved repair.
+
+Step 4 uses the saved manual crop before its usual resolution transform. Without
+a manual crop, it retains the existing full-response path (or saved repaired PNG
+for legacy checkpoints). The existing 480p training profile is 832 × 480 and
+retains its calibrated center-fit policy. Original RGBs and camera poses are not
+changed by manual repair framing.
+
 ### Reconstruction module boundary
 
 `methods.py` is an explicit, lazy-loaded registry. The dashboard lists its public

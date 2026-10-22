@@ -154,7 +154,7 @@ def prepare_repair_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE, *,
     """Prepare exact-size step-4 cameras and recapture their source RGBs.
 
     Work in a run-local derivative. GPT references start from the original
-    response when available, never a previous crop. Legacy checkpoints without
+    response when available, or an explicitly saved manual crop. Legacy checkpoints without
     saved responses fall back to their saved repaired PNG.
     """
     import numpy as np
@@ -195,14 +195,21 @@ def prepare_repair_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE, *,
                 view.setdefault('image_repair', {})['response_image'] = response_relative
             else:
                 original = checkpoint.image_path(old, repaired=True)
+            manual = old.get('manual_resized_rgb')
+            if manual:
+                original = checkpoint.image_path({'original_rgb': manual})
+                manual_relative = f"views/{view['id']}/manual_resized.png"
+                shutil.copy2(original, root / manual_relative)
+                view['manual_resized_rgb'] = manual_relative
+                view.pop('full_repaired_rgb', None)
             with Image.open(original) as image:
                 image = ImageOps.fit(image.convert('RGB'), (width, height),
                                      Image.Resampling.LANCZOS, centering=(.5, .5))
                 view['repaired_rgb'] = f"views/{view['id']}/repaired.png"
                 image.save(root / view['repaired_rgb'])
             view.setdefault('image_repair', {})['reconstruction_resize'] = {
-                'source': response or old['repaired_rgb'],
-                'source_kind': 'full_response' if response else 'legacy_repaired_rgb',
+                'source': manual or response or old['repaired_rgb'],
+                'source_kind': 'manual_crop' if manual else 'full_response' if response else 'legacy_repaired_rgb',
                 'method': 'cover_center_crop', 'target_size': [width, height]}
     metadata = manifest.setdefault('metadata', {})
     def capture():

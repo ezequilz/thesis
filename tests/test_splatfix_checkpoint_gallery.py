@@ -47,7 +47,8 @@ const elements=new Map();
 const get=id=>{if(!elements.has(id))elements.set(id,{value:'',innerHTML:'',style:{},handlers:{},
   classList:{toggle(){}},querySelectorAll(){return[]},addEventListener(type,fn){this.handlers[type]=fn},
   reportValidity(){return true},select(){},showModal(){this.open=true},close(){this.open=false}});return elements.get(id)};
-const context=vm.createContext({document:{getElementById:get},fetch:()=>new Promise(()=>{}),setTimeout(){},setInterval(){},assert});
+const cropTimers=[];
+const context=vm.createContext({document:{getElementById:get},fetch:()=>new Promise(()=>{}),setTimeout(fn,delay){if(delay===450)cropTimers.push(fn)},setInterval(){},assert,cropTimers});
 vm.runInContext(fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0],context);
 vm.runInContext(`(async()=>{
   const views=Array.from({length:10},(_,i)=>({camera:{width:16,height:16},original_url:'/original'+i,repaired_url:i<6?'/repair'+i:null}));
@@ -74,7 +75,50 @@ vm.runInContext(`(async()=>{
   // Polling or changing the selected checkpoint must not alter the open sequence.
   const savedViews=state.checkpoints[0].views;state.checkpoints[0].views=[];
   movePreview(1);assert.equal($('preview-image').src,'/repair1');state.checkpoints[0].views=savedViews;
+  assert.equal($('preview-display-controls').hidden,false);
+  assert.ok($('preview-display-controls').innerHTML.includes('data-image-mode="rgb"'));
+  assert.ok($('preview-display-controls').innerHTML.includes('data-fov="77"'));
+  setPreviewDisplay('image','rgb');assert.equal($('preview-image').src,'/original1');
+  assert.equal(previewIndex,1);assert.equal(selected,'/cp/b');assert.equal($('preview').open,true);
+  setPreviewDisplay('fov','seva');assert.equal($('preview-image').hidden,true);
+  assert.equal($('preview-missing').hidden,false);assert.equal(previewIndex,1);
+  setPreviewDisplay('fov','77');assert.equal($('preview-image').hidden,true);
+  setPreviewDisplay('fov','saved');assert.equal($('preview-image').src,'/original1');
+  assert.equal($('preview-image').hidden,false);assert.equal($('preview-missing').hidden,true);
+  setPreviewDisplay('image','gpt');assert.equal($('preview-image').src,'/repair1');
+  assert.equal(checkpointImageModes.get('/cp/a'),'gpt');
+
+  // Crop handles enforce 16:9 and minimum size in source-image pixels.
+  const canvas=$('crop-canvas');canvas.getBoundingClientRect=()=>({left:0,top:0,width:800,height:450});
+  const draws=[];
+  canvas.getContext=()=>({drawImage(...args){draws.push(args)},fillRect(){},strokeRect(){},save(){},restore(){},beginPath(){},rect(){},clip(){}});canvas.setPointerCapture=()=>{};
+  cropState={info:{width:1600,height:900},image:{kind:'gpt'},rgb:{kind:'rgb'},opacity:.65,box:[0,0,1600,900]};
+  const pointer=(x,y)=>{const t=cropTransform();return {clientX:(t.frame[0]+(x-t.viewport[0])*t.scale)/2,clientY:(t.frame[1]+(y-t.viewport[1])*t.scale)/2,pointerId:1,preventDefault(){}}};
+  drawCrop();const rgbBefore=draws.find(args=>args[0].kind==='rgb').slice(1);
+  canvas.handlers.pointerdown(pointer(1600,900));
+  canvas.handlers.pointermove(pointer(200,200));
+  assert.deepEqual(cropState.box,[0,0,1280,720]);
+  canvas.handlers.pointerup();assert.equal(cropTimers.length,1);
+  assert.equal(cropState.viewport,undefined);cropTimers.shift()();
+  assert.deepEqual(cropState.viewport,[0,0,1280,720]);
+  // Widen the crop directly in the zoomed view, retaining full-source pixels.
+  canvas.handlers.pointerdown(pointer(1280,720));
+  canvas.handlers.pointermove(pointer(1440,810));
+  assert.deepEqual(cropState.box,[0,0,1440,810]);
+  canvas.handlers.pointerup();cropTimers.shift()();
+  assert.deepEqual(cropState.viewport,[0,0,1440,810]);
+  const rgbAfter=draws.filter(args=>args[0].kind==='rgb').at(-1).slice(1);
+  assert.deepEqual(rgbAfter,rgbBefore);
+  $('crop-opacity').value='0';$('crop-opacity').handlers.input();assert.equal(cropState.opacity,0);
+  assert.deepEqual(cropState.box,[0,0,1440,810]);
+  $('crop-opacity').value='100';$('crop-opacity').handlers.input();assert.equal(cropState.opacity,1);
+  showFullCrop();assert.deepEqual(cropState.viewport,[0,0,1600,900]);
+  canvas.handlers.pointerdown(pointer(720,405));
+  canvas.handlers.pointermove(pointer(1800,1000));
+  assert.deepEqual(cropState.box,[160,90,1440,810]);
+  canvas.handlers.pointerup();stopCrop();cropTimers.shift()();assert.equal(cropState,null);
   $('preview').close();preview('/standalone');assert.equal($('preview-navigation').hidden,true);
+  assert.equal($('preview-display-controls').hidden,true);
   movePreview(1);assert.equal($('preview-image').src,'/standalone');$('preview').close();
 
   assert.ok($('checkpoint-grid').innerHTML.includes('data-select-checkpoint="/cp/b" aria-pressed="true"'));

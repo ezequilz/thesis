@@ -1438,6 +1438,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._send_json(studio.delete_checkpoint(body))
                 except OSError:
                     self._send_json({"ok": False, "error": "Could not delete checkpoint. Please try again."}, 500)
+            elif self.command == "POST" and path == "/api/splatfix/checkpoints/crop":
+                self._send_json(studio.crop_checkpoint(body))
             elif self.command == "POST" and path == "/api/splatfix/checkpoints/rename":
                 try:
                     self._send_json(studio.rename_checkpoint(body))

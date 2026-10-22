@@ -67,6 +67,39 @@ class SplatfixStudio(SceneRunStudio):
         name = label.get('name') if isinstance(label, dict) else None
         return name if isinstance(name, str) and name.strip() else root.name
 
+    def crop_checkpoint(self, body):
+        from PIL import Image
+        from ..splatfix.manual_crop import crop_source, save_crop
+        if not isinstance(body, dict) or not isinstance(body.get('checkpoint'), str):
+            raise ValueError('Choose an existing checkpoint')
+        root = Path(body['checkpoint']).resolve()
+        manifests = list(self.checkpoint_root.glob('*/checkpoint.json'))
+        manifests += list(self.root.glob('run_*/checkpoints/*/checkpoint.json'))
+        if (not any(root.is_relative_to(base.resolve()) for base in (self.checkpoint_root, self.root))
+                or not any(p.parent.resolve() == root for p in manifests)):
+            raise ValueError('Choose an existing checkpoint')
+        cp = Checkpoint.load(root)
+        view = next((v for v in cp.views if v['id'] == body.get('view_id')), None)
+        if view is None:
+            raise ValueError('Unknown saved view')
+        image_set = body.get('image_set', 'saved')
+        if image_set == 'seva':
+            view = view.get('seva_capture') or {}
+        elif image_set not in ('saved', '77'):
+            raise ValueError('Unknown image set')
+        source, token = crop_source(cp, view)
+        if 'box' in body:
+            save_crop(cp, view, body['box'], body.get('source_token'))
+            return {'ok': True, 'checkpoint': next(c for c in self.checkpoints() if c['id'] == str(root))}
+        with Image.open(source) as raw:
+            image = raw.convert('RGB')
+        # PNG preview for response.image payloads, whose original bytes stay untouched.
+        preview = source.parent / ('crop-source-' + token + '.png')
+        if not preview.exists():
+            image.save(preview)
+        return {'url': self.file_url(preview), 'width': image.width, 'height': image.height,
+                'source_token': token, 'box': (view.get('manual_crop') or {}).get('box_xywh')}
+
     def rename_checkpoint(self, body):
         if not isinstance(body, dict):
             raise ValueError('Request must be an object')

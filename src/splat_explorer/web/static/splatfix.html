@@ -9,6 +9,9 @@
 .checkpoint-caption-row{display:flex;align-items:center;gap:8px;padding-right:13px}.checkpoint-caption-row .checkpoint-select{min-width:0;flex:1}.checkpoint-fov{display:flex;gap:5px;flex-shrink:0}.checkpoint-fov button{padding:5px;display:flex;flex-direction:column;align-items:center;gap:2px;background:transparent}.checkpoint-fov button[aria-pressed="true"]{color:var(--green);border-color:var(--green);background:#c6e69b12}.checkpoint-fov small{font-size:9px}.checkpoint-missing{display:flex;align-items:center;justify-content:center;text-align:center;font-size:11px;color:var(--muted);background:var(--panel)}
 .custom-capture{display:flex;min-width:0}.custom-capture button{border-radius:7px 0 0 7px}.custom-capture select{width:100px;padding:5px;font-size:11px;border-radius:0 7px 7px 0}.select-actions{flex-wrap:wrap}
 .checkpoint-status-labels{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.checkpoint-display-controls{display:flex;align-items:center;gap:8px;flex-shrink:0}.checkpoint-toggle-divider{width:1px;height:28px;background:var(--line)}.checkpoint-caption-row{flex-wrap:wrap}.checkpoint-caption-row .checkpoint-select{flex-basis:180px}.checkpoint-display-controls{margin-left:auto;padding:8px 0}
+#preview .preview-toolbar{flex-wrap:wrap}#preview-caption{flex:1;min-width:150px}#preview-display-controls[hidden],#preview img[hidden],#preview-missing[hidden]{display:none}#preview-missing{padding:60px 24px;text-align:center}#preview img{max-height:calc(90dvh - 200px)}
+#crop-editor[hidden],#preview-resize[hidden]{display:none}#crop-canvas{display:block;max-width:90vw;max-height:65dvh;width:auto;height:auto;touch-action:none;cursor:move;margin:auto}.crop-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px}.crop-actions .note{flex:1;min-width:200px}
+.crop-alignment{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}.crop-alignment input{width:180px;padding:0;accent-color:var(--green)}.crop-alignment label{white-space:nowrap}.crop-alignment output{display:inline-block;min-width:36px}
 </style></head>
 <body><main class="shell">
 <header><a class="brand" href="/splatfix">splat<span>fix</span><span style="font-size:12px;letter-spacing:0;color:var(--muted);font-weight:400;margin-left:15px">Reconstruction studio</span></a><nav class="nav"><a href="/splatfix/worldexplorer">Generate scene</a><a href="/splatfix/results">Results</a><a href="/repair/gpu">Compute</a><a href="/">Explorer ↗</a></nav></header>
@@ -48,7 +51,7 @@
 <dialog id="schedule-dialog"><form id="schedule-form"><div class="eyebrow">Plan a stage</div><h2 id="schedule-title">Schedule run</h2><p id="schedule-context" class="note"></p><p>The job will become eligible at this time and start when the shared queue is free. Keep the queue manager running.</p><label for="when">Start after (your local time)</label><input id="when" type="datetime-local" required><div class="row"><button type="button" onclick="document.getElementById('schedule-dialog').close()">Cancel</button><button class="primary" type="submit">Schedule run</button></div></form></dialog>
 <dialog id="delete-dialog" aria-labelledby="delete-title"><form id="delete-form"><h2 id="delete-title">Delete checkpoint?</h2><p id="delete-context"></p><p>This permanently deletes the checkpoint, its saved views and repaired images.</p><p id="delete-error" role="alert"></p><div class="row"><button id="delete-cancel" type="button" onclick="$('delete-dialog').close()">Cancel</button><button id="delete-confirm" class="danger" type="submit">Delete checkpoint</button></div></form></dialog>
 <dialog id="rename-dialog"><form id="rename-form"><h2>Rename checkpoint</h2><p class="note">Choose a recognizable name. Saved cameras, images and run links stay connected.</p><label for="checkpoint-name">Checkpoint name</label><input id="checkpoint-name" required maxlength="120" autocomplete="off"><p id="rename-error" role="alert"></p><div class="row"><button type="button" onclick="$('rename-dialog').close()">Cancel</button><button id="rename-save" class="primary" type="submit">Save name</button></div></form></dialog>
-<dialog id="preview" aria-label="Saved view preview"><div class="preview-toolbar"><span id="preview-caption" class="note" aria-live="polite"></span><button onclick="document.getElementById('preview').close()">Close</button></div><img id="preview-image" alt="Selected view preview"><div id="preview-navigation" class="preview-navigation" hidden><button id="preview-previous" type="button" onclick="movePreview(-1)" aria-label="Previous view">←</button><button id="preview-next" type="button" onclick="movePreview(1)" aria-label="Next view">→</button></div></dialog><div id="notice" role="status"></div>
+<dialog id="preview" aria-label="Saved view preview"><div class="preview-toolbar"><span id="preview-caption" class="note" aria-live="polite"></span><div id="preview-display-controls" hidden></div><button id="preview-resize" type="button" onclick="startCrop()" hidden>Resize for input</button><button onclick="document.getElementById('preview').close()">Close</button></div><div id="preview-missing" class="note" hidden>Image not captured for this field of view.</div><img id="preview-image" alt="Selected view preview"><div id="crop-editor" hidden><div class="crop-alignment"><label for="crop-opacity">GPT opacity <output id="crop-opacity-value">65%</output></label><input id="crop-opacity" type="range" min="0" max="100" step="1" value="65" aria-label="GPT opacity over original RGB"><button type="button" onclick="showFullCrop()">Show full repair</button><span class="note">Original RGB stays fixed underneath. Opacity affects the preview only.</span></div><canvas id="crop-canvas" aria-label="Drag the crop rectangle or its corners to resize" role="img"></canvas><div class="crop-actions"><span id="crop-size" class="note" aria-live="polite"></span><button id="crop-cancel" type="button" onclick="stopCrop()">Cancel</button><button id="crop-save" type="button" onclick="saveCrop()">Save crop</button></div></div><div id="preview-navigation" class="preview-navigation" hidden><button id="preview-previous" type="button" onclick="movePreview(-1)" aria-label="Previous view">←</button><button id="preview-next" type="button" onclick="movePreview(1)" aria-label="Next view">→</button></div></dialog><div id="notice" role="status"></div>
 <script>
 let previousMethod='', state={checkpoints:[],jobs:[],scenes:[]}, selected='', pendingStage='', pendingPayload=null, busy=false;
 const $=id=>document.getElementById(id), labels={select:'View finding',seva_capture:'SEVA capture',edit:'Image repair',repair:'Reconstruction',benchmark:'Published dataset benchmark'};
@@ -84,12 +87,16 @@ function checkpointImage(cp,v){
 }
 function setCheckpointImageMode(id,mode){checkpointImageModes.set(id,mode);renderCheckpointGallery()}
 function setCheckpointFov(id,fov){checkpointFovs.set(id,fov);renderCheckpointGallery()}
+function checkpointDisplayControls(cp){
+  const fov=checkpointFov(cp);
+  return `<span class="checkpoint-display-controls"><span class="checkpoint-fov" role="group" aria-label="Image type">${[['rgb','Original RGB','M3 5h18v14H3z M3 15l5-5 5 5 3-3 5 5 M15 8h.01'],['gpt','GPT-image (RGB fallback)','M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z']].map(([value,label,path])=>`<button type="button" data-image-checkpoint="${esc(cp.id)}" data-image-mode="${value}" aria-label="${label} for ${esc(cp.name)}" title="${label}" aria-pressed="${(checkpointImageModes.get(cp.id)||'gpt')===value}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="${path}"/></svg><small>${value==='rgb'?'RGB':'GPT'}</small></button>`).join('')}</span><span class="checkpoint-toggle-divider" aria-hidden="true"></span><span class="checkpoint-fov" role="group" aria-label="Field of view">${[['saved','Original FOV','M3 5h18v14H3z M8 5v14 M16 5v14'],['seva','54°','M6 5h12v14H6z M3 9V5h4 M17 5h4v4 M21 15v4h-4 M7 19H3v-4'],['77','77°','M4 5h16v14H4z M8 9l-4 3 4 3 M16 9l4 3-4 3']].map(([value,label,path])=>`<button type="button" data-fov-checkpoint="${esc(cp.id)}" data-fov="${value}" aria-label="${label} images for ${esc(cp.name)}" title="${label}" aria-pressed="${fov===value}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="${path}"/></svg><small>${value==='saved'?'Orig.':label}</small></button>`).join('')}</span></span>`;
+}
 function renderCheckpointGallery(){
   $('saved-checkpoint-count').textContent=`${state.checkpoints.length} saved`;
   $('empty-checkpoints').hidden=!!state.checkpoints.length;
   $('checkpoint-grid').innerHTML=state.checkpoints.map(cp=>{
     const active=cp.id===selected, columns=Math.ceil(Math.sqrt(cp.views.length||1)), fov=checkpointFov(cp), seva=fov==='seva';
-    return `<article class="view checkpoint-tile${active?' active':''}" data-checkpoint-tile="${esc(cp.id)}"><span class="checkpoint-mosaic" style="--columns:${columns}">${cp.views.length?cp.views.map((v,i)=>{const image=checkpointImage(cp,v);return image.url?`<button type="button" class="checkpoint-thumbnail" data-preview-checkpoint="${esc(cp.id)}" data-view-index="${i}" aria-label="Preview view ${i+1} of ${esc(cp.name)}"><img loading="lazy" src="${esc(image.url)}" alt="View ${i+1} · ${image.label}"></button>`:`<span class="checkpoint-missing">View ${i+1}<br>${seva?'54° capture pending':fov==='77'?'77° not captured':'Original FOV not captured'}</span>`}).join(''):'<span class="pending">Waiting for saved views</span>'}</span><div class="checkpoint-caption-row"><button type="button" class="checkpoint-select" data-select-checkpoint="${esc(cp.id)}" aria-pressed="${active}" aria-label="Select ${esc(cp.name)}"><span class="checkpoint-caption"><strong>${esc(cp.name)}</strong><span class="note">${esc(cp.scene)} · ${cp.views.length}/${cp.target_views} views · ${seva?(cp.seva_edited||0):fov==='77'?cp.views.filter(v=>is77Capture(v)&&v.repaired_url).length:cp.edited} repaired</span></span></button><span class="checkpoint-display-controls"><span class="checkpoint-fov" role="group" aria-label="Tile image type">${[['rgb','Original RGB','M3 5h18v14H3z M3 15l5-5 5 5 3-3 5 5 M15 8h.01'],['gpt','GPT-image (RGB fallback)','M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z']].map(([value,label,path])=>`<button type="button" data-image-checkpoint="${esc(cp.id)}" data-image-mode="${value}" aria-label="${label} for ${esc(cp.name)}" title="${label}" aria-pressed="${(checkpointImageModes.get(cp.id)||'gpt')===value}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="${path}"/></svg><small>${value==='rgb'?'RGB':'GPT'}</small></button>`).join('')}</span><span class="checkpoint-toggle-divider" aria-hidden="true"></span><span class="checkpoint-fov" role="group" aria-label="Tile field of view">${[['saved','Original FOV','M3 5h18v14H3z M8 5v14 M16 5v14'],['seva','54°','M6 5h12v14H6z M3 9V5h4 M17 5h4v4 M21 15v4h-4 M7 19H3v-4'],['77','77°','M4 5h16v14H4z M8 9l-4 3 4 3 M16 9l4 3-4 3']].map(([value,label,path])=>`<button type="button" data-fov-checkpoint="${esc(cp.id)}" data-fov="${value}" aria-label="${label} images for ${esc(cp.name)}" title="${label}" aria-pressed="${fov===value}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="${path}"/></svg><small>${value==='saved'?'Orig.':label}</small></button>`).join('')}</span></span></div><footer><span class="checkpoint-status-labels"><span class="${active?'pill':'note'}">${active?'Selected':'Choose checkpoint'}</span>${cp.metadata?.repair_policy==='endpoints'?'<span class="pill" title="Only the first and last selected views are GPT-repaired">Endpoint repair</span>':''}</span><span class="checkpoint-actions"><button type="button" data-rename-checkpoint="${esc(cp.id)}" aria-label="Rename ${esc(cp.name)}">Rename</button><button type="button" class="checkpoint-delete" data-delete-checkpoint="${esc(cp.id)}" aria-label="Delete ${esc(cp.name)}" title="Delete checkpoint" ${deleteSaving?'disabled':''}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></button></span></footer></article>`;
+    return `<article class="view checkpoint-tile${active?' active':''}" data-checkpoint-tile="${esc(cp.id)}"><span class="checkpoint-mosaic" style="--columns:${columns}">${cp.views.length?cp.views.map((v,i)=>{const image=checkpointImage(cp,v);return image.url?`<button type="button" class="checkpoint-thumbnail" data-preview-checkpoint="${esc(cp.id)}" data-view-index="${i}" aria-label="Preview view ${i+1} of ${esc(cp.name)}"><img loading="lazy" src="${esc(image.url)}" alt="View ${i+1} · ${image.label}"></button>`:`<span class="checkpoint-missing">View ${i+1}<br>${seva?'54° capture pending':fov==='77'?'77° not captured':'Original FOV not captured'}</span>`}).join(''):'<span class="pending">Waiting for saved views</span>'}</span><div class="checkpoint-caption-row"><button type="button" class="checkpoint-select" data-select-checkpoint="${esc(cp.id)}" aria-pressed="${active}" aria-label="Select ${esc(cp.name)}"><span class="checkpoint-caption"><strong>${esc(cp.name)}</strong><span class="note">${esc(cp.scene)} · ${cp.views.length}/${cp.target_views} views · ${seva?(cp.seva_edited||0):fov==='77'?cp.views.filter(v=>is77Capture(v)&&v.repaired_url).length:cp.edited} repaired</span></span></button>${checkpointDisplayControls(cp)}</div><footer><span class="checkpoint-status-labels"><span class="${active?'pill':'note'}">${active?'Selected':'Choose checkpoint'}</span>${cp.metadata?.repair_policy==='endpoints'?'<span class="pill" title="Only the first and last selected views are GPT-repaired">Endpoint repair</span>':''}</span><span class="checkpoint-actions"><button type="button" data-rename-checkpoint="${esc(cp.id)}" aria-label="Rename ${esc(cp.name)}">Rename</button><button type="button" class="checkpoint-delete" data-delete-checkpoint="${esc(cp.id)}" aria-label="Delete ${esc(cp.name)}" title="Delete checkpoint" ${deleteSaving?'disabled':''}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></button></span></footer></article>`;
   }).join('');
   $('checkpoint-grid').querySelectorAll('[data-image-checkpoint]').forEach(el=>el.addEventListener('click',()=>setCheckpointImageMode(el.dataset.imageCheckpoint,el.dataset.imageMode)));
   $('checkpoint-grid').querySelectorAll('[data-fov-checkpoint]').forEach(el=>el.addEventListener('click',()=>setCheckpointFov(el.dataset.fovCheckpoint,el.dataset.fov)));
@@ -137,9 +144,102 @@ $('rename-form').addEventListener('submit',async event=>{
   catch(error){$('rename-error').textContent=error.message}
   finally{renameSaving=false;$('rename-save').disabled=false}
 });
-let previewViews=[], previewIndex=0, previewName='';
+let cropState=null,cropGeneration=0;
+function cropRequest(){return {checkpoint:previewCheckpointSnapshot.id,view_id:previewCheckpointSnapshot.views[previewIndex].id,image_set:checkpointFov(previewCheckpointSnapshot)}}
+function stopCrop(){cropState=null;$('crop-editor').hidden=true;$('preview-display-controls').hidden=!previewCheckpointSnapshot;$('preview-resize').disabled=false;if(previewCheckpointSnapshot)renderPreview()}
+async function startCrop(){
+  const generation=++cropGeneration;
+  $('preview-resize').disabled=true;
+  try{
+    const request=cropRequest(), info=await api('/checkpoints/crop',request);
+    if(info.width<1280||info.height<720)throw new Error('The full repair is smaller than 1280 × 720 and cannot be cropped without upscaling.');
+    const image=new Image();image.src=info.url;
+    const view=previewCheckpointSnapshot.views[previewIndex],rgb=new Image();
+    rgb.src=request.image_set==='seva'?view.seva_original_url:view.original_url;
+    await Promise.all([image.decode(),rgb.decode()]);
+    if(generation!==cropGeneration||!$('preview').open)return;
+    const units=Math.floor(Math.min(info.width/16,info.height/9));
+    cropState={request,info,image,rgb,opacity:Number($('crop-opacity').value)/100,box:info.box||[Math.floor((info.width-units*16)/2),Math.floor((info.height-units*9)/2),units*16,units*9],drag:null,saving:false};
+    $('preview-image').hidden=true;$('preview-missing').hidden=true;$('preview-navigation').hidden=true;$('preview-display-controls').hidden=true;
+    $('crop-editor').hidden=false;drawCrop();if(info.box)scheduleCropZoom();
+  }catch(error){toast(error.message,true);$('preview-resize').disabled=false}
+}
+function cropFullViewport(){const {width,height}=cropState.info,w=Math.max(width,height*16/9),h=w*9/16;return [(width-w)/2,(height-h)/2,w,h]}
+function cropTransform(){
+  const {width:W,height:H}=cropState.info,frameWidth=W*.76,frameHeight=frameWidth*9/16;
+  const frame=[(W-frameWidth)/2,(H-frameHeight)/2,frameWidth,frameHeight],viewport=cropState.viewport||cropFullViewport();
+  return {frame,viewport,scale:frameWidth/viewport[2]};
+}
+function fitCropPreview(){if(!cropState||cropState.drag||cropState.saving)return;cropState.viewport=[...cropState.box];drawCrop()}
+function showFullCrop(){if(!cropState||cropState.saving)return;cropState.zoomRevision=(cropState.zoomRevision||0)+1;cropState.viewport=cropFullViewport();drawCrop()}
+function scheduleCropZoom(){
+  const session=cropState,revision=session.zoomRevision=(session.zoomRevision||0)+1;
+  setTimeout(()=>{if(cropState===session&&session.zoomRevision===revision)fitCropPreview()},450);
+}
+function drawCrop(){
+  if(!cropState)return;
+  const {info,image,rgb,box:[x,y,w,h]}=cropState,c=$('crop-canvas');c.width=info.width;c.height=info.height;
+  const ctx=c.getContext('2d'),{frame:[fx,fy,fw,fh],viewport:[vx,vy],scale:s}=cropTransform();
+  ctx.fillStyle='#101312';ctx.fillRect(0,0,c.width,c.height);
+  // Only the GPT layer follows the source-space viewport. RGB never pans or zooms.
+  if(rgb)ctx.drawImage(rgb,fx,fy,fw,fh);
+  ctx.save();ctx.beginPath();ctx.rect(fx,fy,fw,fh);ctx.clip();
+  ctx.globalAlpha=cropState.opacity??.65;
+  ctx.drawImage(image,fx-vx*s,fy-vy*s,info.width*s,info.height*s);
+  ctx.restore();
+  const px=fx+(x-vx)*s,py=fy+(y-vy)*s,pw=w*s,ph=h*s;
+  const screenScale=c.width/(c.getBoundingClientRect().width||c.width),handle=12*screenScale;
+  ctx.strokeStyle='#c6e69b';ctx.lineWidth=2*screenScale;ctx.strokeRect(px,py,pw,ph);ctx.fillStyle='#c6e69b';
+  for(const [hx,hy] of [[px,py],[px+pw,py],[px,py+ph],[px+pw,py+ph]])ctx.fillRect(hx-handle/2,hy-handle/2,handle,handle);
+  $('crop-size').textContent=`${w} × ${h} px · 16:9 · minimum 1280 × 720. Drag inside to move; drag corners inward or outward. Preview zooms after release.`;
+}
+function cropPoint(event){
+  const r=$('crop-canvas').getBoundingClientRect(),{frame:[fx,fy],viewport:[vx,vy],scale:s}=cropTransform();
+  return [vx+((event.clientX-r.left)*cropState.info.width/r.width-fx)/s,vy+((event.clientY-r.top)*cropState.info.height/r.height-fy)/s];
+}
+$('crop-opacity').addEventListener('input',()=>{
+  const opacity=Number($('crop-opacity').value);$('crop-opacity-value').textContent=`${opacity}%`;
+  if(cropState){cropState.opacity=opacity/100;drawCrop()}
+});
+$('crop-canvas').addEventListener('pointerdown',event=>{
+  if(!cropState||cropState.saving)return;
+  const [px,py]=cropPoint(event),[x,y,w,h]=cropState.box,tolerance=22*cropState.info.width/$('crop-canvas').getBoundingClientRect().width/cropTransform().scale;
+  const corners=[[x,y,-1,-1],[x+w,y,1,-1],[x,y+h,-1,1],[x+w,y+h,1,1]];
+  const corner=corners.find(([cx,cy])=>Math.hypot(px-cx,py-cy)<tolerance);
+  if(!corner&&(px<x||px>x+w||py<y||py>y+h))return;
+  cropState.zoomRevision=(cropState.zoomRevision||0)+1;
+  cropState.drag={start:[px,py],box:[x,y,w,h],corner};$('crop-canvas').setPointerCapture(event.pointerId);event.preventDefault();
+});
+$('crop-canvas').addEventListener('pointermove',event=>{
+  if(!cropState?.drag)return;
+  const [px,py]=cropPoint(event),{start,box:[x,y,w,h],corner}=cropState.drag,{width:W,height:H}=cropState.info;
+  if(!corner){cropState.box=[Math.max(0,Math.min(W-w,Math.round(x+px-start[0]))),Math.max(0,Math.min(H-h,Math.round(y+py-start[1]))),w,h]}
+  else{
+    const sx=corner[2],sy=corner[3],ax=sx===1?x:x+w,ay=sy===1?y:y+h;
+    const maxUnits=Math.floor(Math.min((sx===1?W-ax:ax)/16,(sy===1?H-ay:ay)/9));
+    const units=Math.max(80,Math.min(maxUnits,Math.round(((px-ax)*sx/16+(py-ay)*sy/9)/2)));
+    cropState.box=[sx===1?ax:ax-units*16,sy===1?ay:ay-units*9,units*16,units*9];
+  }
+  drawCrop();
+});
+for(const type of ['pointerup','pointercancel'])$('crop-canvas').addEventListener(type,()=>{if(cropState?.drag){cropState.drag=null;scheduleCropZoom()}});
+async function saveCrop(){
+  if(!cropState||cropState.saving)return;
+  cropState.saving=true;$('crop-save').disabled=true;$('crop-cancel').disabled=true;
+  try{
+    const result=await api('/checkpoints/crop',{...cropState.request,box:cropState.box,source_token:cropState.info.source_token});
+    const cp=result.checkpoint,index=state.checkpoints.findIndex(v=>v.id===cp.id);if(index>=0)state.checkpoints[index]=cp;
+    previewCheckpointSnapshot=JSON.parse(JSON.stringify(cp));previewViews=cp.views.map(v=>checkpointImage(cp,v));
+    cropState=null;$('crop-editor').hidden=true;$('preview-resize').disabled=false;renderCheckpointGallery();renderPreview();toast('Crop saved for reconstruction; full repair preserved.');
+  }catch(error){toast(error.message,true);if(cropState)cropState.saving=false}
+  finally{$('crop-save').disabled=false;$('crop-cancel').disabled=false}
+}
+$('preview').addEventListener('close',()=>{cropGeneration++;cropState=null;$('crop-editor').hidden=true;$('preview-resize').disabled=false});
+
+let previewViews=[], previewIndex=0, previewName='', previewCheckpointSnapshot=null;
 function preview(url){
-  previewViews=[];previewName='';$('preview-navigation').hidden=true;$('preview-caption').textContent='';
+  $('preview-resize').hidden=true;
+  previewViews=[];previewName='';previewCheckpointSnapshot=null;$('preview-display-controls').hidden=true;$('preview-missing').hidden=true;$('preview-image').hidden=false;$('preview-navigation').hidden=true;$('preview-caption').textContent='';
   $('preview-image').src=url;$('preview-image').alt='Selected view preview';$('preview').showModal();
 }
 function previewCheckpoint(id,index){
@@ -148,18 +248,34 @@ function previewCheckpoint(id,index){
   // Snapshot this checkpoint so polling never changes the images under navigation.
   const images=cp.views.map(v=>checkpointImage(cp,v));
   if(!images[index].url)return;
-  previewViews=images.filter(v=>v.url);
-  previewName=cp.name;previewIndex=images.slice(0,index).filter(v=>v.url).length;renderPreview();$('preview').showModal();
+  previewCheckpointSnapshot=JSON.parse(JSON.stringify(cp));
+  previewViews=images;
+  previewName=cp.name;previewIndex=index;renderPreview();$('preview').showModal();
+}
+function setPreviewDisplay(kind,value){
+  if(!previewCheckpointSnapshot)return;
+  const id=previewCheckpointSnapshot.id;
+  if(kind==='image')setCheckpointImageMode(id,value);else setCheckpointFov(id,value);
+  previewViews=previewCheckpointSnapshot.views.map(v=>checkpointImage(previewCheckpointSnapshot,v));
+  renderPreview();
 }
 function renderPreview(){
+  if(cropState)return;
   const view=previewViews[previewIndex];if(!view)return;
-  $('preview-image').src=view.url;$('preview-image').alt=`${previewName} · View ${previewIndex+1} · ${view.label}`;
+  const currentView=previewCheckpointSnapshot.views[previewIndex],seva=checkpointFov(previewCheckpointSnapshot)==='seva';
+  $('preview-resize').hidden=checkpointImageModes.get(previewCheckpointSnapshot.id)==='rgb'||!view.url||!(seva?currentView.seva_repaired_url:currentView.repaired_url);
+  $('preview-display-controls').hidden=false;
+  $('preview-display-controls').innerHTML=checkpointDisplayControls(previewCheckpointSnapshot);
+  $('preview-display-controls').querySelectorAll('[data-image-mode]').forEach(el=>el.addEventListener('click',()=>setPreviewDisplay('image',el.dataset.imageMode)));
+  $('preview-display-controls').querySelectorAll('[data-fov]').forEach(el=>el.addEventListener('click',()=>setPreviewDisplay('fov',el.dataset.fov)));
+  $('preview-image').hidden=!view.url;$('preview-missing').hidden=!!view.url;
+  $('preview-image').src=view.url||'';$('preview-image').alt=`${previewName} · View ${previewIndex+1} · ${view.label}`;
   $('preview-caption').textContent=`${previewName} · View ${previewIndex+1} of ${previewViews.length} · ${view.label}`;
   $('preview-navigation').hidden=false;
   $('preview-previous').disabled=previewIndex===0;$('preview-next').disabled=previewIndex===previewViews.length-1;
 }
 function movePreview(direction){
-  if(!$('preview').open||!previewViews.length)return;
+  if(cropState||!$('preview').open||!previewViews.length)return;
   previewIndex=Math.max(0,Math.min(previewViews.length-1,previewIndex+direction));renderPreview();
 }
 $('preview').addEventListener('keydown',event=>{
