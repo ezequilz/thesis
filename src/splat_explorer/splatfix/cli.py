@@ -29,6 +29,8 @@ def select_views(cfg, args):
     scene_path = Path(args.scene or cfg.scene.path).expanduser().resolve()
     renderer_cfg = Config(dict(cfg.renderer))
     renderer_cfg["backend"] = args.renderer
+    if getattr(args, "horizontal_fov", None) is not None:
+        renderer_cfg["fov_deg"] = args.horizontal_fov
     from .resolution import profile_size
     renderer_cfg["width"], renderer_cfg["height"] = profile_size(
         cfg.get("splatfix", {}).get("resolution_profile", "training"))
@@ -48,7 +50,7 @@ def select_views(cfg, args):
     policy = make_view_policy(cfg.agent)
     checkpoint = Checkpoint.create(
         args.output, scene_path, target_views=args.views,
-        metadata={"scene_load": {"min_opacity": cfg.scene.min_opacity,
+        metadata={"repair_policy": getattr(args, "repair_policy", "all"), "scene_load": {"min_opacity": cfg.scene.min_opacity,
                                   "lod_level": int(cfg.scene.get("lod_level", 0))},
                   "renderer": dict(renderer_cfg), "up_axis": cfg.camera.up_axis,
                   "model": cfg.agent.model, "vlm_backend": cfg.agent.vlm_backend},
@@ -96,6 +98,8 @@ def repair_splat(cfg, args):
     method = getattr(args, "reconstruction_method", "artifixer")
     runtime = dict(cfg.get("splatfix", {}).get(method + "_runtime" if method in ("g4splat", "oraclegs") else "runtime", {}))
     runtime["resolution_profile"] = cfg.get("splatfix", {}).get("resolution_profile", "training")
+    if getattr(args, 'endpoint_reference_mode', None) is not None:
+        runtime['endpoint_reference_mode'] = args.endpoint_reference_mode
     runtime['split_mode'] = getattr(args, 'split_mode', 'double-split')
     if getattr(args, 'image_cache_insertion', None) is not None:
         runtime['image_cache_insertion'] = args.image_cache_insertion
@@ -145,6 +149,8 @@ def _add_stages(parser):
                         help="Viser capture is required; no CPU or CUDA RGB fallback")
     select.add_argument("--select-only", action="store_true", help="Save original views without GPT-image calls")
     select.set_defaults(func=select_views)
+    select.add_argument("--repair-policy", choices=("all", "endpoints"), default="all")
+    select.add_argument("--horizontal-fov", type=float)
     edit = stages.add_parser("edit", help="Create missing GPT-image repairs in an existing checkpoint")
     edit.add_argument("checkpoint", type=Path)
     edit.add_argument("--image-set", choices=("saved", "seva"), default="saved")
@@ -176,8 +182,9 @@ def _add_stages(parser):
     repair.add_argument("checkpoint", type=Path)
     repair.add_argument("--scene", type=Path, help="Relocated source asset on the GPU host (same content)")
     repair.add_argument("--output", required=True, type=Path, help="Parent directory for isolated reconstruction runs")
+    repair.add_argument("--endpoint-reference-mode", choices=("both", "initial"))
     repair.add_argument("--mode", choices=("edited", "baseline"), default="edited")
-    repair.add_argument('--split-mode', choices=('single-split', 'double-split'), default='double-split',
+    repair.add_argument('--split-mode', choices=('single-split', 'double-split', 'no-split'), default='double-split',
                         help='Generate whole legs or inward from both reference endpoints (default)')
     repair.add_argument('--reconstruction-images', choices=('all', 'distilled'), default=None,
                         help='All images (default), or saved references and ArtiFixer targets without WorldExplorer originals')

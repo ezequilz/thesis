@@ -113,6 +113,9 @@ class SplatfixExecutor:
         if options['stage'] == 'select':
             argv += ['select', '--scene', str(Path(cfg.scene.path).resolve()), '--output', str(root / 'checkpoints'),
                      '--views', str(options['views']), '--renderer', options['renderer'], '--select-only']
+            argv += ['--repair-policy', options.get('repair_policy', 'all')]
+            if options.get('horizontal_fov') is not None:
+                argv += ['--horizontal-fov', str(options['horizontal_fov'])]
         else:
             cp = Checkpoint.load(options['checkpoint'])
             if not cp.complete:

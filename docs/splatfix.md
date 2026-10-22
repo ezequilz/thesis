@@ -999,3 +999,31 @@ these choices; older requests retain the all-images/full-splat defaults.
 
 CLI equivalents: `--reconstruction-images all|distilled` and
 `--reconstruction-initialization full_splat|point_cloud`.
+
+### Endpoint-only ArtiFixer checkpoints
+
+In Step 1 choose **Six poses · repair first and last only**. Save all six
+positions in the intended travel order. The horizontal FOV controls now include
+**77°**, including Custom capture. Original RGB and calibrated cameras remain
+saved for every position. Step 3 edits only positions 1 and 6, resuming missing
+endpoint edits without repeating successful requests.
+
+These checkpoints require edited ArtiFixer reconstruction and automatically use
+**No split**. Consecutive saved poses use the authors' interpolation helper;
+legs are joined in selection order into a single continuous trajectory. Intermediate
+saved RGBs never become reference images. Degraded source renders provide the
+inference inputs along the complete interpolated path.
+
+**Endpoint checkpoint references** selects either both repaired endpoints
+(starting endpoint first) or only the starting repaired endpoint. Initial inference
+runs twice, with fresh inference caches: front to back and the exact reverse.
+`inference-directions.json` records frame indices, reference order and output
+ownership. Forward predictions retain the normal `inference/` location and enter
+reconstruction with the two repaired references. Reverse predictions are saved
+under `inference-back-to-front/` and never enter reconstruction. The existing
+post-reconstruction 3D+ pass remains forward-only.
+
+CLI selection accepts `--repair-policy endpoints --views 6 --horizontal-fov 77`;
+repair accepts `--endpoint-reference-mode both` (default) or `initial`.
+`--split-mode no-split` is also available independently; endpoint checkpoints
+force this mode regardless of a previously selected split setting.

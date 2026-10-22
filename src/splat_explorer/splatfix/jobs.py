@@ -41,7 +41,13 @@ def validate_job(raw):
         views = raw.get('views', 6)
         if type(views) is not int or not 1 <= views <= 24:
             raise ValueError('views must be an integer between 1 and 24')
-        result['views'] = views
+        policy = raw.get('repair_policy', 'all')
+        if policy not in ('all', 'endpoints') or (policy == 'endpoints' and views != 6):
+            raise ValueError('Endpoint checkpoints require exactly six views')
+        fov = raw.get('horizontal_fov')
+        if fov is not None and (type(fov) not in (int, float) or not 0 < fov < 180):
+            raise ValueError('Invalid horizontal field of view')
+        result.update(views=views, repair_policy=policy, horizontal_fov=fov)
         renderer = raw.get('renderer', 'viser')
         if renderer != 'viser':
             raise ValueError('Splatfix view selection requires Viser captures; other RGB renderers are disabled')

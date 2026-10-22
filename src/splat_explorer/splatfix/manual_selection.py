@@ -45,6 +45,7 @@ class ManualSelection:
             self.expected = metadata['manual_scene']
             self.width, self.height = metadata['width'], metadata['height']
             self.seva = metadata.get('capture_set') == 'seva'
+            self.horizontal_fov = 54. if self.seva else metadata.get('horizontal_fov')
             self.depth_renderer = None
             self.folder = self.server.gui.add_folder('Custom view finding')
             with self.folder:
@@ -60,11 +61,11 @@ class ManualSelection:
             return {'ok': True}
 
     def apply_fov(self, client):
-        if self.folder is not None and self.seva:
+        if self.folder is not None and (self.seva or self.horizontal_fov):
             aspect = float(getattr(client.camera, 'aspect', 1024 / 576))
             if not np.isfinite(aspect) or aspect <= 0:
                 aspect = 1024 / 576
-            client.camera.fov = float(2 * np.arctan(np.tan(np.radians(54) / 2) / aspect))
+            client.camera.fov = float(2 * np.arctan(np.tan(np.radians(54. if self.seva else self.horizontal_fov) / 2) / aspect))
 
     def save_seva(self, image, camera):
         from .oraclegs.captures import save_capture
@@ -89,7 +90,7 @@ class ManualSelection:
 
     def progress(self):
         cp = self.checkpoint
-        return f'**{len(cp.views)} / {cp.target_views} views saved** · {self.width} × {self.height}' + (' · **54° horizontal FOV**' if self.seva else '')
+        return f'**{len(cp.views)} / {cp.target_views} views saved** · {self.width} × {self.height}' + (f' · **{54 if self.seva else self.horizontal_fov:g}° horizontal FOV**' if self.seva or self.horizontal_fov else '')
 
     def require_scene(self):
         state = self.scene_state
@@ -112,8 +113,8 @@ class ManualSelection:
                 raise ValueError('Requested view selection is already complete')
             self.apply_fov(event.client)
             camera = camera_from_client(event.client, self.width, self.height)
-            if self.seva:
-                camera.fov_deg = 54.
+            if self.seva or self.horizontal_fov:
+                camera.fov_deg = 54. if self.seva else float(self.horizontal_fov)
             if any(np.allclose(camera.c2w, camera_from_record(v).c2w, atol=1e-5)
                    for v in self.checkpoint.views):
                 raise ValueError('This position is already saved. Move to another view.')
@@ -142,6 +143,9 @@ class ManualSelection:
                 return
             if not self.checkpoint.views:
                 self.status.content = self.progress() + '\n\nSave at least one position first.'
+                return
+            if self.checkpoint.endpoint_only and not self.checkpoint.complete:
+                self.status.content = self.progress() + '\n\nEndpoint checkpoints require all six positions.'
                 return
             old_target = self.checkpoint.target_views
             self.checkpoint.manifest['target_views'] = len(self.checkpoint.views)

@@ -44,6 +44,8 @@ class SplatfixStudio(SceneRunStudio):
                 reconstruction_ready = method_readiness[DEFAULT_METHOD]['ready']
                 reconstruction_reason = method_readiness[DEFAULT_METHOD]['reason']
                 result.append({'id': str(cp.root), 'name': self.checkpoint_name(cp.root), 'storage_name': cp.root.name, 'scene': Path(cp.manifest['scene_path']).name,
+                               'repair_target_views': len(cp.repair_views),
+                               'required_edited': sum(bool(v.get('repaired_rgb')) for v in cp.repair_views),
                                'seva_captured': sum(bool(v.get('seva_original_url')) for v in views),
                                'seva_edited': sum(bool(v.get('seva_repaired_url')) for v in views),
                                'rgb_renderer': cp.manifest.get('metadata', {}).get('renderer', {}).get('backend'),
@@ -242,14 +244,18 @@ class SplatfixStudio(SceneRunStudio):
         if scene is None or not scene.get('path'):
             raise ValueError('Choose an available scene')
         capture_set = body.get('capture_set', 'saved')
-        if capture_set not in ('saved', 'seva'):
+        if capture_set not in ('saved', 'seva', '77'):
             raise ValueError('Unknown Custom capture FOV')
+        if options.get('repair_policy') == 'endpoints' and capture_set == 'seva':
+            raise ValueError('Endpoint checkpoints require original or 77° captures')
         width, height = (1024, 576) if capture_set == 'seva' else profile_size(options['resolution_profile'])
         ident, generation = 'splatfix-manual-' + uuid.uuid4().hex, time.time_ns() // 1000000
         spec = SceneSpec(ident, scene['label'], Path(scene['path']),
                          up_axis=scene.get('up_axis', '+y'), lod_level=scene.get('lod_level', 0))
         cp = Checkpoint.create(self.checkpoint_root, spec.path, target_views=options['views'], metadata={
-            'selection': 'manual', 'capture_set': capture_set, 'renderer': {'backend': 'viser'},
+            'selection': 'manual', 'capture_set': capture_set,
+            'repair_policy': options.get('repair_policy', 'all'),
+            'horizontal_fov': 77 if capture_set == '77' else options.get('horizontal_fov'), 'renderer': {'backend': 'viser'},
             'width': width, 'height': height, 'resolution_profile': options['resolution_profile'],
             'up_axis': spec.up_axis,
             'scene_load': {'lod_level': spec.lod_level,
@@ -310,6 +316,10 @@ class SplatfixStudio(SceneRunStudio):
             cp = checkpoints[checkpoint]
             if not cp['complete']:
                 raise ValueError('Finish selecting all views before starting this stage')
+            if cp['metadata'].get('repair_policy') == 'endpoints' and options['stage'] == 'repair':
+                if options['reconstruction_method'] != 'artifixer' or options['mode'] != 'edited':
+                    raise ValueError('Endpoint checkpoints require GPT-repaired ArtiFixer runs')
+                options['split_mode'] = 'no-split'
             seva_set = options.get('oracle_capture_source') == 'seva' or options.get('image_set') == 'seva'
             if seva_set:
                 from ..splatfix.oraclegs.captures import select_checkpoint
@@ -331,7 +341,7 @@ class SplatfixStudio(SceneRunStudio):
                 readiness = cp['reconstruction_methods'][options['reconstruction_method']]
                 if not readiness['ready']:
                     raise ValueError(readiness['reason'])
-            if options['stage'] == 'repair' and options['mode'] == 'edited' and not seva_set and cp['edited'] != cp['target_views']:
+            if options['stage'] == 'repair' and options['mode'] == 'edited' and not seva_set and cp['required_edited'] != cp['repair_target_views']:
                 raise ValueError('Repair all checkpoint images before GPT-image improved reconstruction')
             options['checkpoint'] = checkpoint
             # The saved camera/RGB source determines provenance, irrespective

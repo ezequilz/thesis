@@ -270,3 +270,16 @@ def test_single_split_records_trusted_cache_endpoint(original_orbit_renderer, co
     for segment in provenance['segments']:
         assert segment['cache_seed_full_frame_index'] in provenance['reference_frame_indices']
         assert 'seed_full_frame_index' not in segment  # Off keeps reference-only inference.
+
+
+def test_endpoint_saved_order_with_original_authors_interpolation(original_orbit_renderer):
+    poses = [pose(x) for x in (0., .5, .2, 1., .8, 2.)]
+    result = author_trajectory.build_endpoint_path(poses, K, 1, renderer=original_orbit_renderer)
+    full = [np.asarray(f['transform_matrix']) for f in result['full_trajectory']['frames']]
+    # Nonmonotonic path must follow all six waypoints in selection order.
+    cursor = 0
+    for expected in poses:
+        cursor = next(i for i in range(cursor, len(full)) if np.array_equal(full[i], expected)) + 1
+    assert np.array_equal(full[0], poses[0])
+    assert np.array_equal(full[-1], poses[-1])
+    assert len(result['provenance']['segments']) == 1

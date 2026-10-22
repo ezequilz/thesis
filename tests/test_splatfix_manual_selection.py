@@ -170,3 +170,15 @@ def test_live_seva_fov_respects_viewport_aspect(selection):
     event.client.camera.aspect=1.0
     session.apply_fov(event.client)
     assert np.degrees(event.client.camera.fov)==pytest.approx(54.)
+
+
+def test_77_degree_horizontal_capture(selection):
+    session, event, captures = selection
+    session.horizontal_fov = 77.
+    event.client.camera.aspect = 1.
+    session.save_current(event)
+    cp = Checkpoint.load(session.checkpoint.root)
+    camera = camera_from_record(cp.views[0])
+    assert camera.fov_deg == pytest.approx(77.)
+    assert event.client.camera.fov == pytest.approx(np.radians(77.))
+    assert captures[0]['fov'] == pytest.approx(camera.vertical_fov_rad())

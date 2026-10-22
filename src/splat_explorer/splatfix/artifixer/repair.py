@@ -284,9 +284,16 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
         anchor_indices = []
         for camera in anchors:
             matches = [i for i, pose in enumerate(poses) if np.array_equal(pose, camera.c2w)]
-            if len(matches) != 1:
+            if not matches or (not cp.endpoint_only and len(matches) != 1):
                 raise ValueError('Authored orbit must contain every saved anchor exactly once')
             anchor_indices.append(matches[0])
+    if cp.endpoint_only:
+        if orbit and (not np.array_equal(poses[0], anchors[0].c2w)
+                      or not np.array_equal(poses[-1], anchors[-1].c2w)):
+            raise ValueError('Endpoint trajectory must start and end at the selected endpoint cameras')
+        anchor_indices = [0, len(cameras)-1]
+        anchors = [anchors[0], anchors[-1]]
+    reference_views = cp.repair_views
     source_path = str(Path(scene_path).resolve()) if scene_path else cp.manifest['scene_path']
     segments = [{'start': 0, 'count': len(cameras)}]
     if orbit:
@@ -297,7 +304,7 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
         generated = [i for s in segments for i in s['indices']]
         if sorted(generated) != [i for i in range(len(cameras)) if i not in anchor_indices]:
             raise ValueError('Trajectory legs must cover each non-reference camera exactly once')
-    recipe = {'trajectory_version': 6, 'anchor_rgb_policy': 'viser', 'kind': 'authors_orbit' if orbit else 'scale_anchors',
+    recipe = {'trajectory_version': 7, 'repair_policy': 'endpoints' if cp.endpoint_only else 'all', 'anchor_rgb_policy': 'viser', 'kind': 'authors_orbit' if orbit else 'scale_anchors',
               'views': [{k: v for k, v in view.items() if k in ('id', 'camera', 'original_rgb')} for view in cp.views],
               'source': cp.manifest.get('source_fingerprint', cp.manifest['scene_path']),
               'scene_load': cp.manifest.get('metadata', {}).get('scene_load', {}),
@@ -331,7 +338,7 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
             Image.fromarray(rgb).save(rgb_path)
             if index in lookup:
                 anchor_index = lookup[index]
-                view = cp.views[anchor_index]
+                view = reference_views[anchor_index]
                 depth_path = root / f'anchor-{view["id"]}-depth.npy'
                 np.save(depth_path, np.asarray(depth, dtype=np.float32))
                 anchor_records[anchor_index] = {'view_id': view['id'], 'frame_index': index,
@@ -438,10 +445,14 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         raise ValueError('Finish selecting all requested views before repair')
     if mode == 'edited':
         cp.require_viser_images()
-    if mode == 'edited' and any(not view.get('repaired_rgb') for view in cp.views):
+    if cp.endpoint_only:
+        if mode != 'edited' or trajectory_mode != 'authors_orbit':
+            raise ValueError('Endpoint checkpoints require edited authors-orbit ArtiFixer runs')
+        split_mode = 'no-split'
+    if mode == 'edited' and any(not view.get('repaired_rgb') for view in cp.repair_views):
         raise ValueError('Edited reconstruction requires saved GPT-image repairs; run splatfix edit first')
-    references = [str(cp.image_path(view, repaired=mode == 'edited')) for view in cp.views]
-    for view, path in zip(cp.views, references):
+    references = [str(cp.image_path(view, repaired=mode == 'edited')) for view in cp.repair_views]
+    for view, path in zip(cp.repair_views, references):
         camera = camera_from_record(view)
         with Image.open(path) as image:
             if image.size != (camera.width, camera.height):
@@ -456,12 +467,14 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
             raise ValueError('Saved anchor poses must be distinct for authors smooth orbit')
     cfg = validate_runtime(runtime)
     cfg = {**cfg, 'split_mode': split_mode}
+    if cfg.get('endpoint_reference_mode', 'both') not in ('both', 'initial'):
+        raise ValueError('endpoint_reference_mode must be both or initial')
     from ..resolution import prepare_repair_checkpoint
     root = Path(output_dir).resolve() / f'{mode}_{uuid.uuid4().hex[:12]}'
     root.mkdir(parents=True, exist_ok=False)
     cp = prepare_repair_checkpoint(cp, root / 'checkpoint', cfg['resolution_profile'],
                                    scene_path=cfg.get('scene_path'), should_stop=should_stop, reuse_artifixer_inputs=True)
-    references = [str(cp.image_path(view, repaired=mode == 'edited')) for view in cp.views]
+    references = [str(cp.image_path(view, repaired=mode == 'edited')) for view in cp.repair_views]
     on_progress({'phase': 'anchor_geometry' if trajectory_mode == 'authors_orbit' else 'trajectory'})
     if trajectory_mode == 'authors_orbit':
         trajectory_root, trajectory = prepare_saved_path(cp, should_stop=should_stop, scene_path=cfg.get('scene_path'))
@@ -473,7 +486,8 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         cfg.get('scene_path') or cp.manifest['scene_path'], root / 'initialization.ply'
     ) if cfg.get('reconstruction_initialization', 'full_splat') == 'full_splat' else None
     points = cfg.get('source_points3d') or str(cp.root / trajectory['points3d'])
-    request = {'reconstruction_method': 'artifixer', 'resolution_profile': cfg['resolution_profile'],
+    request = {'repair_policy': 'endpoints' if cp.endpoint_only else 'all',
+               'reconstruction_method': 'artifixer', 'resolution_profile': cfg['resolution_profile'],
                'resolution': cp.manifest.get('metadata', {}).get('resolution'),
                'checkpoint_root': str(cp.root), 'trajectory': str(trajectory_root / 'trajectory.json'),
                'references': references, 'runtime': cfg, 'mode': mode, 'seed': seed,
@@ -521,6 +535,7 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                 atomic_json(root / 'anchor-transforms.json', {**trajectory['transforms'], 'camera_convention': 'opencv_c2w'})
                 atomic_json(root / 'anchor-indices.json', list(range(len(cp.views))))
                 command = [cfg['python'], str(Path(__file__).with_name('author_trajectory.py')),
+                    *(['--endpoint-path'] if cp.endpoint_only else []),
                     '--split-mode', split_mode,
                     '--repo', cfg['repo'], '--transforms', str(root / 'anchor-transforms.json'),
                     '--selected-indices', str(root / 'anchor-indices.json'),

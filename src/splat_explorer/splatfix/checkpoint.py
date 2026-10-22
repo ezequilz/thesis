@@ -117,6 +117,9 @@ class Checkpoint:
     def create(cls, output_root, scene_path, target_views=6, metadata=None):
         if isinstance(target_views, bool) or not isinstance(target_views, int) or target_views < 1:
             raise ValueError('target_views must be a positive integer')
+        policy = (metadata or {}).get('repair_policy', 'all')
+        if policy not in ('all', 'endpoints') or (policy == 'endpoints' and target_views != 6):
+            raise ValueError('Endpoint checkpoints require exactly six views')
         from ..scene.catalog import openable_scene_path
         source = openable_scene_path(Path(scene_path).expanduser()).resolve()
         fingerprint = source_fingerprint(source) if source.exists() else None
@@ -145,6 +148,9 @@ class Checkpoint:
         target = body.get('target_views')
         if isinstance(target, bool) or not isinstance(target, int) or target < 1:
             raise ValueError('Invalid checkpoint target_views')
+        policy = body.get('metadata', {}).get('repair_policy', 'all')
+        if policy not in ('all', 'endpoints') or (policy == 'endpoints' and target != 6):
+            raise ValueError('Endpoint checkpoints require exactly six views')
         checkpoint = cls(manifest_path.parent, body)
         views = body.get('views')
         if not isinstance(views, list) or len(views) > target:
@@ -171,6 +177,14 @@ class Checkpoint:
     @property
     def views(self):
         return self.manifest['views']
+
+    @property
+    def endpoint_only(self):
+        return self.manifest.get('metadata', {}).get('repair_policy', 'all') == 'endpoints'
+
+    @property
+    def repair_views(self):
+        return ([self.views[0], self.views[-1]] if self.endpoint_only and self.views else self.views)
 
     @property
     def target_views(self):

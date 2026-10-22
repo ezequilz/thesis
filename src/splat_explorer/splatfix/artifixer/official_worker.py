@@ -541,6 +541,32 @@ def install_image_cache_insertion(pipe):
     module.install_starter_inference(pipe, generated_cache='clean')
 
 
+def inference_jobs(request, trajectory, *, plus=False):
+    """Explicit output ownership keeps reverse predictions out of reconstruction."""
+    anchors = [a['frame_index'] for a in trajectory['anchors']]
+    if request.get('repair_policy') != 'endpoints':
+        return [(s, list(range(len(anchors))), 'plus' if plus else 'inference')
+                for s in trajectory['segments']]
+    if len(anchors) != 2:
+        raise ValueError('Endpoint inference requires exactly two repaired references')
+    mode = request['runtime'].get('endpoint_reference_mode', 'both')
+    if mode not in ('both', 'initial'):
+        raise ValueError('Invalid endpoint reference mode')
+    indices = list(range(len(trajectory['frames'])))
+    if anchors != [indices[0], indices[-1]]:
+        raise ValueError('Endpoint reference cameras must bound the ordered trajectory')
+    jobs = []
+    for reverse in ([False] if plus else [False, True]):
+        order = [1, 0] if reverse else [0, 1]
+        if mode == 'initial':
+            order = order[:1]
+        jobs.append(({'indices': indices[::-1] if reverse else indices,
+                      'cache_seed_index': anchors[order[0]],
+                      'direction': 'back-to-front' if reverse else 'front-to-back'}, order,
+                     'plus' if plus else 'inference-back-to-front' if reverse else 'inference'))
+    return jobs
+
+
 def inference(root, request, trajectory, plus=False):
     import numpy as np
     import torch
@@ -578,15 +604,26 @@ def inference(root, request, trajectory, plus=False):
     def rgb(path):
         with Image.open(path) as im:
             return torch.from_numpy(np.array(im.convert('RGB'))).permute(2, 0, 1).float() / 255
-    references = torch.stack([rgb(path) for path in request['references']])
-    neighbors = [a['frame_index'] for a in trajectory['anchors']]
+    all_references = torch.stack([rgb(path) for path in request['references']])
+    all_neighbors = [a['frame_index'] for a in trajectory['anchors']]
+    jobs = inference_jobs(request, trajectory, plus=plus)
+    if request.get('repair_policy') == 'endpoints':
+        (root / ('plus-directions.json' if plus else 'inference-directions.json')).write_text(json.dumps([
+            {'direction': s['direction'], 'frame_indices': s['indices'],
+             'reference_paths': [request['references'][i] for i in order],
+             'reference_frame_indices': [all_neighbors[i] for i in order],
+             'output': directory, 'used_for_reconstruction': directory == 'inference'}
+            for s, order, directory in jobs], indent=2))
     render_dir = Path(json.loads((root / 'distillation.json').read_text())['render_dir']) if plus else None
     insertion_audits = []
     with torch.inference_mode():
-        for segment in trajectory['segments']:
+        for segment, reference_order, directory in jobs:
+            output = root / directory
+            references = all_references[reference_order]
+            neighbors = [all_neighbors[i] for i in reference_order]
             indices = (list(segment['indices']) if 'indices' in segment else
                        list(range(segment['start'], segment['start'] + segment['count'])))
-            if request.get('trajectory_mode') == 'authors_orbit':
+            if request.get('trajectory_mode') == 'authors_orbit' and request.get('repair_policy') != 'endpoints':
                 # Match ReconstructedColmapDataset's explicit-trajectory contract:
                 # saved anchors condition inference and supervise fitting directly.
                 indices = [index for index in indices if index not in neighbors]
@@ -603,7 +640,7 @@ def inference(root, request, trajectory, plus=False):
             if seed_index is not None:
                 if seed_index not in neighbors:
                     raise ValueError('Series seed must be a trusted reference camera')
-                indices = [seed_index, *indices]
+                indices = [seed_index, *[i for i in indices if i != seed_index]]
             if plus:
                 renders = torch.stack([rgb(render_dir / 'renders' / f'{i:05d}.png') for i in indices])
                 opacity = torch.stack([torch.from_numpy(np.array(Image.open(render_dir / 'opacity' / f'{i:05d}.png').convert('L'), dtype=np.float32) / 255) for i in indices])
@@ -611,6 +648,8 @@ def inference(root, request, trajectory, plus=False):
                 renders = torch.stack([rgb(cp / trajectory['frames'][i]['rgb']) for i in indices])
                 opacity = torch.stack([torch.from_numpy(np.load(cp / trajectory['frames'][i]['opacity'], allow_pickle=False)) for i in indices])
             valid = torch.ones(len(indices), dtype=torch.bool)
+            if request.get('repair_policy') == 'endpoints':
+                valid = torch.tensor([i not in all_neighbors for i in indices], dtype=torch.bool)
             if seed_index is not None:
                 # References are the run-local, resolution-prepared GPT images.
                 # Upstream denoise_to_latents applies VAE preprocessing/scaling;
@@ -633,11 +672,11 @@ def inference(root, request, trajectory, plus=False):
                 audit = pipe.starter_inference_audit
                 if not audit or not audit.get('encoded_starter_preserved'):
                     raise RuntimeError('Image cache insertion was requested but starter preservation was not verified')
-                reference = request['references'][neighbors.index(seed_index)]
-                record = {**audit, 'seed_global_index': seed_index,
+                reference = request['references'][reference_order[neighbors.index(seed_index)]]
+                record = {**audit, 'output': directory, 'seed_global_index': seed_index,
                           'reference_path': reference, 'reference_sha256': caption_digest(Path(reference)),
                           'generation_global_indices': indices,
-                          'export_global_indices': indices[1:],
+                          'export_global_indices': [i for i, keep in zip(indices, valid.tolist()) if keep],
                           'starter_exported': False}
                 insertion_audits.append(record)
                 (root / ('plus-insertion-audit.json' if plus else 'inference-insertion-audit.json')).write_text(
@@ -645,7 +684,11 @@ def inference(root, request, trajectory, plus=False):
                 print('SPLATFIX_STARTER_VERIFIED: ' + json.dumps(record), flush=True)
     if plus:
         result = json.loads((root / 'distillation.json').read_text())
-        result.update(reconstruction_method='artifixer', plus_frames=str(output / 'splatfix/frames/batch_0000/pred'),
+        result.update(repair_policy=request.get('repair_policy', 'all'),
+                      endpoint_reference_mode=cfg.get('endpoint_reference_mode', 'both'),
+                      reverse_inference_frames=(str(root / 'inference-back-to-front/splatfix/frames/batch_0000/pred')
+                                                if request.get('repair_policy') == 'endpoints' else None),
+                      reconstruction_method='artifixer', plus_frames=str(output / 'splatfix/frames/batch_0000/pred'),
                       rgb_renderer=request.get('anchor_rgb_policy'),
                       plus_rgb_renderer=request.get('plus_rgb_renderer'),
                       mode=request['mode'], upstream_revision=request['upstream_revision'],

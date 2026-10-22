@@ -19,6 +19,10 @@ def validate_options(raw):
             raise ValueError('benchmark_runs must be a positive integer')
         result['benchmark_runs'] = runs
     if raw['stage'] == 'repair':
+        reference_mode = raw.get('endpoint_reference_mode', 'both')
+        if reference_mode not in ('both', 'initial'):
+            raise ValueError('endpoint_reference_mode must be both or initial')
+        result['endpoint_reference_mode'] = reference_mode
         frames = raw.get('frames', 25)
         if type(frames) is not int or frames < 9 or frames > 101 or (frames - 1) % 4:
             raise ValueError('frames must be 1 + 4*n, between 9 and 101')

@@ -79,9 +79,11 @@ def execute_remote(executor, run_id, options, root, stop, update):
     from ...scene_runs.lrz_transport import LrzSceneRunTransport
     benchmark = options['stage'] == 'benchmark'
     cp = None if benchmark else Checkpoint.load(options['checkpoint'])
+    if cp is not None and cp.endpoint_only and options['mode'] != 'edited':
+        raise ValueError('Endpoint checkpoints require GPT-repaired references')
     if cp is not None and options['mode'] == 'edited':
         cp.require_viser_images()
-    if cp is not None and (not cp.complete or (options['mode'] == 'edited' and any(not v.get('repaired_rgb') for v in cp.views))):
+    if cp is not None and (not cp.complete or (options['mode'] == 'edited' and any(not v.get('repaired_rgb') for v in cp.repair_views))):
         raise ValueError('Checkpoint is not ready for the requested reconstruction mode')
     cfg = lrz.load_lrz_config()
     saved = executor.store.get_run(run_id).state.details
@@ -114,7 +116,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
         runtime = {**DEFAULT_RUNTIME, **dict(executor.cfg.get('splatfix', {}).get('runtime', {}))}
         runtime['resolution_profile'] = options['resolution_profile']
         runtime['regularization_profile'] = options.get('regularization_profile', 'artifixer')
-        runtime['split_mode'] = options.get('split_mode', 'double-split')
+        runtime['split_mode'] = 'no-split' if cp is not None and cp.endpoint_only else options.get('split_mode', 'double-split')
+        runtime['endpoint_reference_mode'] = options.get('endpoint_reference_mode', 'both')
         if not benchmark:
             from .official_worker import validate_reconstruction_options
             runtime.update(validate_reconstruction_options(options))

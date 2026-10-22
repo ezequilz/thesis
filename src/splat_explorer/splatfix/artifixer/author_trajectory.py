@@ -8,12 +8,12 @@ from __future__ import annotations
 import math
 
 
-SPLIT_MODES = ('single-split', 'double-split')
+SPLIT_MODES = ('single-split', 'double-split', 'no-split')
 
 
 def validate_split_mode(value):
     if value not in SPLIT_MODES:
-        raise ValueError('split_mode must be single-split or double-split')
+        raise ValueError('split_mode must be single-split, double-split or no-split')
     return value
 
 
@@ -215,6 +215,10 @@ def build_author_orbit(reference_poses, intrinsics, metric_scale, *, target_pose
     if not frames:
         raise ValueError('Authors interpolation produced no non-reference targets; use smaller spacing')
     segments = [s for s in segments if s['target_indices']]
+    if split_mode == 'no-split':
+        segments = [{'target_indices': list(range(len(frames))),
+                     'full_frame_indices': [m['full_frame_index'] for m in mapping],
+                     'cache_seed_full_frame_index': full_lookup[key(references[0])]}]
     if split_mode == 'single-split':
         for segment in segments:
             seed_key = key(interpolated[segment['author_start']])
@@ -286,12 +290,48 @@ def build_author_orbit(reference_poses, intrinsics, metric_scale, *, target_pose
             'unique_input_nodes': len(nodes), 'author_frame_count': len(interpolated),
             'target_frame_count': len(frames), 'frames': mapping, 'removed_frames': removed,
             'split_mode': split_mode,
-            'series_policy': ('independent_original_waypoint_legs_v1' if split_mode == 'single-split'
+            'series_policy': ('continuous_full_path_v1' if split_mode == 'no-split' else 'independent_original_waypoint_legs_v1' if split_mode == 'single-split'
                               else 'reference_anchored_bidirectional_halves_v1'),
             'segments': segments,
             'motion_diagnostics': motion,
         },
     }
+
+
+def build_endpoint_path(poses, intrinsics, metric_scale, *, spacing=.1, renderer=None):
+    """Interpolate consecutive saved cameras with the authors' helper, in saved order.
+
+    Pairwise helper sorting may reverse a leg; orient each result back to the
+    selected order before concatenating. Only the two endpoint cameras are GT.
+    """
+    import numpy as np
+    if len(poses) != 6:
+        raise ValueError('Endpoint trajectories require six saved poses')
+    full = []
+    for first, last in zip(poses, poses[1:]):
+        leg = build_author_orbit([first, last], intrinsics, metric_scale,
+                                spacing=spacing, renderer=renderer, split_mode='single-split')
+        frames = leg['full_trajectory']['frames']
+        if np.array_equal(frames[-1]['transform_matrix'], first):
+            frames = frames[::-1]
+        if (not np.array_equal(frames[0]['transform_matrix'], first)
+                or not np.array_equal(frames[-1]['transform_matrix'], last)):
+            raise ValueError('Authors interpolation omitted an endpoint')
+        full.extend(frames if not full else frames[1:])
+    for i, frame in enumerate(full):
+        frame['file_path'] = f'orbit_full/{i:05d}.png'
+    camera = {k: v for k, v in leg['full_trajectory'].items() if k != 'frames'}
+    targets = list(range(1, len(full)-1))
+    return {'full_trajectory': {**camera, 'frames': full},
+            'trajectory': {**camera, 'frames': [full[i] for i in targets]},
+            'provenance': {'split_mode': 'no-split', 'repair_policy': 'endpoints',
+                'implementation': 'threedgrut.render.Renderer.interpolate_orbit_poses',
+                'series_policy': 'saved_order_endpoint_bidirectional_v1',
+                'reference_frame_indices': [0, len(full)-1],
+                'frames': [{'target_index': j, 'full_frame_index': i, 'requested_target_indices': []}
+                           for j, i in enumerate(targets)],
+                'segments': [{'full_frame_indices': targets, 'target_indices': list(range(len(targets))),
+                              'cache_seed_full_frame_index': 0}]}}
 
 
 def main(argv=None):
@@ -311,6 +351,7 @@ def main(argv=None):
     parser.add_argument('--interp-distance', type=float, default=0.1)
     parser.add_argument('--split-mode', choices=SPLIT_MODES, default='double-split')
     parser.add_argument('--loop', action='store_true')
+    parser.add_argument('--endpoint-path', action='store_true')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--provenance', type=Path, required=True)
     parser.add_argument('--full-output', type=Path)
@@ -351,8 +392,9 @@ def main(argv=None):
     targets = [np.asarray(frames[index]['transform_matrix']) @ conversion for index in target_indices]
     sys.path.insert(0, str(args.repo / 'thirdparty' / '3DGRUT-ArtiFixer'))
     sys.path.insert(0, str(args.repo))
-    result = build_author_orbit(references, intrinsics, args.metric_scale, target_poses=targets,
-                                loop=args.loop, spacing=args.interp_distance, split_mode=args.split_mode)
+    result = (build_endpoint_path(references, intrinsics, args.metric_scale, spacing=args.interp_distance)
+              if args.endpoint_path else build_author_orbit(references, intrinsics, args.metric_scale, target_poses=targets,
+                                loop=args.loop, spacing=args.interp_distance, split_mode=args.split_mode))
     name_to_index = {}
     for mapping in result['provenance']['frames']:
         requested = mapping['requested_target_indices']
