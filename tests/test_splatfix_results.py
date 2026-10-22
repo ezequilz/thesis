@@ -986,7 +986,7 @@ const html=fs.readFileSync(process.argv[1],'utf8');
 const elements={};const get=id=>elements[id]??={value:'',checked:false,setAttribute(){}};
 let confirmed=false,calls=0,backup=false,preserve=false;
 const context=vm.createContext({document:{getElementById:get,hidden:true},setInterval(){},
- window:{confirm:message=>{assert.match(message,preserve?/six repaired references/:/Remove all other images, poses/);if(preserve)assert.doesNotMatch(message,/Training cannot be resumed/);return confirmed}},
+ window:{confirm:message=>{assert.match(message,preserve?/repaired references \(two endpoints or six views\)/:/Remove all other images, poses/);if(preserve)assert.doesNotMatch(message,/Training cannot be resumed/);return confirmed}},
  fetch:async(url,options)=>{if(!options)return new Promise(()=>{});calls++;assert.equal(url,'/api/splatfix/results/reduce');assert.deepEqual(JSON.parse(options.body),{run_id:'test',backup,...(preserve?{preserve_reconstruction:true}:{})});return{ok:true,json:async()=>({output_size_bytes:1024,reduction_saved_bytes:12992276070,backup_path:backup?'/history/test':null})}}});
 vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
 const load=()=>vm.runInContext("rows=[{run_id:'test',kind:'ArtiFixer3D',mode:'edited',can_reduce:true,can_archive:true,metrics:{}}];render()",context);

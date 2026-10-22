@@ -155,7 +155,7 @@ def _add_stages(parser):
     select.add_argument("--horizontal-fov", type=float)
     edit = stages.add_parser("edit", help="Create missing GPT-image repairs in an existing checkpoint")
     edit.add_argument("checkpoint", type=Path)
-    edit.add_argument("--image-set", choices=("saved", "seva"), default="saved")
+    edit.add_argument("--image-set", choices=("saved", "seva", "77"), default="saved")
     edit.set_defaults(func=edit_views)
     capture = stages.add_parser("seva-capture", help="Capture reusable SEVA RGB and depth at saved poses")
     capture.add_argument("checkpoint", type=Path)

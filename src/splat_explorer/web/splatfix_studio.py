@@ -324,6 +324,8 @@ class SplatfixStudio(SceneRunStudio):
                 if options['reconstruction_method'] != 'artifixer' or options['mode'] != 'edited':
                     raise ValueError('Endpoint checkpoints require GPT-repaired ArtiFixer runs')
                 options['split_mode'] = 'no-split'
+            if options['stage'] == 'edit' and options.get('image_set') == '77':
+                Checkpoint.load(checkpoint).require_horizontal_fov(77)
             seva_set = options.get('oracle_capture_source') == 'seva' or options.get('image_set') == 'seva'
             if seva_set:
                 from ..splatfix.oraclegs.captures import select_checkpoint

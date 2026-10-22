@@ -197,6 +197,11 @@ class Checkpoint:
     def save(self):
         atomic_json(self.root / 'checkpoint.json', self.manifest)
 
+    def require_horizontal_fov(self, degrees):
+        if not self.views or any(not np.isclose(camera_from_record(v).fov_deg, degrees, atol=.001, rtol=0)
+                                 or not v.get('original_rgb') for v in self.views):
+            raise ValueError(f'This checkpoint has no complete {degrees:g}° capture set; select matching saved captures')
+
     def require_viser_images(self):
         """Reject legacy proxy images before editing or reusing edited anchors."""
         backend = self.manifest.get('metadata', {}).get('renderer', {}).get('backend')

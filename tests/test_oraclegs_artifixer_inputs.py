@@ -290,3 +290,77 @@ def test_reduce_reconstruction_rejects_missing_references_without_pruning(tmp_pa
         studio.results.reduce_run(run.name, preserve_reconstruction=True)
     assert all(p.read_bytes() == content for p, content in before.items())
     assert not (run / 'reduction.json').exists()
+
+
+@pytest.mark.parametrize('backup', [False, True])
+@pytest.mark.parametrize('preserve_reconstruction', [False, True])
+def test_endpoint_reduce_preserves_both_inference_folders(tmp_path, backup, preserve_reconstruction):
+    import shutil
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
+        pytest.skip('ffmpeg/ffprobe required')
+    from test_splatfix_results import setup
+    studio, run, _ = setup(tmp_path)
+    _, row = fixture(run / 'gpu/results')
+    row['run_id'] = run.name
+    studio.results.entries = lambda **kwargs: [row]
+    studio.store.set_status(run.name, 'completed')
+    result = row['_manifest'].parent
+    trajectory = json.loads((result / 'preview-trajectory.json').read_text())
+    trajectory['anchors'] = [{'view_id': 'start', 'frame_index': 0},
+                             {'view_id': 'end', 'frame_index': 7}]
+    trajectory['recipe'] = {'repair_policy': 'endpoints'}
+    atomic_json(result / 'preview-trajectory.json', trajectory)
+    refs = json.loads((result / 'input-preview.json').read_text())['reference_images'][:2]
+    atomic_json(result / 'input-preview.json', {'reference_images': refs})
+    for index in range(2, 6):
+        (result / f'ref{index}.png').unlink()
+    shutil.rmtree(result / 'pred')
+    for directory, color in [('inference', 30), ('inference-back-to-front', 150)]:
+        folder = result / directory / 'splatfix/frames/batch_0000/pred'
+        folder.mkdir(parents=True)
+        for index in range(1, 7):
+            Image.new('RGB', (16, 8), (color, index, 0)).save(folder / f'{index:05d}.png')
+    atomic_json(result / 'inference-preview.json', {
+        'prediction_frames': 'inference/splatfix/frames/batch_0000/pred',
+        'reconstruction_inputs': list(range(1, 7)), 'reference_count': 2})
+    directions = [
+        {'direction': 'front-to-back', 'frame_indices': list(range(8)),
+         'reference_frame_indices': [0, 7], 'output': 'inference', 'used_for_reconstruction': True},
+        {'direction': 'back-to-front', 'frame_indices': list(reversed(range(8))),
+         'reference_frame_indices': [7, 0], 'output': 'inference-back-to-front', 'used_for_reconstruction': False}]
+    atomic_json(result / 'inference-directions.json', directions)
+    atomic_json(result / 'inference-insertion-audit.json', {'series': [
+        {'output': item['output'], 'export_global_indices': item['frame_indices'][1:-1]}
+        for item in directions]})
+    (result / 'checkpoint.pt').write_bytes(b'weights')
+    (result / 'raw-capture.png').write_bytes(b'input')
+    predictions = {p: p.read_bytes() for p in result.glob('**/pred/*.png')}
+    report = studio.results.reduce_run(run.name, backup=backup,
+                                      preserve_reconstruction=preserve_reconstruction)
+    assert len(report['inference_videos']) == 2
+    assert all(video['frame_count'] == 6 for video in report['inference_videos'])
+    assert all(path.read_bytes() == content for path, content in predictions.items())
+    assert not (result / 'checkpoint.pt').exists()
+    assert not (result / 'raw-capture.png').exists()
+    if backup:
+        saved = Path(report['backup_path']) / result.relative_to(run)
+        assert (saved / 'checkpoint.pt').exists()
+        assert len(list(saved.glob('**/pred/*.png'))) == 12
+    if preserve_reconstruction:
+        assert json.loads((result / 'preview-trajectory.json').read_text()) == trajectory
+        assert json.loads((result / 'inference-directions.json').read_text()) == directions
+        assert (result / 'inference-insertion-audit.json').is_file()
+        for initialization in ('sfm', 'source_splat', 'point_cloud'):
+            destination = tmp_path / initialization
+            manifest = export_inputs(studio, row, destination, initialization)
+            validate_assets(destination, manifest)
+            assert len(manifest['views']) == 2
+            assert manifest['artifixer_source']['generated_count'] == 6
+            frames = json.loads((destination / 'scene/transforms.json').read_text())['frames']
+            assert [frame['transform_matrix'][0][3] for frame in frames] == [0, 7, 1, 2, 3, 4, 5, 6]
+            assert [target['reference_index'] for target in manifest['trajectory']['frames']] == [0, 0, 0, 1, 1, 1]
+            # Keep the existing forward-only reconstruction contract; never merge reverse RGBs.
+            assert Image.open(destination / 'scene/images/target_000003.png').getpixel((0, 0)) == (30, 3, 0)
+    else:
+        assert not (result / 'preview-trajectory.json').exists()
+        assert not (result / 'inference-directions.json').exists()

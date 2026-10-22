@@ -20,17 +20,21 @@ def source_assets(studio, row):
     def data(raw):
         path = local(raw)
         return read_json(path, {}) if path else {}
+    request = data('request.json')
     trajectory = data('preview-trajectory.json')
     if not trajectory:
-        trajectory = data(data('request.json').get('trajectory'))
+        trajectory = data(request.get('trajectory'))
     if trajectory.get('camera_convention') != 'opencv_c2w':
         raise ValueError('Saved ArtiFixer camera trajectory is unavailable')
     anchors = trajectory.get('anchors', [])
     refs = data('input-preview.json').get('reference_images', [])
-    if len(anchors) != 6 or len(refs) != 6:
-        raise ValueError('Requires all six saved GPT repaired reference images')
+    endpoint = (result.get('repair_policy') or request.get('repair_policy')
+                or trajectory.get('recipe', {}).get('repair_policy')) == 'endpoints'
+    reference_count = 2 if endpoint else 6
+    if len(anchors) != reference_count or len(refs) != reference_count:
+        raise ValueError(f'Requires all {reference_count} saved GPT repaired reference images')
     refs = sorted(refs, key=lambda item: item['index'])
-    if [item['index'] for item in refs] != list(range(6)):
+    if [item['index'] for item in refs] != list(range(reference_count)):
         raise ValueError('Reference image mapping is invalid')
     references = [local(item['path']) for item in refs]
     if any(p is None or not p.is_file() for p in references):
@@ -40,6 +44,8 @@ def source_assets(studio, row):
     if prediction is None:
         raise ValueError('ArtiFixer inference images are unavailable')
     cameras = trajectory['transforms']['frames']
+    if endpoint and [a['frame_index'] for a in anchors] != [0, len(cameras) - 1]:
+        raise ValueError('Endpoint reference cameras must bound the saved trajectory')
     predictions = {int(p.stem): p for p in prediction.glob('*.png') if p.stem.isdigit() and p.resolve().is_relative_to(manifest.parent.resolve())}
     expected = preview.get('reconstruction_inputs')
     if not isinstance(expected, list) or not expected:
@@ -85,7 +91,7 @@ def export_inputs(studio, row, destination, initialization, *, oracle_attention_
     for index, source in sorted(predictions.items()):
         name = f'target_{index:06d}.png'
         frames.append(stage(source, index, name))
-        reference = min(range(6), key=lambda i: np.linalg.norm(np.asarray(frames[i]['transform_matrix'])[:3,3]-np.asarray(frames[-1]['transform_matrix'])[:3,3]))
+        reference = min(range(len(references)), key=lambda i: np.linalg.norm(np.asarray(frames[i]['transform_matrix'])[:3,3]-np.asarray(frames[-1]['transform_matrix'])[:3,3]))
         targets.append({'target_index':index, 'image_name':name, 'reference_index':reference,
                         'segment_index':reference, 'alpha':0.0, 'source_sha256':digest(source)})
     manifest = {**options, 'mode':'edited', 'views':views, 'resolution':list(size),

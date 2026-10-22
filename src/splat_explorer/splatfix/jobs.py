@@ -85,8 +85,8 @@ def validate_job(raw):
         result['view_id'] = view_id
     if stage == 'edit':
         image_set = raw.get('image_set', 'saved')
-        if image_set not in ('saved', 'seva'):
-            raise ValueError('image_set must be saved or seva')
+        if image_set not in ('saved', 'seva', '77'):
+            raise ValueError('image_set must be saved, seva or 77')
         result['image_set'] = image_set
     if stage == 'repair':
         mode = raw.get('mode', 'edited')

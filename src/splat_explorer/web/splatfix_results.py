@@ -136,7 +136,7 @@ class ResultCatalog:
                 copies.append((native, native))
             preview = read_json(manifest.parent / 'inference-preview.json', {})
             predictions = [self.studio.result_artifact(manifest, result.get(key) or preview.get(key))
-                           for key in ('prediction_frames', 'plus_frames')]
+                           for key in ('prediction_frames', 'reverse_inference_frames', 'plus_frames')]
             plan = {'root': manifest.parent, 'ply_copies': copies,
                     'prediction_dirs': [p for p in predictions if p and p.is_dir()]}
             if preserve_reconstruction:
@@ -147,6 +147,11 @@ class ResultCatalog:
                 # Preserve any additional saved input/output camera exports too.
                 for pattern in ('*trajectory*.json', '*transforms*.json', '*poses*.json', '*cameras*.json'):
                     plan['reconstruction_files'].extend(manifest.parent.rglob(pattern))
+                for name in ('inference-directions.json', 'plus-directions.json',
+                             'inference-insertion-audit.json', 'plus-insertion-audit.json'):
+                    path = manifest.parent / name
+                    if path.is_file():
+                        plan['reconstruction_files'].append(path)
             plans.append(plan)
         return plans
 

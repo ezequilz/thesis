@@ -31,7 +31,9 @@ def repair_images(checkpoint, *, backend=None, cfg=None, prompt=DEFAULT_PROMPT, 
         checkpoint = Checkpoint.load(checkpoint)
     if not checkpoint.complete:
         raise ValueError('Finish selecting all requested views before image repair')
-    if checkpoint.endpoint_only and image_set != 'saved':
+    if image_set == '77':
+        checkpoint.require_horizontal_fov(77)
+    if checkpoint.endpoint_only and image_set not in ('saved', '77'):
         raise ValueError('Endpoint checkpoints use their saved RGB captures')
     if image_set == 'seva':
         from .oraclegs.captures import validate_capture
@@ -42,7 +44,7 @@ def repair_images(checkpoint, *, backend=None, cfg=None, prompt=DEFAULT_PROMPT, 
         # Nested records remain owned by the original checkpoint for saving.
         for original, view in zip(selected, views):
             view['id'] = original['id']
-    elif image_set == 'saved':
+    elif image_set in ('saved', '77'):
         checkpoint.require_viser_images()
         views = checkpoint.repair_views
     else:

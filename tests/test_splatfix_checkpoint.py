@@ -238,3 +238,25 @@ def test_directory_fingerprint_covers_nested_assets_and_ignores_mount_path(tmp_p
     assert source_fingerprint(copied) != fingerprint
     (root / 'chunk' / 'means.webp').rename(root / 'chunk' / 'renamed.webp')
     assert source_fingerprint(root) != fingerprint
+
+
+@pytest.mark.parametrize('endpoints,expected_calls', [(False, 4), (True, 2)])
+def test_77_capture_repairs_use_saved_images_and_skip_existing(tmp_path, endpoints, expected_calls):
+    from dataclasses import replace
+    from splat_explorer.splatfix.checkpoint import camera_to_record
+    from splat_explorer.splatfix.jobs import validate_job
+    cp = make_checkpoint(tmp_path, 4)
+    backend = Backend()
+    with pytest.raises(ValueError, match='77° capture set'):
+        repair_images(cp, backend=backend, image_set='77')
+    assert not backend.calls
+    for view in cp.views:
+        view['camera'] = camera_to_record(replace(camera_from_record(view), fov_deg=77))
+    cp.manifest['metadata']['repair_policy'] = 'endpoints' if endpoints else 'all'
+    cp.save()
+    options = validate_job({'stage': 'edit', 'checkpoint': str(cp.root), 'image_set': '77'})
+    repair_images(cp, backend=backend, image_set=options['image_set'])
+    assert len(backend.calls) == expected_calls
+    assert all(v['image_repair']['image_set'] == '77' for v in cp.repair_views)
+    repair_images(cp, backend=backend, image_set='77')
+    assert len(backend.calls) == expected_calls
