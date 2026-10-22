@@ -259,7 +259,8 @@ not `R`, the GPU page still loads login-node data (availability, reserved
 jobs, past allocations, estimated start times). Connected GPU / current repair stay
 empty until a row is `ST=R`. Reserve a new hold (or **Use** an already-running
 row), then **Load GPU setup**. **Cancel** on a reserved row runs one `scancel`;
-a running (`ST=R`) job asks **cancel?** in red before it fires.
+a running (`ST=R`) job requires confirmation in a browser dialog before it fires.
+Pending (`ST=PD`) jobs cancel directly.
 
 ## Qwen RGB edit on the same GPU
 

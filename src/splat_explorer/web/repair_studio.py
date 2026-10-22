@@ -178,9 +178,19 @@ class RepairStudio:
             logger.exception("Could not inspect scene-run GPU lease")
             return None
 
-    def _require_gpu_available(self, operation: str) -> None:
+    def _require_gpu_available(self, operation: str, *, job_id: str | None = None) -> None:
         owner = self._scene_run_gpu_owner()
         if owner:
+            if job_id is not None:
+                from ..repair_lrz import load_lrz_config
+
+                # Older setup leases have no allocation metadata. Switching jobs
+                # is blocked while leased, so the selected allocation owns those.
+                owned_job = str(owner.get("job_id") or "").strip()
+                if not owned_job:
+                    owned_job = str(load_lrz_config().get("job_id") or "").strip()
+                if owned_job and owned_job != str(job_id).strip():
+                    return
             run_id = owner.get("run_id") or "an active scene-run"
             raise RuntimeError(
                 f"GPU is reserved by {run_id}; stop that scene-run before {operation}."
@@ -334,7 +344,7 @@ class RepairStudio:
     def gpu_cancel_job(self, job_id: str, *, confirm: bool = False) -> dict:
         from ..repair_lrz import cancel_lrz_job
 
-        self._require_gpu_available("cancelling the LRZ allocation")
+        self._require_gpu_available("cancelling the LRZ allocation", job_id=job_id)
         result = cancel_lrz_job(job_id, confirm=confirm)
         snap = self.gpu_snapshot(probe=True, force=True)
         snap["ok"] = True
@@ -352,7 +362,7 @@ class RepairStudio:
         artifixer_model: str = "1.3b",
     ) -> dict:
         from ..image_edit import resolve_qwen_required
-        from ..repair_lrz import request_lrz_setup
+        from ..repair_lrz import load_lrz_config, request_lrz_setup
 
         self._require_gpu_available("reloading GPU setup")
         from ..scene_runs_ext.config import validate_model_variant
@@ -363,7 +373,9 @@ class RepairStudio:
             raise ValueError("ARTIFIXER_required must be a boolean")
         if artifixer_required and needed:
             raise ValueError("ArtiFixer mode uses CliRelay; disable QWEN_required")
-        lease = SceneRunStore(Path(self.app.cfg.output.dir) / "scene-runs").acquire_setup_lease()
+        lease = SceneRunStore(Path(self.app.cfg.output.dir) / "scene-runs").acquire_setup_lease(
+            job_id=load_lrz_config().get("job_id"),
+        )
         if lease is None:
             raise RuntimeError("GPU is owned by a scene-run or another setup; stop it before reloading")
         try:

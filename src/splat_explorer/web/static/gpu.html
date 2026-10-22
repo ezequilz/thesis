@@ -148,11 +148,6 @@
   .tiny { padding: 4px 9px; font-size: 11px; }
   td.acts { white-space: nowrap; }
   td.acts button { margin-left: 6px; }
-  .tiny.cancel-confirm {
-    background: var(--err) !important;
-    color: #1a0808;
-    border-color: var(--err) !important;
-  }
   .occ { display: flex; flex-direction: column; gap: 8px; }
   .occ-row {
     display: grid; grid-template-columns: minmax(120px, 170px) 1fr minmax(140px, 190px);
@@ -325,8 +320,6 @@ let autoTimer = null;
 let inflight = null;
 let reviewedOnce = false;
 let autoMs = AUTO_MS;
-let cancelArmed = null;
-let cancelArmedTimer = null;
 let loadProbeTimer = null;
 let occupancyBusy = false;
 let setupLogPin = null;
@@ -795,12 +788,9 @@ function renderJobs() {
       const reason = j.reason && j.state !== "R" ? ` ${j.reason}` : "";
       const start = j.state === "R" ? (j.start_time ? fmtStart(j.start_time) : "running") : fmtStart(j.start_time);
       const running = j.state === "R";
-      const armed = running && cancelArmed === j.job_id;
       const use = on
         ? `<span>using</span>`
         : `<button type="button" class="ghost tiny" data-use="${esc(j.job_id)}">use</button>`;
-      const cancelCls = armed ? "ghost tiny cancel-confirm" : "ghost tiny";
-      const cancelLabel = armed ? "cancel?" : "cancel";
       return `<tr class="${on ? "current" : ""}">
         <td>${esc(j.job_id)}</td>
         <td>${esc(j.name || "–")}</td>
@@ -809,7 +799,7 @@ function renderJobs() {
         <td>${esc(j.elapsed || "–")} / ${esc(j.timelimit || "–")}</td>
         <td>${esc(start)}</td>
         <td>${esc(j.node || "–")}</td>
-        <td class="acts">${use}<button type="button" class="${cancelCls}" data-cancel="${esc(j.job_id)}" data-running="${running ? "1" : "0"}">${cancelLabel}</button></td>
+        <td class="acts">${use}<button type="button" class="ghost tiny" data-cancel="${esc(j.job_id)}" data-running="${running ? "1" : "0"}">cancel</button></td>
       </tr>`;
     }).join("")}</tbody>
   </table>
@@ -1337,16 +1327,6 @@ function startAuto() {
   }, autoMs);
 }
 
-function armCancel(jobId) {
-  clearCancelArmed();
-  cancelArmed = jobId;
-  cancelArmedTimer = setTimeout(() => {
-    cancelArmed = null;
-    cancelArmedTimer = null;
-    if (snap) renderJobs();
-  }, 8000);
-}
-
 function syncAutoInterval() {
   const want = (snap?.setup?.inflight || snap?.probing || snap?.reviewing) ? 2000 : AUTO_MS;
   if (want === autoMs && autoTimer) return;
@@ -1576,19 +1556,16 @@ $("jobs").onclick = async (ev) => {
     return;
   }
   const btn = ev.target.closest("[data-cancel]");
-  if (!btn) return;
+  if (!btn || btn.disabled) return;
   const jobId = btn.dataset.cancel;
   const running = btn.dataset.running === "1";
-  if (running && cancelArmed !== jobId) {
-    armCancel(jobId);
-    renderJobs();
-    return;
-  }
+  if (running && !window.confirm(
+    `Cancel running GPU job ${jobId} (R)? This will stop the job and release its GPU reservation.`
+  )) return;
   btn.disabled = true;
   try {
     snap = await postJson("/api/repair/gpu/cancel", { job_id: jobId, confirm: running });
     lastRemoteAt = Date.now();
-    clearCancelArmed();
     setNote("info", snap.message || `Cancelled job ${jobId}.`);
     render();
   } catch (err) {

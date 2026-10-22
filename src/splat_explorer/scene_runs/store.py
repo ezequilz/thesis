@@ -457,10 +457,12 @@ class SceneRunStore:
         self.get_run(run_id)
         return self._acquire_gpu_lease(run_id, metadata=metadata)
 
-    def acquire_setup_lease(self):
+    def acquire_setup_lease(self, *, job_id: str | None = None):
         """Use the same atomic lock as both scene-run pipelines during setup."""
         self._ensure_root()
-        return self._acquire_gpu_lease("gpu-setup", metadata={"kind": "setup"})
+        return self._acquire_gpu_lease(
+            "gpu-setup", metadata={"kind": "setup", "job_id": str(job_id or "").strip()},
+        )
 
     def _acquire_gpu_lease(self, run_id, *, metadata=None):
         lease_path = self.gpu_lease_path

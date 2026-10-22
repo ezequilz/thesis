@@ -3183,7 +3183,7 @@ def cancel_lrz_job(job_id: str, *, confirm: bool = False, cfg: dict | None = Non
     row = next((j for j in jobs if str(j.get("job_id")) == job), None)
     if row and slurm_job_is_running(row) and not confirm:
         raise RuntimeError(
-            f"Job {job} is running (ST=R). Click cancel? to confirm scancel."
+            f"Job {job} is running (ST=R). Confirm cancellation in the browser before cancelling this job."
         )
     result = _ssh_run(cfg, command, timeout=PROBE_TIMEOUT_S)
     output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()

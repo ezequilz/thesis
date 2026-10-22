@@ -1036,7 +1036,7 @@ def test_cancel_running_job_requires_confirm(monkeypatch, tmp_path):
             "slurm": {"job_id": "5778400", "state": "R"},
         }
         _PROBE["at"] = time.time()
-    with pytest.raises(RuntimeError, match="cancel\\?"):
+    with pytest.raises(RuntimeError, match="Confirm cancellation"):
         cancel_lrz_job("5778400")
     called = []
 
