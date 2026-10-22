@@ -22,13 +22,15 @@ from PIL import Image
 from ..checkpoint import Checkpoint, atomic_json, camera_from_record
 from ..viser_capture import capture_rgb
 from .capture import capture_plus_rgb
-from .official_worker import ARTIFIXER3D_CONFIG, ARTIFIXER3D_STEPS, reconstruction_recipe, validate_regularization
+from .official_worker import ARTIFIXER3D_CONFIG, ARTIFIXER3D_STEPS, reconstruction_recipe, validate_regularization, generated_loss_options
 
 UPSTREAM_REVISION = 'a392c4dfe17459ef9952407accdb9fcdcdddba98'
 DEFAULT_RUNTIME = {
-    'artifixer_pipeline': 'authors_3dgut',
+    'artifixer_pipeline': 'legacy_gsplat',
     'resolution_profile': '720p',
     'regularization_profile': 'artifixer',
+    'generated_rgb_loss': False,
+    'generated_lpips_downscale': True,
     'prompt_source': 'worldexplorer',
     'reconstruction_initialization': 'point_cloud',
     'reconstruction_images': 'distilled',
@@ -533,7 +535,7 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                'source_points3d': str(Path(points).resolve()),
                'initialization': 'source_colmap_points' if cfg.get('source_points3d') else 'original_splat_positions_and_rgb',
                'upstream_revision': UPSTREAM_REVISION, 'fit_iterations': ARTIFIXER3D_STEPS,
-               'reconstruction_recipe': reconstruction_recipe(cfg.get('regularization_profile', 'artifixer'), source_ply=bool(initialization)),
+               'reconstruction_recipe': reconstruction_recipe(cfg.get('regularization_profile', 'artifixer'), source_ply=bool(initialization), **generated_loss_options(cfg)),
                'input_adaptation': 'Source splat RGB captured through the harness Viser at every calibrated camera. CUDA supplies only opacity/depth. Edited mode uses edits of Viser captures.',
                'anchor_rgb_policy': backend,
                'artifixer_pipeline': cfg['artifixer_pipeline'],

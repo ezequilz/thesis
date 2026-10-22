@@ -1,11 +1,12 @@
 """Explicit native versus historical ArtiFixer rendering/reconstruction policy."""
-DEFAULT_PIPELINE = 'authors_3dgut'
+AUTHORS_PIPELINE = 'authors_3dgut'
 HYBRID_PIPELINE = 'authors_3dgut_viser_rgb'
 LEGACY_PIPELINE = 'legacy_gsplat'
+DEFAULT_PIPELINE = LEGACY_PIPELINE
 
 
 def pipeline_profile(value):
-    if value not in (DEFAULT_PIPELINE, HYBRID_PIPELINE, LEGACY_PIPELINE):
+    if value not in (AUTHORS_PIPELINE, HYBRID_PIPELINE, LEGACY_PIPELINE):
         raise ValueError('artifixer_pipeline must be authors_3dgut, authors_3dgut_viser_rgb or legacy_gsplat')
     return value
 
@@ -16,7 +17,7 @@ def apply_pipeline(raw):
     result['artifixer_pipeline'] = profile
     if profile != LEGACY_PIPELINE:
         # The upstream ArtiFixer3D endpoint is a fresh fit, using references and
-        # generated frames, with the published sparse LPIPS recipe unchanged.
+        # generated frames. Generated-image loss choices remain user-controlled.
         result.update(reconstruction_initialization='point_cloud',
                       reconstruction_images='distilled', regularization_profile='artifixer')
     return result
@@ -24,7 +25,7 @@ def apply_pipeline(raw):
 
 def rgb_backend(raw):
     profile = pipeline_profile(raw.get('artifixer_pipeline', LEGACY_PIPELINE))
-    return '3dgut' if profile == DEFAULT_PIPELINE else 'viser'
+    return '3dgut' if profile == AUTHORS_PIPELINE else 'viser'
 
 
 def geometry_backend(raw):

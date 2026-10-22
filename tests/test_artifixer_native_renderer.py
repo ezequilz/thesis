@@ -6,8 +6,9 @@ from splat_explorer.splatfix.artifixer.pipeline_profile import apply_pipeline, r
 from splat_explorer.splatfix.jobs import validate_job
 
 
-def test_default_job_uses_native_renderer_and_fresh_author_recipe():
+def test_explicit_authors_job_uses_native_renderer_and_fresh_author_recipe():
     opts = validate_job({'stage': 'repair', 'checkpoint': '/saved/cp',
+                         'artifixer_pipeline': 'authors_3dgut',
                          'reconstruction_initialization': 'full_splat',
                          'reconstruction_images': 'all', 'regularization_profile': 'base_mcmc'})
     assert opts['artifixer_pipeline'] == 'authors_3dgut'

@@ -27,7 +27,7 @@ splatfix:
     repo: /workspace/third_party/G4Splat
     python: /workspace/g4splat-env/bin/python
   runtime:
-    artifixer_pipeline: authors_3dgut  # legacy_gsplat restores the previous renderer and reconstruction controls
+    artifixer_pipeline: legacy_gsplat  # Default Viser / gsplat renderer with custom reconstruction controls
     prompt_source: worldexplorer
     reconstruction_initialization: point_cloud  # authors path always uses a fresh fit
     initial_image_seeding: true  # Seed each series, including both endpoint directions

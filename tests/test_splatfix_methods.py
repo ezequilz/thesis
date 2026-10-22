@@ -92,7 +92,7 @@ def test_artifixer_reconstruction_choices(images, initialization):
     assert job['reconstruction_images'] == images
     assert job['reconstruction_initialization'] == initialization
     default = validate_job({'stage': 'repair', 'checkpoint': 'saved'})
-    assert default['artifixer_pipeline'] == 'authors_3dgut'
+    assert default['artifixer_pipeline'] == 'legacy_gsplat'
     assert default['reconstruction_images'] == 'distilled'
     assert default['resolution_profile'] == '720p'
     assert default['reconstruction_initialization'] == 'point_cloud'

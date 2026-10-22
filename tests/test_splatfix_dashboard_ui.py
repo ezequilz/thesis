@@ -31,6 +31,19 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('select').scene_id,'unrelated-current-scene');
   assert.equal(payload('repair').checkpoint,'/saved/cp');
   assert.equal(payload('repair').mode,'edited');
+  for(const pipeline of ['authors_3dgut','authors_3dgut_viser_rgb','legacy_gsplat']){
+    $('artifixer-pipeline').value=pipeline;
+    for(const rgb of ['on','off'])for(const downscale of ['on','off']){
+      $('artifixer-generated-rgb-loss').value=rgb;
+      $('artifixer-generated-lpips-downscale').value=downscale;
+      renderArtifixerPipeline();
+      assert.equal($('artifixer-generated-rgb-loss').disabled,false);
+      assert.equal($('artifixer-generated-lpips-downscale').disabled,false);
+      assert.equal(payload('repair').generated_rgb_loss,rgb==='on');
+      assert.equal(payload('repair').generated_lpips_downscale,downscale==='on');
+      assert.equal(payload('benchmark').generated_rgb_loss,undefined);
+    }
+  }
   // Endpoint selection must not leave legacy checkpoints in no-split mode.
   for(const split of ['double-split','single-split','no-split']){
     $('split-mode').value=split;

@@ -127,6 +127,30 @@ adapter or error-based allocation is used. Exact recipe replication does not
 remove the documented SplatFix input adaptations (rendered or edited anchors
 and full source PLY initialization for saved-view repairs).
 
+### Generated-image reconstruction losses (step 4)
+
+ArtiFixer repair runs expose two independent controls in all three pipeline modes:
+
+- **RGB L1/SSIM contribution for generated images** defaults to off
+  (`generated_rgb_loss=false`, `lambda_reconlosses_override=0`). On sets the
+  multiplier to 1 and copies the reference-image L1/SSIM weights: 0.8 / 0.2.
+- **LPIPS loss downscale for generated images** defaults to on
+  (`generated_lpips_downscale=true`, `lambda_lpips_override=0.1`). Off uses 1.0,
+  retaining LPIPS without downscaling.
+
+Thus generated-image loss is `RGB_enabled × (0.8 L1 + 0.2 (1 − SSIM)) +
+LPIPS_weight × LPIPS`, plus any separately enabled Gaussian regularization.
+Reference-image losses are unchanged. These choices survive the authors pipeline
+preset enforcement, are saved in job/runtime settings and reconstruction recipes,
+and affect the fitting configuration recorded by the trainer. Historical jobs
+without these fields retain the original ArtiFixer weights. Benchmark controls
+are unchanged.
+
+The [original MCMC training code](https://github.com/ubc-vision/3dgs-mcmc/blob/main/train.py)
+uses RGB L1/SSIM and Gaussian regularization, with default SSIM weight 0.2; it
+has no LPIPS training term. Full-weight LPIPS is therefore an ArtiFixer extension,
+not a reproduction of the complete original MCMC objective.
+
 ### Reconstruction regularization comparison
 
 The dashboard's **Reconstruction regularization** selector applies to new repair
@@ -1035,7 +1059,7 @@ These custom controls apply to **Legacy Viser / gsplat**. CLI equivalents:
 
 Step 4's **ArtiFixer rendering and reconstruction** setting labels the default
 **Authors 3DGUT baseline** and selects
-`authors_3dgut` (default), `authors_3dgut_viser_rgb`, or `legacy_gsplat`. It is saved with the job, propagated
+`authors_3dgut`, `authors_3dgut_viser_rgb`, or `legacy_gsplat` (default). It is saved with the job, propagated
 to the GPU worker, and recorded in run provenance. CLI: `--artifixer-pipeline
 authors_3dgut|authors_3dgut_viser_rgb|legacy_gsplat`; config: `splatfix.runtime.artifixer_pipeline`.
 
@@ -1052,7 +1076,8 @@ Reconstruction uses the upstream fresh 30,000-step sparse MCMC/LPIPS
 ArtiFixer3D recipe with its original regularization settings, references and
 generated views. Native mode fixes initialization to `point_cloud` and images to
 `distilled`; custom initialization, extra images and regularization remain in
-legacy mode. The “+” pass retains the authors' paired reconstruction renders.
+legacy mode. The two generated-image loss controls above remain available in
+native modes as explicit recipe overrides. The “+” pass retains the authors' paired reconstruction renders.
 Renderer-specific cache keys prevent reuse of legacy RGB/opacity as native
 inputs. Errors never silently fall back to gsplat.
 
@@ -1068,11 +1093,11 @@ The third option, **Viser RGB + authors 3DGUT geometry / fitting**
 (`authors_3dgut_viser_rgb`), captures conditioning RGB with Viser while retaining
 the native 3DGUT opacity and auxiliary depth, including opacity quantization and
 camera-Z conversion described above. It uses the same fixed fresh ArtiFixer3D
-fitting recipe as the default. The “+” pass likewise uses Viser RGB with native
+fitting recipe as the authors 3DGUT option. The “+” pass likewise uses Viser RGB with native
 reconstruction opacity. Its trajectory cache is separate from both other modes;
 RGB-only captures can share the Viser capture cache. This mixed-renderer variant
 is an application option, not the authors' original paired-rendering method.
-The default remains `authors_3dgut`; native geometry still requires a supported PLY.
+The default is `legacy_gsplat`; selecting native geometry still requires a supported PLY.
 
 ### Endpoint-only ArtiFixer checkpoints
 

@@ -197,7 +197,7 @@ def _add_stages(parser):
                         help='Generate one continuous path (no-split), whole legs, or inward halves (default); normal runs retain all references')
     repair.add_argument('--prompt-source', choices=('original_anchors', 'original_and_repaired', 'worldexplorer'), default=None)
     repair.add_argument('--artifixer-pipeline', choices=('authors_3dgut', 'authors_3dgut_viser_rgb', 'legacy_gsplat'), default=None,
-                        help='Authors 3DGUT rendering and fresh reconstruction (default), Viser RGB with authors 3DGUT geometry/fitting, or legacy Viser/gsplat')
+                        help='Legacy Viser/gsplat (default), authors 3DGUT rendering and fresh reconstruction, or Viser RGB with authors 3DGUT geometry/fitting')
     repair.add_argument('--reconstruction-images', choices=('all', 'distilled'), default=None,
                         help='Saved references and ArtiFixer targets only (default: distilled), or all images including WorldExplorer originals')
     repair.add_argument('--reconstruction-initialization', choices=('full_splat', 'point_cloud'), default=None,

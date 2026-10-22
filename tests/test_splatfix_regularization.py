@@ -61,3 +61,66 @@ def test_config_inheritance_is_scoped_and_preserves_other_settings(monkeypatch, 
             raise RuntimeError('training failed')
     assert training.compose_3dgrut_config is compose and training.Trainer3DGRUT is object
     assert calls == [worker.ARTIFIXER3D_CONFIG] + (['base_mcmc'] if profile == 'base_mcmc' else [])
+
+
+@pytest.mark.parametrize('pipeline', ['authors_3dgut', 'authors_3dgut_viser_rgb', 'legacy_gsplat'])
+@pytest.mark.parametrize('rgb', [False, True])
+@pytest.mark.parametrize('downscale', [False, True])
+def test_generated_loss_job_choices_survive_pipeline(pipeline, rgb, downscale):
+    options = validate_job(dict(stage='repair', checkpoint='saved', artifixer_pipeline=pipeline,
+                                generated_rgb_loss=rgb, generated_lpips_downscale=downscale))
+    policy = worker.validate_reconstruction_options(options)
+    assert policy['generated_rgb_loss'] is rgb
+    assert policy['generated_lpips_downscale'] is downscale
+    recipe = worker.reconstruction_recipe(**worker.generated_loss_options(policy))
+    assert recipe['lambda_reconlosses_override'] == float(rgb)
+    assert recipe['lambda_lpips_override'] == (0.1 if downscale else 1.0)
+    assert recipe['custom_reconstruction_overrides'] == (rgb or not downscale)
+
+
+def test_generated_loss_defaults_and_validation():
+    options = validate_job(dict(stage='repair', checkpoint='saved'))
+    assert worker.generated_loss_options(options) == dict(generated_rgb_loss=False, generated_lpips_downscale=True)
+    for key in worker.generated_loss_options({}):
+        for value in ['off', 'on', 0, 1, None]:
+            with pytest.raises(ValueError, match=key):
+                validate_job(dict(stage='repair', checkpoint='saved', **{key: value}))
+
+
+@pytest.mark.parametrize('rgb', [False, True])
+@pytest.mark.parametrize('downscale', [False, True])
+@pytest.mark.parametrize('profile', ['artifixer', 'base_mcmc'])
+def test_generated_loss_config_and_reference_isolation(monkeypatch, rgb, downscale, profile):
+    # Model the pinned upstream branches with nonzero synthetic losses so that
+    # toggling either weight independently changes the generated total only.
+    sparse = SimpleNamespace(loss=dict(use_lpips_override=True, lambda_l1=0.8, lambda_ssim=0.2,
+        lambda_l1_override=0.8, lambda_ssim_override=0.2, lambda_reconlosses_override=0.0,
+        lambda_lpips_override=0.1, use_opacity=False, lambda_opacity=0., use_scale=False, lambda_scale=0.))
+    base = SimpleNamespace(loss=dict(use_opacity=True, lambda_opacity=0.01, use_scale=True, lambda_scale=0.01))
+    def compose(name, overrides, directory):
+        return copy.deepcopy(base if name == 'base_mcmc' else sparse)
+    class Trainer:
+        def get_losses(self, batch, outputs):
+            c = self.conf.loss
+            regularization = c['lambda_opacity'] * 2 + c['lambda_scale'] * 3
+            total = (c['lambda_lpips_override'] * 5 + c['lambda_reconlosses_override'] *
+                     (c['lambda_l1_override'] * 2 + c['lambda_ssim_override'] * 3)) if batch.is_override else (
+                     c['lambda_l1'] * 2 + c['lambda_ssim'] * 3 + regularization)
+            return dict(total_loss=total, opacity_loss=c['lambda_opacity'] * 2, scale_loss=c['lambda_scale'] * 3)
+    training = ModuleType('data_processing.threedgrut_training')
+    training.compose_3dgrut_config, training.Trainer3DGRUT = compose, Trainer
+    package = ModuleType('data_processing')
+    package.threedgrut_training = training
+    monkeypatch.setitem(sys.modules, 'data_processing', package)
+    monkeypatch.setitem(sys.modules, training.__name__, training)
+    with worker.reconstruction_settings(profile, generated_rgb_loss=rgb, generated_lpips_downscale=downscale):
+        trainer = training.Trainer3DGRUT()
+        trainer.conf = training.compose_3dgrut_config(worker.ARTIFIXER3D_CONFIG, [], '/pinned')
+        reg = 0.05 if profile == 'base_mcmc' else 0
+        assert trainer.get_losses(SimpleNamespace(is_override=True), {})['total_loss'] == pytest.approx(
+            (0.5 if downscale else 5) + (2.2 if rgb else 0) + reg)
+        assert trainer.get_losses(SimpleNamespace(is_override=False), {})['total_loss'] == pytest.approx(2.2 + reg)
+        for key in ('lambda_l1', 'lambda_ssim', 'use_lpips_override'):
+            assert trainer.conf.loss[key] == sparse.loss[key]
+    assert training.compose_3dgrut_config is compose
+    assert training.Trainer3DGRUT is Trainer
