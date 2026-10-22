@@ -88,6 +88,10 @@ def validate_job(raw):
         if image_set not in ('saved', 'seva', '77'):
             raise ValueError('image_set must be saved, seva or 77')
         result['image_set'] = image_set
+        context = raw.get('endpoint_repair_context', 'initial_repair')
+        if context not in ('initial_repair', 'prior_repair', 'rgb_only'):
+            raise ValueError('endpoint_repair_context must be initial_repair, prior_repair or rgb_only')
+        result['endpoint_repair_context'] = context
     if stage == 'repair':
         mode = raw.get('mode', 'edited')
         if mode not in ('baseline', 'edited'):

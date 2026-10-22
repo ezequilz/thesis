@@ -125,7 +125,8 @@ class SplatfixExecutor:
                 if options.get('view_id') is not None:
                     argv += ['--view-id', options['view_id']]
             else:
-                argv += ['edit', str(cp.root), '--image-set', options.get('image_set', 'saved')]
+                argv += ['edit', str(cp.root), '--image-set', options.get('image_set', 'saved'),
+                         '--endpoint-repair-context', options.get('endpoint_repair_context', 'initial_repair')]
         def progress():
             paths = list((root / 'checkpoints').glob('*/checkpoint.json')) if options['stage'] == 'select' else [Path(options['checkpoint']) / 'checkpoint.json']
             if paths:

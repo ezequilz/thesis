@@ -72,6 +72,9 @@ def test_seva_edit_is_separate_resumable_and_staged_with_cached_depth(tmp_path, 
     edits = []
     class Editor:
         name = 'test'
+        def edit_with_references(self, path, references, prompt):
+            assert references == [cp.image_path(cp.views[0]['seva_capture'], True)]
+            return self.edit(path, prompt)
         def edit(self, path, prompt):
             edits.append(path)
             return SimpleNamespace(error=None, images=[result.getvalue()])
@@ -151,6 +154,9 @@ def test_seva_output_dimensions_preserve_full_frame(tmp_path, capture_backend, s
     Image.new('RGB', size, 'green').save(raw, format='PNG')
     class Editor:
         name = 'test'
+        def edit_with_references(self, path, references, prompt):
+            assert references == [cp.image_path(cp.views[0]['seva_capture'], True)]
+            return self.edit(path, prompt)
         def edit(self, path, prompt):
             from splat_explorer.splatfix.image_repair import DEFAULT_PROMPT
             assert prompt == DEFAULT_PROMPT

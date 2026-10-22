@@ -75,7 +75,8 @@ def edit_views(cfg, args):
     from .checkpoint import Checkpoint
     from .image_repair import repair_images
     checkpoint = Checkpoint.load(args.checkpoint)
-    repair_images(checkpoint, cfg=cfg, image_set=args.image_set)
+    repair_images(checkpoint, cfg=cfg, image_set=args.image_set,
+                  endpoint_repair_context=getattr(args, 'endpoint_repair_context', 'initial_repair'))
     return checkpoint.root
 
 
@@ -156,6 +157,8 @@ def _add_stages(parser):
     edit = stages.add_parser("edit", help="Create missing GPT-image repairs in an existing checkpoint")
     edit.add_argument("checkpoint", type=Path)
     edit.add_argument("--image-set", choices=("saved", "seva", "77"), default="saved")
+    edit.add_argument("--endpoint-repair-context", choices=("initial_repair", "prior_repair", "rgb_only"),
+                      default="initial_repair", help="Choose first repair, preceding repair, or RGB-only context")
     edit.set_defaults(func=edit_views)
     capture = stages.add_parser("seva-capture", help="Capture reusable SEVA RGB and depth at saved poses")
     capture.add_argument("checkpoint", type=Path)

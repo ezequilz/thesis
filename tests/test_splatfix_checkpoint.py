@@ -35,6 +35,11 @@ class Backend:
         self.calls = []
         self.fail_on = fail_on
         self.size = size
+        self.reference_calls = []
+
+    def edit_with_references(self, image_path, references, prompt):
+        self.reference_calls.append((image_path, references, prompt))
+        return self.edit(image_path, prompt)
 
     def edit(self, image_path, prompt):
         self.calls.append(image_path)
@@ -132,7 +137,7 @@ def test_queued_edit_routes_selected_model_through_worker_config(tmp_path, monke
     run = SimpleNamespace(run_id='job', config=SimpleNamespace(
         image_edit_backend=model,
         splatfix={'stage': 'edit', 'checkpoint': str(checkpoint.root),
-                  'resolution_profile': 'training'}))
+                  'resolution_profile': 'training', 'endpoint_repair_context': 'rgb_only'}))
     seen = []
 
     def edit(self, image_path, prompt):
@@ -143,10 +148,12 @@ def test_queued_edit_routes_selected_model_through_worker_config(tmp_path, monke
     monkeypatch.setattr(GptImageEditBackend, 'edit', edit)
 
     def run_process(argv, log_path, stop, progress):
+        assert argv[argv.index('--endpoint-repair-context') + 1] == 'rgb_only'
         worker_cfg = load_config(argv[argv.index('--config') + 1])
         cli.edit_views(worker_cfg, SimpleNamespace(
             checkpoint=argv[argv.index('edit') + 1],
-            image_set=argv[argv.index('--image-set') + 1]))
+            image_set=argv[argv.index('--image-set') + 1],
+            endpoint_repair_context=argv[argv.index('--endpoint-repair-context') + 1]))
 
     monkeypatch.setattr(executor, 'run_process', run_process)
     store = SimpleNamespace(get_run=lambda _: SimpleNamespace(state=SimpleNamespace(details={})))
@@ -260,3 +267,60 @@ def test_77_capture_repairs_use_saved_images_and_skip_existing(tmp_path, endpoin
     assert all(v['image_repair']['image_set'] == '77' for v in cp.repair_views)
     repair_images(cp, backend=backend, image_set='77')
     assert len(backend.calls) == expected_calls
+
+
+@pytest.mark.parametrize('context', ['initial_repair', 'rgb_only'])
+def test_endpoint_repair_context_order_prompt_and_resume(tmp_path, context):
+    from splat_explorer.splatfix.image_repair import DEFAULT_PROMPT
+    cp = make_checkpoint(tmp_path, 4)
+    cp.manifest['metadata']['repair_policy'] = 'endpoints'
+    cp.save()
+    backend = Backend(fail_on=2)
+    kwargs = {} if context == 'initial_repair' else {'endpoint_repair_context': context}
+    with pytest.raises(RuntimeError, match='temporary failure'):
+        repair_images(cp, backend=backend, **kwargs)
+    assert backend.calls == [cp.image_path(cp.views[0]), cp.image_path(cp.views[-1])]
+    expected = [(cp.image_path(cp.views[-1]),
+                 [cp.image_path(cp.views[0], repaired=True)], DEFAULT_PROMPT)]
+    assert backend.reference_calls == (expected if context == 'initial_repair' else [])
+    retry = Backend()
+    cp = Checkpoint.load(cp.root)
+    repair_images(cp, backend=retry, **kwargs)
+    assert retry.calls == [cp.image_path(cp.views[-1])]
+    assert retry.reference_calls == (expected if context == 'initial_repair' else [])
+    assert not any(v.get('repaired_rgb') for v in cp.views[1:-1])
+    metadata = cp.views[-1]['image_repair']
+    assert metadata['endpoint_repair_context'] == context
+    assert metadata.get('context_repaired_rgb') == (cp.views[0]['repaired_rgb'] if context == 'initial_repair' else None)
+
+
+def test_endpoint_context_job_validation():
+    from splat_explorer.splatfix.jobs import validate_job
+    raw = {'stage': 'edit', 'checkpoint': '/saved/checkpoint'}
+    assert validate_job(raw)['endpoint_repair_context'] == 'initial_repair'
+    assert validate_job({**raw, 'endpoint_repair_context': 'prior_repair'})['endpoint_repair_context'] == 'prior_repair'
+    assert validate_job({**raw, 'endpoint_repair_context': 'rgb_only'})['endpoint_repair_context'] == 'rgb_only'
+    with pytest.raises(ValueError, match='endpoint_repair_context'):
+        validate_job({**raw, 'endpoint_repair_context': 'unknown'})
+
+
+@pytest.mark.parametrize('context', ['initial_repair', 'prior_repair', 'rgb_only'])
+def test_normal_checkpoint_context_sequence_and_retry(tmp_path, context):
+    from splat_explorer.splatfix.image_repair import DEFAULT_PROMPT
+    cp = make_checkpoint(tmp_path, 4)
+    backend = Backend(fail_on=3)
+    kwargs = {} if context == 'initial_repair' else {'endpoint_repair_context': context}
+    with pytest.raises(RuntimeError, match='temporary failure'):
+        repair_images(cp, backend=backend, **kwargs)
+    cp = Checkpoint.load(cp.root)
+    retry = Backend()
+    repair_images(cp, backend=retry, **kwargs)
+    assert retry.calls == [cp.image_path(v) for v in cp.views[2:]]
+    for editor, indices in [(backend, [1, 2]), (retry, [2, 3])]:
+        expected = [] if context == 'rgb_only' else [
+            (cp.image_path(cp.views[i]),
+             [cp.image_path(cp.views[i-1 if context == 'prior_repair' else 0], repaired=True)],
+             DEFAULT_PROMPT) for i in indices]
+        assert editor.reference_calls == expected
+    repair_images(cp, backend=retry, **kwargs)
+    assert len(retry.calls) == 2

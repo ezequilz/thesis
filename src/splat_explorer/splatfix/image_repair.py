@@ -17,7 +17,8 @@ DEFAULT_PROMPT = (
 )
 
 
-def repair_images(checkpoint, *, backend=None, cfg=None, prompt=DEFAULT_PROMPT, image_set='saved', view_id=None):
+def repair_images(checkpoint, *, backend=None, cfg=None, prompt=DEFAULT_PROMPT, image_set='saved', view_id=None,
+                  endpoint_repair_context='initial_repair'):
     """Edit missing views, committing each success so retries avoid paid repeats.
 
     The supplied backend is injectable for offline tests. By default this uses
@@ -27,6 +28,8 @@ def repair_images(checkpoint, *, backend=None, cfg=None, prompt=DEFAULT_PROMPT, 
     original-capture repairs retain their established center-crop policy.
     Response payloads containing base64 images are deliberately not copied.
     """
+    if endpoint_repair_context not in ('initial_repair', 'prior_repair', 'rgb_only'):
+        raise ValueError('endpoint_repair_context must be initial_repair, prior_repair or rgb_only')
     if not isinstance(checkpoint, Checkpoint):
         checkpoint = Checkpoint.load(checkpoint)
     if not checkpoint.complete:
@@ -58,14 +61,25 @@ def repair_images(checkpoint, *, backend=None, cfg=None, prompt=DEFAULT_PROMPT, 
     if backend is None:
         from ..image_edit import make_image_edit_backend
         backend = make_image_edit_backend(cfg=cfg)
+    use_context = endpoint_repair_context != 'rgb_only'
+    if use_context and any(v['id'] != views[0]['id'] for v in pending) and not callable(getattr(backend, 'edit_with_references', None)):
+        raise ValueError('Image backend does not support repair context; select RGB only')
     for view in pending:
         width, height = view['camera']['width'], view['camera']['height']
         metadata = {'backend': backend.name, 'model': getattr(backend, 'model', backend.name),
-                    'prompt': prompt, 'image_set':image_set, 'target_size': [width, height], 'started_at': utc_now()}
+                    'prompt': prompt, 'image_set':image_set,
+                    'endpoint_repair_context': endpoint_repair_context, 'target_size': [width, height], 'started_at': utc_now()}
         view['image_repair'] = metadata
         checkpoint.save()
         try:
-            result = backend.edit(checkpoint.image_path(view), prompt)
+            if use_context and view['id'] != views[0]['id']:
+                index = next(i for i, candidate in enumerate(views) if candidate['id'] == view['id'])
+                context_view = views[index - 1] if endpoint_repair_context == 'prior_repair' else views[0]
+                reference = checkpoint.image_path(context_view, repaired=True)
+                metadata['context_repaired_rgb'] = context_view['repaired_rgb']
+                result = backend.edit_with_references(checkpoint.image_path(view), [reference], prompt)
+            else:
+                result = backend.edit(checkpoint.image_path(view), prompt)
             if result.error or not result.images:
                 raise RuntimeError(result.error or 'Image edit returned no image')
             # Keep the exact response independently of the normalized PNG, even

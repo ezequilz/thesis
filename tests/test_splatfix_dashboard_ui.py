@@ -113,6 +113,11 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('repair').regularization_profile,'base_mcmc');
   assert.equal(payload('repair').scene_id,undefined);
   assert.equal(payload('edit').scene_id,undefined);
+  assert.equal(payload('edit').endpoint_repair_context,'initial_repair');
+  $('endpoint-repair-context').value='prior_repair';
+  assert.equal(payload('edit').endpoint_repair_context,'prior_repair');
+  $('endpoint-repair-context').value='rgb_only';
+  assert.equal(payload('edit').endpoint_repair_context,'rgb_only');
   schedule('repair');
   assert.equal($('schedule-dialog').opened,true);
   assert.match($('schedule-context').textContent,/Saved camera checkpoint/);

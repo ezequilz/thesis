@@ -5,6 +5,17 @@ GPU reconstruction. It is independent of the old artifact-hunting loop.
 Step 4 selects a reconstruction method. ArtiFixer and G4Splat are registered as independent sibling backends.
 See [G4Splat setup and output semantics](g4splat.md).
 
+Step 3 defaults to **Supply initial repair as context** for all checkpoint types.
+The first image is repaired from its original RGB. Each subsequent request sends
+its original RGB first and the first repaired PNG second, with the same prompt.
+For normal checkpoints, **Prior repair as context** instead supplies the immediately
+preceding repaired image (image 2 supplies context for image 3, and so on).
+**RGB only** preserves independent single-image repairs. Context stays within the
+selected capture set. The option is saved in queued jobs as
+`endpoint_repair_context` (`initial_repair`, `prior_repair`, or `rgb_only`) and is
+also available through `edit --endpoint-repair-context`. Retries reuse saved
+repairs; completed repairs remain skipped.
+
 ### Reconstruction module boundary
 
 `methods.py` is an explicit, lazy-loaded registry. The dashboard lists its public
