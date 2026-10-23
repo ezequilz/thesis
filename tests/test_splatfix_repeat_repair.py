@@ -229,3 +229,40 @@ def test_reduced_run_prefers_retained_exact_reference_over_edited_checkpoint(tmp
     assert [repair.digest_file(prepared.image_path(v, repaired=True)) for v in prepared.views] == hashes
     assert info['expected_reference_sha256'] == hashes
     assert [repair.digest_file(cp.image_path(v, repaired=True)) for v in cp.views] != hashes
+
+
+def test_repeat_recovers_prompt_from_original_scene_and_persists_it(tmp_path):
+    cp, row, studio, _ = fixture(tmp_path)
+    cp.manifest['metadata'].pop('worldexplorer_prompt')
+    cp.save()
+    scene = tmp_path / 'worldexplorer/we_original/results/export/splat.ply'
+    scene.parent.mkdir(parents=True); scene.write_bytes(b'ply')
+    prompt = 'bioluminescent, gravity-defying, telepathic cosmic jellyfish hive'
+    atomic_json(scene.parent.parent / 'request.json', {'prompt': prompt})
+    row['scene'] = 'original-scene'
+    studio.scenes = lambda: [{'id': 'other', 'path': '/wrong'}, {'id': 'original-scene', 'path': str(scene)}]
+    root = tmp_path / 'repeat'; root.mkdir()
+    snapshot_repeat(studio, row, root)
+    metadata = Checkpoint.load(root).manifest['metadata']
+    assert metadata['worldexplorer_prompt'] == prompt
+    assert metadata['worldexplorer_prompt_source'] == 'registered_scene_request'
+    from splat_explorer.splatfix.worldexplorer.source import checkpoint_prompt
+    (scene.parent.parent / 'request.json').unlink()
+    assert checkpoint_prompt(Checkpoint.load(root)) == prompt
+
+
+def test_repeat_prompt_prefers_recorded_request_over_checkpoint(tmp_path):
+    _, row, studio, _ = fixture(tmp_path)
+    path = row['_manifest'].parent / 'request.json'
+    request = json.loads(path.read_text()); request['worldexplorer_prompt'] = 'exact older prompt'
+    atomic_json(path, request)
+    _, recovered, _ = repeat_inputs(studio, row)
+    assert recovered['worldexplorer_prompt'] == 'exact older prompt'
+    assert recovered['_repeat_prompt_origin'] == 'parent_request'
+
+
+def test_repeat_missing_prompt_rejected_before_queuing(tmp_path):
+    cp, row, studio, _ = fixture(tmp_path)
+    cp.manifest['metadata'].pop('worldexplorer_prompt'); cp.save()
+    with pytest.raises(ValueError, match='Original WorldExplorer prompt'):
+        repeat_inputs(studio, row)

@@ -192,6 +192,7 @@ class SplatfixStudio(SceneRunStudio):
             if run.config.pipeline != 'splatfix':
                 continue
             row = run.to_dict()
+            row['restart_supported'] = run.state.status.value in ('error', 'stopped', 'gpu_expired')
             from ..splatfix.artifixer.resume import resume_available, preparation_available
             row['resume_supported'] = resume_available(run)
             row['preparation_supported'] = preparation_available(run)
@@ -398,6 +399,51 @@ class SplatfixStudio(SceneRunStudio):
                                      'scene_id': scene_id, 'duration_seconds': 24 * 3600},
                                     settings_snapshot=settings_snapshot)
         return run.to_dict()
+
+    def restart(self, run_id):
+        """Queue the saved configuration anew, retaining the failed run as history."""
+        from copy import deepcopy
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError('Choose a failed or cancelled run')
+        with self.results._run_storage_lock:
+            prior = self.store.get_run(run_id)
+            if prior.config.pipeline != 'splatfix':
+                raise ValueError('Not a splatfix job')
+            if prior.state.status.value not in ('error', 'stopped', 'gpu_expired'):
+                raise ValueError('Only failed, cancelled or GPU-expired runs can be restarted')
+            # Repeated clicks / retried HTTP requests share a pending restart.
+            for existing in self.store.list_runs():
+                if existing.state.status.value not in ('queued', 'waiting_gpu', 'starting', 'running', 'stopping'):
+                    continue
+                snapshot = read_json(Path(existing.path) / 'settings.json', {})
+                if (snapshot.get('submitted') or {}).get('restart_from') == run_id:
+                    return existing.to_dict()
+            config = deepcopy(prior.config.to_dict())
+            options = config['splatfix']
+            options.pop('scheduled_at', None)
+            if options['stage'] == 'select':
+                if config['scene_id'] not in {scene['id'] for scene in self.scenes()}:
+                    raise ValueError('The original scene is no longer available')
+            elif options['stage'] == 'benchmark':
+                registered_benchmark(self.benchmark_root, options['source'])
+            else:
+                snapshot_path = options.get('oracle_artifixer_inputs')
+                raw = snapshot_path or options.get('checkpoint')
+                path = Path(raw).resolve() if raw else None
+                if not path or not path.is_relative_to(Path(self.cfg.output.dir).resolve()):
+                    raise ValueError('Saved restart inputs are unavailable')
+                if snapshot_path:
+                    if not (path / 'inputs.json').is_file():
+                        raise ValueError('Saved OracleGS reconstruction inputs have been removed')
+                else:
+                    if not (path / 'checkpoint.json').is_file():
+                        raise ValueError('Saved checkpoint has been removed; restore it before restarting')
+                    Checkpoint.load(path)  # Validate saved images and cameras too.
+            saved_settings = read_json(Path(prior.path) / 'settings.json', {})
+            run = self.store.create_run(config, settings_snapshot={
+                'submitted': {'restart_from': run_id, 'original_submission': saved_settings.get('submitted')},
+                'dashboard': saved_settings.get('dashboard')})
+            return run.to_dict()
 
     def cancel(self, run_id):
         run = self.store.get_run(run_id)

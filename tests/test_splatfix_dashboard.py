@@ -927,3 +927,54 @@ def test_custom_selection_creates_portable_checkpoint_without_job(studio, tmp_pa
         studio.start_custom({'scene_id': 'missing'})
     with pytest.raises(ValueError):
         studio.start_custom({'scene_id': 'room', 'views': 25})
+
+
+@pytest.mark.parametrize('status', ['error', 'stopped', 'gpu_expired'])
+def test_restart_queues_saved_settings_without_old_execution_state(studio, status):
+    original = studio.create({'stage': 'select', 'scene_id': 'room', 'views': 9,
+        'resolution_profile': 'training', 'scheduled_at': '2099-01-01T00:00:00+00:00',
+        'dashboard_snapshot': {'controls': [{'id': 'views', 'value': '9'}]}})
+    ident = original['run_id']
+    studio.store.request_stop(ident)
+    studio.store.update_status(ident, status=status, remote_dir='/old/gpu-job', error='old failure')
+    path = studio.store.get_run(ident).path
+    before = {p.name: p.read_bytes() for p in Path(path).iterdir() if p.is_file()}
+    restarted = studio.restart(ident)
+    assert restarted['run_id'] != ident
+    expected = original['config']; expected['splatfix'].pop('scheduled_at')
+    assert restarted['config'] == expected
+    assert restarted['state']['status'] == 'queued'
+    assert restarted['state']['details'] == {}
+    assert not studio.store.stop_requested(restarted['run_id'])
+    assert before == {p.name: p.read_bytes() for p in Path(path).iterdir() if p.is_file()}
+    settings = json.loads((studio.root / restarted['run_id'] / 'settings.json').read_text())
+    assert settings['submitted']['restart_from'] == ident
+    assert settings['dashboard']['controls'][0]['value'] == '9'
+    assert studio.restart(ident)['run_id'] == restarted['run_id']
+    assert next(j for j in studio.jobs() if j['run_id'] == ident)['restart_supported']
+
+
+@pytest.mark.parametrize('status', ['queued', 'running', 'stopping', 'completed'])
+def test_restart_rejects_active_and_successful_jobs(studio, status):
+    run = studio.create({'stage': 'select', 'scene_id': 'room'})
+    studio.store.set_status(run['run_id'], status)
+    with pytest.raises(ValueError, match='Only failed'):
+        studio.restart(run['run_id'])
+    assert len(studio.store.list_runs()) == 1
+
+
+def test_restart_repeat_job_reuses_its_fixed_checkpoint_and_custom_settings(studio):
+    cp = checkpoint(studio)
+    run = studio.store.create_run({'pipeline': 'splatfix', 'scene_id': 'room', 'splatfix': {
+        'stage': 'repair', 'checkpoint': str(cp.root), 'mode': 'baseline',
+        'max_gaussians': 2_500_000, 'initial_image_seeding': False,
+        'generated_rgb_loss': True, 'regularization_profile': 'base_mcmc'}})
+    (cp.root / 'repeat-repair.json').write_text('{"parent_run":"saved-parent"}')
+    studio.store.set_status(run.run_id, 'error')
+    restarted = studio.restart(run.run_id)
+    assert restarted['config'] == run.config.to_dict()
+    assert (cp.root / 'repeat-repair.json').read_text() == '{"parent_run":"saved-parent"}'
+    studio.store.set_status(restarted['run_id'], 'stopped')
+    (cp.root / 'checkpoint.json').unlink()
+    with pytest.raises(ValueError, match='checkpoint has been removed'):
+        studio.restart(run.run_id)

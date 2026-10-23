@@ -1268,3 +1268,21 @@ or incompatible trajectory provenance remain explicit errors.
 
 Reduction now retains the small anchor/full-orbit/provenance JSON exports even
 when reconstruction images are not retained, to support future repeats.
+
+Repeat snapshots recover the WorldExplorer prompt before replacing the scene
+path: parent request, prepared checkpoint, original checkpoint/scene, then the
+registered original scene. The recovered prompt and its source are embedded in
+the repeat checkpoint. If WorldExplorer captioning is selected and no prompt is
+recoverable, repeat validation rejects the request before it enters the GPU queue.
+
+### Restart failed or cancelled queue jobs
+
+Failed, cancelled and GPU-expired Splatfix jobs have a **Restart** button in the
+main queue. It creates a new run using the stored effective configuration and
+existing inputs, retaining the old run, logs and settings snapshot. The old
+schedule is cleared so the new job is immediately eligible for the normal queue;
+old STOP flags, GPU allocation details and worker execution state are not copied.
+This starts the stage again, rather than resuming optimizer state. Repeated clicks
+reuse an already queued/active restart of that job. Missing saved checkpoints or
+input snapshots produce an error. The new settings snapshot retains the original
+dashboard controls/submission and records `restart_from` for traceability.

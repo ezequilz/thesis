@@ -1401,6 +1401,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "Could not move run to run_history. The original run has been kept in place."}, 500)
                     return
                 self._send_json({"ok": True, **result})
+            elif self.command == "POST" and path == "/api/splatfix/results/name":
+                if not isinstance(body, dict):
+                    raise ValueError("Request must be an object")
+                try:
+                    result = studio.results.save_name(body.get("run_id"), body.get("name"))
+                except OSError:
+                    self._send_json({"ok": False, "error": "Could not save run name"}, 500)
+                    return
+                self._send_json({"ok": True, **result})
             elif self.command == "POST" and path == "/api/splatfix/results/color":
                 if not isinstance(body, dict):
                     raise ValueError("Request must be an object")
@@ -1479,6 +1488,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json(studio.start_custom(body))
             elif self.command == "POST" and path == "/api/splatfix/jobs":
                 self._send_json({"ok": True, "job": studio.create(body)}, 201)
+            elif self.command == "POST" and path == "/api/splatfix/restart":
+                if not isinstance(body, dict):
+                    raise ValueError("Request must be an object")
+                self._send_json({"ok": True, "job": studio.restart(body.get("run_id"))}, 201)
             elif self.command == "POST" and path == "/api/splatfix/cancel":
                 if not isinstance(body, dict):
                     raise ValueError("Request must be an object")

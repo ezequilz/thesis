@@ -135,6 +135,26 @@ class ResultCatalog:
             _atomic_write_json(path, {'color': color})
         return {'run_id': run_id, 'color': color}
 
+    def read_name(self, run_id):
+        path = self.studio.store.run_path(run_id) / 'run-name.json'
+        if path.is_symlink():
+            return ''
+        saved = read_json(path, {})
+        name = saved.get('name', '') if isinstance(saved, dict) else ''
+        return name if isinstance(name, str) else ''
+
+    def save_name(self, run_id, name):
+        if not isinstance(name, str) or len(name.strip()) > 200:
+            raise ValueError('Run name must be text with at most 200 characters')
+        name = name.strip()
+        with self._run_storage_lock:
+            run = self.studio.store.get_run(run_id)
+            path = Path(run.path) / 'run-name.json'
+            if path.is_symlink():
+                raise ValueError('Unsafe run name path')
+            _atomic_write_json(path, {'name': name})
+        return {'run_id': run_id, 'custom_name': name}
+
     def delete_run(self, run_id):
         """Permanently remove only the validated inactive run directory."""
         with self._run_storage_lock:
@@ -291,6 +311,7 @@ class ResultCatalog:
         rows = []
         for run in self.studio.store.list_runs():
             record = run.to_dict()
+            record['custom_name'] = self.read_name(run.run_id)
             record['color'] = self.read_color(run.run_id)
             record['output_size_bytes'] = self.studio.store.output_size_bytes(run.run_id)
             root = Path(run.path)
@@ -409,6 +430,7 @@ class ResultCatalog:
         return {'repair_pass': repair_pass, 'job_status': record.get('state', {}).get('status'), 'id': key, 'run_id': record['run_id'], 'scene': config.get('scene_id', ''),
                 'can_stop': not record.get('state', {}).get('details', {}).get('remote_finished') and config.get('pipeline') == 'splatfix' and record.get('state', {}).get('status') in ('queued', 'waiting_gpu', 'starting', 'running'),
                 'message': record.get('state', {}).get('message'),
+                'custom_name': record.get('custom_name', ''),
                 'color': record.get('color', ''),
                 'has_notes': record.get('has_notes', False),
                 'incomplete': result.get('incomplete', False),
@@ -504,6 +526,20 @@ class ResultCatalog:
         settings_path = self.studio.root / row['run_id'] / 'settings.json'
         row['settings_snapshot'] = read_json(settings_path, None)
         row['settings_url'] = self.studio.file_url(settings_path) if settings_path.is_file() else None
+        run_root = (self.studio.root / row['run_id']).resolve()
+        manifest = row.get('_manifest')
+        json_paths = [run_root / 'worker-request.json']
+        if manifest:
+            json_paths += [manifest.parent / name for name in (
+                'orbit-provenance.json', 'inference-directions.json')]
+        row['json_artifacts'] = []
+        for path in json_paths:
+            if not path.is_file() or not path.resolve().is_relative_to(run_root):
+                continue
+            row['json_artifacts'].append({
+                'name': path.name, 'path': str(path.relative_to(run_root)),
+                'url': self.studio.file_url(path), 'snapshot': read_json(path, None),
+            })
         if row['kind'] == 'WorldExplorer':
             from .worldexplorer_details import run_detail
             return run_detail(self, row)

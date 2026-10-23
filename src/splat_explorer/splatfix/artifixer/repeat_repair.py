@@ -7,6 +7,44 @@ from ..checkpoint import Checkpoint, atomic_json, source_fingerprint
 from ..jobs import read_json
 
 
+
+def resolve_repeat_prompt(studio, row, request, checkpoint):
+    """Recover prompt before replacing the scene path with the repeat PLY."""
+    from ..worldexplorer.source import scene_prompt
+    def saved(value, source):
+        return (value, source) if isinstance(value, str) and value.strip() else None
+    found = saved(request.get('worldexplorer_prompt'), 'parent_request')
+    if found:
+        return found
+    found = saved(checkpoint.manifest.get('metadata', {}).get('worldexplorer_prompt'), 'parent_checkpoint')
+    if found:
+        return found
+    original = row.get('config', {}).get('splatfix', {}).get('checkpoint')
+    if original:
+        path = Path(original).resolve()
+        if path.is_relative_to(Path(studio.cfg.output.dir).resolve()):
+            body = read_json(path / 'checkpoint.json', {})
+            found = saved(body.get('metadata', {}).get('worldexplorer_prompt'), 'original_checkpoint')
+            if found:
+                return found
+            scene = body.get('scene_path')
+            if scene:
+                found = saved(scene_prompt(scene), 'original_scene_request')
+                if found:
+                    return found
+    found = saved(scene_prompt(checkpoint.manifest['scene_path']), 'checkpoint_scene_request')
+    if found:
+        return found
+    scene_id = row.get('scene') or row.get('config', {}).get('scene_id')
+    if scene_id:
+        for scene in studio.scenes():
+            if scene.get('id') == scene_id and scene.get('path'):
+                found = saved(scene_prompt(scene['path']), 'registered_scene_request')
+                if found:
+                    return found
+    return None, None
+
+
 def repeat_inputs(studio, row):
     if not row or row['kind'] != 'ArtiFixer3D':
         raise ValueError('Choose an ArtiFixer result')
@@ -50,6 +88,13 @@ def repeat_inputs(studio, row):
     cp = checkpoint_for_run(Checkpoint.load(checkpoint),
                             'endpoints' if request.get('repair_policy') == 'endpoints' else
                             request['runtime'].get('image_trajectory', 'checkpoint'))
+    prompt, prompt_origin = resolve_repeat_prompt(studio, row, request, cp)
+    if prompt:
+        request['worldexplorer_prompt'] = prompt
+        request['_repeat_prompt_origin'] = prompt_origin
+    prompt_source = request['runtime'].get('prompt_source', row.get('config', {}).get('splatfix', {}).get('prompt_source', 'worldexplorer'))
+    if prompt_source == 'worldexplorer' and not prompt:
+        raise ValueError('Original WorldExplorer prompt is unavailable in the saved run, checkpoint or original scene')
     request['_repeat_source_checkpoint'] = source_checkpoint
     for view in cp.views:
         cp.image_path(view)
@@ -119,6 +164,7 @@ def snapshot_repeat(studio, row, destination):
     metadata.pop('artifixer_input_cache', None)
     if request.get('worldexplorer_prompt'):
         metadata['worldexplorer_prompt'] = request['worldexplorer_prompt']
+        metadata['worldexplorer_prompt_source'] = request.get('_repeat_prompt_origin', 'parent_request')
     if request.get('reconstruction_images') == 'all':
         bundle = studio.result_artifact(row['_manifest'], request.get('worldexplorer_source'))
         if not bundle:

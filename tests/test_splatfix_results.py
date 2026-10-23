@@ -1440,3 +1440,32 @@ def test_run_color_survives_reduction(tmp_path):
     studio.results.save_color(root.name, 'teal')
     studio.results.reduce_run(root.name)
     assert studio.results.read_color(root.name) == 'teal'
+
+
+def test_custom_run_name_is_separate_searchable_metadata(tmp_path):
+    studio, root, _ = setup(tmp_path)
+    original_config = (root / 'config.json').read_bytes()
+    other = studio.create({'stage': 'select', 'scene_id': 'room'})
+    assert studio.results.entries()[0]['custom_name'] == ''
+    studio.results.save_name(root.name, '  Jellyfish — best geometry  ')
+    assert json.loads((root / 'run-name.json').read_text()) == {'name': 'Jellyfish — best geometry'}
+    row = next(r for r in studio.results.entries() if r['run_id'] == root.name)
+    assert row['custom_name'] == 'Jellyfish — best geometry'
+    assert row['scene'] == 'room'
+    assert studio.results.run_detail(root.name)['custom_name'] == row['custom_name']
+    assert studio.results.read_name(other['run_id']) == ''
+    assert (root / 'config.json').read_bytes() == original_config
+    studio.results.save_name(root.name, '')
+    assert studio.results.read_name(root.name) == ''
+    for invalid in (None, 123, 'a' * 201):
+        with pytest.raises(ValueError):
+            studio.results.save_name(root.name, invalid)
+    with pytest.raises(ValueError):
+        studio.results.save_name('../outside', 'name')
+
+
+def test_custom_run_name_survives_reduction(tmp_path):
+    studio, root, _ = reduction_setup(tmp_path)
+    studio.results.save_name(root.name, 'Favorite result')
+    studio.results.reduce_run(root.name)
+    assert studio.results.read_name(root.name) == 'Favorite result'

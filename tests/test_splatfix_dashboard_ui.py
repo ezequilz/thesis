@@ -15,9 +15,9 @@ def test_dashboard_stage_payloads_and_frozen_schedule_selection():
 const fs=require('fs'), vm=require('vm'), assert=require('assert/strict');
 const source=fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0];
 const elements=new Map();
-const get=id=>{if(!elements.has(id))elements.set(id,{value:'',textContent:'',innerHTML:'',disabled:false,valid:true,opened:false,
+const get=id=>{if(!elements.has(id))elements.set(id,{value:id==='artifixer-max-gaussians'?'1000000':'',textContent:'',innerHTML:'',disabled:false,valid:true,opened:false,
   selectedOptions:[{textContent:'Other scene'}],classList:{toggle(){}},style:{},addEventListener(){},querySelectorAll(){return[]},
-  reportValidity(){return this.valid},showModal(){this.opened=true},close(){this.opened=false}});return elements.get(id)};
+  setCustomValidity(message){this.valid=!message},reportValidity(){return this.valid},showModal(){this.opened=true},close(){this.opened=false}});return elements.get(id)};
 const context=vm.createContext({document:{getElementById:get,querySelectorAll(){return [{id:"future-setting",name:"",type:"select-one",tagName:"SELECT",value:"future",labels:[{textContent:"Future setting"}],selectedOptions:[{value:"future",textContent:"Future option"}],matches(){return false},getClientRects(){return [{}]}}]}},fetch:()=>new Promise(()=>{}),setInterval(){},setTimeout(){},assert});
 vm.runInContext(source,context);
 Promise.resolve(vm.runInContext(`(async()=>{
@@ -376,6 +376,34 @@ assert.equal(input.hidden,false);assert.equal(display.hidden,true);assert.equal(
 input.value='2500000';assert.equal(ctx.saveGaussianLimit(),true);assert.equal(display.textContent,'2,500,000');assert.equal(input.hidden,true);
 for(const value of ['0','-1','1.5','','NaN','9007199254740992']){ctx.editGaussianLimit();input.value=value;assert.equal(ctx.saveGaussianLimit(),false);assert.equal(input.hidden,false);}
 input.value='500000';assert.equal(ctx.saveGaussianLimit(),true);assert.equal(display.textContent,'500,000');
+'''
+    result = subprocess.run([node, '-e', code, str(page)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_restart_button_uses_saved_run_id_and_prevents_duplicate_clicks():
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Node required for queue action test')
+    page = Path(__file__).resolve().parents[1] / 'src/splat_explorer/web/static/splatfix.html'
+    code = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const html=fs.readFileSync(process.argv[1],'utf8');
+assert.ok(html.includes('job.restart_supported?`<button data-restart='));
+assert.ok(html.includes("()=>restartJob(el.dataset.restart)"));
+let calls=[],messages=[],resolveRequest,refreshed=0;
+const ctx=vm.createContext({renderJobs(){},toast:(...args)=>messages.push(args),refresh:async()=>refreshed++,
+api:(path,body)=>{calls.push([path,body]);return new Promise(resolve=>resolveRequest=resolve)}});
+vm.runInContext(html.slice(html.indexOf('const restartingJobs='),html.indexOf('async function cancel(id)')),ctx);
+(async()=>{
+ const first=ctx.restartJob('failed-run');await ctx.restartJob('failed-run');
+ assert.equal(calls.length,1);assert.equal(calls[0][0],'/restart');
+ assert.equal(JSON.stringify(calls[0][1]),JSON.stringify({run_id:'failed-run'}));
+ resolveRequest({job:{run_id:'new-run'}});await first;
+ assert.equal(refreshed,1);assert.equal(messages[0][0],'Restart queued: new-run');
+ ctx.api=async()=>{throw Error('Saved checkpoint has been removed')};
+ await ctx.restartJob('failed-run');assert.deepEqual(messages[1],['Saved checkpoint has been removed',true]);
+})().catch(e=>{console.error(e);process.exitCode=1});
 '''
     result = subprocess.run([node, '-e', code, str(page)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
