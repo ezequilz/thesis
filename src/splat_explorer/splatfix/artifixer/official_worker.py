@@ -37,6 +37,17 @@ def generated_loss_options(raw):
     return result
 
 
+def validate_gaussian_limit(value=1_000_000):
+    if type(value) is not int or value < 1:
+        raise ValueError('max_gaussians must be a positive integer')
+    return value
+
+
+def reconstruction_overrides(raw):
+    return {**generated_loss_options(raw),
+            'max_gaussians': validate_gaussian_limit(raw.get('max_gaussians', 1_000_000))}
+
+
 def validate_reconstruction_options(raw):
     images = raw.get('reconstruction_images', 'distilled')
     initialization = raw.get('reconstruction_initialization', 'point_cloud')
@@ -48,7 +59,7 @@ def validate_reconstruction_options(raw):
     if prompt_source not in ('original_anchors', 'original_and_repaired', 'worldexplorer'):
         raise ValueError('Unknown ArtiFixer prompt_source')
     return {'reconstruction_images': images, 'reconstruction_initialization': initialization,
-            'prompt_source': prompt_source, **generated_loss_options(raw)}
+            'prompt_source': prompt_source, **reconstruction_overrides(raw)}
 
 
 REGULARIZATION_PROFILES = ('artifixer', 'base_mcmc')
@@ -61,10 +72,10 @@ def validate_regularization(profile):
 
 
 def reconstruction_recipe(profile='artifixer', *, source_ply=False,
-                          generated_rgb_loss=False, generated_lpips_downscale=True):
+                          generated_rgb_loss=False, generated_lpips_downscale=True, max_gaussians=1_000_000):
     """Record recipe identity and the effective generated-image loss multipliers."""
     validate_regularization(profile)
-    loss_options = generated_loss_options(locals())
+    loss_options = reconstruction_overrides(locals())
     return {'version': 'artifixer3d-generated-loss-choice-v2',
             **loss_options,
             'lambda_reconlosses_override': 1.0 if generated_rgb_loss else 0.0,
@@ -74,7 +85,7 @@ def reconstruction_recipe(profile='artifixer', *, source_ply=False,
             'training_state': 'fresh', 'start_step': 0, 'parameter_source': 'pinned_upstream',
             'initialization_source': 'original PLY; all Gaussian parameters' if source_ply else 'COLMAP points',
             'regularization_profile': profile,
-            'custom_reconstruction_overrides': source_ply or profile != 'artifixer' or generated_rgb_loss or not generated_lpips_downscale,
+            'custom_reconstruction_overrides': source_ply or profile != 'artifixer' or generated_rgb_loss or not generated_lpips_downscale or max_gaussians != 1_000_000,
             'regularization_source': 'base_mcmc' if profile == 'base_mcmc' else 'base_gs_sparse -> base_gs',
             'loss_adaptation': 'include regularizers in generated-view total' if profile == 'base_mcmc' else None}
 
@@ -144,10 +155,10 @@ def shared_distillation_cameras(official):
 
 @contextmanager
 def reconstruction_settings(profile='artifixer', *, source_ply=None,
-                            generated_rgb_loss=False, generated_lpips_downscale=True):
+                            generated_rgb_loss=False, generated_lpips_downscale=True, max_gaussians=1_000_000):
     validate_regularization(profile)
-    generated_loss_options(locals())
-    if profile == 'artifixer' and source_ply is None and not generated_rgb_loss and generated_lpips_downscale:
+    reconstruction_overrides(locals())
+    if profile == 'artifixer' and source_ply is None and not generated_rgb_loss and generated_lpips_downscale and max_gaussians == 1_000_000:
         yield
         return
     from data_processing import threedgrut_training as training
@@ -155,6 +166,8 @@ def reconstruction_settings(profile='artifixer', *, source_ply=None,
 
     def compose(config_name, overrides, config_dir):
         config = original_compose(config_name, overrides, config_dir)
+        if max_gaussians != 1_000_000:
+            config.strategy.add.max_n_gaussians = max_gaussians
         if generated_rgb_loss or not generated_lpips_downscale:
             # Only the override (generated-image) branch consumes these weights.
             config.loss['lambda_reconlosses_override'] = 1.0 if generated_rgb_loss else 0.0
@@ -807,7 +820,7 @@ def inference(root, request, trajectory, plus=False):
                       reconstruction='fresh ArtiFixer3D; 30000 steps; sparse MCMC LPIPS; regularization recorded in reconstruction_recipe',
                       reconstruction_recipe=reconstruction_recipe(request.get('runtime', {}).get('regularization_profile', 'artifixer'),
                                                                 source_ply=bool(request.get('source_ply')),
-                                                                **generated_loss_options(request.get('runtime', {}))),
+                                                                **reconstruction_overrides(request.get('runtime', {}))),
                       ply_stage='ArtiFixer3D; the + pass produces images, not another splat', merged=False)
         (root / 'result.json').write_text(json.dumps(result, indent=2))
 
@@ -956,7 +969,7 @@ def distill(root, request, trajectory):
     # No resume checkpoint, custom fitter, SH truncation, or compositing.
     profile = request.get('runtime', {}).get('regularization_profile', 'artifixer')
     with shared_distillation_cameras(official), reconstruction_settings(profile, source_ply=request.get('source_ply'),
-                                                                         **generated_loss_options(request.get('runtime', {}))):
+                                                                         **reconstruction_overrides(request.get('runtime', {}))):
         checkpoint, reused = official.train_artifixer3d(
             scene, paths, artifixer_frames_dir=predictions,
             base_checkpoint=None, config_name=ARTIFIXER3D_CONFIG,
@@ -976,7 +989,7 @@ def distill(root, request, trajectory):
     (root / 'distillation.json').write_text(json.dumps({
         'splat_path': str(splat_path), 'reconstruction_checkpoint': str(checkpoint),
         'reconstruction_recipe': reconstruction_recipe(profile, source_ply=bool(request.get('source_ply')),
-                                                      **generated_loss_options(request.get('runtime', {}))),
+                                                      **reconstruction_overrides(request.get('runtime', {}))),
         'source_ply_sha256': request.get('source_ply_sha256'),
         'render_dir': str(render_dir), 'supervision_manifest': str(root / 'supervision.json'),
         'reconstruction_images': supervision['reconstruction_images'],

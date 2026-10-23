@@ -22,13 +22,14 @@ from PIL import Image
 from ..checkpoint import Checkpoint, atomic_json, camera_from_record
 from ..viser_capture import capture_rgb
 from .capture import capture_plus_rgb
-from .official_worker import ARTIFIXER3D_CONFIG, ARTIFIXER3D_STEPS, reconstruction_recipe, validate_regularization, generated_loss_options
+from .official_worker import ARTIFIXER3D_CONFIG, ARTIFIXER3D_STEPS, reconstruction_recipe, validate_regularization, reconstruction_overrides
 
 UPSTREAM_REVISION = 'a392c4dfe17459ef9952407accdb9fcdcdddba98'
 DEFAULT_RUNTIME = {
     'artifixer_pipeline': 'legacy_gsplat',
     'resolution_profile': '720p',
     'regularization_profile': 'artifixer',
+    'max_gaussians': 1_000_000,
     'generated_rgb_loss': False,
     'generated_lpips_downscale': True,
     'prompt_source': 'worldexplorer',
@@ -466,6 +467,10 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         raise ValueError('Invalid seed or camera_scale')
     from .checkpoint_policy import checkpoint_for_run
     cp = checkpoint_for_run(Checkpoint.load(checkpoint_dir), (runtime or {}).get('image_trajectory', 'checkpoint'))
+    from ..jobs import read_json
+    repeat = read_json(cp.root / 'repeat-repair.json', None)
+    if repeat:
+        seed, camera_scale = repeat['seed'], repeat['camera_scale']
     if not cp.complete:
         raise ValueError('Finish selecting all requested views before repair')
     if mode == 'edited':
@@ -508,12 +513,12 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
     root = Path(output_dir).resolve() / f'{mode}_{uuid.uuid4().hex[:12]}'
     root.mkdir(parents=True, exist_ok=False)
     cp = prepare_repair_checkpoint(cp, root / 'checkpoint', cfg['resolution_profile'],
-                                   scene_path=cfg.get('scene_path'), should_stop=should_stop, reuse_artifixer_inputs=True,
+                                   scene_path=cfg.get('scene_path'), should_stop=should_stop, reuse_artifixer_inputs=not bool(repeat),
                                    artifixer_runtime=cfg)
     references = [str(cp.image_path(view, repaired=mode == 'edited')) for view in cp.repair_views]
     on_progress({'phase': 'anchor_geometry' if trajectory_mode == 'authors_orbit' else 'trajectory'})
     if trajectory_mode == 'authors_orbit':
-        trajectory_root, trajectory = prepare_saved_path(cp, should_stop=should_stop, scene_path=cfg.get('scene_path'), runtime=cfg)
+        trajectory_root, trajectory = prepare_saved_path(cp, orbit=repeat['orbit'] if repeat else None, should_stop=should_stop, scene_path=cfg.get('scene_path'), runtime=cfg)
     else:
         trajectory_root, trajectory = prepare_trajectory(cp, frames=frames, span_fraction=span_fraction, should_stop=should_stop, scene_path=cfg.get('scene_path'))
     if mode == 'baseline':
@@ -535,7 +540,7 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                'source_points3d': str(Path(points).resolve()),
                'initialization': 'source_colmap_points' if cfg.get('source_points3d') else 'original_splat_positions_and_rgb',
                'upstream_revision': UPSTREAM_REVISION, 'fit_iterations': ARTIFIXER3D_STEPS,
-               'reconstruction_recipe': reconstruction_recipe(cfg.get('regularization_profile', 'artifixer'), source_ply=bool(initialization), **generated_loss_options(cfg)),
+               'reconstruction_recipe': reconstruction_recipe(cfg.get('regularization_profile', 'artifixer'), source_ply=bool(initialization), **reconstruction_overrides(cfg)),
                'input_adaptation': 'Source splat RGB captured through the harness Viser at every calibrated camera. CUDA supplies only opacity/depth. Edited mode uses edits of Viser captures.',
                'anchor_rgb_policy': backend,
                'artifixer_pipeline': cfg['artifixer_pipeline'],
@@ -571,10 +576,15 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         request['worldexplorer_prompt'] = checkpoint_prompt(cp)
         if not request['worldexplorer_prompt']:
             raise ValueError('Original WorldExplorer prompt is unavailable for this scene')
+    if repeat:
+        shutil.copy2(cfg.get('scene_path') or cp.manifest['scene_path'], root / 'original.ply')
+        request['repeat_repair'] = {k: repeat[k] for k in (
+            'parent_result', 'parent_run', 'repair_pass', 'parent_incomplete', 'parent_splat') if k in repeat}
+        request['orbit_provenance'] = repeat['orbit']['provenance']
     atomic_json(root / 'request.json', request)
     env = runtime_environment(cfg)
     try:
-        phases = (('scale',) if camera_scale is None else ()) + (('orbit',) if trajectory_mode == 'authors_orbit' else ()) + ('caption', 'infer', 'distill', 'plus')
+        phases = (('scale',) if camera_scale is None else ()) + (('orbit',) if trajectory_mode == 'authors_orbit' and not repeat else ()) + ('caption', 'infer', 'distill', 'plus')
         for phase in phases:
             if should_stop():
                 raise InterruptedError('Splatfix repair stopped')
@@ -640,6 +650,9 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         result = json.loads((root / 'result.json').read_text())
         if not Path(result['splat_path']).is_file():
             raise RuntimeError('Authors reconstruction did not produce its isolated PLY')
+        if repeat:
+            result['repeat_repair'] = request['repeat_repair']
+            atomic_json(root / 'result.json', result)
         return {**result, 'output_dir': str(root)}
     except Exception as exc:
         atomic_json(root / 'failure.json', {'error': str(exc), 'type': type(exc).__name__})

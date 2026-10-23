@@ -141,6 +141,10 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 runtime.pop('worldexplorer_source', None)
         runtime['initial_image_seeding'] = options.get('initial_image_seeding') if not benchmark else None
         runtime['image_cache_insertion'] = options.get('image_cache_insertion', False) if not benchmark else False
+        if cp is not None and (cp.root / 'repeat-repair.json').is_file():
+            # Recorded effective runtime wins over current dashboard/server defaults.
+            repeat = json.loads((cp.root / 'repeat-repair.json').read_text())
+            runtime = dict(repeat['runtime'])
         if benchmark:
             from ..jobs import registered_benchmark
             source, _ = registered_benchmark(Path(executor.cfg.output.dir) / 'benchmarks', options['source'])
@@ -225,7 +229,10 @@ def execute_remote(executor, run_id, options, root, stop, update):
             executor.store.request_stop(run_id)
             return True
         return stop()
-    native = options.get('artifixer_pipeline') == 'authors_3dgut'
+    capture_pipeline = options.get('artifixer_pipeline')
+    if cp is not None and (cp.root / 'repeat-repair.json').is_file():
+        capture_pipeline = json.loads((cp.root / 'repeat-repair.json').read_text())['runtime'].get('artifixer_pipeline')
+    native = capture_pipeline == 'authors_3dgut'
     capture_mirror = None if benchmark or native else CaptureMirror(
         root, remote_dir, container_dir, cp, endpoint, ssh, sync,
         url=executor.cfg.get('renderer', {}).get('viser_url') or None, should_stop=capture_stop, progress=update)

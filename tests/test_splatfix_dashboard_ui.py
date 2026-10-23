@@ -354,3 +354,28 @@ def test_dashboard_new_defaults():
         select = re.search(r'<select id="'+element+r'"[^>]*>(.*?)</select>', html).group(1)
         assert re.search(r'<option value="([^"]+)"', select).group(1) == expected
     assert re.search(r'id="oracle-preset-scale"[^>]*value="0.25"', html)
+
+
+def test_gaussian_limit_click_edit_and_validation():
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Node required for dashboard controls')
+    page = Path(__file__).resolve().parents[1] / 'src/splat_explorer/web/static/splatfix.html'
+    code = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const html=fs.readFileSync(process.argv[1],'utf8');
+assert.match(html,/id="artifixer-max-gaussians"[^>]*value="1000000"/);
+assert.ok(html.includes("body.max_gaussians=Number($('artifixer-max-gaussians').value)"));
+const elements={};
+for(const id of ['artifixer-max-gaussians','artifixer-gaussian-limit-display'])elements[id]={hidden:id==='artifixer-max-gaussians',value:'1000000',textContent:'1,000,000',focus(){this.focused=true},select(){},addEventListener(){},setCustomValidity(s){this.error=s},reportValidity(){}};
+const ctx=vm.createContext({$:id=>elements[id]});
+vm.runInContext(html.slice(html.indexOf('function editGaussianLimit()'),html.indexOf('function renderArtifixerPipeline()')),ctx);
+ctx.editGaussianLimit();
+const input=elements['artifixer-max-gaussians'],display=elements['artifixer-gaussian-limit-display'];
+assert.equal(input.hidden,false);assert.equal(display.hidden,true);assert.equal(input.focused,true);
+input.value='2500000';assert.equal(ctx.saveGaussianLimit(),true);assert.equal(display.textContent,'2,500,000');assert.equal(input.hidden,true);
+for(const value of ['0','-1','1.5','','NaN','9007199254740992']){ctx.editGaussianLimit();input.value=value;assert.equal(ctx.saveGaussianLimit(),false);assert.equal(input.hidden,false);}
+input.value='500000';assert.equal(ctx.saveGaussianLimit(),true);assert.equal(display.textContent,'500,000');
+'''
+    result = subprocess.run([node, '-e', code, str(page)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

@@ -1349,6 +1349,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "Could not fully delete run. Some files may have been removed. Check the run folder and its permissions."}, 500)
                     return
                 self._send_json({"ok": True, **result})
+            elif self.command == "POST" and path == "/api/splatfix/results/repeat-artifixer":
+                if not isinstance(body, dict):
+                    raise ValueError("Request must be an object")
+                result = studio.results.repeat_artifixer(body.get("id"))
+                self._send_json({"ok": True, "run": result})
             elif self.command == "POST" and path == "/api/splatfix/results/reconstruct-artifixer":
                 if not isinstance(body, dict):
                     raise ValueError("Request must be an object")

@@ -52,6 +52,31 @@ class ResultCatalog:
                 raise
             return run.to_dict()
 
+    def repeat_artifixer(self, key):
+        import tempfile
+        from copy import deepcopy
+        from ..splatfix.artifixer.repeat_repair import snapshot_repeat
+        with self._run_storage_lock:
+            row = self.detail(key)
+            if row is None:
+                raise ValueError('Result not found')
+            self.studio.checkpoint_root.mkdir(parents=True, exist_ok=True)
+            destination = Path(tempfile.mkdtemp(prefix='repeat-', dir=self.studio.checkpoint_root))
+            try:
+                repeat = snapshot_repeat(self.studio, row, destination)
+                config = deepcopy(row['config'])
+                options = config['splatfix']
+                options.update(stage='repair', reconstruction_method='artifixer', checkpoint=str(destination.resolve()))
+                options.pop('scheduled_at', None)
+                parent_settings = read_json(self.studio.root / row['run_id'] / 'settings.json', {})
+                run = self.studio.store.create_run(config, settings_snapshot={
+                    'submitted': {'repeat_repair': repeat, 'parent_settings': parent_settings},
+                    'dashboard': parent_settings.get('dashboard')})
+            except Exception:
+                shutil.rmtree(destination)
+                raise
+            return run.to_dict()
+
     def delete_run(self, run_id):
         """Permanently remove only the validated inactive run directory."""
         with self._run_storage_lock:
@@ -415,6 +440,14 @@ class ResultCatalog:
         if row['kind'] == 'WorldExplorer':
             from .worldexplorer_details import run_detail
             return run_detail(self, row)
+        if row['kind'] == 'ArtiFixer3D':
+            from ..splatfix.artifixer.repeat_repair import repeat_inputs
+            try:
+                repeat_inputs(self.studio, row)
+                row['artifixer_repeat'] = {'ready': True, 'note': (
+                    'Uses the saved intermediate PLY from this interrupted run.' if row.get('incomplete') else '')}
+            except (ValueError, OSError, KeyError, TypeError) as exc:
+                row['artifixer_repeat'] = {'ready': False, 'reason': str(exc)}
         source_row = dict(row)
         manifest = row.pop('_manifest')
         row.pop('_paths')

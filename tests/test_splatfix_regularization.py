@@ -124,3 +124,41 @@ def test_generated_loss_config_and_reference_isolation(monkeypatch, rgb, downsca
             assert trainer.conf.loss[key] == sparse.loss[key]
     assert training.compose_3dgrut_config is compose
     assert training.Trainer3DGRUT is Trainer
+
+
+@pytest.mark.parametrize('pipeline', ['authors_3dgut', 'authors_3dgut_viser_rgb', 'legacy_gsplat'])
+def test_gaussian_limit_survives_pipeline_and_runtime_validation(pipeline):
+    options = validate_job(dict(stage='repair', checkpoint='saved', artifixer_pipeline=pipeline,
+                                max_gaussians=2_500_000))
+    assert options['max_gaussians'] == 2_500_000
+    overrides = worker.reconstruction_overrides(options)
+    assert worker.validate_reconstruction_options(options)['max_gaussians'] == 2_500_000
+    recipe = worker.reconstruction_recipe(**overrides)
+    assert recipe['max_gaussians'] == 2_500_000
+    assert recipe['custom_reconstruction_overrides'] is True
+    assert validate_job(dict(stage='repair', checkpoint='saved'))['max_gaussians'] == 1_000_000
+
+
+@pytest.mark.parametrize('limit', [0, -1, True, 1.5, '2000000', None])
+def test_invalid_gaussian_limits_rejected(limit):
+    with pytest.raises(ValueError, match='max_gaussians must be a positive integer'):
+        validate_job(dict(stage='repair', checkpoint='saved', max_gaussians=limit))
+
+
+@pytest.mark.parametrize('limit', [250_000, 2_000_000])
+def test_gaussian_limit_reaches_training_and_restores_compose(monkeypatch, limit):
+    sparse = SimpleNamespace(strategy=SimpleNamespace(add=SimpleNamespace(max_n_gaussians=1_000_000)),
+                             loss={'lambda_lpips_override': 0.1})
+    def compose(*args):
+        return copy.deepcopy(sparse)
+    training = ModuleType('data_processing.threedgrut_training')
+    training.compose_3dgrut_config, training.Trainer3DGRUT = compose, object
+    package = ModuleType('data_processing'); package.threedgrut_training = training
+    monkeypatch.setitem(sys.modules, 'data_processing', package)
+    monkeypatch.setitem(sys.modules, training.__name__, training)
+    with worker.reconstruction_settings(max_gaussians=limit):
+        config = training.compose_3dgrut_config(worker.ARTIFIXER3D_CONFIG, [], '/pinned')
+        assert config.strategy.add.max_n_gaussians == limit
+        assert config.loss == sparse.loss
+    assert training.compose_3dgrut_config is compose
+    assert sparse.strategy.add.max_n_gaussians == 1_000_000

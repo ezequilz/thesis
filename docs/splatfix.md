@@ -1218,3 +1218,40 @@ attention sink, 21-latent local attention window, and cache reset per series.
 Double-split's explicit `seed_index` alone never enabled this sampler: the
 historical dispatcher installed it only when `image_cache_insertion=true`.
 The new seeding flag cannot disable seeding when cache preservation is enabled.
+
+### Repeat a saved ArtiFixer reconstruction
+
+On an ArtiFixer result detail page, **Queue next ArtiFixer pass** appears above
+OracleGS reconstruction. It snapshots the saved output PLY as the next
+checkpoint's `original.ply`, the calibrated reference images, and the recorded
+orbit and effective runtime. The job uses the normal manager/GPU queue. Repeat
+inputs are independent of the parent run; second, third and later passes record
+the parent result and pass number.
+
+Repeat workers retain the previous camera scale and exact orbit instead of
+running alignment/interpolation again. They recapture anchor and trajectory RGB
+with the recorded renderer (Viser for legacy/hybrid pipelines), recompute opacity,
+depth and seed points, and run captioning, inference, distillation and plus again.
+Initial-image seeding and cache insertion retain their recorded settings. Saved
+GPT references remain the same, as in an ordinary reconstruction from that
+checkpoint. Old image, geometry and caption caches are not copied.
+
+The action accepts completed outputs and saved intermediate PLYs from interrupted
+runs; repeat provenance records whether the parent was incomplete and which PLY
+was used. It requires a saved result PLY, its prepared checkpoint, effective
+request settings and saved authored orbit. Missing/reduced inputs disable the
+button with a reason rather than silently using current defaults or new cameras.
+Bicycle benchmarks retain their existing benchmark repeat workflow. No GPU job
+is launched until the action is clicked. Restart the web/manager process after
+updating Python code.
+
+### ArtiFixer Gaussian limit
+
+Step 04 exposes **Gaussian limit**, initially **1,000,000**. Click the value to
+enter a positive integer, then press Enter or click away to save. This applies
+to ArtiFixer checkpoint reconstructions in all three pipeline modes. The queued
+options, effective runtime and reconstruction recipe record `max_gaussians`;
+repeat passes inherit the recorded value. Historical runs default to one million.
+
+The value overrides the authors' `strategy.add.max_n_gaussians` densification
+cap. It does not prune an imported source PLY that already exceeds the cap.
