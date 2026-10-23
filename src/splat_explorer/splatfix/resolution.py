@@ -151,7 +151,7 @@ def prepare_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE):
 
 def prepare_repair_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE, *,
                               scene_path=None, should_stop=lambda: False, reuse_artifixer_inputs=False,
-                              artifixer_runtime=None):
+                              artifixer_runtime=None, preserve_repaired_images=False):
     """Prepare exact-size step-4 cameras and recapture their source RGBs.
 
     Work in a run-local derivative. GPT references start from the original
@@ -204,10 +204,15 @@ def prepare_repair_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE, *,
                 view['manual_resized_rgb'] = manual_relative
                 view.pop('full_repaired_rgb', None)
             with Image.open(original) as image:
-                image = ImageOps.fit(image.convert('RGB'), (width, height),
-                                     Image.Resampling.LANCZOS, centering=(.5, .5))
                 view['repaired_rgb'] = f"views/{view['id']}/repaired.png"
-                image.save(root / view['repaired_rgb'])
+                if preserve_repaired_images and not manual and not response and image.size == (width, height):
+                    # Repeat snapshots can contain the exact calibrated input.
+                    # Preserve its bytes/hash instead of re-encoding the PNG.
+                    shutil.copy2(original, root / view['repaired_rgb'])
+                else:
+                    image = ImageOps.fit(image.convert('RGB'), (width, height),
+                                         Image.Resampling.LANCZOS, centering=(.5, .5))
+                    image.save(root / view['repaired_rgb'])
             view.setdefault('image_repair', {})['reconstruction_resize'] = {
                 'source': manual or response or old['repaired_rgb'],
                 'source_kind': 'manual_crop' if manual else 'full_response' if response else 'legacy_repaired_rgb',

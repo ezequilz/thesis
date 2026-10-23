@@ -31,7 +31,7 @@ def fixture(tmp_path):
         'seed': 123, 'camera_scale': .027, 'mode': 'baseline'})
     row = {'id': 'result-id', 'run_id': 'prior', 'kind': 'ArtiFixer3D',
            '_manifest': result / 'result.json', '_paths': {'repaired': result / 'output.ply'}, 'repair_pass': 2}
-    studio = SimpleNamespace(result_artifact=lambda manifest, raw: Path(raw) if raw and Path(raw).exists() else None)
+    studio = SimpleNamespace(cfg=SimpleNamespace(output=SimpleNamespace(dir=str(tmp_path))), result_artifact=lambda manifest, raw: Path(raw) if raw and Path(raw).exists() else None)
     return cp, row, studio, orbit
 
 
@@ -63,11 +63,19 @@ def test_missing_orbit_rejects_repeat(tmp_path):
         repeat_inputs(studio, row)
 
 
-def test_repeat_rerenders_saved_poses_and_skips_interpolation(tmp_path, monkeypatch):
+@pytest.mark.parametrize('rebuild', [False, True])
+def test_repeat_rerenders_saved_poses_and_skips_interpolation(tmp_path, monkeypatch, rebuild):
     cp, row, studio, orbit = fixture(tmp_path)
     # Keep a valid source PLY for the rendering path.
     row['_paths']['repaired'].write_bytes(Path(cp.manifest['scene_path']).read_bytes())
     root = tmp_path / 'repeat'; root.mkdir()
+    if rebuild:
+        row['reduced'] = True
+        request_path = row['_manifest'].parent / 'request.json'
+        request = json.loads(request_path.read_text())
+        request.update(upstream_revision=repair.UPSTREAM_REVISION, orbit_provenance=orbit['provenance'])
+        atomic_json(request_path, request)
+        (cp.root / 'trajectory.json').unlink()
     info = snapshot_repeat(studio, row, root)
     mock_scene(monkeypatch)
     monkeypatch.setattr('splat_explorer.splatfix.rendering.BundleRenderer', FakeRenderer)
@@ -75,6 +83,15 @@ def test_repeat_rerenders_saved_poses_and_skips_interpolation(tmp_path, monkeypa
     captures, phases = [], []
     monkeypatch.setattr(repair, 'capture_rgb', lambda source, cameras, paths, **kw: captures.append((source, [c.c2w.tolist() for c in cameras])))
     def worker(command, **kwargs):
+        if '--full-output' in command:
+            assert rebuild
+            phases.append('orbit')
+            assert command[command.index('--metric-scale') + 1] == str(.027 / .01)
+            atomic_json(Path(command[command.index('--provenance') + 1]), orbit['provenance'])
+            atomic_json(Path(command[command.index('--full-output') + 1]), {'frames': [
+                {'transform_matrix': (np.asarray(p) @ np.diag([1., -1., -1., 1.])).tolist()}
+                for p in orbit['poses']]})
+            return
         phase = command[-1]; phases.append(phase)
         assert phase not in ('orbit', 'scale')
         path = Path(command[command.index('--request') + 1])
@@ -91,8 +108,8 @@ def test_repeat_rerenders_saved_poses_and_skips_interpolation(tmp_path, monkeypa
             atomic_json(path.parent / 'result.json', {'splat_path': str(output)})
     monkeypatch.setattr(repair, 'run_worker', worker)
     result = repair.run_repair(root, tmp_path / 'outputs', mode='baseline', runtime=info['runtime'])
-    assert phases == ['caption', 'infer', 'distill', 'plus']
-    assert captures == [(str(root / 'original.ply'), orbit['poses'])]
+    assert phases == (['orbit'] if rebuild else []) + ['caption', 'infer', 'distill', 'plus']
+    assert captures == [(str(root / 'original.ply'), orbit['poses'])] * (2 if rebuild else 1)
     assert result['repeat_repair']['repair_pass'] == 3
     assert (Path(result['output_dir']) / 'original.ply').read_bytes() == (root / 'original.ply').read_bytes()
 
@@ -160,3 +177,55 @@ def test_repeat_preserves_custom_gaussian_limit(tmp_path):
     destination = tmp_path / 'repeat'; destination.mkdir()
     info = snapshot_repeat(studio, row, destination)
     assert info['runtime']['max_gaussians'] == 2_500_000
+
+
+def test_reduced_run_falls_back_to_original_checkpoint(tmp_path):
+    cp, row, studio, orbit = fixture(tmp_path)
+    row.update(reduced=True, config={'splatfix': {'checkpoint': str(cp.root)}})
+    request_path = row['_manifest'].parent / 'request.json'
+    request = json.loads(request_path.read_text())
+    request['checkpoint_root'] = str(tmp_path / 'deleted-checkpoint')
+    atomic_json(request_path, request)
+    recovered, req, saved_orbit = repeat_inputs(studio, row)
+    assert recovered.root == cp.root
+    assert req['_repeat_source_checkpoint'] is True
+    assert saved_orbit == orbit
+    root = tmp_path / 'repeat'; root.mkdir()
+    assert snapshot_repeat(studio, row, root)['trajectory_replay'] == 'saved_orbit'
+    row['config']['splatfix']['checkpoint'] = '/outside/checkpoint'
+    with pytest.raises(ValueError, match='checkpoint poses'):
+        repeat_inputs(studio, row)
+
+
+def test_rebuilt_orbit_rejects_different_interpolation():
+    from splat_explorer.splatfix.artifixer.repeat_repair import validate_rebuilt_provenance
+    expected = {'segments': [{'full_frame_indices': [1, 2]}], 'source_transforms': '/old/path'}
+    validate_rebuilt_provenance(expected, {**expected, 'source_transforms': '/new/path'})
+    with pytest.raises(ValueError, match='segments'):
+        validate_rebuilt_provenance(expected, {'segments': [{'full_frame_indices': [1]}]})
+
+
+def test_reduced_run_prefers_retained_exact_reference_over_edited_checkpoint(tmp_path):
+    from PIL import Image
+    cp, row, studio, _ = fixture(tmp_path)
+    for view in cp.views:
+        view['repaired_rgb'] = view['original_rgb']
+    cp.save()
+    row.update(reduced=True, config={'splatfix': {'checkpoint': str(cp.root)}})
+    result = row['_manifest'].parent
+    saved, hashes = [], []
+    for index in range(len(cp.views)):
+        path = result / f'reference-{index}.png'
+        Image.new('RGB', (32, 32), (222, 33, index)).save(path)
+        saved.append({'index': index, 'path': str(path)})
+        hashes.append(repair.digest_file(path))
+    atomic_json(result / 'input-preview.json', {'reference_images': saved})
+    req = json.loads((result / 'request.json').read_text())
+    req.update(checkpoint_root=str(tmp_path / 'deleted'), mode='edited', reference_sha256=hashes)
+    atomic_json(result / 'request.json', req)
+    destination = tmp_path / 'repeat'; destination.mkdir()
+    info = snapshot_repeat(studio, row, destination)
+    prepared = Checkpoint.load(destination)
+    assert [repair.digest_file(prepared.image_path(v, repaired=True)) for v in prepared.views] == hashes
+    assert info['expected_reference_sha256'] == hashes
+    assert [repair.digest_file(cp.image_path(v, repaired=True)) for v in cp.views] != hashes

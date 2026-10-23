@@ -218,3 +218,23 @@ def test_artifixer_checkpoint_staging_reused_after_remote_roundtrip(tmp_path, mo
     cp.views[0]['camera']['position'][0] = 0.
     with pytest.raises(ValueError, match='checksum'):
         prepare_repair_checkpoint(cp, tmp_path / 'corrupt', reuse_artifixer_inputs=True)
+
+
+def test_repeat_preserves_exact_calibrated_reference_bytes(tmp_path, monkeypatch):
+    from PIL.PngImagePlugin import PngInfo
+    from splat_explorer.splatfix.resolution import prepare_repair_checkpoint
+    source = tmp_path / 'scene.ply'; source.write_text('scene')
+    cp = Checkpoint.create(tmp_path / 'saved', source, target_views=1,
+                           metadata={'renderer': {'backend': 'viser'}})
+    camera = Camera(np.zeros(3), np.eye(3), width=832, height=480)
+    cp.add_view(np.zeros((480, 832, 3), np.uint8), camera)
+    view = cp.views[0]; view['repaired_rgb'] = 'views/000/repaired.png'
+    metadata = PngInfo(); metadata.add_text('provenance', 'saved reference')
+    Image.new('RGB', (832, 480), 'blue').save(cp.root / view['repaired_rgb'], pnginfo=metadata)
+    cp.save()
+    def capture(scene, cameras, paths, **kwargs):
+        for cam, path in zip(cameras, paths):
+            Image.new('RGB', (cam.width, cam.height)).save(path)
+    monkeypatch.setattr('splat_explorer.splatfix.viser_capture.capture_rgb', capture)
+    result = prepare_repair_checkpoint(cp, tmp_path / 'prepared', 'training', preserve_repaired_images=True)
+    assert result.image_path(result.views[0], repaired=True).read_bytes() == cp.image_path(view, repaired=True).read_bytes()

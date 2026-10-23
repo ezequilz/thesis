@@ -514,8 +514,20 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
     root.mkdir(parents=True, exist_ok=False)
     cp = prepare_repair_checkpoint(cp, root / 'checkpoint', cfg['resolution_profile'],
                                    scene_path=cfg.get('scene_path'), should_stop=should_stop, reuse_artifixer_inputs=not bool(repeat),
-                                   artifixer_runtime=cfg)
+                                   artifixer_runtime=cfg, preserve_repaired_images=bool(repeat))
     references = [str(cp.image_path(view, repaired=mode == 'edited')) for view in cp.repair_views]
+    if repeat and repeat.get('expected_reference_sha256'):
+        if [digest_file(path) for path in references] != repeat['expected_reference_sha256']:
+            raise ValueError('Checkpoint references changed since the parent run')
+    if repeat and repeat.get('expected_anchor_transforms'):
+        from ...scene_runs_ext.bundle import transforms
+        actual = transforms([camera_from_record(view) for view in cp.views])
+        expected = repeat['expected_anchor_transforms']
+        for key in ('w', 'h', 'fl_x', 'fl_y', 'cx', 'cy'):
+            if not np.isclose(actual[key], expected[key], rtol=0, atol=1e-9):
+                raise ValueError('Checkpoint camera calibration changed since the parent run')
+        if [f['transform_matrix'] for f in actual['frames']] != [f['transform_matrix'] for f in expected['frames']]:
+            raise ValueError('Checkpoint camera poses changed since the parent run')
     on_progress({'phase': 'anchor_geometry' if trajectory_mode == 'authors_orbit' else 'trajectory'})
     if trajectory_mode == 'authors_orbit':
         trajectory_root, trajectory = prepare_saved_path(cp, orbit=repeat['orbit'] if repeat else None, should_stop=should_stop, scene_path=cfg.get('scene_path'), runtime=cfg)
@@ -579,12 +591,13 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
     if repeat:
         shutil.copy2(cfg.get('scene_path') or cp.manifest['scene_path'], root / 'original.ply')
         request['repeat_repair'] = {k: repeat[k] for k in (
-            'parent_result', 'parent_run', 'repair_pass', 'parent_incomplete', 'parent_splat') if k in repeat}
-        request['orbit_provenance'] = repeat['orbit']['provenance']
+            'parent_result', 'parent_run', 'repair_pass', 'parent_incomplete', 'parent_splat', 'trajectory_replay') if k in repeat}
+        if repeat.get('orbit'):
+            request['orbit_provenance'] = repeat['orbit']['provenance']
     atomic_json(root / 'request.json', request)
     env = runtime_environment(cfg)
     try:
-        phases = (('scale',) if camera_scale is None else ()) + (('orbit',) if trajectory_mode == 'authors_orbit' and not repeat else ()) + ('caption', 'infer', 'distill', 'plus')
+        phases = (('scale',) if camera_scale is None else ()) + (('orbit',) if trajectory_mode == 'authors_orbit' and not (repeat and repeat.get('orbit')) else ()) + ('caption', 'infer', 'distill', 'plus')
         for phase in phases:
             if should_stop():
                 raise InterruptedError('Splatfix repair stopped')
@@ -603,8 +616,16 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                     '--metric-scale', str(request['camera_scale'] / .01),
                     '--output', str(root / 'orbit-targets.json'), '--provenance', str(root / 'orbit-provenance.json'),
                     '--full-output', str(root / 'orbit-full.json')]
+                if repeat:
+                    prior = repeat.get('expected_orbit_provenance') or {}
+                    command += ['--interp-distance', str(prior.get('requested_spacing', prior.get('spacing', .1)))]
+                    if prior.get('loop'):
+                        command += ['--loop']
                 run_worker(command, cwd=cfg['repo'], env=env, log_path=root / 'orbit.log', should_stop=should_stop)
                 orbit_provenance = json.loads((root / 'orbit-provenance.json').read_text())
+                if repeat:
+                    from .repeat_repair import validate_rebuilt_provenance
+                    validate_rebuilt_provenance(repeat.get('expected_orbit_provenance'), orbit_provenance)
                 full = json.loads((root / 'orbit-full.json').read_text())
                 poses = np.asarray([frame['transform_matrix'] for frame in full['frames']]) @ np.diag([1., -1., -1., 1.])
                 orbit = {'poses': poses.tolist(), 'provenance': {key: value for key, value in orbit_provenance.items() if key != 'source_transforms'}}

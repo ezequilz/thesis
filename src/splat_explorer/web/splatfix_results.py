@@ -443,9 +443,10 @@ class ResultCatalog:
         if row['kind'] == 'ArtiFixer3D':
             from ..splatfix.artifixer.repeat_repair import repeat_inputs
             try:
-                repeat_inputs(self.studio, row)
+                _, _, orbit = repeat_inputs(self.studio, row)
                 row['artifixer_repeat'] = {'ready': True, 'note': (
-                    'Uses the saved intermediate PLY from this interrupted run.' if row.get('incomplete') else '')}
+                    ('Uses the saved intermediate PLY from this interrupted run. ' if row.get('incomplete') else '') +
+                    ('Rebuilds the camera trajectory from saved checkpoint poses and recorded interpolation settings.' if not orbit else ''))}
             except (ValueError, OSError, KeyError, TypeError) as exc:
                 row['artifixer_repeat'] = {'ready': False, 'reason': str(exc)}
         source_row = dict(row)

@@ -187,7 +187,8 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
             keep.add(result / 'preview-trajectory.json')
         for name in ('result.json', 'partial-result.json', 'inference-preview.json', 'input-preview.json',
                      'benchmark-run.json', 'published-test-metrics.json', 'request.json',
-                     'failure.json', 'distill.lifecycle.json'):
+                     'failure.json', 'distill.lifecycle.json', 'anchor-transforms.json',
+                     'orbit-full.json', 'orbit-provenance.json'):
             if (result / name).is_file():
                 keep.add(result / name)
         for pattern in ('stage-comparison*.jpg', 'stage-comparison.json', 'trajectory-quality.png', 'trajectory-quality.json'):

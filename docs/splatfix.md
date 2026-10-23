@@ -1255,3 +1255,16 @@ repeat passes inherit the recorded value. Historical runs default to one million
 
 The value overrides the authors' `strategy.add.max_n_gaussians` densification
 cap. It does not prune an imported source PLY that already exceeds the cap.
+
+Reduced ArtiFixer runs can repeat from the original registered checkpoint when
+reduction removed the prepared checkpoint. Exact retained reference images take
+precedence over subsequent edits to that checkpoint. Reference hashes and saved
+anchor poses/calibration are checked before inference. A retained trajectory or
+full-orbit export is reused first. If those poses are missing, the worker rebuilds
+the orbit using the pinned authors implementation, saved camera scale, endpoint
+policy, split mode and interpolation settings; it checks the regenerated segment
+and reference mappings against the parent provenance. Missing checkpoint inputs
+or incompatible trajectory provenance remain explicit errors.
+
+Reduction now retains the small anchor/full-orbit/provenance JSON exports even
+when reconstruction images are not retained, to support future repeats.
