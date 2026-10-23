@@ -104,6 +104,28 @@ def test_saved_checkpoint_original_uses_registered_source(tmp_path):
     assert not studio.results.entries()[0]['original']
 
 
+@pytest.mark.parametrize('location', ['manifest', 'preview', 'fallback'])
+def test_detail_plus_gallery_is_separate_and_numerically_ordered(tmp_path, location):
+    studio, run, root = setup(tmp_path)
+    folder = root / ('plus/splatfix/frames/batch_0000/pred' if location == 'fallback' else 'custom-plus')
+    folder.mkdir(parents=True)
+    for name in ('10.png', '2.jpg', '0.png'):
+        (folder / name).write_bytes(b'image')
+    (folder / '3.png').touch()
+    outside = tmp_path / 'outside.png'
+    outside.write_bytes(b'outside')
+    (folder / '4.png').symlink_to(outside)
+    if location != 'fallback':
+        manifest = root / ('result.json' if location == 'manifest' else 'inference-preview.json')
+        data = json.loads(manifest.read_text()) if manifest.exists() else {}
+        data['plus_frames'] = f'/remote/results/{root.name}/custom-plus'
+        manifest.write_text(json.dumps(data))
+    detail = studio.results.run_detail(run.name)
+    assert detail['gallery']['frames'] == []
+    assert [f['index'] for f in detail['plus_gallery']['frames']] == [0, 2, 10]
+    assert all(f['url'] == studio.file_url(folder / f['name']) for f in detail['plus_gallery']['frames'])
+
+
 def test_catalog_handles_relative_output_root(tmp_path, monkeypatch):
     studio, _, _ = setup(tmp_path)
     monkeypatch.chdir(tmp_path)
@@ -538,6 +560,29 @@ ResizeObserver:class{observe(){}},
 fetch:()=>new Promise(()=>{}),clearTimeout(){},setTimeout(){},assert});
 vm.runInContext(fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0],context);
 vm.runInContext(String.raw`
+const plusTiles=[0,1].map(()=>({setAttribute(){},scrollIntoView(){}}));
+$('plusGallery').querySelectorAll=()=>plusTiles;
+document.querySelectorAll=()=>plusTiles;
+$('viewerFrame').style={};$('full').style={};
+$('lightbox').showModal=()=>{$('lightbox').open=true};
+renderPlus({kind:'ArtiFixer3D',plus_gallery:{frames:[{index:2,url:'/plus/2.png'},{index:10,url:'/plus/10.png'}]}});
+assert.equal($('plusImages').hidden,false);
+$('plusOpen').onclick();
+assert.equal($('lightbox').open,true);
+assert.equal($('full').src,'/plus/2.png');
+assert.equal(viewerGallery,'plusGallery');
+assert.equal($('captureToggle').hidden,true);
+choose(viewerIndex+1,false,viewerGallery);
+assert.equal($('full').src,'/plus/10.png');
+assert.equal($('next').disabled,true);
+$('plusFind').value='2';$('plusGo').onclick();
+assert.equal(viewerIndex,0);
+assert.ok($('position').textContent.includes('ArtiFixer3D+ frame 2'));
+renderPlus({kind:'ArtiFixer3D'});
+assert.equal($('plusOpen').disabled,true);
+assert.ok($('plusGallery').innerHTML.includes('No ArtiFixer3D+ images'));
+renderPlus({kind:'OracleGS'});
+assert.equal($('plusImages').hidden,true);
 assert.equal(cleanLog('\x1b[31mERROR\x1b[0m\r\nnext\rprogress'),'ERROR\nnext\nprogress');
 $('logSearch').value='<script>';
 $('logContent').querySelectorAll=()=>[];

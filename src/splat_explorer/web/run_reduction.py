@@ -166,6 +166,17 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
         if not result.resolve().is_relative_to(root.resolve()):
             raise ValueError('Result directory escapes run')
         copies.extend(plan['ply_copies'])
+        # Keep 3D+ image outputs independently of video batch discovery, including
+        # images in nested output folders. All three reduction modes share this rule.
+        plus_frames = plan.get('plus_frames_dir')
+        if plus_frames and plus_frames.is_dir():
+            for path in files(plus_frames):
+                if path.suffix.lower() not in ('.png', '.jpg', '.jpeg'):
+                    continue
+                if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+                    raise ValueError('Cannot preserve linked ArtiFixer3D+ images')
+                if path.stat().st_size > 0:
+                    keep.add(path)
         if preserve_reconstruction:
             if not plan.get('trajectory'):
                 raise ValueError('Saved inference trajectory is required to keep reconstruction inputs')

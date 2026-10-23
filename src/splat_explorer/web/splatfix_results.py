@@ -141,7 +141,8 @@ class ResultCatalog:
             predictions = [self.studio.result_artifact(manifest, result.get(key) or preview.get(key))
                            for key in ('prediction_frames', 'reverse_inference_frames', 'plus_frames')]
             plan = {'root': manifest.parent, 'ply_copies': copies,
-                    'prediction_dirs': [p for p in predictions if p and p.is_dir()]}
+                    'prediction_dirs': [p for p in predictions if p and p.is_dir()],
+                    'plus_frames_dir': predictions[-1]}
             if preserve_reconstruction:
                 from ..splatfix.oraclegs.artifixer_inputs import source_assets
                 trajectory, references, _ = source_assets(self.studio, row)
@@ -420,6 +421,7 @@ class ResultCatalog:
         gallery = {'frames': [], 'reference_count': None, 'verified_inputs': False,
                    'stage': 'ArtiFixer · reconstruction inputs'}
         row['gallery'] = gallery
+        row['plus_gallery'] = {'frames': []}
         reduction = read_json(self.studio.root / row['run_id'] / 'reduction.json', {})
         row['inference_videos'] = []
         saved_videos = reduction if row['reduced'] else read_json(self.studio.root / row['run_id'] / 'inference-videos.json', {})
@@ -511,6 +513,17 @@ class ResultCatalog:
             return row
         gallery, allowed = self._reconstruction_gallery(manifest, result)
         row['gallery'] = gallery
+        preview = read_json(root / 'inference-preview.json', {})
+        plus = self.studio.result_artifact(manifest, result.get('plus_frames') or preview.get('plus_frames'))
+        if plus is None:
+            plus = self.studio.result_artifact(manifest, 'plus/splatfix/frames/batch_0000/pred')
+        if plus and plus.is_dir():
+            images = [p for p in plus.iterdir() if p.suffix.lower() in ('.png', '.jpg', '.jpeg')
+                      and p.stem.isdigit() and p.is_file() and p.stat().st_size > 0
+                      and p.resolve().is_relative_to(root.resolve())]
+            row['plus_gallery']['frames'] = [
+                {'index': int(p.stem), 'name': p.name, 'url': self.studio.file_url(p)}
+                for p in sorted(images, key=lambda p: (int(p.stem), p.name))]
         from ..splatfix.oraclegs.artifixer_inputs import source_assets
         try:
             source_assets(self.studio, source_row)

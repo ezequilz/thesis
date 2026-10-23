@@ -337,12 +337,22 @@ def test_endpoint_reduce_preserves_both_inference_folders(tmp_path, backup, pres
         for item in directions]})
     (result / 'checkpoint.pt').write_bytes(b'weights')
     (result / 'raw-capture.png').write_bytes(b'input')
+    plus = result / 'plus-images'
+    (plus / 'additional').mkdir(parents=True)
+    Image.new('RGB', (16, 8), (20, 40, 60)).save(plus / '00000.png')
+    Image.new('RGB', (16, 8), (60, 40, 20)).save(plus / 'additional/view.jpg')
+    plus_images = {p: p.read_bytes() for p in plus.rglob('*') if p.is_file()}
+    manifest = json.loads(row['_manifest'].read_text())
+    manifest['plus_frames'] = str(plus)
+    atomic_json(row['_manifest'], manifest)
     predictions = {p: p.read_bytes() for p in result.glob('**/pred/*.png')}
     report = studio.results.reduce_run(run.name, backup=backup,
                                       preserve_reconstruction=preserve_reconstruction)
-    assert len(report['inference_videos']) == 2
-    assert all(video['frame_count'] == 6 for video in report['inference_videos'])
+    assert len(report['inference_videos']) == 3
+    assert sorted(video['frame_count'] for video in report['inference_videos']) == [1, 6, 6]
     assert all(path.read_bytes() == content for path, content in predictions.items())
+    assert all(path.read_bytes() == content for path, content in plus_images.items())
+    assert studio.plus_previews(row['_manifest'], manifest) == [studio.file_url(plus / '00000.png')]
     assert not (result / 'checkpoint.pt').exists()
     assert not (result / 'raw-capture.png').exists()
     if backup:
