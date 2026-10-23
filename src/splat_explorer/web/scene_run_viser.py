@@ -56,7 +56,8 @@ class SceneRunViser:
 
     Opening ``/{run_id}/viser`` POSTs to start it. Extra run tabs rebind this
     same server instead of spawning another process. Closing the last visor
-    tab (or an idle timeout) stops it.
+    tab stops it once Viser disconnects. Connected WebSockets keep it alive
+    without browser heartbeats; disconnected sessions expire after a grace period.
     """
 
     def __init__(
@@ -89,6 +90,10 @@ class SceneRunViser:
         self._scenes: dict[str, Any] = {}
         self._clients: dict[str, float] = {}
         self._watchdog_started = False
+        self._disconnected_since: float | None = None
+
+    def detail(self, run_id):
+        return self.studio.detail(run_id)
 
     def ply_paths(self, run_id: str) -> dict[str, Path | None]:
         return {
@@ -141,7 +146,7 @@ class SceneRunViser:
                 self._clients.pop(str(client), None)
             elif self._run_id == str(run_id):
                 self._clients.clear()
-            if not self._clients:
+            if not self._clients and (self._server is None or not self._server.get_clients()):
                 self._stop_locked()
         return self.snapshot(run_id)
 
@@ -165,6 +170,7 @@ class SceneRunViser:
         self._handles.clear()
         self._scenes.clear()
         self._clients.clear()
+        self._disconnected_since = None
         if server is None:
             return
         stopper = getattr(server, "stop", None)
@@ -181,26 +187,32 @@ class SceneRunViser:
         self._watchdog_started = True
         threading.Thread(target=self._watchdog, daemon=True).start()
 
-    def _watchdog(self) -> None:
+    def _stop_if_idle_locked(self, now: float) -> bool:
+        if self._server is None:
+            return True
+        if self._server.get_clients():
+            self._disconnected_since = None
+            return False
+        # Allow the iframe to connect initially or reconnect after a brief drop.
+        if self._disconnected_since is None:
+            self._disconnected_since = now
         timeout = self._idle_timeout
-        while timeout is not None:
+        if timeout is None:
+            return False
+        self._clients = {token: seen for token, seen in self._clients.items()
+                         if now - seen <= timeout}
+        if self._clients or now - self._disconnected_since < timeout:
+            return False
+        self._stop_locked()
+        return True
+
+    def _watchdog(self) -> None:
+        while self._idle_timeout is not None:
             time.sleep(_WATCHDOG_S)
-            now = time.monotonic()
             with self._lock:
-                stale = [
-                    token for token, seen in self._clients.items()
-                    if now - seen > timeout
-                ]
-                for token in stale:
-                    self._clients.pop(token, None)
-                if self._server is None:
+                if self._stop_if_idle_locked(time.monotonic()):
                     self._watchdog_started = False
                     return
-                if self._clients:
-                    continue
-                self._stop_locked()
-                self._watchdog_started = False
-                return
 
     def show(
         self,
@@ -212,7 +224,7 @@ class SceneRunViser:
         client: str | None = None,
     ) -> dict[str, Any]:
         run_id = str(run_id)
-        if self.studio.detail(run_id) is None:
+        if self.detail(run_id) is None:
             return {
                 "ok": False,
                 "run_id": run_id,
@@ -362,7 +374,7 @@ class SceneRunViser:
     def _up_axis(self, run_id: str) -> str:
         default = str(_cfg_get(self.cfg, "camera.up_axis", "+y") or "+y")
         try:
-            detail = self.studio.detail(run_id) or {}
+            detail = self.detail(run_id) or {}
         except Exception:
             return default
         config = detail.get("config") if isinstance(detail, Mapping) else None
@@ -507,20 +519,15 @@ class SceneRunViser:
         try:
             min_opacity = float(_cfg_get(self.cfg, "scene.min_opacity", 0.0) or 0.0)
             lod = int(_cfg_get(self.cfg, "scene.lod_level", 0) or 0)
-            saved_views = self.review_views(run_id)
+            saved_views = self._saved_views if keep_camera else self.review_views(run_id)
+            # Publish the selected splat before preparing comparison payloads.
+            names = WHICH if which == "highlight" else (which,)
             scenes = {}
-            first = "repaired" if which == "highlight" else which
-            for name in (first, *(name for name in WHICH if name != first)):
-                path = paths[name]
-                if path is None:
-                    continue
-                with self._lock:
-                    if generation != self._generation or self._server is None:
-                        return
-                scenes[name] = loader(path, min_opacity=0.0, lod_level=lod)
-            if self.highlight_supported(run_id) and all(name in scenes for name in WHICH):
+            for name in names:
+                scenes[name] = loader(paths[name], min_opacity=0.0, lod_level=lod)
+            if which == "highlight":
                 from .repair_difference import repair_difference
-                scenes["highlight"] = repair_difference(scenes["original"], scenes["repaired"])
+                scenes[which] = repair_difference(scenes["original"], scenes["repaired"])
             if min_opacity > 0:
                 scenes = {name: scene.filtered_by_opacity(min_opacity)
                           for name, scene in scenes.items()}
@@ -541,7 +548,7 @@ class SceneRunViser:
             saved = _snapshot_client_cameras(server) if keep_camera else []
             try:
                 self._install_review_scene(scenes[which], which)
-                self._scenes = scenes
+                self._scenes.update(scenes)
             except Exception as exc:
                 self._status = "error"
                 self._error = f"{type(exc).__name__}: {exc}"
@@ -565,3 +572,21 @@ class SceneRunViser:
                 "Scene-run visor showing %s %s (%d gaussians)",
                 run_id, _PLY_NAME[which], scene.num_gaussians,
             )
+
+        # The browser can display the selected payload while its alternative
+        # loads. A failed preload must not turn a working viewer into an error.
+        for name in WHICH:
+            with self._lock:
+                if generation != self._generation or self._server is None:
+                    return
+                if name in self._scenes or paths[name] is None:
+                    continue
+            try:
+                scene = loader(paths[name], min_opacity=min_opacity, lod_level=lod)
+            except Exception:
+                logger.debug("Review preload failed for %s", paths[name], exc_info=True)
+                continue
+            with self._lock:
+                if generation != self._generation or self._server is None:
+                    return
+                self._scenes[name] = scene

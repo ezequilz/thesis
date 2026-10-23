@@ -70,6 +70,7 @@ const highlight = $("highlight");
 const frame = $("frame"), overlay = $("overlay");
 const api = resultReview ? `/api/splatfix/results/viser?id=${encodeURIComponent(runId)}` : `/api/scene-runs/${encodeURIComponent(runId)}/viser`;
 if(resultReview){highlight.hidden=true;document.querySelector("header a").href="/splatfix/results";document.querySelector("header a").textContent="Results";document.querySelector("h1").firstChild.textContent="Review ";}
+let inactiveTimer = null;
 let state = null, pending = false, timer = null, started = false, closed = false, revision = 0;
 
 function plyLabel(which) {
@@ -144,7 +145,7 @@ async function refresh(start) {
     started = Boolean(state?.viewer_url) || state?.status === "loading" || state?.status === "ready";
     pending = false;
   } else if (started) {
-    const next = await post({heartbeat: true});
+    const next = await fetchJson(api);
     if (requestRevision !== revision || closed) return;
     state = next;
   } else {
@@ -162,12 +163,13 @@ async function tick() {
     state = {ok: false, message: error.message, status: "error"};
     render();
   }
-  const wait = !started || state?.status === "loading" ? 1000 : 8000;
-  if (!closed) timer = setTimeout(tick, wait);
+  if (!closed && state?.status === "loading") timer = setTimeout(tick, 1000);
 }
 function stopVisor() {
   closed = true;
   clearTimeout(timer);
+  clearTimeout(inactiveTimer);
+  frame.removeAttribute("src");
   const body = JSON.stringify({stop: true, client});
   try {
     if (navigator.sendBeacon(api, new Blob([body], {type: "application/json"}))) return;
@@ -185,7 +187,7 @@ async function changeView(body) {
   pending = false;
   if (closed) { stopVisor(); return; }
   render();
-  timer = setTimeout(tick, state?.status === "loading" ? 1000 : 8000);
+  if (state?.status === "loading") timer = setTimeout(tick, 1000);
 };
 $("view-prev").onclick = () => { if(!$("view-prev").disabled) changeView({view_delta:-1}); };
 $("view-next").onclick = () => { if(!$("view-next").disabled) changeView({view_delta:1}); };
@@ -193,10 +195,28 @@ flip.onclick = () => { if (!flip.disabled) changeView({toggle: true}); };
 highlight.onclick = () => { if (!highlight.disabled) changeView({which: "repaired", highlight: !state?.highlight}); };
 window.addEventListener("keydown", event => { if(event.code === "Space" && !event.repeat && event.target === document.body){event.preventDefault();flip.click();} });
 window.addEventListener("pagehide", stopVisor);
+function resumeVisor() {
+  closed = false;
+  started = false;
+  pending = false;
+  frame.removeAttribute("src");
+  setOverlay("Loading repaired splat…");
+  tick();
+}
+function updateVisibility() {
+  clearTimeout(inactiveTimer);
+  if (document.hidden) {
+    if (!closed) inactiveTimer = setTimeout(stopVisor, 4 * 60 * 1000);
+  } else if (closed) {
+    resumeVisor();
+  }
+}
+document.addEventListener("visibilitychange", updateVisibility);
 window.addEventListener("pageshow", event => {
-  if (event.persisted) { closed = false; started = false; frame.removeAttribute("src"); tick(); }
+  if (event.persisted) { resumeVisor(); updateVisibility(); }
 });
 tick();
+updateVisibility();
 </script>
 </body>
 </html>

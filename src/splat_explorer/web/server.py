@@ -1447,9 +1447,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif path == "/api/splatfix/results/viser":
                 query = parse_qs(urlsplit(self.path).query)
                 key = query.get("id", [""])[0]
-                if studio.results.detail(key) is None:
-                    self._send_json({"ok": False, "error": "Result not found"}, 404)
-                    return
                 visor = studio.results.visor
                 if self.command == "GET":
                     result = visor.snapshot(key)

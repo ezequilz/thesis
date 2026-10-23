@@ -198,8 +198,8 @@ def test_result_viewer_hidden_outliers_cannot_change_original_depth_range(tmp_pa
     original.means[:, 2] = [-2., -1., 0., 1.]
     repaired.means[:, 2] = [-20000., -1., 0., 40000.]
     paths = {name: run_dir / f"scene_{name}.ply" for name in ("original", "repaired")}
-    catalog = SimpleNamespace(cfg=studio.cfg, detail=lambda _: {"_paths": paths,
-        "scene": "room", "run_id": "test", "config": {}}, review_views=lambda _: [])
+    catalog = SimpleNamespace(cfg=studio.cfg, detail=lambda _, **kw: {"_paths": paths,
+        "scene": "room", "run_id": "test", "config": {}}, review_views=lambda _, **kw: [])
     loaded = []
 
     def loader(path, **kwargs):
@@ -372,3 +372,165 @@ def test_saved_views_initialize_navigate_and_preserve_free_camera_on_splat_toggl
     np.testing.assert_array_equal(camera.position, [8., 9., 10.])
     assert viewer.move_view(run, 1)['view_index'] == 0  # wrap
     assert viewer.move_view(run, -1)['view_index'] == 1
+
+
+def test_result_status_is_ready_while_comparison_preloads(tmp_path):
+    import threading
+    from splat_explorer.web.splatfix_results import ResultViser
+
+    studio, run_dir = _studio(tmp_path)
+    paths = {name: run_dir / f"scene_{name}.ply" for name in ("original", "repaired")}
+    calls = []
+    def detail(key, **kwargs):
+        calls.append(key)
+        return {"_paths": paths, "scene": "room", "run_id": key, "config": {}}
+    catalog = SimpleNamespace(cfg=studio.cfg, detail=detail,
+                              review_views=lambda *a, **kw: [])
+    preloading, finish, done = threading.Event(), threading.Event(), threading.Event()
+    def loader(path, **kwargs):
+        if path == paths["original"]:
+            preloading.set()
+            assert finish.wait(5)
+            done.set()
+        return _tiny_scene()
+    viewer = ResultViser(catalog, server_factory=_FakeServer,
+                         load_scene=loader, idle_timeout=None)
+    try:
+        viewer.show("result", client="tab")
+        assert preloading.wait(5)
+        assert viewer.snapshot("result")["status"] == "ready"
+        assert set(viewer._server.scene.active) == {"/review/repaired"}
+        for _ in range(5):
+            assert viewer.heartbeat("result", client="tab")["status"] == "ready"
+        assert calls == ["result"]
+    finally:
+        viewer.release("result", client="tab")
+        finish.set()
+        assert done.wait(5)
+    assert calls == ["result"]
+    assert viewer._scenes == {}
+
+
+def test_websocket_keeps_idle_viewer_alive_without_heartbeats(tmp_path):
+    studio, _ = _studio(tmp_path)
+    viewer = SceneRunViser(studio, background=False, server_factory=_FakeServer,
+                          load_scene=lambda *a, **k: _tiny_scene(), idle_timeout=None)
+    run = 'run_20260915_200000'
+    viewer.show(run, client='tab')
+    server = viewer._server
+    viewer._idle_timeout = 45
+    server._clients['socket'] = object()
+    now = __import__('time').monotonic() + 1000
+    assert not viewer._stop_if_idle_locked(now)
+    # A pagehide beacon must not shut down a still-connected sibling tab.
+    viewer.release(run, client='tab')
+    assert viewer._server is server
+    assert not viewer._stop_if_idle_locked(now + 1000)
+    server._clients.clear()
+    assert not viewer._stop_if_idle_locked(now + 1001)
+    assert not viewer._stop_if_idle_locked(now + 1045)
+    assert viewer._stop_if_idle_locked(now + 1046)
+    assert server.stopped
+
+
+def test_viewer_allows_initial_connection_and_reconnection(tmp_path):
+    studio, _ = _studio(tmp_path)
+    viewer = SceneRunViser(studio, background=False, server_factory=_FakeServer,
+                          load_scene=lambda *a, **k: _tiny_scene(), idle_timeout=None)
+    viewer.show('run_20260915_200000')
+    viewer._idle_timeout = 45
+    server = viewer._server
+    assert not viewer._stop_if_idle_locked(0)
+    assert not viewer._stop_if_idle_locked(44)
+    server._clients['socket'] = object()
+    assert not viewer._stop_if_idle_locked(45)
+    server._clients.clear()
+    assert not viewer._stop_if_idle_locked(100)
+    server._clients['socket'] = object()
+    assert not viewer._stop_if_idle_locked(140)
+    server._clients.clear()
+    assert not viewer._stop_if_idle_locked(200)
+    assert viewer._stop_if_idle_locked(245)
+
+
+def test_browser_polls_only_while_loading():
+    import shutil
+    import subprocess
+    from pathlib import Path
+    import pytest
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node required for viewer JavaScript test')
+    script = r'''
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const html = fs.readFileSync(process.argv[1], 'utf8');
+const source = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+const elements = new Map();
+function element(id) {
+  if (!elements.has(id)) elements.set(id, {
+    classList: {toggle(){}, remove(){}}, setAttribute(){}, removeAttribute(name){if(name === "src") this.src = "";},
+    firstChild: {}, src: '', disabled: false
+  });
+  return elements.get(id);
+}
+let responses = ['loading', 'ready'], requests = [], timers = new Map(), nextTimer = 0;
+let visibilityChanged, beacons = 0, lastDelay;
+const doc = {getElementById: element, querySelector: element, body: {}, hidden: false,
+  addEventListener(name, fn) {if(name === 'visibilitychange') visibilityChanged = fn;}};
+const context = vm.createContext({
+  document: doc,
+  Blob, navigator: {sendBeacon(){beacons++; return true;}},
+  location: {pathname: '/splatfix/results/viser', search: '?id=result'},
+  crypto: {randomUUID: () => 'tab'}, URLSearchParams,
+  window: {addEventListener(){}},
+  setTimeout(fn, delay) {lastDelay = delay; timers.set(++nextTimer, fn); return nextTimer;},
+  clearTimeout(id) {timers.delete(id);},
+  fetch: async (url, options) => {
+    requests.push(options?.method || 'GET');
+    const status = responses.shift();
+    assert(status, 'Unexpected status request');
+    return {ok: true, json: async () => ({ok: true, status,
+      viewer_url: 'http://localhost:8083', which: 'repaired', original: true,
+      repaired: true, view_count: 2})};
+  }
+});
+const flush = () => new Promise(resolve => setImmediate(resolve));
+(async () => {
+  vm.runInContext(source, context);
+  await flush();
+  assert.equal(timers.size, 1);
+  const [id, poll] = [...timers][0]; timers.delete(id); poll();
+  await flush();
+  assert.equal(timers.size, 0, 'Ready viewer must not poll');
+  assert.deepEqual(requests, ['POST', 'GET']);
+  responses.push('ready'); element('flip').onclick(); await flush();
+  assert.equal(timers.size, 0, 'Cached splat switch must not poll');
+  responses.push('ready'); element('view-next').onclick(); await flush();
+  assert.equal(timers.size, 0, 'Camera switch must not poll');
+  const before = requests.length;
+  doc.hidden = true; visibilityChanged();
+  assert.equal(lastDelay, 240000);
+  assert.equal(timers.size, 1);
+  doc.hidden = false; visibilityChanged();
+  assert.equal(timers.size, 0);
+  assert.equal(beacons, 0);
+  assert.equal(requests.length, before, 'Returning early must reuse the viewer');
+  doc.hidden = true; visibilityChanged();
+  const [hideId, expire] = [...timers][0]; timers.delete(hideId); expire();
+  assert.equal(beacons, 1);
+  assert.equal(element('frame').src, '', 'Expired tab must disconnect its WebSocket');
+  assert.equal(timers.size, 0);
+  responses.push('ready'); doc.hidden = false; visibilityChanged(); await flush();
+  assert.equal(requests.length, before + 1, 'Returning after expiry restarts viewer');
+  assert.equal(element('frame').src, 'http://localhost:8083');
+  assert.equal(timers.size, 0);
+  responses.push('loading', 'error'); element('flip').onclick(); await flush();
+  assert.equal(timers.size, 1);
+  const [lastId, lastPoll] = [...timers][0]; timers.delete(lastId); lastPoll();
+  await flush();
+  assert.equal(timers.size, 0, 'Failed load must not poll forever');
+})().catch(error => {console.error(error); process.exitCode = 1;});
+'''
+    page = Path('src/splat_explorer/web/static/scene_run_viser.html')
+    result = subprocess.run([node, '-e', script, str(page)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr

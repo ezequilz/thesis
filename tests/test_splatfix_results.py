@@ -1469,3 +1469,14 @@ def test_custom_run_name_survives_reduction(tmp_path):
     studio.results.save_name(root.name, 'Favorite result')
     studio.results.reduce_run(root.name)
     assert studio.results.read_name(root.name) == 'Favorite result'
+
+
+def test_review_lookup_skips_catalog_bookkeeping(tmp_path, monkeypatch):
+    studio, _, root = setup(tmp_path)
+    key = studio.results.entries()[0]['id']
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Viewer must not build cards or count output sizes")
+    monkeypatch.setattr(studio.store, 'output_size_bytes', unexpected)
+    monkeypatch.setattr(studio.results, '_row', unexpected)
+    row = studio.results.detail(key, review=True)
+    assert row['_paths']['repaired'] == root / 'artifixer3d.ply'

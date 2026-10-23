@@ -307,20 +307,10 @@ class ResultCatalog:
             self._visor = ResultViser(self)
         return self._visor
 
-    def entries(self, *, private=False):
+    def entries(self, *, private=False, review_key=None):
         rows = []
         for run in self.studio.store.list_runs():
-            record = run.to_dict()
-            record['custom_name'] = self.read_name(run.run_id)
-            record['color'] = self.read_color(run.run_id)
-            record['output_size_bytes'] = self.studio.store.output_size_bytes(run.run_id)
             root = Path(run.path)
-            comments_path = root / 'comments.md'
-            try:
-                record['has_notes'] = not comments_path.is_symlink() and bool(comments_path.read_text(encoding='utf-8').strip())
-            except (OSError, UnicodeError):
-                record['has_notes'] = False
-            config = record.get('config', {})
             candidates = sorted((root / 'gpu/results').glob('*/result.json'))
             candidates += sorted(p for p in (root / 'gpu/results').glob('*/partial-result.json')
                                  if not (p.parent / 'result.json').is_file())
@@ -330,6 +320,23 @@ class ResultCatalog:
             candidates += sorted(p for p in (root / 'gpu/results').glob('*/input-preview.json')
                                  if not any((p.parent / name).is_file() for name in
                                             ('result.json', 'partial-result.json', 'inference-preview.json')))
+            if review_key and review_key != run.run_id:
+                candidates = [p for p in candidates
+                    if p.resolve().is_relative_to(self.studio.root.resolve()) and any(
+                    hashlib.sha256(str(p.with_name(name).resolve().relative_to(self.studio.root.resolve())).encode()).hexdigest()[:20] == review_key
+                    for name in ('result.json', 'partial-result.json'))]
+                if not candidates:
+                    continue
+            record = run.to_dict()
+            record['custom_name'] = self.read_name(run.run_id)
+            record['color'] = self.read_color(run.run_id)
+            record['output_size_bytes'] = None if review_key else self.studio.store.output_size_bytes(run.run_id)
+            comments_path = root / 'comments.md'
+            try:
+                record['has_notes'] = not comments_path.is_symlink() and bool(comments_path.read_text(encoding='utf-8').strip())
+            except (OSError, UnicodeError):
+                record['has_notes'] = False
+            config = record.get('config', {})
             first_row = len(rows)
             for manifest in candidates:
                 if not manifest.resolve().is_relative_to(self.studio.root.resolve()):
@@ -361,6 +368,12 @@ class ResultCatalog:
                             if str(source.resolve()) in allowed and source.exists():
                                 original = source
                 key = hashlib.sha256(str(manifest.with_name('result.json').resolve().relative_to(self.studio.root.resolve())).encode()).hexdigest()[:20]
+                if review_key:
+                    rows.append({'id': key, 'run_id': run.run_id,
+                                 'scene': config.get('scene_id', ''), 'config': config,
+                                 'kind': 'reconstruction', '_manifest': manifest,
+                                 '_paths': {'original': original, 'repaired': repaired}})
+                    continue
                 metrics_file = manifest.parent / 'published-test-metrics.json'
                 metrics = read_json(metrics_file, {})
                 if not isinstance(metrics, dict):
@@ -375,6 +388,8 @@ class ResultCatalog:
                             metrics, metrics_file = data, candidate
                             break
                 rows.append(self._row(key, record, original, repaired, result, metrics, metrics_file, manifest))
+            if review_key and len(rows) > first_row:
+                return rows
             if len(rows) == first_row and config.get('pipeline') == 'splatfix' and config.get('splatfix', {}).get('stage') in ('benchmark', 'repair'):
                 rows.append(self._row(record['run_id'], record, None, None, {}, {}, None, None))
             job_rows = rows[first_row:]
@@ -795,9 +810,9 @@ class ResultCatalog:
                 gallery['reference_count'] = len(row['reference_images'])
         return row
 
-    def review_views(self, key):
+    def review_views(self, key, *, row=None):
         from .review_cameras import checkpoint_views, benchmark_views, historical_views
-        row = self.detail(key)
+        row = row if row is not None else self.detail(key)
         if not row:
             return []
         if row['kind'] == 'WorldExplorer':
@@ -817,8 +832,8 @@ class ResultCatalog:
             return benchmark_views(row['_manifest'])
         return historical_views(self.studio.root / row['run_id'])
 
-    def detail(self, key):
-        for row in self.entries(private=True):
+    def detail(self, key, *, review=False):
+        for row in self.entries(private=True, review_key=key if review else None):
             if row['id'] == key or row['run_id'] == key:
                 return row
             manifest = row['_manifest']
@@ -832,8 +847,28 @@ class ResultCatalog:
 class ResultViser(SceneRunViser):
     port_offset = 3
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._rows = {}
+
+    def detail(self, run_id):
+        # Resolve once per review session, never from polling or under _lock.
+        if run_id not in self._rows:
+            row = self.studio.detail(run_id, review=True)
+            if row is not None:
+                self._rows[run_id] = row
+            return row
+        return self._rows[run_id]
+
+    def review_views(self, run_id):
+        return self.studio.review_views(run_id, row=self._rows[run_id])
+
+    def _stop_locked(self):
+        super()._stop_locked()
+        self._rows.clear()
+
     def ply_paths(self, run_id):
-        row = self.studio.detail(run_id)
+        row = self._rows.get(run_id)
         return row['_paths'] if row else {'original': None, 'repaired': None}
 
     def highlight_supported(self, run_id):
@@ -842,7 +877,7 @@ class ResultViser(SceneRunViser):
     def _snapshot_locked(self, run_id, paths, *, showing):
         result = super()._snapshot_locked(run_id, paths, showing=showing)
         result['viser_path'] = '/splatfix/results/viser?id=' + quote(run_id)
-        row = self.studio.detail(run_id)
+        row = self._rows.get(run_id)
         if row:
             result['label'] = f"{row['scene']} · {row['run_id']}"
         return result
