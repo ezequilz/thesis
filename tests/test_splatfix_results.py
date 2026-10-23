@@ -762,7 +762,7 @@ def test_delete_ui_confirmation_separation_and_failure():
     script = r'''
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const html=fs.readFileSync(process.argv[1],'utf8');
-const elements={};const get=id=>elements[id]??={value:'',checked:false,setAttribute(){}};
+const elements={};const get=id=>elements[id]??={value:'',checked:false,getAttribute(){return null},addEventListener(){},setAttribute(){}};
 let confirmed=false,fail=false,calls=0,prompts=0;
 const context=vm.createContext({document:{getElementById:get,hidden:true},setInterval(){},
  window:{confirm:message=>{prompts++;assert.match(message,/Permanently delete test/);return confirmed}},
@@ -835,7 +835,7 @@ def test_bulk_delete_ui_toggle_confirmation_and_partial_failure():
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const html=fs.readFileSync(process.argv[1],'utf8');
 assert.match(html,/id="delete-hidden"[^>]+hidden>Delete all hidden runs/);
-const elements={};const get=id=>elements[id]??={value:'',checked:false,setAttribute(){}};
+const elements={};const get=id=>elements[id]??={value:'',checked:false,getAttribute(){return null},addEventListener(){},setAttribute(){}};
 let confirmed=false,calls=0;
 const context=vm.createContext({document:{getElementById:get,hidden:true},setInterval(){},
  window:{confirm:message=>{assert.match(message,/all 2 inactive hidden runs/);assert.match(message,/search and filters/);return confirmed}},
@@ -868,7 +868,7 @@ def test_results_sort_by_timestamp_and_size():
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const html=fs.readFileSync(process.argv[1],'utf8');
 assert.match(html,/id="sort"[^>]*><option value="newest">Newest first \(default\)/);
-const elements={};const get=id=>elements[id]??={value:'',checked:false,setAttribute(){}};
+const elements={};const get=id=>elements[id]??={value:'',checked:false,getAttribute(){return null},addEventListener(){},setAttribute(){}};
 const context=vm.createContext({document:{getElementById:get,hidden:true},setInterval(){},fetch:()=>new Promise(()=>{}),assert});
 vm.runInContext(html.split('<script>')[1].split('</script>')[0],context);
 vm.runInContext(`
@@ -1030,7 +1030,7 @@ def test_reduce_ui_confirmation_backup_and_size():
     script = r'''
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const html=fs.readFileSync(process.argv[1],'utf8');
-const elements={};const get=id=>elements[id]??={value:'',checked:false,setAttribute(){}};
+const elements={};const get=id=>elements[id]??={value:'',checked:false,getAttribute(){return null},addEventListener(){},setAttribute(){}};
 let confirmed=false,calls=0,backup=false,preserve=false;
 const context=vm.createContext({document:{getElementById:get,hidden:true},setInterval(){},
  window:{confirm:message=>{assert.match(message,preserve?/repaired references \(two endpoints or six views\)/:/Remove all other images, poses/);if(preserve)assert.doesNotMatch(message,/Training cannot be resumed/);return confirmed}},
