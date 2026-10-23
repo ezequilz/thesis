@@ -166,8 +166,11 @@ def persist_remote_run(lrz, cfg, root, run_id, remote, *, excludes=()):
     argv += [f"{cfg['user']}@{cfg['host']}:{remote}/", str(root / 'gpu') + '/']
     lrz._mux_run(argv)
     verification = portable_links(root, run_id)
+    from .deduplication import deduplicate_artifacts
+    deduplication = deduplicate_artifacts(root)
     atomic_json(root / RECEIPT, {'status': 'persisted', 'remote_dir': remote,
-                'excluded_patterns': list(excludes), 'remote_cleanup': 'pending', **verification})
+                'excluded_patterns': list(excludes), 'remote_cleanup': 'pending',
+                'deduplication': deduplication, **verification})
     cleanup_persisted(lrz, cfg, root, run_id)
 
 

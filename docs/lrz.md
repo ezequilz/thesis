@@ -325,4 +325,23 @@ and remote cleanup status. Failed cleanup is retried before another remote
 SplatFix run. ArtiFixer still excludes staged source/benchmark input copies and
 regenerable benchmark depth diagnostics. Repeat/resume restores persisted prior
 results from the local archive to their original remote path when needed.
+
+After the final verified download, SplatFix automatically deduplicates immutable
+binary artifacts within the run's `gpu/` archive using SHA-256 and hard links.
+All paths remain regular files; deleting either copy does not invalidate the
+other. Metadata, logs, symlinks and shared runtime directories are excluded.
+Archived binary artifacts must be replaced atomically when updated, never
+edited in place; checksum-based rsync already follows this rule. Unsupported
+hard links leave the original files intact. The persistence receipt records
+linked-file counts, reclaimed bytes and skipped files under `deduplication`.
+
+To deduplicate an older run whose persistence and remote cleanup are complete:
+
+```bash
+.venv/bin/python -m splat_explorer.splatfix.deduplication outputs/scene-runs/RUN_ID
+```
+
+This is idempotent and only shares bytes within that run. Reported reclaimed
+bytes count removed file content; filesystem compression or copy-on-write can
+make the physical free-space change differ.
 Models and reusable Python/CUDA environments are outside job cleanup.
