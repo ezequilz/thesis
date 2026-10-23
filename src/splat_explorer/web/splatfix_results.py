@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 import shutil
 import threading
 from datetime import datetime, timezone
@@ -76,6 +78,41 @@ class ResultCatalog:
                 shutil.rmtree(destination)
                 raise
             return run.to_dict()
+
+    def _comments_path(self, run_id):
+        run = self.studio.store.get_run(run_id)
+        path = Path(run.path) / 'comments.md'
+        if path.is_symlink():
+            raise ValueError('Unsafe comments path')
+        return path
+
+    def read_comments(self, run_id):
+        with self._run_storage_lock:
+            path = self._comments_path(run_id)
+            try:
+                return path.read_text(encoding='utf-8')
+            except FileNotFoundError:
+                path.touch(exist_ok=False)
+                return ''
+
+    def save_comments(self, run_id, comments):
+        if not isinstance(comments, str):
+            raise ValueError('comments must be a string')
+        with self._run_storage_lock:
+            path = self._comments_path(run_id)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                                 prefix='.comments-', delete=False) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(comments)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                temporary.replace(path)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+            return {'run_id': run_id}
 
     def delete_run(self, run_id):
         """Permanently remove only the validated inactive run directory."""
@@ -235,6 +272,11 @@ class ResultCatalog:
             record = run.to_dict()
             record['output_size_bytes'] = self.studio.store.output_size_bytes(run.run_id)
             root = Path(run.path)
+            comments_path = root / 'comments.md'
+            try:
+                record['has_notes'] = not comments_path.is_symlink() and bool(comments_path.read_text(encoding='utf-8').strip())
+            except (OSError, UnicodeError):
+                record['has_notes'] = False
             config = record.get('config', {})
             candidates = sorted((root / 'gpu/results').glob('*/result.json'))
             candidates += sorted(p for p in (root / 'gpu/results').glob('*/partial-result.json')
@@ -345,6 +387,7 @@ class ResultCatalog:
         return {'repair_pass': repair_pass, 'job_status': record.get('state', {}).get('status'), 'id': key, 'run_id': record['run_id'], 'scene': config.get('scene_id', ''),
                 'can_stop': not record.get('state', {}).get('details', {}).get('remote_finished') and config.get('pipeline') == 'splatfix' and record.get('state', {}).get('status') in ('queued', 'waiting_gpu', 'starting', 'running'),
                 'message': record.get('state', {}).get('message'),
+                'has_notes': record.get('has_notes', False),
                 'incomplete': result.get('incomplete', False),
                 'inference_ready': result.get('inference_ready', False),
                 'phase': record.get('state', {}).get('details', {}).get('phase'),
@@ -434,6 +477,7 @@ class ResultCatalog:
         row = self.detail(key)
         if row is None:
             return None
+        row['comments'] = self.read_comments(row['run_id'])
         settings_path = self.studio.root / row['run_id'] / 'settings.json'
         row['settings_snapshot'] = read_json(settings_path, None)
         row['settings_url'] = self.studio.file_url(settings_path) if settings_path.is_file() else None

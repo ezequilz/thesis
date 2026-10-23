@@ -255,6 +255,7 @@ class SceneRunStore:
                     "dashboard": snapshot.get("dashboard"),
                     "effective_config": validated.to_dict(),
                 })
+            (path / "comments.md").write_text("", encoding="utf-8")
             _atomic_write_json(path / STATUS_NAME, state.to_dict())
             self.append_event(run_id, "created", status=RunStatus.QUEUED.value)
         except BaseException:

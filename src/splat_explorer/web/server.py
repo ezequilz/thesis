@@ -1399,6 +1399,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "Could not move run to run_history. The original run has been kept in place."}, 500)
                     return
                 self._send_json({"ok": True, **result})
+            elif self.command == "POST" and path == "/api/splatfix/results/comments":
+                if not isinstance(body, dict):
+                    raise ValueError("Request must be an object")
+                try:
+                    result = studio.results.save_comments(body.get("run_id"), body.get("comments"))
+                except FileNotFoundError:
+                    self._send_json({"ok": False, "error": "Run not found"}, 404)
+                    return
+                except OSError:
+                    self._send_json({"ok": False, "error": "Could not save comments"}, 500)
+                    return
+                self._send_json({"ok": True, **result})
             elif self.command == "POST" and path == "/api/splatfix/results/visibility":
                 if not isinstance(body, dict):
                     raise ValueError("Request must be an object")

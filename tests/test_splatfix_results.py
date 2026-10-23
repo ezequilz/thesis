@@ -555,7 +555,7 @@ def test_detail_chain_navigation_and_polling_javascript():
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const elements=new Map();const get=id=>{if(!elements.has(id))elements.set(id,{addEventListener(){}});return elements.get(id)};
 const location={search:'?id=job',href:''};
-const context=vm.createContext({document:{getElementById:get},location,URLSearchParams,
+const context=vm.createContext({document:{getElementById:get,addEventListener(){}},window:{addEventListener(){}},location,URLSearchParams,
 ResizeObserver:class{observe(){}},
 fetch:()=>new Promise(()=>{}),clearTimeout(){},setTimeout(){},assert});
 vm.runInContext(fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0],context);
@@ -970,8 +970,10 @@ def reduction_setup(tmp_path):
 
 def test_reduce_keeps_only_minimal_artifacts_and_refreshes_size(tmp_path):
     studio, root, result = reduction_setup(tmp_path)
+    studio.results.save_comments(root.name, '# Keep these notes')
     studio.store.output_size_bytes(root.name)
     report = studio.results.reduce_run(root.name)
+    assert studio.results.read_comments(root.name) == '# Keep these notes'
     assert report['reference_count'] == 6
     assert report['backup_path'] is None
     assert len(list(root.rglob('*.png'))) == 6
@@ -1120,10 +1122,12 @@ def test_artifixer_reduce_encodes_both_passes_and_exposes_verified_videos(tmp_pa
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
         pytest.skip('ffmpeg/ffprobe required')
     studio, root, result = artifixer_reduction_setup(tmp_path)
+    studio.results.save_comments(root.name, '# Keep ArtiFixer notes')
     predictions = {p: p.read_bytes() for p in result.glob('**/pred/*.png')}
     (result / 'cameras.json').write_text('{"poses": []}')
     assert studio.results.entries()[0]['can_reduce'] is True
     report = studio.results.reduce_run(root.name, backup=backup)
+    assert studio.results.read_comments(root.name) == '# Keep ArtiFixer notes'
     assert len(report['inference_videos']) == 2
     assert all(v['frame_count'] == 3 and v['frame_names'] == ['0.png', '2.png', '10.png'] for v in report['inference_videos'])
     assert set(root.rglob('*.png')) == set(predictions) | {result / 'trajectory-quality.png'}
@@ -1329,3 +1333,89 @@ def test_manifestless_stopped_run_retains_checkpoint_artifacts(tmp_path):
     assert {p['name'] for p in saved['checkpoints']} >= {'checkpoint/checkpoint.json', 'checkpoint/snapshot.pt'}
     assert studio.allowed_file(str(checkpoint / 'snapshot.pt')) == checkpoint / 'snapshot.pt'
     assert 'showSavedArtifacts(r)' in Path('src/splat_explorer/web/static/splatfix_result_detail.html').read_text()
+
+
+def test_comments_roundtrip_clear_and_run_isolation(tmp_path):
+    studio, root, _ = setup(tmp_path)
+    other = studio.create({'stage': 'select', 'scene_id': 'room'})
+    key = studio.results.entries()[0]['id']
+    assert studio.results.run_detail(key)['comments'] == ''
+    markdown = '# Observation\n\n- Improved geometry — café\n<script>literal text</script>\n'
+    studio.results.save_comments(root.name, markdown)
+    assert (root / 'comments.md').read_text(encoding='utf-8') == markdown
+    assert studio.results.run_detail(key)['comments'] == markdown
+    assert studio.results.read_comments(other['run_id']) == ''
+    studio.results.save_comments(root.name, '')
+    assert (root / 'comments.md').read_text() == ''
+    assert not list(root.glob('.comments-*'))
+
+
+def test_comments_reject_unsafe_paths_and_invalid_content(tmp_path):
+    studio, root, _ = setup(tmp_path)
+    with pytest.raises(ValueError):
+        studio.results.save_comments('../outside', 'test')
+    with pytest.raises(ValueError):
+        studio.results.save_comments(root.name, None)
+    outside = tmp_path / 'outside.md'
+    outside.write_text('untouched')
+    (root / 'comments.md').unlink()
+    (root / 'comments.md').symlink_to(outside)
+    with pytest.raises(ValueError):
+        studio.results.save_comments(root.name, 'overwrite')
+    with pytest.raises(ValueError):
+        studio.results.read_comments(root.name)
+    assert outside.read_text() == 'untouched'
+
+
+def test_comments_failed_replace_preserves_saved_notes(tmp_path, monkeypatch):
+    studio, root, _ = setup(tmp_path)
+    studio.results.save_comments(root.name, 'saved')
+    def fail(*args):
+        raise OSError('disk failure')
+    monkeypatch.setattr(Path, 'replace', fail)
+    with pytest.raises(OSError):
+        studio.results.save_comments(root.name, 'new draft')
+    assert (root / 'comments.md').read_text() == 'saved'
+    assert not list(root.glob('.comments-*'))
+
+
+def test_comments_autosave_serializes_edits_and_keeps_drafts():
+    import shutil
+    import subprocess
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node required for dashboard logic')
+    script = r'''const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const elements=new Map(),listeners={},timers=[];
+const get=id=>{if(!elements.has(id))elements.set(id,{value:'',addEventListener(event,fn){listeners[id+':'+event]=fn}});return elements.get(id)};
+const pending=[];
+const context=vm.createContext({document:{getElementById:get,addEventListener(){}},window:{addEventListener(){}},
+ clearTimeout(){},setTimeout(fn){timers.push(fn)},
+ fetch(url,options){return new Promise(resolve=>pending.push({resolve,body:JSON.parse(options.body)}))},assert});
+const source=fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('// WorldExplorer')[0];
+vm.runInContext(source,context);
+(async()=>{
+ await vm.runInContext(`(async()=>{
+ showComments({run_id:'run_one',comments:'saved'});
+ $('comments').value='first';
+ const first=saveComments();
+ $('comments').value='second';
+ showComments({run_id:'run_one',comments:'stale refresh'});
+ assert.equal($('comments').value,'second');
+ await saveComments();
+ })()`,context);
+ assert.equal(pending.length,1);assert.equal(pending[0].body.comments,'first');
+ pending[0].resolve({ok:true,json:async()=>({ok:true})});
+ await new Promise(setImmediate);
+ timers.pop()();
+ assert.equal(pending.length,2);assert.equal(pending[1].body.comments,'second');
+ pending[1].resolve({ok:false,json:async()=>({error:'Disk full'})});
+ await new Promise(setImmediate);
+ assert.equal(get('comments').value,'second');assert.match(get('commentsStatus').textContent,/retrying/);
+ timers.pop()();
+ pending[2].resolve({ok:true,json:async()=>({ok:true})});
+ await new Promise(setImmediate);
+ assert.equal(get('commentsStatus').textContent,'Saved to comments.md');
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+    subprocess.run([node, '-e', script, 'src/splat_explorer/web/static/splatfix_result_detail.html'], check=True)

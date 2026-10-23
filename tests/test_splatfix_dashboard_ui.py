@@ -292,8 +292,8 @@ const elements=new Map();
 const get=id=>{if(!elements.has(id))elements.set(id,{value:'',textContent:'',innerHTML:'',addEventListener(){},querySelector(){return{}},querySelectorAll(){return[]},before(){},after(){},replaceWith(){},setAttribute(){},open:false});return elements.get(id)};
 let calls=0,timer=null,lastDelay=null;
 let result={run_id:'run',status:'running',kind:'ArtiFixer3D',metrics:{},gallery:{frames:[]}};
-const document={getElementById:get,querySelectorAll:()=>[],hidden:false};
-const context=vm.createContext({document,location:{search:'?id=run'},URLSearchParams,
+const document={getElementById:get,querySelectorAll:()=>[],hidden:false,addEventListener(){}};
+const context=vm.createContext({document,window:{addEventListener(){}},location:{search:'?id=run'},URLSearchParams,
  ResizeObserver:class{observe(){}},
  fetch:async()=>{calls++;return{ok:true,json:async()=>result}},
  setTimeout:(fn,ms)=>{assert.ok([3000,5000,30000].includes(ms));lastDelay=ms;timer=fn;return 1},clearTimeout:()=>{timer=null}});

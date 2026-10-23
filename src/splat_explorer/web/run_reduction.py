@@ -91,6 +91,7 @@ def reduce_oraclegs(root, history=None, *, before_size_bytes=None):
     keep.update(result / name for name in ('result.json', 'partial-result.json', 'input-preview.json', 'inference-preview.json') if (result / name).is_file())
     # Keep lifecycle/provenance records, not source datasets or camera exports.
     keep.update(p for p in root.glob('*.json') if p.name not in ('output-size.json', 'worker-request.json', 'oraclegs-staging.json'))
+    keep.add(root / 'comments.md')
     keep.update(p for p in files(root) if not p.is_symlink() and (p.suffix in ('.log', '.jsonl') or p.name.startswith('events.out.tfevents')))
     keep.update(p for p in result.glob('**/samples-rgb.mp4') if 'first-pass' not in p.parts)
     recipe = read_json(result / 'recipe.json', {})
@@ -156,6 +157,7 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
     if not plans:
         raise ValueError('No ArtiFixer result directories were found')
     keep = {p for p in root.glob('*.json') if p.name not in ('output-size.json', 'worker-request.json')}
+    keep.add(root / 'comments.md')
     keep.update(p for p in files(root) if not p.is_symlink() and
                 (p.suffix in ('.log', '.jsonl') or p.name.startswith('events.out.tfevents')))
     sequences = []
