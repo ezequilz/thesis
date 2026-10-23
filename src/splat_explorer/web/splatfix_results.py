@@ -114,6 +114,27 @@ class ResultCatalog:
                     temporary.unlink(missing_ok=True)
             return {'run_id': run_id}
 
+    COLORS = ('', 'red', 'orange', 'yellow', 'green', 'teal', 'blue', 'purple', 'pink')
+
+    def read_color(self, run_id):
+        path = self.studio.store.run_path(run_id) / 'color-label.json'
+        if path.is_symlink():
+            return ''
+        saved = read_json(path, {})
+        color = saved.get('color', '') if isinstance(saved, dict) else ''
+        return color if color in self.COLORS else ''
+
+    def save_color(self, run_id, color):
+        if not isinstance(color, str) or color not in self.COLORS:
+            raise ValueError('Unknown run color')
+        with self._run_storage_lock:
+            run = self.studio.store.get_run(run_id)
+            path = Path(run.path) / 'color-label.json'
+            if path.is_symlink():
+                raise ValueError('Unsafe color label path')
+            _atomic_write_json(path, {'color': color})
+        return {'run_id': run_id, 'color': color}
+
     def delete_run(self, run_id):
         """Permanently remove only the validated inactive run directory."""
         with self._run_storage_lock:
@@ -270,6 +291,7 @@ class ResultCatalog:
         rows = []
         for run in self.studio.store.list_runs():
             record = run.to_dict()
+            record['color'] = self.read_color(run.run_id)
             record['output_size_bytes'] = self.studio.store.output_size_bytes(run.run_id)
             root = Path(run.path)
             comments_path = root / 'comments.md'
@@ -387,6 +409,7 @@ class ResultCatalog:
         return {'repair_pass': repair_pass, 'job_status': record.get('state', {}).get('status'), 'id': key, 'run_id': record['run_id'], 'scene': config.get('scene_id', ''),
                 'can_stop': not record.get('state', {}).get('details', {}).get('remote_finished') and config.get('pipeline') == 'splatfix' and record.get('state', {}).get('status') in ('queued', 'waiting_gpu', 'starting', 'running'),
                 'message': record.get('state', {}).get('message'),
+                'color': record.get('color', ''),
                 'has_notes': record.get('has_notes', False),
                 'incomplete': result.get('incomplete', False),
                 'inference_ready': result.get('inference_ready', False),

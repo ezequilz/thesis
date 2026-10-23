@@ -1387,7 +1387,7 @@ def test_comments_autosave_serializes_edits_and_keeps_drafts():
         pytest.skip('Node required for dashboard logic')
     script = r'''const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const elements=new Map(),listeners={},timers=[];
-const get=id=>{if(!elements.has(id))elements.set(id,{value:'',addEventListener(event,fn){listeners[id+':'+event]=fn}});return elements.get(id)};
+const get=id=>{if(!elements.has(id))elements.set(id,{value:'',setAttribute(){},addEventListener(event,fn){listeners[id+':'+event]=fn}});return elements.get(id)};
 const pending=[];
 const context=vm.createContext({document:{getElementById:get,addEventListener(){}},window:{addEventListener(){}},
  clearTimeout(){},setTimeout(fn){timers.push(fn)},
@@ -1419,3 +1419,24 @@ vm.runInContext(source,context);
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''
     subprocess.run([node, '-e', script, 'src/splat_explorer/web/static/splatfix_result_detail.html'], check=True)
+
+
+def test_run_color_persists_and_is_shared_by_results_and_details(tmp_path):
+    studio, root, _ = setup(tmp_path)
+    assert studio.results.entries()[0]['color'] == ''
+    for color in ('blue', 'orange', ''):
+        studio.results.save_color(root.name, color)
+        assert json.loads((root / 'color-label.json').read_text()) == {'color': color}
+        assert studio.results.entries()[0]['color'] == color
+        assert studio.results.run_detail(root.name)['color'] == color
+    with pytest.raises(ValueError):
+        studio.results.save_color(root.name, 'invalid')
+    with pytest.raises(ValueError):
+        studio.results.save_color('../outside', 'blue')
+
+
+def test_run_color_survives_reduction(tmp_path):
+    studio, root, _ = reduction_setup(tmp_path)
+    studio.results.save_color(root.name, 'teal')
+    studio.results.reduce_run(root.name)
+    assert studio.results.read_color(root.name) == 'teal'

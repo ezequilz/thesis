@@ -832,6 +832,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(200, (STATIC_DIR / "gpu.html").read_bytes(), "text/html; charset=utf-8")
         elif path in ("/scene-runs-ext", "/scene-runs-ext.html"):
             self._send(200, (STATIC_DIR / "scene_runs_ext.html").read_bytes(), "text/html; charset=utf-8")
+        elif path == "/run_color.js":
+            self._send(200, (STATIC_DIR / "run_color.js").read_bytes(), "text/javascript; charset=utf-8")
         elif path == "/artifixer_model.js":
             self._send(200, (STATIC_DIR / "artifixer_model.js").read_bytes(), "text/javascript; charset=utf-8")
         elif path in ("/scene-runs", "/scene-runs.html"):
@@ -1397,6 +1399,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
                 except OSError:
                     self._send_json({"ok": False, "error": "Could not move run to run_history. The original run has been kept in place."}, 500)
+                    return
+                self._send_json({"ok": True, **result})
+            elif self.command == "POST" and path == "/api/splatfix/results/color":
+                if not isinstance(body, dict):
+                    raise ValueError("Request must be an object")
+                try:
+                    result = studio.results.save_color(body.get("run_id"), body.get("color"))
+                except OSError:
+                    self._send_json({"ok": False, "error": "Could not save run color"}, 500)
                     return
                 self._send_json({"ok": True, **result})
             elif self.command == "POST" and path == "/api/splatfix/results/comments":
