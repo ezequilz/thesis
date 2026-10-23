@@ -214,3 +214,76 @@ def test_seva_only_checkpoint_is_listed_and_original_jobs_are_rejected(studio, c
         studio.create({'stage':'edit','checkpoint':str(cp.root),'image_set':'saved'})
     job=studio.create({'stage':'edit','checkpoint':str(cp.root),'image_set':'seva'})
     assert job['config']['splatfix']['image_set']=='seva'
+
+
+def test_77_capture_preserves_other_sets_and_resumes(tmp_path, capture_backend):
+    cp = capture_checkpoint(checkpoint(tmp_path, 2))
+    original = copy.deepcopy(cp.manifest)
+    cp = capture_checkpoint(cp, capture_set='77', view_id='001')
+    assert 'capture_77' not in cp.views[0]
+    cp = capture_checkpoint(cp, capture_set='77')
+    before = len(capture_backend)
+    capture_checkpoint(cp, capture_set='77')
+    assert len(capture_backend) == before
+    for old, view in zip(original['views'], cp.views):
+        assert {k:v for k,v in view.items() if k != 'capture_77'} == old
+        wide = view['capture_77']
+        assert wide['camera']['fov_deg'] == 77
+        assert wide['camera']['c2w'] == old['camera']['c2w']
+        assert wide['camera']['width'] == old['camera']['width']
+        assert wide['camera']['height'] == old['camera']['height']
+        assert wide['camera']['intrinsics'] != old['camera']['intrinsics']
+        assert cp.image_path(wide).exists()
+    assert len([c for c in capture_backend if c[0] == 'depth']) == 2
+
+
+def test_original_capture_restores_seva_only_checkpoint(tmp_path, capture_backend):
+    cp = capture_checkpoint(checkpoint(tmp_path, 2))
+    for view in cp.views:
+        view['original_rgb'] = None
+        view['repaired_rgb'] = None
+        view['camera'] = copy.deepcopy(view['seva_capture']['camera'])
+    cp.save()
+    before = copy.deepcopy(cp.views)
+    cp = capture_checkpoint(cp, capture_set='saved')
+    for old, view in zip(before, cp.views):
+        assert view['camera'] == old['camera']
+        assert view['seva_capture'] == old['seva_capture']
+        assert cp.image_path(view).exists()
+    count = len(capture_backend)
+    capture_checkpoint(cp, capture_set='saved')
+    assert len(capture_backend) == count
+
+
+def test_77_capture_repair_and_dashboard(studio, capture_backend):
+    cp = capture_checkpoint(checkpoint(studio.checkpoint_root, 2), capture_set='77')
+    originals = copy.deepcopy(cp.views)
+    result = io.BytesIO()
+    Image.new('RGB', (32, 24), 'green').save(result, format='PNG')
+    class Editor:
+        name = 'test'
+        def edit(self, path, prompt):
+            assert '/fov77/' in str(path)
+            return SimpleNamespace(error=None, images=[result.getvalue()])
+    job = studio.create({'stage':'edit', 'checkpoint':str(cp.root), 'image_set':'77'})
+    assert job['config']['splatfix']['image_set'] == '77'
+    repair_images(cp, image_set='77', backend=Editor(), endpoint_repair_context='rgb_only')
+    cp = Checkpoint.load(cp.root)
+    for old, view in zip(originals, cp.views):
+        assert view['original_rgb'] == old['original_rgb']
+        assert view['repaired_rgb'] == old['repaired_rgb']
+        assert cp.image_path(view['capture_77'], True).exists()
+    row = next(c for c in studio.checkpoints() if c['id'] == str(cp.root))
+    assert all(v['fov77_original_url'] and v['fov77_repaired_url'] for v in row['views'])
+    job = studio.create({'stage':'seva_capture', 'checkpoint':str(cp.root), 'capture_set':'77'})
+    assert job['config']['splatfix']['capture_set'] == '77'
+
+
+@pytest.mark.parametrize('capture_set', ['saved', 'seva', '77'])
+def test_capture_set_survives_validation(capture_set):
+    assert validate_job({'stage':'seva_capture', 'checkpoint':'/saved', 'capture_set':capture_set})['capture_set'] == capture_set
+
+
+def test_capture_set_rejects_unknown_value():
+    with pytest.raises(ValueError, match='capture_set'):
+        validate_job({'stage':'seva_capture', 'checkpoint':'/saved', 'capture_set':'90'})

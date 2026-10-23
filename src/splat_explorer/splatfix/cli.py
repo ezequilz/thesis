@@ -82,7 +82,7 @@ def edit_views(cfg, args):
 
 def capture_seva_views(cfg, args):
     from .oraclegs.captures import capture_checkpoint
-    return capture_checkpoint(args.checkpoint, view_id=args.view_id,
+    return capture_checkpoint(args.checkpoint, view_id=args.view_id, capture_set=args.capture_set,
         url=cfg.get('renderer', {}).get('viser_url'),
         on_progress=lambda **event: print(event['message'], flush=True)).root
 
@@ -165,6 +165,7 @@ def _add_stages(parser):
     capture = stages.add_parser("seva-capture", help="Capture reusable SEVA RGB and depth at saved poses")
     capture.add_argument("checkpoint", type=Path)
     capture.add_argument("--view-id")
+    capture.add_argument("--capture-set", choices=("saved", "seva", "77"), default="seva")
     capture.set_defaults(func=capture_seva_views)
     repair = stages.add_parser("repair", help="Run the selected reconstruction method locally on a GPU from saved views")
     from .methods import METHODS, DEFAULT_METHOD

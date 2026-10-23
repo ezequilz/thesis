@@ -34,6 +34,10 @@ class SplatfixStudio(SceneRunStudio):
                           'repaired_url': self.file_url(cp.image_path(v, True)) if v.get('repaired_rgb') else None}
                          for v in cp.views]
                 for view in views:
+                    from ..splatfix.oraclegs.captures import capture_77
+                    wide = capture_77(view)
+                    view['fov77_original_url'] = self.file_url(cp.image_path(wide)) if wide.get('original_rgb') else None
+                    view['fov77_repaired_url'] = self.file_url(cp.image_path(wide, True)) if wide.get('repaired_rgb') else None
                     capture = view.get('seva_capture') or {}
                     view['seva_original_url'] = self.file_url(cp.image_path(capture)) if capture.get('original_rgb') else None
                     view['seva_response_url'] = self.file_url(cp.image_path({'original_rgb':capture['original_response_rgb']})) if capture.get('original_response_rgb') else None
@@ -85,7 +89,10 @@ class SplatfixStudio(SceneRunStudio):
         image_set = body.get('image_set', 'saved')
         if image_set == 'seva':
             view = view.get('seva_capture') or {}
-        elif image_set not in ('saved', '77'):
+        elif image_set == '77':
+            from ..splatfix.oraclegs.captures import capture_77
+            view = capture_77(view)
+        elif image_set != 'saved':
             raise ValueError('Unknown image set')
         source, token = crop_source(cp, view)
         if 'box' in body:
@@ -361,7 +368,11 @@ class SplatfixStudio(SceneRunStudio):
                     raise ValueError('Endpoint checkpoints require GPT-repaired ArtiFixer runs')
                 options['split_mode'] = 'no-split'
             if options['stage'] == 'edit' and options.get('image_set') == '77':
-                Checkpoint.load(checkpoint).require_horizontal_fov(77)
+                from ..splatfix.oraclegs.captures import capture_77
+                if any(not capture_77(v).get('original_rgb') or
+                       (capture_77(v).get('rgb_renderer') or cp['rgb_renderer']) != 'viser'
+                       for v in cp['views']):
+                    raise ValueError('Complete the 77° capture set in Step 2 first')
             seva_set = options.get('oracle_capture_source') == 'seva' or options.get('image_set') == 'seva'
             if seva_set:
                 from ..splatfix.oraclegs.captures import select_checkpoint
@@ -375,9 +386,10 @@ class SplatfixStudio(SceneRunStudio):
                             and opts.get('checkpoint') == checkpoint
                             and existing.state.status.value in ('queued', 'waiting_gpu', 'starting', 'running', 'stopping')):
                         raise ValueError('A SEVA capture job is already queued or active for this checkpoint')
-            if not seva_set and options['stage'] in ('edit', 'repair') and any(not v.get('original_rgb') for v in cp['views']):
+            separate_77 = options['stage'] == 'edit' and options.get('image_set') == '77'
+            if not seva_set and not separate_77 and options['stage'] in ('edit', 'repair') and any(not v.get('original_rgb') for v in cp['views']):
                 raise ValueError('This checkpoint has no original-FOV images; select SEVA captures')
-            if not seva_set and (options['stage'] == 'edit' or options.get('mode') == 'edited') and cp['rgb_renderer'] != 'viser':
+            if not seva_set and not separate_77 and (options['stage'] == 'edit' or options.get('mode') == 'edited') and cp['rgb_renderer'] != 'viser':
                 raise ValueError('Recapture these views in Viser before image editing or edited reconstruction')
             if options['stage'] == 'repair':
                 readiness = cp['reconstruction_methods'][options['reconstruction_method']]

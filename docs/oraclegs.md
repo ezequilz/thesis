@@ -677,3 +677,17 @@ physical storage and survive deletion of the archive or another checkpoint.
 Cross-filesystem staging falls back to copying. Remote transfer still requires
 bytes on the remote filesystem; the ArtiFixer checkpoint upload excludes this
 bundle to avoid transferring it twice. Existing queued snapshots remain fixed.
+
+
+### Capturing another FOV at saved poses
+
+Step 2's **Capture field of view** selector offers **Original FOV**, **54° · SEVA**
+(the default), and **77° horizontal**. Select a profile and press the camera button.
+The job captures missing images at the checkpoint's existing positions and rotations;
+it skips images already captured with Viser. Keep the capture visor connected.
+
+54° keeps the calibrated 1024 × 576 RGB/depth profile. 77° saves a separate RGB
+set using each saved camera's resolution and recalculated 77° intrinsics, preserving
+original images, SEVA captures, and their repairs. View it with the gallery's 77°
+selector or repair it with **Images to repair → 77° captures**. Original FOV fills
+missing original RGBs (or replaces non-Viser captures) using the saved calibration.

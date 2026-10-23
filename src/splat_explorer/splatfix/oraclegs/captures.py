@@ -1,4 +1,4 @@
-"""Reusable, separately captured SEVA references on a saved checkpoint."""
+"""Reusable captures at saved checkpoint poses, with independent FOV sets."""
 from pathlib import Path
 import copy
 import fcntl
@@ -92,11 +92,13 @@ def save_capture(checkpoint, view, camera, rgb, depth):
     return capture
 
 
-def capture_checkpoint(checkpoint, *, view_id=None, url=None, should_stop=lambda:False, on_progress=lambda **kw:None):
-    """Capture missing views only; publish each RGB/depth pair after validation."""
+def capture_checkpoint(checkpoint, *, capture_set='seva', view_id=None, url=None, should_stop=lambda:False, on_progress=lambda **kw:None):
+    """Capture missing views in the selected set; preserve other image sets."""
     from ..viser_capture import CaptureSession
     from ...scene import load_scene
     from ...rendering.cpu_splat_renderer import CpuSplatRenderer
+    if capture_set not in ('saved', 'seva', '77'):
+        raise ValueError('Unknown capture set')
     checkpoint = Checkpoint.load(checkpoint.root if isinstance(checkpoint, Checkpoint) else checkpoint)
     with (checkpoint.root/'.seva-capture.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -108,8 +110,13 @@ def capture_checkpoint(checkpoint, *, view_id=None, url=None, should_stop=lambda
             raise ValueError('Unknown saved view')
         pending = []
         for view in views:
-            if view.get('seva_capture'):
+            if capture_set == 'seva' and view.get('seva_capture'):
                 validate_capture(checkpoint, view)
+            elif capture_set == 'saved' and view.get('original_rgb') and (view.get('rgb_renderer') or meta_renderer(checkpoint)) == 'viser':
+                continue
+            elif (capture_set == '77' and capture_77(view).get('original_rgb')
+                  and (capture_77(view).get('rgb_renderer') or meta_renderer(checkpoint)) == 'viser'):
+                continue
             else:
                 pending.append(view)
         if not pending:
@@ -120,22 +127,49 @@ def capture_checkpoint(checkpoint, *, view_id=None, url=None, should_stop=lambda
         scene_path = checkpoint.manifest['scene_path']
         session = CaptureSession(scene_path, up_axis=meta.get('up_axis', '-y'),
                                  lod_level=int(loading.get('lod_level', 0)), url=url, should_stop=should_stop)
-        renderer = CpuSplatRenderer(load_scene(scene_path, min_opacity=loading.get('min_opacity', 0.),
-                                               lod_level=int(loading.get('lod_level', 0))))
+        renderer = (CpuSplatRenderer(load_scene(scene_path, min_opacity=loading.get('min_opacity', 0.),
+                                               lod_level=int(loading.get('lod_level', 0)))) if capture_set == 'seva' else None)
         for view in pending:
             if should_stop():
-                raise InterruptedError('SEVA capture cancelled')
-            on_progress(message='Capturing SEVA RGB and depth for view ' + view['id'])
-            camera = capture_camera(view)
+                raise InterruptedError('Saved-pose capture cancelled')
+            on_progress(message=f'Capturing {capture_set} images for view ' + view['id'])
+            camera = capture_camera(view) if capture_set == 'seva' else camera_from_record(view)
+            if capture_set == '77':
+                camera = Camera(camera.position.copy(), camera.rotation.copy(), width=camera.width, height=camera.height, fov_deg=77.)
             rgb = session.render(camera)
-            depth = renderer.render_depth(camera)
-            capture = save_capture(checkpoint, view, camera, rgb, depth)
+            if capture_set == 'seva':
+                capture = save_capture(checkpoint, view, camera, rgb, renderer.render_depth(camera))
+            else:
+                directory = checkpoint.root/'views'/view['id']/('fov77' if capture_set == '77' else 'saved-capture')
+                directory.mkdir(parents=True, exist_ok=True)
+                Image.fromarray(rgb).save(directory/'original.png')
+                capture = {'camera':camera_to_record(camera), 'rgb_renderer':'viser', 'captured_at':utc_now(),
+                           'original_rgb':str((directory/'original.png').relative_to(checkpoint.root)),
+                           'repaired_rgb':None, 'image_repair':None}
             # Merge into the latest manifest, retaining unrelated original-image edits.
             latest = Checkpoint.load(checkpoint.root)
             target = next(v for v in latest.views if v['id'] == view['id'])
             if target['camera'] != view['camera']:
                 raise ValueError('Saved view changed during SEVA capture')
-            target['seva_capture'] = capture
+            if capture_set == 'saved':
+                target.update(capture)
+                if all(v.get('rgb_renderer') == 'viser' for v in latest.views):
+                    latest.manifest.setdefault('metadata', {}).setdefault('renderer', {})['backend'] = 'viser'
+            else:
+                target['seva_capture' if capture_set == 'seva' else 'capture_77'] = capture
             latest.save()
             checkpoint = latest
         return checkpoint
+
+
+def meta_renderer(checkpoint):
+    return checkpoint.manifest.get('metadata', {}).get('renderer', {}).get('backend')
+
+
+def capture_77(view):
+    """Resolve separately captured 77° RGBs or a native 77° original."""
+    if view.get('capture_77'):
+        return view['capture_77']
+    if abs(float(view['camera']['fov_deg']) - 77) < 0.001:
+        return view
+    return {}

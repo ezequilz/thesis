@@ -78,6 +78,11 @@ def validate_job(raw):
         if not checkpoint and not result.get('oracle_artifixer_inputs'):
             raise ValueError('Choose an existing checkpoint')
         result['checkpoint'] = checkpoint
+    if stage == 'seva_capture':
+        capture_set = raw.get('capture_set', 'seva')
+        if capture_set not in ('saved', 'seva', '77'):
+            raise ValueError('capture_set must be saved, seva or 77')
+        result['capture_set'] = capture_set
     if stage == 'seva_capture' and raw.get('view_id') is not None:
         view_id = raw['view_id']
         if not isinstance(view_id, str) or len(view_id) != 3 or not view_id.isascii() or not view_id.isdigit():

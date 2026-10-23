@@ -255,6 +255,29 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal($('edit-now').disabled,true);assert.equal($('edit-schedule').disabled,true);
   assert.equal($('repair-now').disabled,false);
   $('oracle-capture-source').value='saved';assert.equal(payload('repair').oracle_capture_source,'saved');
+  // Switching away from a complete SEVA set enables capture of missing 77° RGBs.
+  const oldTarget=cp.target_views;cp.target_views=cp.views.length;
+  $('checkpoint-capture-set').value='77';renderCheckpoint();
+  assert.equal(payload('seva_capture').capture_set,'77');
+  assert.equal($('seva-capture').disabled,false);
+  assert.match($('seva-capture-status').textContent,/77° captures/);
+  state.jobs=[{config:{splatfix:{stage:'seva_capture',checkpoint:selected}},state:{status:'running'}}];
+  renderCheckpoint();assert.equal($('seva-capture').disabled,true);
+  state.jobs=[];
+  for(const v of cp.views){v.fov77_original_url='/77-rgb.png';v.capture_77={rgb_renderer:'viser'};}
+  $('edit-image-set').value='77';renderCheckpoint();
+  assert.equal($('seva-capture').disabled,true);
+  assert.equal($('edit-now').disabled,false);
+  setCheckpointFov(cp.id,'77');
+  assert.equal(checkpointImage(cp,cp.views[0]).url,'/77-rgb.png');
+  for(const v of cp.views)v.fov77_repaired_url='/77-repaired.png';
+  renderCheckpoint();assert.equal($('edit-now').disabled,true);
+  assert.equal(checkpointImage(cp,cp.views[0]).url,'/77-repaired.png');
+  $('checkpoint-capture-set').value='saved';
+  assert.equal(payload('seva_capture').capture_set,'saved');
+  setCheckpointFov(cp.id,'saved');
+
+  cp.target_views=oldTarget;
   const view=cp.views[0];view.repaired_url='/saved-repair.png';view.seva_original_url='/seva-rgb.png';view.seva_repaired_url='/seva-repair.png';
   assert.equal(checkpointImage(cp,view).url,'/saved-repair.png');
   setCheckpointFov(cp.id,'seva');assert.equal(checkpointImage(cp,view).url,'/seva-repair.png');

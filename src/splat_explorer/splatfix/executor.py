@@ -121,7 +121,7 @@ class SplatfixExecutor:
             if not cp.complete:
                 raise ValueError('View selection must finish before GPT-image editing')
             if options['stage'] == 'seva_capture':
-                argv += ['seva-capture', str(cp.root)]
+                argv += ['seva-capture', str(cp.root), '--capture-set', options.get('capture_set', 'seva')]
                 if options.get('view_id') is not None:
                     argv += ['--view-id', options['view_id']]
             else:
@@ -133,13 +133,18 @@ class SplatfixExecutor:
                 manifest = read_json(paths[0], {})
                 views = manifest.get('views', [])
                 selected = len(views)
-                edited = sum(bool((v.get('seva_capture') or {}).get('repaired_rgb') if options.get('image_set') == 'seva' else v.get('repaired_rgb')) for v in views)
-                captured = sum(bool(v.get('seva_capture')) for v in views)
+                capture_set = options.get('capture_set', 'seva')
+                from .oraclegs.captures import capture_77
+                edited = sum(bool((v.get('seva_capture') or {}).get('repaired_rgb') if options.get('image_set') == 'seva' else
+                                  capture_77(v).get('repaired_rgb') if options.get('image_set') == '77' else v.get('repaired_rgb')) for v in views)
+                captured = sum(bool(v.get('seva_capture') if capture_set == 'seva' else
+                                    capture_77(v).get('original_rgb') if capture_set == '77' else v.get('original_rgb')) for v in views)
+                capture_label = {'seva':'SEVA', '77':'77°', 'saved':'Original FOV'}[capture_set]
                 previous = getattr(progress, 'counts', None)
                 if previous != (selected, edited, captured):
                     progress.counts = selected, edited, captured
                     update(checkpoint=str(paths[0].parent), selected_views=selected, edited_views=edited,
-                           target_views=manifest.get('target_views'), message=(f'{captured}/{selected} SEVA captures saved' if options['stage'] == 'seva_capture' else f'{selected} views saved · {edited} images repaired'))
+                           target_views=manifest.get('target_views'), message=(f'{captured}/{selected} {capture_label} captures saved' if options['stage'] == 'seva_capture' else f'{selected} views saved · {edited} images repaired'))
         run_process(argv, root / 'stage.log', stop, progress)
         progress()
         return {'checkpoint': self.store.get_run(run.run_id).state.details.get('checkpoint')}
