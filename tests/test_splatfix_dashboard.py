@@ -978,3 +978,28 @@ def test_restart_repeat_job_reuses_its_fixed_checkpoint_and_custom_settings(stud
     (cp.root / 'checkpoint.json').unlink()
     with pytest.raises(ValueError, match='checkpoint has been removed'):
         studio.restart(run.run_id)
+
+
+def test_restart_keeps_running_and_earlier_queued_reconstructions_ahead(studio):
+    cp = checkpoint(studio)
+    config = {'pipeline': 'splatfix', 'scene_id': 'room', 'splatfix': {
+        'stage': 'repair', 'checkpoint': str(cp.root), 'mode': 'baseline'}}
+    failed = studio.store.create_run(config)
+    studio.store.set_status(failed.run_id, 'error')
+    running = studio.store.create_run(config)
+    studio.store.set_status(running.run_id, 'running')
+    waiting = studio.store.create_run(config)
+    studio.store.set_status(waiting.run_id, 'waiting_gpu')
+    queued = studio.store.create_run(config)
+    before = {run.run_id: studio.store.get_run(run.run_id).to_dict()
+              for run in (failed, running, waiting, queued)}
+    retry = studio.restart(failed.run_id)
+    assert before == {ident: studio.store.get_run(ident).to_dict() for ident in before}
+    manager = SceneRunManager(studio.cfg, store=studio.store)
+    assert manager._next_queued()['run_id'] == waiting.run_id
+    studio.store.set_status(waiting.run_id, 'completed')
+    assert manager._next_queued()['run_id'] == queued.run_id
+    studio.store.set_status(queued.run_id, 'completed')
+    assert manager._next_queued()['run_id'] == retry['run_id']
+    assert studio.store.get_run(running.run_id).state.status.value == 'running'
+    assert not studio.store.stop_requested(running.run_id)
