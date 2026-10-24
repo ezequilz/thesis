@@ -696,6 +696,15 @@ def inference(root, request, trajectory, plus=False):
     validate_caption(request['caption_path'], request['caption_sha256'])
     encoded_prompt, _ = load_encoded_prompt([Path(request['caption_path'])])
     cfg = request['runtime']
+    if __package__:
+        from .handoff import enabled, repair_boundary
+    else:
+        from handoff import enabled, repair_boundary
+    handoff = enabled(cfg)
+    if handoff and (request.get('repair_policy') == 'endpoints' or
+                    request.get('trajectory_mode') != 'authors_orbit' or
+                    cfg.get('split_mode') != 'single-split'):
+        raise ValueError('Handoff generation requires single-split checkpoint authors-orbit trajectories')
     insertion = cfg.get('image_cache_insertion', False)
     if type(insertion) is not bool:
         raise ValueError('image_cache_insertion must be a boolean')
@@ -724,6 +733,13 @@ def inference(root, request, trajectory, plus=False):
             return torch.from_numpy(np.array(im.convert('RGB'))).permute(2, 0, 1).float() / 255
     all_references = torch.stack([rgb(path) for path in request['references']])
     all_neighbors = [a['frame_index'] for a in trajectory['anchors']]
+    active_neighbors = list(all_neighbors)
+    active_reference_paths = list(request['references'])
+    if handoff and plus:
+        state = load_handoff_references(root, request, trajectory)
+        active_neighbors = state['frame_indices']
+        active_reference_paths = state['paths']
+        all_references = torch.stack([rgb(path) for path in active_reference_paths])
     jobs = inference_jobs(request, trajectory, plus=plus)
     if request.get('repair_policy') == 'endpoints':
         (root / ('plus-directions.json' if plus else 'inference-directions.json')).write_text(json.dumps([
@@ -735,6 +751,8 @@ def inference(root, request, trajectory, plus=False):
     render_dir = Path(json.loads((root / 'distillation.json').read_text())['render_dir']) if plus else None
     insertion_audits = []
     seeding_audits = []
+    previous_boundary = None
+    handoff_records = []
     with torch.inference_mode():
         for segment, reference_order, directory in jobs:
             output = root / directory
@@ -745,10 +763,41 @@ def inference(root, request, trajectory, plus=False):
             if request.get('trajectory_mode') == 'authors_orbit' and request.get('repair_policy') != 'endpoints':
                 # Match ReconstructedColmapDataset's explicit-trajectory contract:
                 # saved anchors condition inference and supervise fitting directly.
-                indices = [index for index in indices if index not in neighbors]
+                indices = [index for index in indices if index not in (all_neighbors if handoff else neighbors)]
             if not indices:
                 continue
-            seed_index = initial_seed_index(cfg, segment, indices, neighbors)
+            seed_path = None
+            if handoff:
+                if previous_boundary is None:
+                    seed_index = initial_seed_index({**cfg, 'initial_image_seeding': True},
+                                                    segment, indices, all_neighbors)
+                    seed_path = Path(active_reference_paths[all_neighbors.index(seed_index)])
+                else:
+                    replaced_index = initial_seed_index({**cfg, 'initial_image_seeding': True},
+                                                        segment, indices, all_neighbors)
+                    if replaced_index not in sorted(all_neighbors)[1:-1]:
+                        raise ValueError('Handoff may replace only an interior trajectory reference')
+                    reference_slot = all_neighbors.index(replaced_index)
+                    seed_index = previous_boundary
+                    source = output / 'splatfix/frames/batch_0000/pred' / f'{seed_index:05d}.png'
+                    seed_path = repair_boundary(root, source, seed_index,
+                        {**{k: v for k, v in cameras.items() if k != 'frames'},
+                         **cameras['frames'][seed_index]}, phase=directory)
+                    active_neighbors[reference_slot] = seed_index
+                    active_reference_paths[reference_slot] = str(seed_path)
+                    all_references[reference_slot] = rgb(seed_path)
+                    handoff_records.append({'frame_index': seed_index, 'repair': str(seed_path),
+                        'replaced_reference_frame_index': replaced_index, 'reference_slot': reference_slot,
+                        'reference_frame_indices': list(active_neighbors),
+                        'reference_paths': list(active_reference_paths),
+                        'next_sequence': len(seeding_audits), 'output': directory,
+                        'policy': 'replace original boundary at identical camera and global index'})
+                    (root / ('plus-handoffs.json' if plus else 'inference-handoffs.json')).write_text(
+                        json.dumps(handoff_records, indent=2))
+                references = all_references[reference_order]
+                neighbors = [active_neighbors[i] for i in reference_order]
+            else:
+                seed_index = initial_seed_index(cfg, segment, indices, neighbors)
             if seed_index is not None:
                 if seed_index not in neighbors:
                     raise ValueError('Series seed must be a trusted reference camera')
@@ -770,7 +819,10 @@ def inference(root, request, trajectory, plus=False):
                 opacity[0] = 1
                 valid[0] = False  # Trusted anchors supervise reconstruction directly.
             seeding_audits.append({'output': directory, 'enabled': seed_index is not None,
-                                   'seed_global_index': seed_index, 'cache_preservation': insertion})
+                                   'seed_global_index': seed_index, 'cache_preservation': insertion,
+                                   **({'reference_frame_indices': list(neighbors),
+                                       'reference_paths': [active_reference_paths[i] for i in reference_order]}
+                                      if handoff else {})})
             (root / ('plus-seeding.json' if plus else 'inference-seeding.json')).write_text(
                 json.dumps({'series': seeding_audits}, indent=2))
             item = {'scene_id': 'splatfix', 'rgb_rendered': renders, 'rgb_neighbors': references,
@@ -788,7 +840,7 @@ def inference(root, request, trajectory, plus=False):
                 audit = pipe.starter_inference_audit
                 if not audit or not audit.get('encoded_starter_preserved'):
                     raise RuntimeError('Image cache insertion was requested but starter preservation was not verified')
-                reference = request['references'][reference_order[neighbors.index(seed_index)]]
+                reference = str(seed_path) if handoff else request['references'][reference_order[neighbors.index(seed_index)]]
                 record = {**audit, 'output': directory, 'seed_global_index': seed_index,
                           'reference_path': reference, 'reference_sha256': caption_digest(Path(reference)),
                           'generation_global_indices': indices,
@@ -798,6 +850,14 @@ def inference(root, request, trajectory, plus=False):
                 (root / ('plus-insertion-audit.json' if plus else 'inference-insertion-audit.json')).write_text(
                     json.dumps({'series': insertion_audits}, indent=2))
                 print('SPLATFIX_STARTER_VERIFIED: ' + json.dumps(record), flush=True)
+            if handoff:
+                previous_boundary = indices[-1]
+    if handoff:
+        reference_state = {'original_frame_indices': all_neighbors, 'frame_indices': active_neighbors,
+                           'paths': active_reference_paths,
+                           'sha256': [caption_digest(path) for path in active_reference_paths]}
+        (root / ('plus-references.json' if plus else 'inference-references.json')).write_text(
+            json.dumps(reference_state, indent=2))
     if plus:
         result = json.loads((root / 'distillation.json').read_text())
         result.update(repair_policy=request.get('repair_policy', 'all'),
@@ -809,6 +869,7 @@ def inference(root, request, trajectory, plus=False):
                       rgb_renderer=request.get('anchor_rgb_policy'),
                       plus_rgb_renderer=request.get('plus_rgb_renderer'),
                       mode=request['mode'], upstream_revision=request['upstream_revision'],
+                      handoff_generation=handoff,
                       image_cache_insertion=insertion,
                       initial_image_seeding=any(s['enabled'] for s in seeding_audits),
                       inference_target_policy=request.get('inference_target_policy', 'all_segment_frames'),
@@ -825,7 +886,7 @@ def inference(root, request, trajectory, plus=False):
         (root / 'result.json').write_text(json.dumps(result, indent=2))
 
 
-def unique_supervision(trajectory, references):
+def unique_supervision(trajectory, references, *, excluded_indices=()):
     """One RGB target per exact calibrated pose; saved anchors take priority.
 
     Diffusion retains closed temporal loops. This catalogue is used only for
@@ -840,6 +901,9 @@ def unique_supervision(trajectory, references):
     frames = transforms['frames']
     groups, keys, original_to_unique = [], {}, []
     for index, frame in enumerate(frames):
+        if index in excluded_indices:
+            original_to_unique.append(None)
+            continue
         pose = np.asarray(frame['transform_matrix'], dtype=np.float64)
         if pose.shape != (4, 4) or not np.isfinite(pose).all():
             raise ValueError('Invalid distillation camera pose')
@@ -857,6 +921,8 @@ def unique_supervision(trajectory, references):
         original_index = anchor['frame_index']
         if type(original_index) is not int or not 0 <= original_index < len(frames):
             raise ValueError('Anchor frame index is outside the saved trajectory')
+        if original_to_unique[original_index] is None:
+            raise ValueError('Cannot exclude a ground-truth reference camera')
         group = groups[original_to_unique[original_index]]
         reference = str(Path(reference).resolve())
         if group['reference'] is not None and caption_digest(group['reference']) != caption_digest(reference):
@@ -880,6 +946,43 @@ def unique_supervision(trajectory, references):
                'distillation_to_original': [group['source_index'] for group in groups],
                'groups': groups, 'selected_indices': selected}
     return result, mapping
+
+
+def load_handoff_references(root, request, trajectory):
+    """Require the completed inference reference set before fitting or plus generation."""
+    state = json.loads((root / 'inference-references.json').read_text())
+    original = [a['frame_index'] for a in trajectory['anchors']]
+    indices, paths, hashes = state['frame_indices'], state['paths'], state['sha256']
+    if (state['original_frame_indices'] != original or
+            not len(indices) == len(paths) == len(hashes) == len(original) or
+            len(set(indices)) != len(indices)):
+        raise ValueError('Invalid completed handoff reference set')
+    endpoints = (min(original), max(original))
+    for slot, (old, new, path, expected) in enumerate(zip(original, indices, paths, hashes)):
+        if type(new) is not int or not 0 <= new < len(trajectory['frames']):
+            raise ValueError('Handoff reference camera is outside trajectory')
+        if old in endpoints:
+            if new != old or Path(path).resolve() != Path(request['references'][slot]).resolve():
+                raise ValueError('Handoff must preserve first and last references')
+        elif new in original:
+            raise ValueError('Interior reference was not replaced by a generated handoff')
+        if caption_digest(path) != expected:
+            raise ValueError('Handoff reference checksum mismatch')
+    return state
+
+
+def reconstruction_supervision(root, request, trajectory):
+    if not request.get('runtime', {}).get('handoff_generation', False):
+        return unique_supervision(trajectory, request['references'])
+    state = load_handoff_references(root, request, trajectory)
+    anchors = [{**anchor, 'frame_index': index}
+               for anchor, index in zip(trajectory['anchors'], state['frame_indices'])]
+    displaced = [old for old, new in zip(state['original_frame_indices'], state['frame_indices']) if old != new]
+    transforms, supervision = unique_supervision({**trajectory, 'anchors': anchors}, state['paths'],
+                                                 excluded_indices=set(displaced))
+    supervision.update(handoff_references=state, excluded_original_reference_indices=displaced,
+                       policy='completed handoff references are ground truth at their exact cameras; displaced references excluded')
+    return transforms, supervision
 
 
 def append_worldexplorer_supervision(request, transforms, supervision):
@@ -931,7 +1034,7 @@ def distill(root, request, trajectory):
     render_transforms = opengl_transforms(trajectory)
     render_transforms_path = root / 'render_transforms_opengl.json'
     render_transforms_path.write_text(json.dumps(render_transforms, indent=2))
-    transforms, supervision = unique_supervision(trajectory, request['references'])
+    transforms, supervision = reconstruction_supervision(root, request, trajectory)
     append_worldexplorer_supervision(request, transforms, supervision)
     (root / 'supervision.json').write_text(json.dumps(supervision, indent=2))
     cameras, images = [], []

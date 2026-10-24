@@ -684,6 +684,12 @@ class ResultCatalog:
             row['artifixer_oraclegs'] = {'ready':False, 'reason':str(exc)}
         from ..splatfix.resolution import PROFILE_LABELS
         recorded_request = read_json(root / 'request.json', {})
+        from .artifixer_anchor_chart import anchor_chart
+        try:
+            row['anchor_chart'] = anchor_chart(self.studio, manifest, row['run_id'])
+        except (OSError, ValueError, KeyError, TypeError):
+            # Partial downloads and reduced archives may not contain the arrays.
+            row['anchor_chart'] = None
         profile = (result.get('resolution_policy') or {}).get('profile') or recorded_request.get('resolution_profile')
         row['resolution_setting'] = PROFILE_LABELS.get(profile, 'Early original resolution · unversioned run')
         def local(raw):

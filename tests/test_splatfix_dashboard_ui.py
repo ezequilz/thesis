@@ -31,6 +31,15 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('select').scene_id,'unrelated-current-scene');
   assert.equal(payload('repair').checkpoint,'/saved/cp');
   assert.equal(payload('repair').mode,'edited');
+  assert.equal(payload('repair').handoff_generation,false);
+  $('handoff-generation').value='on';
+  assert.equal(payload('repair').handoff_generation,true);
+  assert.equal(payload('repair').split_mode,'single-split');
+  assert.equal(payload('benchmark').handoff_generation,undefined);
+  $('reconstruction-method').value='oraclegs';
+  assert.equal(payload('repair').handoff_generation,undefined);
+  $('reconstruction-method').value='artifixer';
+  $('handoff-generation').value='off';
   for(const pipeline of ['authors_3dgut','authors_3dgut_viser_rgb','legacy_gsplat']){
     $('artifixer-pipeline').value=pipeline;
     for(const rgb of ['on','off'])for(const downscale of ['on','off']){

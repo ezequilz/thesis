@@ -35,6 +35,17 @@ def _digest(path):
 
 
 def deduplicate_artifacts(root):
+    """Share verified artifacts and invalidate the dashboard's size snapshot."""
+    from ..scene_runs.store import OUTPUT_SIZE_NAME
+    try:
+        return _deduplicate_artifacts(root)
+    finally:
+        # Also invalidate after a partial failure: some replacements may already
+        # have succeeded. The next dashboard read counts unique inodes again.
+        (Path(root) / OUTPUT_SIZE_NAME).unlink(missing_ok=True)
+
+
+def _deduplicate_artifacts(root):
     """Deduplicate a quiescent GPU archive; never follow symlinks or cross runs.
 
     Call only after the worker exits and its final download is verified. Size

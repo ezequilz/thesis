@@ -91,6 +91,8 @@ def digest_file(path):
 
 def validate_runtime(runtime=None):
     cfg = {**DEFAULT_RUNTIME, **(runtime or {})}
+    from .handoff import enabled
+    cfg['handoff_generation'] = enabled(cfg)
     from .pipeline_profile import pipeline_profile
     pipeline_profile(cfg['artifixer_pipeline'])
     from ..resolution import profile_size
@@ -396,7 +398,7 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
     return root, manifest
 
 
-def run_worker(command, *, cwd, env, log_path, should_stop):
+def run_worker(command, *, cwd, env, log_path, should_stop, handoff_cfg=None):
     log_path = Path(log_path)
     # Only reconstruction subprocesses own trainable Gaussian state. Other
     # phases retain ordinary cancellation and do not import the CUDA trainer.
@@ -415,6 +417,10 @@ def run_worker(command, *, cwd, env, log_path, should_stop):
             'policy': 'Iteration-boundary checkpoint and PLY on stop; no added periodic checkpoints',
             'original_command': original_command, 'worker_command': command,
             'upstream_source_modified': False})
+    handoff_service = None
+    if env.get('SPLATFIX_HANDOFF_LOCAL') and log_path.stem in ('infer', 'plus'):
+        from .handoff import HandoffService
+        handoff_service = HandoffService(env['SPLATFIX_HANDOFF_MAILBOX'], cfg=handoff_cfg)
     stop_started = None
     save_timeout = float(env.get('SPLATFIX_SAVE_STOP_TIMEOUT_SECONDS', '240'))
     with Path(log_path).open('w') as log:
@@ -433,6 +439,8 @@ def run_worker(command, *, cwd, env, log_path, should_stop):
                             'status': 'save_timeout', 'seconds': save_timeout,
                             'message': 'Graceful save did not finish before timeout; inspect interrupted/stop-state.json before trusting outputs'})
                         raise InterruptedError('Graceful save timed out; preserving available files before termination')
+                if handoff_service is not None and stop_started is None:
+                    handoff_service.poll()
                 time.sleep(.25)
             if stop_started is not None or should_stop():
                 raise InterruptedError('Splatfix repair stopped; available checkpoint/PLY and diagnostics preserved')
@@ -444,6 +452,8 @@ def run_worker(command, *, cwd, env, log_path, should_stop):
                     status += '; worker was killed externally; check scheduler/cgroup memory limits'
                 raise RuntimeError(f'ArtiFixer worker failed ({status}): {Path(log_path).read_text(errors="replace")[-3000:]}')
         finally:
+            if handoff_service is not None:
+                handoff_service.close()
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
                 try:
@@ -455,7 +465,7 @@ def run_worker(command, *, cwd, env, log_path, should_stop):
 
 def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frames=25,
                span_fraction=.04, seed=42, camera_scale=None, should_stop=lambda: False,
-               on_progress=lambda event: None, trajectory_mode='authors_orbit'):
+               on_progress=lambda event: None, trajectory_mode='authors_orbit', image_repair_cfg=None):
     """Run independently with cached authors local captioning; never merge PLYs."""
     if mode not in ('edited', 'baseline'):
         raise ValueError('mode must be edited or baseline')
@@ -479,6 +489,11 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         if mode != 'edited' or trajectory_mode != 'authors_orbit':
             raise ValueError('Endpoint checkpoints require edited authors-orbit ArtiFixer runs')
         split_mode = 'no-split'
+    from .handoff import enabled
+    if enabled(runtime or {}):
+        if mode != 'edited' or cp.endpoint_only or trajectory_mode != 'authors_orbit':
+            raise ValueError('Handoff generation requires edited checkpoint authors-orbit trajectories')
+        split_mode = 'single-split'
     if mode == 'edited' and any(not view.get('repaired_rgb') for view in cp.repair_views):
         raise ValueError('Edited reconstruction requires saved GPT-image repairs; run splatfix edit first')
     references = [str(cp.image_path(view, repaired=mode == 'edited')) for view in cp.repair_views]
@@ -596,6 +611,9 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
             request['orbit_provenance'] = repeat['orbit']['provenance']
     atomic_json(root / 'request.json', request)
     env = runtime_environment(cfg)
+    if cfg.get('handoff_generation') and not env.get('SPLATFIX_HANDOFF_MAILBOX'):
+        env['SPLATFIX_HANDOFF_MAILBOX'] = str(root / 'handoff-mailbox')
+        env['SPLATFIX_HANDOFF_LOCAL'] = '1'
     try:
         phases = (('scale',) if camera_scale is None else ()) + (('orbit',) if trajectory_mode == 'authors_orbit' and not (repeat and repeat.get('orbit')) else ()) + ('caption', 'infer', 'distill', 'plus')
         for phase in phases:
@@ -644,11 +662,12 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                 request['plus_rgb_renderer'] = backend
                 atomic_json(root / 'request.json', request)
             run_worker([cfg['python'], str(Path(__file__).with_name('official_worker.py')), '--request', str(root / 'request.json'), '--phase', phase],
-                       cwd=cfg['repo'], env=(runtime_environment({**cfg, 'model_hub_offline': False}) if phase == 'caption' else env), log_path=root / f'{phase}.log', should_stop=should_stop)
+                       cwd=cfg['repo'], env=(runtime_environment({**cfg, 'model_hub_offline': False}) if phase == 'caption' else env), log_path=root / f'{phase}.log', should_stop=should_stop,
+                       **({'handoff_cfg': image_repair_cfg} if env.get('SPLATFIX_HANDOFF_LOCAL') else {}))
             if phase == 'infer':
-                from .official_worker import unique_supervision
+                from .official_worker import reconstruction_supervision
                 from .inference_preview import publish_preview
-                _, supervision = unique_supervision(trajectory, request['references'])
+                _, supervision = reconstruction_supervision(root, request, trajectory)
                 groups = supervision['groups']
                 publish_preview(root, root / 'inference/splatfix/frames/batch_0000/pred',
                                 [g['source_index'] for g in groups if not g.get('reference')],

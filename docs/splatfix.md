@@ -1286,3 +1286,44 @@ This starts the stage again, rather than resuming optimizer state. Repeated clic
 reuse an already queued/active restart of that job. Missing saved checkpoints or
 input snapshots produce an error. The new settings snapshot retains the original
 dashboard controls/submission and records `restart_from` for traceability.
+
+### Experimental handoff generation (Step 4)
+
+**Handoff generation → On** is an opt-in ArtiFixer run setting. Off is the default
+and retains the existing generation path. CLI: `--handoff-generation on|off`.
+The setting is saved with the run, including scheduled/restarted runs.
+
+On uses the checkpoint's single-split trajectory, overriding the split selection
+for that run. It requires edited, non-endpoint authors-orbit checkpoints. The
+first sequence uses the saved repair at its starting camera. Each following sequence waits for a
+GPT Image 2.5 Sunburst repair of the preceding sequence's last generated image,
+then clears inference caches and starts at that image's exact camera/index.
+All saved references remain supplied during generation. Each returned handoff
+repair replaces the following interior reference slot for subsequent sequences,
+using the handoff camera rather than the displaced reference camera. Replacements
+accumulate; the first and last trajectory references remain unchanged. Original
+checkpoint repairs and all generated/debug outputs remain saved. This replacement
+also defines reconstruction ground truth: the completed replacement set is used
+at its exact handoff cameras, alongside the unchanged first and last references.
+Displaced interior reference cameras are excluded from fitting. Initial-image
+seeding is mandatory in this mode; the separate cache-preservation setting still
+controls whether its clean latent is retained. Renderer and loss settings remain
+unchanged. The subsequent ArtiFixer3D+ pass starts with the completed inference
+reference set and applies the same progressive handoff strategy.
+
+The manager uses the existing Step 3 relay backend and repair prompt. No relay
+credentials are copied into GPU requests. Cancellation and deadline polling stay
+active during image editing. Repair errors, checksum errors and aspect-ratio
+changes fail the run rather than silently generating with an unrepaired seed.
+Raw responses are retained and reused after transfer retries.
+
+Each run archives `handoffs/inference/<index>/` and `handoffs/plus/<index>/` with
+`before.png`, `repaired.png`, `response.image`, response metadata and the calibrated
+camera. The repaired RGB replaces the original boundary PNG at the same global
+index; the restarted seed is masked out of generated export. This adds no duplicate
+camera or numbering gap. Distillation compacts the remaining cameras after
+excluding displaced references and records the original-to-final index mapping.
+`inference-references.json` records the exact ground-truth paths, camera indices
+and checksums; `plus-references.json` records the final plus-generation set. `inference-handoffs.json`, `plus-handoffs.json`
+and the seeding logs record each restart. This mode incurs one paid image edit
+per transition per inference pass and keeps the GPU allocation while waiting.

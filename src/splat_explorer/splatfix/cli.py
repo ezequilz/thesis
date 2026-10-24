@@ -109,6 +109,8 @@ def repair_splat(cfg, args):
     if getattr(args, 'image_cache_insertion', None) is not None:
         runtime['image_cache_insertion'] = args.image_cache_insertion
     if method == 'artifixer':
+        if getattr(args, 'handoff_generation', None) is not None:
+            runtime['handoff_generation'] = args.handoff_generation == 'on'
         for key in ('reconstruction_images', 'reconstruction_initialization', 'prompt_source', 'artifixer_pipeline'):
             if getattr(args, key, None) is not None:
                 runtime[key] = getattr(args, key)
@@ -132,6 +134,7 @@ def repair_splat(cfg, args):
         args.checkpoint, args.output, mode=args.mode, runtime=runtime,
         frames=args.frames, span_fraction=args.span_fraction, seed=args.seed,
         camera_scale=args.camera_scale,
+        **({'image_repair_cfg': cfg} if method == 'artifixer' and runtime.get('handoff_generation') else {}),
         on_progress=lambda event: print(json.dumps(event), flush=True),
     )
     print(json.dumps(result, indent=2, default=str))
@@ -196,6 +199,8 @@ def _add_stages(parser):
     repair.add_argument("--mode", choices=("edited", "baseline"), default="edited")
     repair.add_argument('--split-mode', choices=('single-split', 'double-split', 'no-split'), default='double-split',
                         help='Generate one continuous path (no-split), whole legs, or inward halves (default); normal runs retain all references')
+    repair.add_argument('--handoff-generation', choices=('on', 'off'), default=None,
+                        help='Repair generated leg boundaries with GPT Image 2.5 before restarting at the same pose')
     repair.add_argument('--prompt-source', choices=('original_anchors', 'original_and_repaired', 'worldexplorer'), default=None)
     repair.add_argument('--artifixer-pipeline', choices=('authors_3dgut', 'authors_3dgut_viser_rgb', 'legacy_gsplat'), default=None,
                         help='Legacy Viser/gsplat (default), authors 3DGUT rendering and fresh reconstruction, or Viser RGB with authors 3DGUT geometry/fitting')

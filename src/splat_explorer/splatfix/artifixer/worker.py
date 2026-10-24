@@ -23,6 +23,9 @@ def execute(root):
             (root / 'STOP').touch()
             return True
         return (root / 'STOP').exists()
+    previous_handoff = os.environ.get('SPLATFIX_HANDOFF_MAILBOX')
+    if request.get('runtime', {}).get('handoff_generation', False):
+        os.environ['SPLATFIX_HANDOFF_MAILBOX'] = str(root / 'handoff')
     previous_timeout = os.environ.get('SPLATFIX_SAVE_STOP_TIMEOUT_SECONDS')
     previous_mailbox = os.environ.get('SPLATFIX_VISER_MAILBOX')
     if request.get('stage') != 'benchmark':
@@ -88,6 +91,10 @@ def execute(root):
     except Exception as exc:
         publish(status='error', phase='finished', message=f'{type(exc).__name__}: {exc}')
     finally:
+        if previous_handoff is None:
+            os.environ.pop('SPLATFIX_HANDOFF_MAILBOX', None)
+        else:
+            os.environ['SPLATFIX_HANDOFF_MAILBOX'] = previous_handoff
         if previous_mailbox is None:
             os.environ.pop('SPLATFIX_VISER_MAILBOX', None)
         else:

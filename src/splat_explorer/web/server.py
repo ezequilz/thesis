@@ -66,7 +66,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import numpy as np
 
@@ -756,11 +756,14 @@ class DashboardApp:
 class DashboardHandler(BaseHTTPRequestHandler):
     app: DashboardApp  # injected by serve_dashboard
 
-    def _send(self, code: int, body: bytes, content_type: str) -> None:
+    def _send(self, code: int, body: bytes, content_type: str, *, filename: str | None = None) -> None:
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if filename is not None:
+            name = quote(filename, safe='')
+            self.send_header("Content-Disposition", f'inline; filename="{name}"; filename*=UTF-8\'\'{name}')
         self.end_headers()
         self.wfile.write(body)
 
@@ -1468,7 +1471,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if target.suffix.lower() == ".mp4":
                     self._send_video_file(target)
                 else:
-                    self._send(200, target.read_bytes(), mimetypes.guess_type(target.name)[0] or "application/octet-stream")
+                    self._send(200, target.read_bytes(), mimetypes.guess_type(target.name)[0] or "application/octet-stream",
+                               filename=target.name)
             elif self.command == "POST" and path == "/api/splatfix/checkpoints/delete":
                 try:
                     self._send_json(studio.delete_checkpoint(body))

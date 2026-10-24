@@ -19,6 +19,31 @@ def artifacts(tmp_path):
     return first, second
 
 
+def test_deduplication_invalidates_saved_dashboard_size(tmp_path):
+    from splat_explorer.scene_runs import SceneRunStore
+    store = SceneRunStore(tmp_path / 'runs')
+    run = store.create_run()
+    root = store.root / run.run_id
+    first, second = artifacts(root)
+    store.set_status(run.run_id, 'stopped')
+    before = store.output_size_bytes(run.run_id)
+    assert (root / 'output-size.json').is_file()
+    d.deduplicate_artifacts(root)
+    assert not (root / 'output-size.json').exists()
+    assert store.output_size_bytes(run.run_id) == before - len(b'array data')
+
+
+def test_failed_deduplication_invalidates_size_cache(tmp_path, monkeypatch):
+    cache = tmp_path / 'output-size.json'
+    cache.write_text('{}')
+    def fail(root):
+        raise RuntimeError('Interrupted after replacing some copies')
+    monkeypatch.setattr(d, '_deduplicate_artifacts', fail)
+    with pytest.raises(RuntimeError):
+        d.deduplicate_artifacts(tmp_path)
+    assert not cache.exists()
+
+
 def test_verified_copies_share_storage_and_survive_deletion(tmp_path):
     first, second = artifacts(tmp_path)
     different = first.with_name('different.npy')

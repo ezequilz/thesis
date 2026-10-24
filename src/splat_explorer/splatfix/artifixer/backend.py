@@ -25,6 +25,12 @@ def validate_options(raw):
             raise ValueError('benchmark_runs must be a positive integer')
         result['benchmark_runs'] = runs
     if raw['stage'] == 'repair':
+        from .handoff import enabled
+        result['handoff_generation'] = enabled(raw)
+        if result['handoff_generation']:
+            if raw.get('mode', 'edited') != 'edited' or raw.get('image_trajectory') == 'endpoints':
+                raise ValueError('Handoff generation requires edited checkpoint trajectories')
+            result['split_mode'] = 'single-split'
         result['artifixer_pipeline'] = raw['artifixer_pipeline']
         from .checkpoint_policy import validate_image_trajectory
         result['image_trajectory'] = validate_image_trajectory(raw.get('image_trajectory', 'checkpoint'))

@@ -80,6 +80,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
     benchmark = options['stage'] == 'benchmark'
     from .checkpoint_policy import checkpoint_for_run
     cp = None if benchmark else checkpoint_for_run(Checkpoint.load(options['checkpoint']), options.get('image_trajectory', 'checkpoint'))
+    if cp is not None and cp.endpoint_only and options.get('handoff_generation', False):
+        raise ValueError('Handoff generation requires non-endpoint checkpoint trajectories')
     if cp is not None and cp.endpoint_only and options['mode'] != 'edited':
         raise ValueError('Endpoint checkpoints require GPT-repaired references')
     if cp is not None and options['mode'] == 'edited':
@@ -139,6 +141,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
             # A configured historical bundle must not leak into distilled-only runs.
             if runtime['reconstruction_images'] == 'distilled':
                 runtime.pop('worldexplorer_source', None)
+        runtime['handoff_generation'] = options.get('handoff_generation', False) if not benchmark else False
         runtime['initial_image_seeding'] = options.get('initial_image_seeding') if not benchmark else None
         runtime['image_cache_insertion'] = options.get('image_cache_insertion', False) if not benchmark else False
         if cp is not None and (cp.root / 'repeat-repair.json').is_file():
@@ -236,6 +239,13 @@ def execute_remote(executor, run_id, options, root, stop, update):
     capture_mirror = None if benchmark or native else CaptureMirror(
         root, remote_dir, container_dir, cp, endpoint, ssh, sync,
         url=executor.cfg.get('renderer', {}).get('viser_url') or None, should_stop=capture_stop, progress=update)
+    handoff_service = None
+    if not benchmark and (options.get('handoff_generation', False) or
+            (cp is not None and (cp.root / 'repeat-repair.json').is_file() and
+             json.loads((cp.root / 'repeat-repair.json').read_text())['runtime'].get('handoff_generation', False))):
+        from .handoff import HandoffService
+        handoff_service = HandoffService(root / 'handoff', cfg=executor.cfg,
+            remote=remote_dir + '/handoff', endpoint=endpoint, ssh=ssh, sync=sync)
     state = {}
     primary_error = None
     try:
@@ -249,6 +259,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 ssh('touch ' + shlex.quote(remote_dir + '/STOP'))
             elif capture_mirror is not None:
                 capture_mirror.poll()
+            if not stop() and handoff_service is not None:
+                handoff_service.poll()
             raw = ssh('if [ -f ' + shlex.quote(remote_dir + '/worker-status.json') + ' ]; then cat ' + shlex.quote(remote_dir + '/worker-status.json') + '; fi')
             state = json.loads(raw) if raw.strip() else {}
             if state:
@@ -289,6 +301,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
             update(stop_signal_error=str(stop_error))
         raise
     finally:
+        if handoff_service is not None:
+            handoff_service.close()
         preview_mirror.finish()
         # Pull partial results/logs as well; checkpoint trajectories are reusable by both arms.
         try:

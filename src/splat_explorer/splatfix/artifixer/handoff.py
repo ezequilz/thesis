@@ -1,0 +1,157 @@
+"""Opt-in sequential repairs. GPU workers exchange files, never relay credentials."""
+from pathlib import Path
+import hashlib
+import json
+import os
+import re
+import shutil
+import time
+import uuid
+
+
+def enabled(options):
+    value = options.get('handoff_generation', False)
+    if type(value) is not bool:
+        raise ValueError('handoff_generation must be a boolean')
+    return value
+
+
+def write_json(path, value):
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(value, indent=2))
+    temporary.replace(path)
+
+
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def repair_boundary(root, source, frame_index, camera, *, phase):
+    """Block until the manager commits a repair, retaining the exact camera/index."""
+    from PIL import Image
+    mailbox = Path(os.environ['SPLATFIX_HANDOFF_MAILBOX'])
+    ident = uuid.uuid4().hex
+    folder = mailbox / ident
+    folder.mkdir(parents=True)
+    shutil.copy2(source, folder / 'before.png')
+    request = {'id': ident, 'frame_index': frame_index, 'camera': camera,
+               'phase': phase, 'input_sha256': digest(source)}
+    print(f'HANDOFF_REPAIR_WAIT: {phase} frame {frame_index}', flush=True)
+    write_json(mailbox / 'request.json', request)
+    response = folder / 'response.json'
+    deadline = time.monotonic() + 1800
+    while not response.is_file():
+        if (mailbox.parent / 'STOP').exists():
+            raise InterruptedError('Stopped waiting for handoff repair')
+        if time.monotonic() >= deadline:
+            raise TimeoutError('Timed out waiting for handoff repair')
+        time.sleep(.25)
+    result = json.loads(response.read_text())
+    if result.get('error'):
+        raise RuntimeError(result['error'])
+    fixed = folder / 'repaired.png'
+    if (result.get('id') != ident or result.get('input_sha256') != request['input_sha256']
+            or result.get('sha256') != digest(fixed)):
+        raise ValueError('Handoff repair identity/checksum mismatch')
+    with Image.open(source) as original, Image.open(fixed) as edited:
+        if original.size != edited.size:
+            raise ValueError('Handoff repair dimensions changed')
+    archive = Path(root) / 'handoffs' / phase / f'{frame_index:05d}'
+    archive.mkdir(parents=True, exist_ok=True)
+    for name in ('before.png', 'repaired.png', 'response.image', 'response.json'):
+        shutil.copy2(folder / name, archive / name)
+    write_json(archive / 'camera.json', request)
+    # Replace in-place: no duplicate camera, no additional index or gap.
+    shutil.copy2(fixed, source)
+    print(f'HANDOFF_REPAIR_READY: {phase} frame {frame_index}', flush=True)
+    return archive / 'repaired.png'
+
+
+def edit_request(folder, request, cfg=None, backend=None):
+    """Use Step 3's backend/prompt with the requested 2.5 model; retain raw bytes."""
+    from PIL import Image
+    from ..image_repair import DEFAULT_PROMPT
+    from ...image_edit_gpt import GptImageEditBackend
+    from ...image_edit import SCENE_RUN_GPT_IMAGE_MODEL
+    result = {'id': request['id'], 'input_sha256': request['input_sha256'],
+              'model': SCENE_RUN_GPT_IMAGE_MODEL, 'prompt': DEFAULT_PROMPT}
+    try:
+        if digest(folder / 'before.png') != request['input_sha256']:
+            raise ValueError('Handoff input checksum mismatch')
+        raw = folder / 'response.image'
+        if not raw.exists():
+            backend = backend or GptImageEditBackend.from_config(cfg, model=SCENE_RUN_GPT_IMAGE_MODEL)
+            answer = backend.edit(folder / 'before.png', DEFAULT_PROMPT)
+            if answer.error or not answer.images:
+                raise RuntimeError(answer.error or 'Handoff repair returned no image')
+            temporary = raw.with_suffix('.tmp')
+            temporary.write_bytes(answer.images[0])
+            temporary.replace(raw)
+        with Image.open(folder / 'before.png') as original, Image.open(raw) as edited:
+            if original.width * edited.height != original.height * edited.width:
+                raise ValueError('Handoff repair changed camera aspect ratio')
+            edited.convert('RGB').resize(original.size, Image.Resampling.LANCZOS).save(folder / 'repaired.png')
+        result['sha256'] = digest(folder / 'repaired.png')
+    except Exception as exc:
+        result['error'] = f'{type(exc).__name__}: {exc}'
+    write_json(folder / 'response.json', result)
+
+
+class HandoffService:
+    """Nonblocking manager service; cancellation/deadline polling remains active."""
+    def __init__(self, root, *, cfg=None, remote=None, endpoint=None, ssh=None, sync=None):
+        from concurrent.futures import ThreadPoolExecutor
+        self.root = Path(root)
+        self.cfg, self.remote, self.endpoint, self.ssh, self.sync = cfg, remote, endpoint, ssh, sync
+        self.pool = ThreadPoolExecutor(max_workers=1)
+        self.pending = None
+        self.done = set()
+
+    def poll(self):
+        import shlex
+        if self.pending:
+            ident, future = self.pending
+            if not future.done():
+                return
+            future.result()
+            folder = self.root / ident
+            if self.remote:
+                target = self.endpoint + ':' + self.remote + '/' + ident + '/'
+                for name in ('response.image', 'repaired.png'):
+                    if (folder / name).exists():
+                        self.sync(str(folder / name), target + name)
+                self.sync(str(folder / 'response.json'), target + 'response.json')
+            self.done.add(ident)
+            self.pending = None
+        if self.remote:
+            path = shlex.quote(self.remote + '/request.json')
+            raw = self.ssh(f'if [ -f {path} ]; then cat {path}; fi')
+        else:
+            path = self.root / 'request.json'
+            raw = path.read_text() if path.exists() else ''
+        if not raw.strip():
+            return
+        request = json.loads(raw)
+        ident = request.get('id', '')
+        if not isinstance(ident, str) or not re.fullmatch('[0-9a-f]{32}', ident):
+            raise ValueError('Invalid handoff request id')
+        if ident in self.done:
+            return
+        folder = self.root / ident
+        folder.mkdir(parents=True, exist_ok=True)
+        if self.remote:
+            marker = shlex.quote(self.remote + '/' + ident + '/response.json')
+            if self.ssh(f'if [ -f {marker} ]; then cat {marker}; fi').strip():
+                self.done.add(ident)
+                return
+            self.sync(self.endpoint + ':' + self.remote + '/' + ident + '/before.png', str(folder / 'before.png'))
+        if (folder / 'response.json').is_file():
+            from concurrent.futures import Future
+            future = Future()
+            future.set_result(None)
+        else:
+            future = self.pool.submit(edit_request, folder, request, self.cfg)
+        self.pending = (ident, future)
+
+    def close(self):
+        self.pool.shutdown(wait=False, cancel_futures=True)
