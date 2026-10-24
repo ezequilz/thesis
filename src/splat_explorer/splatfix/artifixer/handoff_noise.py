@@ -58,7 +58,8 @@ def vignette_strength(height, width, strength, size='larger', edge_strength=None
     validate_strength(edge)
     center_t = np.clip(radius / inner, 0, 1)
     center_feather = center_t * center_t * (3 - 2 * center_t)
-    interior = strength * (.5 + .5 * center_feather)
+    center = strength / 3
+    interior = center + (strength - center) * center_feather
     return interior + (edge - strength) * feather
 
 
@@ -67,7 +68,7 @@ def vignette_metadata(vignette, strength, size, edge_strength=None):
     edge = max(strength, profile['edge_strength_percent']) if edge_strength is None else edge_strength
     validate_strength(edge)
     return {**profile, 'enabled': vignette, 'edge_strength_percent': edge if vignette else strength,
-            'center_strength_percent': strength * .5 if vignette else strength,
+            'center_strength_percent': strength / 3 if vignette else strength,
             'inner_boundary_strength_percent': strength, 'center_falloff': 'smoothstep' if vignette else None}
 
 

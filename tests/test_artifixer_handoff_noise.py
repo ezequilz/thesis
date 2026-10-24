@@ -71,7 +71,7 @@ def test_new_jobs_default_to_noise_but_historical_runtime_stays_off():
     from splat_explorer.splatfix.artifixer.handoff_noise import noise_options
     options = validate_options({'stage':'repair', 'mode':'edited', 'handoff_generation':True})
     assert options['handoff_add_noise'] is True
-    assert options['handoff_noise_strength'] == 25
+    assert options['handoff_noise_strength'] == 35
     assert options['handoff_noise_mode'] == 'repaired_pixel_sprinkle'
     assert noise_options({})['handoff_noise_mode'] == 'gaussian'
     assert validate_options({'stage':'repair', 'mode':'edited', 'handoff_generation':True,
@@ -87,8 +87,8 @@ def test_new_jobs_default_to_noise_but_historical_runtime_stays_off():
 def test_vignette_is_elliptical_feathered_and_capped():
     from splat_explorer.splatfix.artifixer.handoff_noise import vignette_strength, noise_options
     field = vignette_strength(2001,2001,25)
-    assert field[1000,1000] == 12.5
-    assert field[1000,1252] == pytest.approx(18.75)  # Halfway through inner radius.
+    assert field[1000,1000] == pytest.approx(25 / 3)
+    assert field[1000,1252] == pytest.approx(25 * 2 / 3)  # Halfway through inner radius.
     assert field[1700,1000] == pytest.approx(25)  # Full selected strength at inner boundary.
     assert field[1000,1612] == pytest.approx(60)
     assert field[1850,1000] == pytest.approx(60)  # Same elliptical midpoint.
@@ -109,7 +109,7 @@ def test_vignette_reduces_center_and_increases_edge_noise(tmp_path):
     add_gaussian_noise(source,tmp_path/'vignette.png',strength=25,seed=7,vignette=True)
     uniform = np.asarray(Image.open(tmp_path/'uniform.png'),dtype=float)
     vignette = np.asarray(Image.open(tmp_path/'vignette.png'),dtype=float)
-    assert vignette[170:190,310:330].std() == pytest.approx(uniform[170:190,310:330].std() * .5, rel=.06)
+    assert vignette[170:190,310:330].std() == pytest.approx(255 * .25 / 3, rel=.08)  # Uniform 25% noise clips, so compare to unclipped sigma.
     assert vignette[:20].std() > uniform[:20].std() * 1.35
 
 
@@ -124,7 +124,7 @@ def test_pixel_sprinkle_replaces_whole_pixels_with_elliptical_probability(tmp_pa
     selected = pixels[:,:,0] == 210
     assert np.all(pixels[selected] == [210,220,230])
     assert np.all(pixels[~selected] == [10,20,30])
-    assert selected[340:380,620:660].mean() == pytest.approx(.125,abs=.025)
+    assert selected[340:380,620:660].mean() == pytest.approx(.25 / 3,abs=.025)
     assert selected[:20].mean() == pytest.approx(.95,abs=.03)
     assert meta['replaced_pixels'] == selected.sum()
     first = output.read_bytes()
@@ -182,7 +182,7 @@ def test_smaller_vignette_restores_previous_profile():
     t = np.clip((np.sqrt(y[:, None] ** 2 + x[None, :] ** 2) - .5) / .5, 0, 1)
     outer = t > 0
     np.testing.assert_array_equal(field[outer], (25 + 55 * (t * t * (3 - 2 * t)))[outer])
-    assert field[360,640] == 12.5
+    assert field[360,640] == pytest.approx(25 / 3)
     assert field[360,1120] == pytest.approx(52.5)
     assert field.max() == 80
     assert noise_options({})['handoff_vignette_size'] == 'larger'
@@ -219,7 +219,7 @@ def test_edge_strength_is_independent_and_defaults_follow_size(size,default):
     assert noise_options({'handoff_vignette_size':size})['handoff_vignette_edge_strength'] == default
     for edge in (0,10,70,100):
         field = vignette_strength(101,201,25,size,edge_strength=edge)
-        assert field[50,100] == 12.5
+        assert field[50,100] == pytest.approx(25 / 3)
         np.testing.assert_allclose(field[0],edge,atol=1e-12)
         np.testing.assert_allclose(field[:,0],edge,atol=1e-12)
         assert noise_options({'handoff_vignette_edge_strength':edge})['handoff_vignette_edge_strength'] == edge
@@ -234,7 +234,7 @@ def test_very_large_ellipse_extends_vertically_and_is_new_job_default():
     larger = vignette_strength(721,1281,25,'larger')
     very_large = vignette_strength(721,1281,25,'very_large')
     np.testing.assert_array_equal(very_large[360], larger[360])
-    assert very_large[360,640] == 12.5
+    assert very_large[360,640] == pytest.approx(25 / 3)
     assert very_large[60,640] < larger[60,640]
     assert very_large.max() == 95
     np.testing.assert_allclose(very_large, very_large[::-1,::-1])
