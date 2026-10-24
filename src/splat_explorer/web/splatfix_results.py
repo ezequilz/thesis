@@ -611,6 +611,7 @@ class ResultCatalog:
         row['saved_artifacts'] = {'image_groups': [], 'checkpoints': []}
         saved = row['saved_artifacts']
         groups = {}
+        seen_artifacts = set()
         gpu = run_root / 'gpu'
         for path in sorted(gpu.rglob('*')):
             if path.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.pt', '.pth', '.ckpt', '.ply', '.json'):
@@ -619,11 +620,17 @@ class ResultCatalog:
             if not resolved.is_relative_to(run_root) or not resolved.is_file():
                 continue
             relative = path.relative_to(gpu)
+            url = self.studio.file_url(path)
+            info = resolved.stat()
+            identity = (info.st_dev, info.st_ino)
+            if identity in seen_artifacts:
+                continue
+            seen_artifacts.add(identity)
             if path.suffix.lower() in ('.pt', '.pth', '.ckpt', '.ply') or path.name == 'checkpoint.json':
-                saved['checkpoints'].append({'name': str(relative), 'url': self.studio.file_url(path)})
+                saved['checkpoints'].append({'name': str(relative), 'url': url})
             elif path.suffix.lower() in ('.png', '.jpg', '.jpeg'):
                 name = str(relative.parent)
-                groups.setdefault(name, []).append({'name': path.name, 'url': self.studio.file_url(path)})
+                groups.setdefault(name, []).append({'name': path.name, 'url': url})
         saved['image_groups'] = [{'name': name, 'images': images} for name, images in groups.items()]
         candidates = list(run_root.glob('*.log')) + list((run_root / 'gpu').glob('*.log'))
         decoded_names = {}

@@ -194,6 +194,8 @@ class SplatfixStudio(SceneRunStudio):
         return path
 
     def file_url(self, path):
+        from ..splatfix.deduplication import canonical_artifact
+        path = canonical_artifact(path, self.root)
         return '/api/splatfix/file?path=' + quote(str(Path(path).resolve()), safe='')
 
     def jobs(self):

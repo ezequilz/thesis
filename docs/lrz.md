@@ -345,3 +345,20 @@ This is idempotent and only shares bytes within that run. Reported reclaimed
 bytes count removed file content; filesystem compression or copy-on-write can
 make the physical free-space change differ.
 Models and reusable Python/CUDA environments are outside job cleanup.
+
+The post-run pass also writes `artifact-aliases.json`, mapping duplicate binary
+paths to a canonical path (including `.ckpt` checkpoints). Display URLs reuse
+that canonical path; the saved-artifact browser lists each shared file once.
+Sequence views retain their frame indices even when frames share bytes. Original
+hard-link paths remain available for replay and manifests. If a canonical path
+is removed or replaced, display falls back to the surviving original path.
+Mutable JSON metadata and logs are intentionally not linked.
+
+Backfill all eligible past runs, skipping archives without completed persistence:
+
+```bash
+.venv/bin/python -m splat_explorer.splatfix.deduplication --all outputs/scene-runs
+```
+
+Backfills also build display aliases for files already hard-linked by older
+versions. Reload the dashboard server after installing the code change.

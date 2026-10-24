@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
+from functools import lru_cache
 import os
 import stat
 import uuid
@@ -15,7 +17,10 @@ from collections import defaultdict
 from pathlib import Path
 
 SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp', '.tif', '.tiff', '.exr',
-            '.npy', '.npz', '.bin', '.h5', '.ply', '.pt', '.pth', '.safetensors'}
+            '.npy', '.npz', '.bin', '.h5', '.hdf5', '.ply', '.pt', '.pth',
+            '.ckpt', '.safetensors', '.mp4'}
+
+INDEX = 'artifact-aliases.json'
 
 
 def _signature(path):
@@ -67,7 +72,8 @@ def _deduplicate_artifacts(root):
             if stat.S_ISREG(info.st_mode) and info.st_size:
                 groups[(info.st_dev, info.st_size, info.st_mode,
                         info.st_uid, info.st_gid)].append(path)
-    result = {'version': 1, 'method': 'sha256-hardlink', 'linked_files': 0,
+    aliases = {}
+    result = {'version': 2, 'method': 'sha256-hardlink', 'linked_files': 0,
               'reclaimed_bytes': 0, 'skipped_files': 0}
     for paths in groups.values():
         if len(paths) < 2:
@@ -89,6 +95,7 @@ def _deduplicate_artifacts(root):
                 continue
             source, source_signature = prior
             if source_signature[:2] == inode:
+                aliases[str(path.relative_to(gpu))] = str(source.relative_to(gpu))
                 continue
             temporary = path.with_name('.dedup-' + uuid.uuid4().hex)
             try:
@@ -100,6 +107,7 @@ def _deduplicate_artifacts(root):
                 # An existing external/internal hard link still owns these bytes.
                 reclaimed = before[2] if path.stat().st_nlink == 1 else 0
                 os.replace(temporary, path)
+                aliases[str(path.relative_to(gpu))] = str(source.relative_to(gpu))
                 result['linked_files'] += 1
                 result['reclaimed_bytes'] += reclaimed
             except OSError as exc:
@@ -109,6 +117,9 @@ def _deduplicate_artifacts(root):
                 result['skipped_files'] += 1
             finally:
                 temporary.unlink(missing_ok=True)
+    from .checkpoint import atomic_json
+    atomic_json(Path(root) / INDEX, {'version': 1, 'aliases': aliases})
+    result['alias_files'] = len(aliases)
     return result
 
 
@@ -127,9 +138,65 @@ def deduplicate_persisted_run(root):
     return result
 
 
+@lru_cache(maxsize=32)
+def _read_aliases(index, revision):
+    # The stat revision invalidates cached maps after atomic backfills.
+    try:
+        data = json.loads(index.read_text())
+        aliases = data.get('aliases', {})
+        return aliases if isinstance(aliases, dict) else {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def canonical_artifact(path, runs_root):
+    """Resolve display aliases only while both paths still share verified bytes.
+
+    Keep original hard-link paths for replay/resume. A replaced or deleted
+    canonical file never redirects a surviving alias to missing/changed data.
+    """
+    path = Path(path).resolve()
+    try:
+        relative = path.relative_to(Path(runs_root).resolve())
+        if len(relative.parts) < 3 or relative.parts[1] != 'gpu':
+            return path
+        root = Path(runs_root).resolve() / relative.parts[0]
+        index = root / INDEX
+        info = index.stat()
+        aliases = _read_aliases(index, (info.st_ino, info.st_size, info.st_mtime_ns))
+        target = aliases.get(str(Path(*relative.parts[2:])))
+        if not isinstance(target, str):
+            return path
+        gpu = root / 'gpu'
+        canonical = (gpu / target).resolve()
+        if canonical.is_relative_to(gpu.resolve()) and path.samefile(canonical):
+            return canonical
+    except (OSError, ValueError):
+        pass
+    return path
+
+
+def deduplicate_persisted_runs(root):
+    """Backfill eligible direct child runs, reporting incomplete archives safely."""
+    results = {}
+    for run in sorted(Path(root).glob('run_*')):
+        if not run.is_dir() or run.is_symlink():
+            continue
+        try:
+            results[run.name] = {'status': 'deduplicated', **deduplicate_persisted_run(run)}
+        except ValueError as exc:
+            results[run.name] = {'status': 'skipped', 'reason': str(exc)}
+        except (OSError, RuntimeError) as exc:
+            results[run.name] = {'status': 'error', 'reason': str(exc)}
+    return results
+
+
 if __name__ == '__main__':
     import argparse
-    import json
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('run', type=Path)
-    print(json.dumps(deduplicate_persisted_run(parser.parse_args().run), indent=2))
+    parser.add_argument('--all', action='store_true',
+                        help='Treat RUN as a scene-runs directory; skip unfinished archives')
+    args = parser.parse_args()
+    result = deduplicate_persisted_runs(args.run) if args.all else deduplicate_persisted_run(args.run)
+    print(json.dumps(result, indent=2))

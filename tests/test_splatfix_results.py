@@ -1502,3 +1502,25 @@ def test_runs_without_recorded_backup_are_not_backed_up(tmp_path, backup_path):
     row = studio.results.entries()[0]
     assert row['backed_up'] is False
     assert row['backup_path'] is None
+
+
+def test_saved_gallery_and_urls_reuse_deduplicated_artifacts(tmp_path):
+    from splat_explorer.splatfix.deduplication import deduplicate_artifacts
+    studio, root, result = setup(tmp_path)
+    original = root / 'gpu/checkpoint/trajectory/00000.png'
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b'original RGB')
+    copy = result / 'input-images/original_rgb_images/00000.png'
+    copy.parent.mkdir(parents=True)
+    copy.write_bytes(original.read_bytes())
+    checkpoint = root / 'gpu/checkpoint/model.ckpt'
+    checkpoint.write_bytes(b'model weights')
+    (result / 'model.ckpt').write_bytes(checkpoint.read_bytes())
+    deduplicate_artifacts(root)
+    assert studio.file_url(copy) == studio.file_url(original)
+    assert studio.file_url(result / 'model.ckpt') == studio.file_url(checkpoint)
+    saved = studio.results.run_detail(studio.results.entries()[0]['id'])['saved_artifacts']
+    images = [image for group in saved['image_groups'] for image in group['images']]
+    assert len(images) == 1
+    assert images[0]['url'] == studio.file_url(original)
+    assert len([item for item in saved['checkpoints'] if item['name'].endswith('.ckpt')]) == 1

@@ -30,7 +30,7 @@ def test_deduplication_invalidates_saved_dashboard_size(tmp_path):
     assert (root / 'output-size.json').is_file()
     d.deduplicate_artifacts(root)
     assert not (root / 'output-size.json').exists()
-    assert store.output_size_bytes(run.run_id) == before - len(b'array data')
+    assert store.output_size_bytes(run.run_id) == before - len(b'array data') + (root / d.INDEX).stat().st_size
 
 
 def test_failed_deduplication_invalidates_size_cache(tmp_path, monkeypatch):
@@ -152,3 +152,47 @@ def test_backfill_requires_completed_archive(tmp_path):
     (tmp_path / p.RECEIPT).write_text(json.dumps(
         {'status': 'persisted', 'remote_cleanup': 'removed'}))
     assert d.deduplicate_persisted_run(tmp_path)['linked_files'] == 1
+
+
+def test_checkpoint_aliases_are_idempotent_and_safe_after_replacement(tmp_path):
+    root = tmp_path / 'run_old'
+    gpu = root / 'gpu'
+    gpu.mkdir(parents=True)
+    first = gpu / 'original.ckpt'
+    second = gpu / 'result.ckpt'
+    first.write_bytes(b'checkpoint')
+    second.write_bytes(first.read_bytes())
+    assert d.deduplicate_artifacts(root)['linked_files'] == 1
+    assert first.samefile(second)
+    assert d.canonical_artifact(second, tmp_path) == first
+    assert d.deduplicate_artifacts(root)['alias_files'] == 1
+    replacement = gpu / 'replacement'
+    replacement.write_bytes(b'new checkpoint')
+    os.replace(replacement, first)
+    assert d.canonical_artifact(second, tmp_path) == second
+    first.unlink()
+    assert d.canonical_artifact(second, tmp_path) == second
+
+
+def test_alias_index_cannot_redirect_outside_run(tmp_path):
+    root = tmp_path / 'run_old'
+    root.mkdir()
+    first, second = artifacts(root)
+    outside = tmp_path / 'outside.npy'
+    os.link(first, outside)
+    (root / d.INDEX).write_text(json.dumps({'aliases': {'a.npy': '../../outside.npy'}}))
+    assert d.canonical_artifact(first, tmp_path) == first
+
+
+def test_batch_backfill_skips_unfinished_runs(tmp_path):
+    finished = tmp_path / 'run_finished'
+    active = tmp_path / 'run_active'
+    for root in (finished, active):
+        root.mkdir()
+        artifacts(root)
+    (finished / p.RECEIPT).write_text(json.dumps(
+        {'status': 'persisted', 'remote_cleanup': 'removed'}))
+    results = d.deduplicate_persisted_runs(tmp_path)
+    assert results['run_finished']['linked_files'] == 1
+    assert results['run_active']['status'] == 'skipped'
+    assert not (active / d.INDEX).exists()
