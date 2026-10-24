@@ -606,8 +606,12 @@ available initial inference images. The optional ArtiFixer3D+ outputs are
 excluded. The action requires the saved camera trajectory, reference snapshots,
 and all expected inference outputs to be downloaded.
 
-**Repaired PLY • source points + source depth** is the default on ArtiFixer
-result pages. It initializes fresh Gaussians from repaired positions and DC colors.
+**Repaired PLY full initialization** (`repaired_full`) is the default on ArtiFixer
+result pages. It refines the saved Gaussian positions, scales, rotations, opacity,
+and all color/SH coefficients with a fresh optimizer and source-depth supervision.
+It uses the same full-splat worker path as **Repaired PLY + source depth**.
+**Repaired PLY • source points + source depth** instead initializes fresh
+Gaussians from repaired positions and DC colors.
 **Repaired PLY + source depth** imports the full repaired Gaussian PLY, including
 SH parameters. Both prefer `repaired.ply`, falling back to `interrupted.ply` when
 only an interrupted checkpoint is available; neither silently uses the original.

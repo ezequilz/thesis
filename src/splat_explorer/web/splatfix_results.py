@@ -77,7 +77,7 @@ class ResultCatalog:
                 self._catalog_time = time.monotonic()
             self._catalog_refreshing = False
 
-    def reconstruct_artifixer(self, key, initialization='repaired_point_cloud', *, oracle_attention_batching='within_trajectory',
+    def reconstruct_artifixer(self, key, initialization='repaired_full', *, oracle_attention_batching='within_trajectory',
                               oracle_artifixer_input='new_only', oracle_artifixer_reference_assignment='trajectory'):
         """Snapshot inputs, then enqueue through the normal manager/GPU lease path."""
         import tempfile

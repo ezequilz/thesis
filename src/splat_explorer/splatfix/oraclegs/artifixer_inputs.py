@@ -13,6 +13,7 @@ INITIALIZATIONS = {
     'source_splat': ('original', 'source_splat'),
     'point_cloud': ('original', 'point_cloud'),
     'repaired_splat': ('repaired', 'source_splat'),
+    'repaired_full': ('repaired', 'source_splat'),
     'repaired_point_cloud': ('repaired', 'point_cloud'),
     'sfm': (None, 'sfm'),
 }

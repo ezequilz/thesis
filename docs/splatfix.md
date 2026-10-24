@@ -1379,3 +1379,7 @@ With vignette enabled, both ellipse sizes now include a smooth inner falloff: th
 New jobs now default to **35% inner strength**. For all three ellipse sizes, the inner smoothstep falls to **one-third** of that strength at the exact center (35/3 ≈ 11.67%), returning to the full 35% at the outer-transition start. This replaces the previous half-strength center. Explicit saved strengths and historical missing-field defaults are preserved; edge settings and blur are unchanged.
 
 New-job defaults are now **40% inner strength** and **87% vignette edge strength** for every ellipse size. The one-third center falloff gives approximately **13.33%** at the center. Explicit saved values and historical preset fallbacks remain unchanged.
+
+Current new-job defaults: **35% inner strength**, **95% edge strength**, and **0.5 px blur**. The one-third center falloff remains, giving approximately **11.67%** at the exact center. Saved explicit settings are unchanged.
+
+Pixel sprinkle applies a configurable Gaussian pre-blur (default **0.5 px**) to the ArtiFixer boundary pixels before replacement. The **Pre-blur** setting below the final blur controls `handoff_preblur_radius` (0–10 px; 0 disables it) and is independent of `handoff_blur_radius`, which still applies afterward to the composite (including when set to 0). The source file and reference pixels remain unchanged; `source_preblur` records this step in noise metadata. Classical Gaussian noise and noise-Off paths retain their existing processing.

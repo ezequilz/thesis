@@ -442,7 +442,7 @@ def test_invalid_input_selection_and_missing_originals_rejected(tmp_path):
 
 @pytest.mark.parametrize('selection', [None, 'new_only', 'original_and_new'])
 @pytest.mark.parametrize('assignment', [None, 'trajectory', 'camera_proximity'])
-@pytest.mark.parametrize('initialization', [None, 'source_splat', 'point_cloud', 'repaired_splat', 'repaired_point_cloud', 'sfm'])
+@pytest.mark.parametrize('initialization', [None, 'source_splat', 'point_cloud', 'repaired_splat', 'repaired_point_cloud', 'repaired_full', 'sfm'])
 def test_reconstruction_endpoint_forwards_input_selection(selection, assignment, initialization):
     from splat_explorer.web.server import DashboardHandler
     calls, replies = [], []
@@ -457,7 +457,7 @@ def test_reconstruction_endpoint_forwards_input_selection(selection, assignment,
     if assignment is not None:
         body['oracle_artifixer_reference_assignment'] = assignment
     DashboardHandler._serve_splatfix(handler, '/api/splatfix/results/reconstruct-artifixer', body)
-    assert calls[0][0] == ('run', initialization or 'repaired_point_cloud')
+    assert calls[0][0] == ('run', initialization or 'repaired_full')
     assert calls[0][1]['oracle_artifixer_reference_assignment'] == (assignment or 'trajectory')
     assert calls[0][1]['oracle_artifixer_input'] == (selection or 'new_only')
     assert replies == [{'ok': True, 'run': {'run_id': 'queued'}}]
@@ -698,7 +698,7 @@ def test_backward_handoff_export_assigns_final_half_to_existing_final_repair(tmp
 
 
 @pytest.mark.parametrize('selection,algorithm', [
-    ('repaired_splat', 'source_splat'), ('repaired_point_cloud', 'point_cloud')])
+    ('repaired_splat', 'source_splat'), ('repaired_full', 'source_splat'), ('repaired_point_cloud', 'point_cloud')])
 @pytest.mark.parametrize('completed', [True, False])
 def test_repaired_initialization_and_depth_use_selected_snapshot(tmp_path, monkeypatch, selection, algorithm, completed):
     from splat_explorer.splatfix.oraclegs import artifixer_inputs
@@ -731,7 +731,7 @@ def test_repaired_initialization_and_depth_use_selected_snapshot(tmp_path, monke
     assert rendered[0] != original
 
 
-def test_default_queue_uses_repaired_points_and_missing_repair_does_not_queue(tmp_path):
+def test_default_queue_uses_full_repaired_splat_and_missing_repair_does_not_queue(tmp_path):
     from test_splatfix_results import setup
     studio, _, _ = setup(tmp_path/'dashboard')
     _, row = fixture(tmp_path)
@@ -739,10 +739,10 @@ def test_default_queue_uses_repaired_points_and_missing_repair_does_not_queue(tm
     studio.results.detail = lambda key: row
     queued = studio.results.reconstruct_artifixer('result')
     options = queued['config']['splatfix']
-    assert options['oracle_initialization'] == 'point_cloud'
+    assert options['oracle_initialization'] == 'source_splat'
     snapshot = Path(options['oracle_artifixer_inputs'])
     manifest = json.loads((snapshot/'inputs.json').read_text())
-    assert manifest['artifixer_source']['initialization'] == 'repaired_point_cloud'
+    assert manifest['artifixer_source']['initialization'] == 'repaired_full'
     (row['_manifest'].parent/'repaired.ply').unlink()
     before = len(studio.store.list_runs())
     with pytest.raises(ValueError, match='no repaired.ply or interrupted.ply'):

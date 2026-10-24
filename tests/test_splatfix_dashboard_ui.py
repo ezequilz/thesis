@@ -41,17 +41,20 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('repair').gpt_image_context,'original_rgb_capture');
   $('gpt-image-context').value='closest_repaired_image';
   assert.equal(payload('repair').handoff_add_noise,true);
-  assert.equal(payload('repair').handoff_noise_strength,40);
-  assert.equal(payload('repair').handoff_blur_radius,0.25);
+  assert.equal(payload('repair').handoff_noise_strength,35);
+  assert.equal(payload('repair').handoff_blur_radius,0.5);
+  assert.equal(payload('repair').handoff_preblur_radius,0.5);
+  $('handoff-preblur-radius').value='0';
+  assert.equal(payload('repair').handoff_preblur_radius,0);
   $('handoff-blur-radius').value='0';
   assert.equal(payload('repair').handoff_blur_radius,0);
   $('handoff-blur-radius').value='0.8';
   assert.equal(payload('repair').handoff_blur_radius,0.8);
   assert.equal(payload('repair').handoff_vignette_size,'very_large');
-  assert.equal(payload('repair').handoff_vignette_edge_strength,87);
+  assert.equal(payload('repair').handoff_vignette_edge_strength,95);
   $('handoff-vignette-size').value='smaller';
   assert.equal(payload('repair').handoff_vignette_size,'smaller');
-  assert.equal(payload('repair').handoff_vignette_edge_strength,87);
+  assert.equal(payload('repair').handoff_vignette_edge_strength,95);
   $('handoff-vignette-edge-strength').value='60';
   assert.equal(payload('repair').handoff_vignette_edge_strength,60);
   $('handoff-vignette-edge-strength').value='0';
@@ -406,7 +409,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
  await get('refresh').onclick();assert.equal(timer,null);
  result={...result,kind:'ArtiFixer3D',gallery:{frames:[],verified_inputs:true,expected_count:0}};
  await get('refresh').onclick();assert.equal(timer,null);
- for(const initialization of ['source_splat','point_cloud','repaired_splat','repaired_point_cloud','sfm']) for(const mode of ['within_trajectory','global']){
+ for(const initialization of ['source_splat','point_cloud','repaired_splat','repaired_point_cloud','repaired_full','sfm']) for(const mode of ['within_trajectory','global']){
    get('oracleInit').value=initialization;get('oracleAttentionBatching').value=mode;
    context.fetch=async(url,options)=>{
      assert.equal(url,'/api/splatfix/results/reconstruct-artifixer');

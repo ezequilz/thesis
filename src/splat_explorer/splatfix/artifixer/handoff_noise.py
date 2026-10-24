@@ -7,6 +7,9 @@ def noise_options(options):
     blur = options.get('handoff_blur_radius', 0.0)
     if type(blur) not in (int, float) or not math.isfinite(blur) or not 0 <= blur <= 10:
         raise ValueError('handoff_blur_radius must be between 0 and 10 pixels')
+    preblur = options.get('handoff_preblur_radius', 0.5)
+    if type(preblur) not in (int, float) or not math.isfinite(preblur) or not 0 <= preblur <= 10:
+        raise ValueError('handoff_preblur_radius must be between 0 and 10 pixels')
     enabled = options.get('handoff_add_noise', False)
     strength = options.get('handoff_noise_strength', 25)
     if type(enabled) is not bool:
@@ -24,7 +27,7 @@ def noise_options(options):
     validate_strength(strength)
     edge = options.get('handoff_vignette_edge_strength', max(strength, vignette_profile(size)['edge_strength_percent']))
     validate_strength(edge)
-    return {'handoff_blur_radius': float(blur), 'handoff_add_noise': enabled, 'handoff_noise_strength': float(strength),
+    return {'handoff_preblur_radius': float(preblur), 'handoff_blur_radius': float(blur), 'handoff_add_noise': enabled, 'handoff_noise_strength': float(strength),
             'handoff_noise_vignette': vignette, 'handoff_noise_mode': mode,
             'handoff_vignette_size': size, 'handoff_vignette_edge_strength': float(edge)}
 
@@ -102,14 +105,15 @@ def add_gaussian_noise(source, destination, *, strength, seed, vignette=False, v
             'vignette': vignette_metadata(vignette, strength, vignette_size, edge_strength)}
 
 
-def sprinkle_repaired_pixels(source, reference, destination, *, strength, seed, vignette=False, vignette_size='larger', edge_strength=None):
+def sprinkle_repaired_pixels(source, reference, destination, *, strength, seed, vignette=False, vignette_size='larger', edge_strength=None, preblur_radius=.5):
     """Replace whole RGB pixels with the same-position repaired-reference pixels.
 
     Strength is replacement probability in percent, not Gaussian sigma. Uses the
     same elliptical strength profile as Gaussian mode, without additive noise.
     """
     import numpy as np
-    from PIL import Image, ImageOps
+    from PIL import Image, ImageOps, ImageFilter
+    noise_options({'handoff_preblur_radius': preblur_radius})
     validate_strength(strength)
     vignette_profile(vignette_size)
     if edge_strength is not None:
@@ -120,7 +124,8 @@ def sprinkle_repaired_pixels(source, reference, destination, *, strength, seed, 
     if destination.resolve() in (source.resolve(), reference.resolve()):
         raise ValueError('Pixel sprinkle must preserve the original and reference images')
     with Image.open(source) as image:
-        original = np.asarray(image.convert('RGB'))
+        # Boundary-only pre-blur, independent of the final composite blur.
+        original = np.asarray(image.convert('RGB').filter(ImageFilter.GaussianBlur(radius=preblur_radius)))
         size = image.size
     with Image.open(reference) as image:
         reference_size = list(image.size)
@@ -131,6 +136,8 @@ def sprinkle_repaired_pixels(source, reference, destination, *, strength, seed, 
     Image.fromarray(combined).save(destination, format='PNG')
     return {'algorithm': 'repaired_pixel_sprinkle', 'strength_percent': strength,
             'strength_semantics': 'whole_pixel_replacement_probability', 'seed': seed,
+            'source_preblur': {'algorithm': 'gaussian', 'radius_pixels': preblur_radius,
+                               'order': 'before_pixel_replacement', 'reference_blurred': False},
             'replaced_pixels': int(selected.sum()), 'total_pixels': int(selected.size),
             'reference_source_size': reference_size, 'reference_fit': 'cover_center_crop',
             'vignette': vignette_metadata(vignette, strength, vignette_size, edge_strength)}

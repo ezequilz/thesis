@@ -71,7 +71,7 @@ def test_new_jobs_default_to_noise_but_historical_runtime_stays_off():
     from splat_explorer.splatfix.artifixer.handoff_noise import noise_options
     options = validate_options({'stage':'repair', 'mode':'edited', 'handoff_generation':True})
     assert options['handoff_add_noise'] is True
-    assert options['handoff_noise_strength'] == 40
+    assert options['handoff_noise_strength'] == 35
     assert options['handoff_noise_mode'] == 'repaired_pixel_sprinkle'
     assert noise_options({})['handoff_noise_mode'] == 'gaussian'
     assert validate_options({'stage':'repair', 'mode':'edited', 'handoff_generation':True,
@@ -241,7 +241,7 @@ def test_very_large_ellipse_extends_vertically_and_is_new_job_default():
     assert vignette_profile('very_large')['axis_scale_y'] == 1.15
     options = validate_options({'stage':'repair', 'handoff_generation':True})
     assert options['handoff_vignette_size'] == 'very_large'
-    assert options['handoff_vignette_edge_strength'] == 87
+    assert options['handoff_vignette_edge_strength'] == 95
     assert validate_options({'stage':'repair', 'handoff_vignette_size':'smaller'})['handoff_vignette_size'] == 'smaller'
 
 
@@ -290,7 +290,41 @@ def test_blur_defaults_and_validation():
     from splat_explorer.splatfix.artifixer.handoff_noise import noise_options
     from splat_explorer.splatfix.artifixer.backend import validate_options
     assert noise_options({})['handoff_blur_radius'] == 0
-    assert validate_options({'stage':'repair','handoff_generation':True})['handoff_blur_radius'] == .25
+    assert validate_options({'stage':'repair','handoff_generation':True})['handoff_blur_radius'] == .5
     for bad in (-1,11,True,'1',None,float('nan')):
         with pytest.raises(ValueError,match='handoff_blur_radius'):
             noise_options({'handoff_blur_radius':bad})
+
+
+@pytest.mark.parametrize('preblur', [0,.5,1.0])
+@pytest.mark.parametrize('postblur', [0,.5])
+def test_boundary_preblur_precedes_sprinkle_and_is_independent(tmp_path,postblur,preblur):
+    import json
+    from PIL import ImageFilter
+    from types import SimpleNamespace
+    from splat_explorer.splatfix.artifixer.handoff import edit_request,digest
+    source,reference = tmp_path/'before.png',tmp_path/'reference.png'
+    checker = ((np.indices((32,64)).sum(axis=0)%2)*255).astype(np.uint8)
+    Image.fromarray(checker).convert('RGB').save(source)
+    Image.fromarray(255-checker).convert('RGB').save(reference)
+    original,clean = source.read_bytes(),reference.read_bytes()
+    with Image.open(source) as image:
+        blurred_source = np.asarray(image.filter(ImageFilter.GaussianBlur(preblur)))
+    with Image.open(reference) as image:
+        reference_pixels = np.asarray(image)
+    mask = np.random.default_rng(int(digest(source)[:16],16)).random((32,64)) < .35
+    composite = np.where(mask[...,None],reference_pixels,blurred_source)
+    expected = np.asarray(Image.fromarray(composite).filter(ImageFilter.GaussianBlur(postblur)))
+    def edit(path,prompt):
+        np.testing.assert_array_equal(np.asarray(Image.open(path)),expected)
+        return SimpleNamespace(error=None,images=[original])
+    edit_request(tmp_path,{'id':'e'*32,'input_sha256':digest(source),'reference_sha256':digest(reference),
+        'gpt_image_context':'closest_repaired_image','handoff_add_noise':True,
+        'handoff_noise_mode':'repaired_pixel_sprinkle','handoff_noise_strength':35,
+        'handoff_blur_radius':postblur,'handoff_preblur_radius':preblur},backend=SimpleNamespace(edit=edit))
+    result = json.loads((tmp_path/'response.json').read_text())
+    assert 'error' not in result
+    assert result['noise']['source_preblur']['radius_pixels'] == preblur
+    assert result['noise']['source_preblur']['reference_blurred'] is False
+    assert result['blur']['radius_pixels'] == postblur
+    assert source.read_bytes() == original and reference.read_bytes() == clean

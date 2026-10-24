@@ -128,7 +128,8 @@ def edit_request(folder, request, cfg=None, backend=None):
                        'vignette': noise['handoff_noise_vignette'],
                        'vignette_size': noise['handoff_vignette_size'],
                        'edge_strength': noise['handoff_vignette_edge_strength']}
-            result['noise'] = (sprinkle_repaired_pixels(folder / 'before.png', folder / 'reference.png', repair_input, **options)
+            result['noise'] = (sprinkle_repaired_pixels(folder / 'before.png', folder / 'reference.png', repair_input,
+                                                       preblur_radius=noise['handoff_preblur_radius'], **options)
                                if sprinkle else add_gaussian_noise(folder / 'before.png', repair_input, **options))
             if sprinkle:
                 result['noise']['reference_sha256'] = request['reference_sha256']
