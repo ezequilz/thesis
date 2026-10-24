@@ -100,7 +100,7 @@ def edit_request(folder, request, cfg=None, backend=None):
     mode = context_mode(request)
     prompt = DEFAULT_PROMPT
     if mode == 'closest_repaired_image':
-        prompt += ' Align color grading and semantic context with the reference image in the second attachment.'
+        prompt += ' Align color grading and visual quality details with the reference image in the second attachment.'
     result = {'id': request['id'], 'input_sha256': request['input_sha256'],
               'model': SCENE_RUN_GPT_IMAGE_MODEL, 'prompt': prompt, 'gpt_image_context': mode}
     try:
@@ -114,7 +114,8 @@ def edit_request(folder, request, cfg=None, backend=None):
         if noise['handoff_add_noise']:
             repair_input = folder / 'repair-input.png'
             result['noise'] = add_gaussian_noise(folder / 'before.png', repair_input,
-                strength=noise['handoff_noise_strength'], seed=int(request['input_sha256'][:16], 16))
+                strength=noise['handoff_noise_strength'], seed=int(request['input_sha256'][:16], 16),
+                vignette=noise['handoff_noise_vignette'])
             result['noise']['enabled'] = True
             result['noise']['input_sha256'] = digest(repair_input)
         else:

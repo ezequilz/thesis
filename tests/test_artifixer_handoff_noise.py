@@ -42,7 +42,7 @@ def test_repair_sends_noisy_first_image_and_clean_reference(tmp_path, with_conte
     Image.new('RGB', (32,16), 'blue').save(reference)
     original, clean_reference = source.read_bytes(), reference.read_bytes()
     request = {'id':'a'*32, 'input_sha256':digest(source), 'handoff_add_noise':True,
-               'handoff_noise_strength':25}
+               'handoff_noise_strength':25, 'handoff_noise_vignette':True}
     if with_context:
         request.update(gpt_image_context='closest_repaired_image', reference_sha256=digest(reference))
     calls = []
@@ -57,6 +57,8 @@ def test_repair_sends_noisy_first_image_and_clean_reference(tmp_path, with_conte
     result = json.loads((tmp_path/'response.json').read_text())
     assert 'error' not in result
     assert result['noise']['strength_percent'] == 25
+    assert result['noise']['vignette']['enabled'] is True
+    assert result['noise']['vignette']['edge_strength_percent'] == 80
     assert result['noise']['input_sha256'] == digest(tmp_path/'repair-input.png')
     assert source.read_bytes() == original and reference.read_bytes() == clean_reference
     edit_request(tmp_path,request,backend=backend)
@@ -70,7 +72,38 @@ def test_new_jobs_default_to_noise_but_historical_runtime_stays_off():
     options = validate_options({'stage':'repair', 'mode':'edited', 'handoff_generation':True})
     assert options['handoff_add_noise'] is True
     assert options['handoff_noise_strength'] == 25
+    assert options['handoff_noise_vignette'] is True
+    assert noise_options({})['handoff_noise_vignette'] is False
     assert noise_options({})['handoff_add_noise'] is False
     assert noise_options({'handoff_add_noise':False})['handoff_add_noise'] is False
     with pytest.raises(ValueError,match='boolean'):
         noise_options({'handoff_add_noise':'yes'})
+
+
+def test_vignette_is_elliptical_feathered_and_capped():
+    from splat_explorer.splatfix.artifixer.handoff_noise import vignette_strength, noise_options
+    field = vignette_strength(721,1281,25)
+    assert field[360,640] == 25
+    assert field[360,800] == 25  # Quarter-radius is still the flat center.
+    assert field[360,960] == 25  # Transition begins at half-radius.
+    assert field[360,1120] == pytest.approx(52.5)
+    assert field[630,640] == pytest.approx(52.5)  # Same normalized elliptical radius.
+    assert np.all(field[0] == 80) and np.all(field[-1] == 80)
+    assert np.all(field[:,0] == 80) and np.all(field[:,-1] == 80)
+    assert field.max() == 80
+    assert np.max(np.abs(np.diff(field[360]))) < .3  # No hard band at the border.
+    np.testing.assert_allclose(field,field[::-1,::-1])
+    assert np.all(vignette_strength(10,20,90) == 90)
+    with pytest.raises(ValueError,match='vignette'):
+        noise_options({'handoff_noise_vignette':'yes'})
+
+
+def test_vignette_preserves_center_and_increases_edge_noise(tmp_path):
+    source = tmp_path/'before.png'
+    Image.new('RGB',(640,360),(128,128,128)).save(source)
+    add_gaussian_noise(source,tmp_path/'uniform.png',strength=25,seed=7)
+    add_gaussian_noise(source,tmp_path/'vignette.png',strength=25,seed=7,vignette=True)
+    uniform = np.asarray(Image.open(tmp_path/'uniform.png'),dtype=float)
+    vignette = np.asarray(Image.open(tmp_path/'vignette.png'),dtype=float)
+    np.testing.assert_array_equal(uniform[150:210,280:360],vignette[150:210,280:360])
+    assert vignette[:20].std() > uniform[:20].std() * 1.35

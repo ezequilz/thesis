@@ -35,6 +35,9 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('repair').gpt_image_context,'single_last_frame');
   assert.equal(payload('repair').handoff_add_noise,true);
   assert.equal(payload('repair').handoff_noise_strength,25);
+  assert.equal(payload('repair').handoff_noise_vignette,true);
+  $('handoff-noise-vignette').value='off';
+  assert.equal(payload('repair').handoff_noise_vignette,false);
   $('handoff-add-noise').value='off';
   $('handoff-noise-strength').value='12';
   assert.equal(payload('repair').handoff_add_noise,false);

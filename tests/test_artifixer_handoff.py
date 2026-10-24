@@ -90,7 +90,7 @@ def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatc
         refs.append(str(path))
     repaired = []
     def repair(root, source, index, camera, *, phase, reference=None, reference_frame_index=None, noise=None):
-        assert noise == ({'handoff_add_noise': True, 'handoff_noise_strength': 25} if add_noise else None)
+        assert noise == ({'handoff_add_noise': True, 'handoff_noise_strength': 25, 'handoff_noise_vignette': True} if add_noise else None)
         if context_mode == 'closest_repaired_image':
             slot = [0, 2, 3, 4][len(repaired)]
             assert str(reference) == (prior_paths if plus else request['references'])[slot]
@@ -114,7 +114,7 @@ def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatc
             for i in range(16): Image.new('RGB', (8, 8)).save(tmp_path / kind / f'{i:05d}.png')
         (tmp_path / 'distillation.json').write_text(json.dumps({'render_dir': str(tmp_path)}))
     request = {'runtime': {'checkpoint': '', 'model_id': '', 'handoff_generation': True,
-                           'handoff_add_noise': add_noise, 'handoff_noise_strength': 25,
+                           'handoff_add_noise': add_noise, 'handoff_noise_strength': 25, 'handoff_noise_vignette': True,
                            'split_mode': 'single-split', 'gpt_image_context': context_mode, 'initial_image_seeding': False,
                            'image_cache_insertion': insertion},
                'references': refs, 'checkpoint_root': str(tmp_path), 'seed': 1,
@@ -365,7 +365,7 @@ def test_context_edit_uses_second_attachment_and_checks_reference(tmp_path):
         return SimpleNamespace(error=None, images=[target.read_bytes()])
     handoff.edit_request(tmp_path, request, backend=SimpleNamespace(edit_with_references=edit))
     assert calls == [(tmp_path / 'before.png', [tmp_path / 'reference.png'], DEFAULT_PROMPT +
-                     ' Align color grading and semantic context with the reference image in the second attachment.')]
+                     ' Align color grading and visual quality details with the reference image in the second attachment.')]
     assert 'error' not in json.loads((tmp_path / 'response.json').read_text())
     Image.new('RGB', (16, 8), 'green').save(tmp_path / 'reference.png')
     handoff.edit_request(tmp_path, request, backend=SimpleNamespace(edit_with_references=edit))
