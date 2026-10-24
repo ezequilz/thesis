@@ -71,7 +71,7 @@ def test_new_jobs_default_to_noise_but_historical_runtime_stays_off():
     from splat_explorer.splatfix.artifixer.handoff_noise import noise_options
     options = validate_options({'stage':'repair', 'mode':'edited', 'handoff_generation':True})
     assert options['handoff_add_noise'] is True
-    assert options['handoff_noise_strength'] == 35
+    assert options['handoff_noise_strength'] == 40
     assert options['handoff_noise_mode'] == 'repaired_pixel_sprinkle'
     assert noise_options({})['handoff_noise_mode'] == 'gaussian'
     assert validate_options({'stage':'repair', 'mode':'edited', 'handoff_generation':True,
@@ -241,7 +241,7 @@ def test_very_large_ellipse_extends_vertically_and_is_new_job_default():
     assert vignette_profile('very_large')['axis_scale_y'] == 1.15
     options = validate_options({'stage':'repair', 'handoff_generation':True})
     assert options['handoff_vignette_size'] == 'very_large'
-    assert options['handoff_vignette_edge_strength'] == 95
+    assert options['handoff_vignette_edge_strength'] == 87
     assert validate_options({'stage':'repair', 'handoff_vignette_size':'smaller'})['handoff_vignette_size'] == 'smaller'
 
 
