@@ -27,7 +27,7 @@ def validate_options(raw):
     if raw['stage'] == 'repair':
         from .handoff import enabled, context_mode
         result['handoff_generation'] = enabled(raw)
-        result['gpt_image_context'] = context_mode(raw)
+        result['gpt_image_context'] = context_mode({'gpt_image_context': 'closest_repaired_image', **raw})
         from .handoff_noise import noise_options
         result.update(noise_options({'handoff_add_noise': True, 'handoff_noise_vignette': True, **raw}))
         if result['handoff_generation']:

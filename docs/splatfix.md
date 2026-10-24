@@ -1341,7 +1341,7 @@ per transition per inference pass and keeps the GPU allocation while waiting.
 
 ### Handoff GPT image context
 
-In Step 4, **GPT image context** below Handoff generation defaults to **Single last frame** (the existing single-image repair). **Closest repaired image** sends the generated boundary first and the next repaired reference that will be displaced second. It appends “Align color grading and visual quality details with the reference image in the second attachment.” to the default repair prompt. The repaired handoff still replaces the same reference slot and seeds the next sequence at the boundary pose. The context image is saved as `reference.png`, with its frame index and checksum in the handoff metadata, and appears in handoff results. Saved jobs store this choice as `gpt_image_context`; older jobs default to `single_last_frame`.
+In Step 4, **GPT image context** below Handoff generation defaults to **Closest repaired image** for new runs. **Single last frame** remains available for single-image repair. **Closest repaired image** sends the generated boundary first and the next repaired reference that will be displaced second. It appends “Align color grading and visual quality details with the reference image in the second attachment.” to the default repair prompt. The repaired handoff still replaces the same reference slot and seeds the next sequence at the boundary pose. The context image is saved as `reference.png`, with its frame index and checksum in the handoff metadata, and appears in handoff results. Saved jobs store this choice as `gpt_image_context`; older jobs default to `single_last_frame`.
 
 ### OracleGS export of handoff runs
 

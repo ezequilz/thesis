@@ -376,7 +376,8 @@ def test_context_edit_uses_second_attachment_and_checks_reference(tmp_path):
 def test_context_option_validation():
     from splat_explorer.splatfix.artifixer.backend import validate_options
     base = {'stage': 'repair', 'mode': 'edited'}
-    assert validate_options(base)['gpt_image_context'] == 'single_last_frame'
+    assert validate_options(base)['gpt_image_context'] == 'closest_repaired_image'
+    assert validate_options({**base, 'gpt_image_context': 'single_last_frame'})['gpt_image_context'] == 'single_last_frame'
     assert validate_options({**base, 'gpt_image_context': 'closest_repaired_image'})['gpt_image_context'] == 'closest_repaired_image'
     with pytest.raises(ValueError, match='gpt_image_context'):
         validate_options({**base, 'gpt_image_context': 'nearest'})

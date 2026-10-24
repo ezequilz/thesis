@@ -32,7 +32,7 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('repair').checkpoint,'/saved/cp');
   assert.equal(payload('repair').mode,'edited');
   assert.equal(payload('repair').handoff_generation,false);
-  assert.equal(payload('repair').gpt_image_context,'single_last_frame');
+  assert.equal(payload('repair').gpt_image_context,'closest_repaired_image');
   assert.equal(payload('repair').handoff_add_noise,true);
   assert.equal(payload('repair').handoff_noise_strength,25);
   assert.equal(payload('repair').handoff_noise_vignette,true);
