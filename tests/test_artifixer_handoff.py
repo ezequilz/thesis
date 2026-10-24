@@ -359,7 +359,7 @@ def test_context_edit_uses_second_attachment_and_checks_reference(tmp_path):
         return SimpleNamespace(error=None, images=[target.read_bytes()])
     handoff.edit_request(tmp_path, request, backend=SimpleNamespace(edit_with_references=edit))
     assert calls == [(tmp_path / 'before.png', [tmp_path / 'reference.png'], DEFAULT_PROMPT +
-                     ' Align color grading and palette with the context from second attachment reference image.')]
+                     ' Align color grading and semantic context with the reference image in the second attachment.')]
     assert 'error' not in json.loads((tmp_path / 'response.json').read_text())
     Image.new('RGB', (16, 8), 'green').save(tmp_path / 'reference.png')
     handoff.edit_request(tmp_path, request, backend=SimpleNamespace(edit_with_references=edit))
