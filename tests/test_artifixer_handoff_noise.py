@@ -88,10 +88,10 @@ def test_vignette_is_elliptical_feathered_and_capped():
     from splat_explorer.splatfix.artifixer.handoff_noise import vignette_strength, noise_options
     field = vignette_strength(2001,2001,25)
     assert field[1000,1000] == 25
-    assert field[1000,1600] == 25  # Flat center inside the narrower horizontal axis.
-    assert field[1800,1000] == 25  # Taller protected center, matching the lime guide.
-    assert field[1000,1666] == pytest.approx(60)
-    assert field[1925,1000] == pytest.approx(60)  # Same elliptical midpoint.
+    assert field[1000,1480] == 25  # Flat center inside the narrower horizontal axis.
+    assert field[1650,1000] == 25  # Taller protected center, matching the lime guide.
+    assert field[1000,1612] == pytest.approx(60)
+    assert field[1850,1000] == pytest.approx(60)  # Same elliptical midpoint.
     assert np.all(field[0] == 95) and np.all(field[-1] == 95)
     assert np.all(field[:,0] == 95) and np.all(field[:,-1] == 95)
     assert field.max() == 95
@@ -173,3 +173,54 @@ def test_sprinkle_requires_a_reference():
                        'gpt_image_context':'single_last_frame'})
     with pytest.raises(ValueError,match='handoff_noise_mode'):
         noise_options({'handoff_noise_mode':'unknown'})
+
+
+def test_smaller_vignette_restores_previous_profile():
+    from splat_explorer.splatfix.artifixer.handoff_noise import vignette_strength, noise_options
+    field = vignette_strength(721, 1281, 25, 'smaller')
+    x, y = np.linspace(-1, 1, 1281), np.linspace(-1, 1, 721)
+    t = np.clip((np.sqrt(y[:, None] ** 2 + x[None, :] ** 2) - .5) / .5, 0, 1)
+    np.testing.assert_array_equal(field, 25 + 55 * (t * t * (3 - 2 * t)))
+    assert field[360,1120] == pytest.approx(52.5)
+    assert field.max() == 80
+    assert noise_options({})['handoff_vignette_size'] == 'larger'
+    with pytest.raises(ValueError, match='handoff_vignette_size'):
+        noise_options({'handoff_vignette_size': 'invalid'})
+
+
+@pytest.mark.parametrize('mode', ['gaussian', 'repaired_pixel_sprinkle'])
+def test_smaller_profile_reaches_repair_request(tmp_path, mode):
+    import json
+    from types import SimpleNamespace
+    from splat_explorer.splatfix.artifixer.handoff import edit_request, digest
+    source = tmp_path/'before.png'
+    reference = tmp_path/'reference.png'
+    Image.new('RGB', (64,32), 'red').save(source)
+    Image.new('RGB', (64,32), 'blue').save(reference)
+    request = {'id': 'c'*32, 'input_sha256': digest(source),
+               'reference_sha256': digest(reference), 'gpt_image_context': 'closest_repaired_image',
+               'handoff_add_noise': True, 'handoff_noise_mode': mode,
+               'handoff_noise_vignette': True, 'handoff_vignette_size': 'smaller',
+               'handoff_vignette_edge_strength': 65}
+    def edit(*args): return SimpleNamespace(error=None, images=[source.read_bytes()])
+    edit_request(tmp_path, request, backend=SimpleNamespace(edit=edit, edit_with_references=edit))
+    result = json.loads((tmp_path/'response.json').read_text())
+    assert 'error' not in result
+    assert result['noise']['vignette']['size'] == 'smaller'
+    assert result['noise']['vignette']['inner_radius'] == .5
+    assert result['noise']['vignette']['edge_strength_percent'] == 65
+
+
+@pytest.mark.parametrize('size,default', [('larger',95), ('smaller',80)])
+def test_edge_strength_is_independent_and_defaults_follow_size(size,default):
+    from splat_explorer.splatfix.artifixer.handoff_noise import noise_options, vignette_strength
+    assert noise_options({'handoff_vignette_size':size})['handoff_vignette_edge_strength'] == default
+    for edge in (0,10,70,100):
+        field = vignette_strength(101,201,25,size,edge_strength=edge)
+        assert field[50,100] == 25
+        np.testing.assert_allclose(field[0],edge,atol=1e-12)
+        np.testing.assert_allclose(field[:,0],edge,atol=1e-12)
+        assert noise_options({'handoff_vignette_edge_strength':edge})['handoff_vignette_edge_strength'] == edge
+    for bad in (-1,101,True,'95',None,float('nan')):
+        with pytest.raises(ValueError,match='strength'):
+            noise_options({'handoff_vignette_edge_strength':bad})

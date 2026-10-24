@@ -42,6 +42,17 @@ Promise.resolve(vm.runInContext(`(async()=>{
   $('gpt-image-context').value='closest_repaired_image';
   assert.equal(payload('repair').handoff_add_noise,true);
   assert.equal(payload('repair').handoff_noise_strength,25);
+  assert.equal(payload('repair').handoff_vignette_size,'larger');
+  assert.equal(payload('repair').handoff_vignette_edge_strength,95);
+  $('handoff-vignette-size').value='smaller';
+  assert.equal(payload('repair').handoff_vignette_size,'smaller');
+  assert.equal(payload('repair').handoff_vignette_edge_strength,80);
+  $('handoff-vignette-edge-strength').value='60';
+  assert.equal(payload('repair').handoff_vignette_edge_strength,60);
+  $('handoff-vignette-edge-strength').value='0';
+  assert.equal(payload('repair').handoff_vignette_edge_strength,0);
+  $('handoff-vignette-edge-strength').value='';
+  $('handoff-vignette-size').value='larger';
   assert.equal(payload('repair').handoff_noise_mode,'repaired_pixel_sprinkle');
   $('handoff-add-noise').value='on';
   assert.equal(payload('repair').handoff_noise_mode,'gaussian');

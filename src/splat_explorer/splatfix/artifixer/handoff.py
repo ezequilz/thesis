@@ -125,7 +125,9 @@ def edit_request(folder, request, cfg=None, backend=None):
             repair_input = folder / 'repair-input.png'
             options = {'strength': noise['handoff_noise_strength'],
                        'seed': int(request['input_sha256'][:16], 16),
-                       'vignette': noise['handoff_noise_vignette']}
+                       'vignette': noise['handoff_noise_vignette'],
+                       'vignette_size': noise['handoff_vignette_size'],
+                       'edge_strength': noise['handoff_vignette_edge_strength']}
             result['noise'] = (sprinkle_repaired_pixels(folder / 'before.png', folder / 'reference.png', repair_input, **options)
                                if sprinkle else add_gaussian_noise(folder / 'before.png', repair_input, **options))
             if sprinkle:
