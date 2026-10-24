@@ -91,8 +91,9 @@ def digest_file(path):
 
 def validate_runtime(runtime=None):
     cfg = {**DEFAULT_RUNTIME, **(runtime or {})}
-    from .handoff import enabled
+    from .handoff import enabled, context_mode
     cfg['handoff_generation'] = enabled(cfg)
+    cfg['gpt_image_context'] = context_mode(cfg)
     from .pipeline_profile import pipeline_profile
     pipeline_profile(cfg['artifixer_pipeline'])
     from ..resolution import profile_size

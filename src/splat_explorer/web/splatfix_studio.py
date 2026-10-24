@@ -8,6 +8,9 @@ from .scene_run_studio import SceneRunStudio
 from ..splatfix.methods import DEFAULT_METHOD, available_methods, get_method
 
 
+RESTARTABLE_STATUSES = frozenset(('error', 'stopped', 'gpu_expired', 'stopping', 'completed'))
+
+
 class SplatfixStudio(SceneRunStudio):
     def __init__(self, app, store=None):
         super().__init__(app, store, pipeline='splatfix')
@@ -207,7 +210,7 @@ class SplatfixStudio(SceneRunStudio):
             row['queue_position'] = positions.get(run.run_id)
             row['queue_move_up'] = run.run_id in movable and movable.index(run.run_id) > 0
             row['queue_move_down'] = run.run_id in movable and movable.index(run.run_id) < len(movable) - 1
-            row['restart_supported'] = run.state.status.value in ('error', 'stopped', 'gpu_expired')
+            row['restart_supported'] = run.state.status.value in RESTARTABLE_STATUSES
             from ..splatfix.artifixer.resume import resume_available, preparation_available
             row['resume_supported'] = resume_available(run)
             row['preparation_supported'] = preparation_available(run)
@@ -426,16 +429,16 @@ class SplatfixStudio(SceneRunStudio):
         return run.to_dict()
 
     def restart(self, run_id):
-        """Queue the saved configuration anew, retaining the failed run as history."""
+        """Queue the saved configuration anew, leaving the original run untouched."""
         from copy import deepcopy
         if not isinstance(run_id, str) or not run_id:
-            raise ValueError('Choose a failed or cancelled run')
+            raise ValueError('Choose a run to restart')
         with self.results._run_storage_lock:
             prior = self.store.get_run(run_id)
             if prior.config.pipeline != 'splatfix':
                 raise ValueError('Not a splatfix job')
-            if prior.state.status.value not in ('error', 'stopped', 'gpu_expired'):
-                raise ValueError('Only failed, cancelled or GPU-expired runs can be restarted')
+            if prior.state.status.value not in RESTARTABLE_STATUSES:
+                raise ValueError('Only failed, cancelled, GPU-expired, stopping or completed runs can be restarted')
             # Repeated clicks / retried HTTP requests share a pending restart.
             for existing in self.store.list_runs():
                 if existing.state.status.value not in ('queued', 'waiting_gpu', 'starting', 'running', 'stopping'):

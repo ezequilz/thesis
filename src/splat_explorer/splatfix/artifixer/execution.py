@@ -141,6 +141,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
             # A configured historical bundle must not leak into distilled-only runs.
             if runtime['reconstruction_images'] == 'distilled':
                 runtime.pop('worldexplorer_source', None)
+        runtime['gpt_image_context'] = options.get('gpt_image_context', 'single_last_frame')
         runtime['handoff_generation'] = options.get('handoff_generation', False) if not benchmark else False
         runtime['initial_image_seeding'] = options.get('initial_image_seeding') if not benchmark else None
         runtime['image_cache_insertion'] = options.get('image_cache_insertion', False) if not benchmark else False

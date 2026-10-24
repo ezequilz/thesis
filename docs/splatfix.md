@@ -1279,13 +1279,14 @@ registered original scene. The recovered prompt and its source are embedded in
 the repeat checkpoint. If WorldExplorer captioning is selected and no prompt is
 recoverable, repeat validation rejects the request before it enters the GPU queue.
 
-### Restart failed or cancelled queue jobs
+### Restart queue jobs
 
-Failed, cancelled and GPU-expired Splatfix jobs have a **Restart** button in the
+Failed, cancelled, GPU-expired, stopping and completed Splatfix jobs have a **Restart** button in the
 main queue. It creates a new run using the stored effective configuration and
 existing inputs, retaining the old run, logs and settings snapshot. The old
 schedule is cleared so the new job is immediately eligible for the normal queue;
 old STOP flags, GPU allocation details and worker execution state are not copied.
+A stopping run continues stopping independently while its replacement is queued.
 This starts the stage again, rather than resuming optimizer state. Repeated clicks
 reuse an already queued/active restart of that job. Missing saved checkpoints or
 input snapshots produce an error. The new settings snapshot retains the original
@@ -1337,3 +1338,7 @@ indices and checksums. `supervision.json` records the reconstruction subset and
 excluded endpoint; `plus-references.json` records the final plus-generation set. `inference-handoffs.json`, `plus-handoffs.json`
 and the seeding logs record each restart. This mode incurs one paid image edit
 per transition per inference pass and keeps the GPU allocation while waiting.
+
+### Handoff GPT image context
+
+In Step 4, **GPT image context** below Handoff generation defaults to **Single last frame** (the existing single-image repair). **Closest repaired image** sends the generated boundary first and the next repaired reference that will be displaced second. It appends “Align color grading and palette with the context from second attachment reference image.” to the default repair prompt. The repaired handoff still replaces the same reference slot and seeds the next sequence at the boundary pose. The context image is saved as `reference.png`, with its frame index and checksum in the handoff metadata, and appears in handoff results. Saved jobs store this choice as `gpt_image_context`; older jobs default to `single_last_frame`.

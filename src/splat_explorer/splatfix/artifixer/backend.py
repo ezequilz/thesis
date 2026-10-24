@@ -25,8 +25,9 @@ def validate_options(raw):
             raise ValueError('benchmark_runs must be a positive integer')
         result['benchmark_runs'] = runs
     if raw['stage'] == 'repair':
-        from .handoff import enabled
+        from .handoff import enabled, context_mode
         result['handoff_generation'] = enabled(raw)
+        result['gpt_image_context'] = context_mode(raw)
         if result['handoff_generation']:
             if raw.get('mode', 'edited') != 'edited' or raw.get('image_trajectory') == 'endpoints':
                 raise ValueError('Handoff generation requires edited checkpoint trajectories')

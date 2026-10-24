@@ -780,9 +780,13 @@ def inference(root, request, trajectory, plus=False):
                     reference_slot = all_neighbors.index(replaced_index)
                     seed_index = previous_boundary
                     source = output / 'splatfix/frames/batch_0000/pred' / f'{seed_index:05d}.png'
+                    context = {}
+                    if cfg.get('gpt_image_context', 'single_last_frame') == 'closest_repaired_image':
+                        context = {'reference': Path(active_reference_paths[reference_slot]),
+                                   'reference_frame_index': active_neighbors[reference_slot]}
                     seed_path = repair_boundary(root, source, seed_index,
                         {**{k: v for k, v in cameras.items() if k != 'frames'},
-                         **cameras['frames'][seed_index]}, phase=directory)
+                         **cameras['frames'][seed_index]}, phase=directory, **context)
                     active_neighbors[reference_slot] = seed_index
                     active_reference_paths[reference_slot] = str(seed_path)
                     all_references[reference_slot] = rgb(seed_path)

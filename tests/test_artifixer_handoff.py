@@ -28,9 +28,10 @@ def test_options_opt_in_and_scoped():
     assert 'handoff_generation' not in validate_options({'stage': 'benchmark'})
 
 
+@pytest.mark.parametrize('context_mode', ['single_last_frame', 'closest_repaired_image'])
 @pytest.mark.parametrize('plus', [False, True])
 @pytest.mark.parametrize('insertion', [False, True])
-def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatch, plus, insertion):
+def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatch, plus, insertion, context_mode):
     class Tensor(np.ndarray):
         def permute(self, *axes): return self.transpose(axes)
         def float(self): return self.astype(np.float32)
@@ -87,7 +88,13 @@ def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatc
         Image.new('RGB', (8, 8), (100 + i,) * 3).save(path)
         refs.append(str(path))
     repaired = []
-    def repair(root, source, index, camera, *, phase):
+    def repair(root, source, index, camera, *, phase, reference=None, reference_frame_index=None):
+        if context_mode == 'closest_repaired_image':
+            slot = [0, 2, 3, 4][len(repaired)]
+            assert str(reference) == (prior_paths if plus else request['references'])[slot]
+            assert reference_frame_index == ([2, 5, 8, 11] if plus else [3, 6, 9, 12])[len(repaired)]
+        else:
+            assert reference is None
         events.append('repair')
         assert source.is_file() and camera['transform_matrix'] == [[index]]
         assert index == [2, 5, 8, 11][len(repaired)]
@@ -105,7 +112,7 @@ def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatc
             for i in range(16): Image.new('RGB', (8, 8)).save(tmp_path / kind / f'{i:05d}.png')
         (tmp_path / 'distillation.json').write_text(json.dumps({'render_dir': str(tmp_path)}))
     request = {'runtime': {'checkpoint': '', 'model_id': '', 'handoff_generation': True,
-                           'split_mode': 'single-split', 'initial_image_seeding': False,
+                           'split_mode': 'single-split', 'gpt_image_context': context_mode, 'initial_image_seeding': False,
                            'image_cache_insertion': insertion},
                'references': refs, 'checkpoint_root': str(tmp_path), 'seed': 1,
                'camera_scale': 1, 'caption_path': '', 'caption_sha256': '',
@@ -185,7 +192,8 @@ def test_repair_archives_full_response_and_fits_changed_aspect(tmp_path):
     assert result['reconstruction_resize']['method'] == 'cover_center_crop'
 
 
-def test_boundary_handshake_replaces_only_same_index(tmp_path, monkeypatch):
+@pytest.mark.parametrize('with_context', [False, True])
+def test_boundary_handshake_replaces_only_same_index(tmp_path, monkeypatch, with_context):
     mailbox = tmp_path / 'mailbox'; mailbox.mkdir()
     monkeypatch.setenv('SPLATFIX_HANDOFF_MAILBOX', str(mailbox))
     source = tmp_path / '00007.png'; Image.new('RGB', (8, 8)).save(source)
@@ -197,7 +205,15 @@ def test_boundary_handshake_replaces_only_same_index(tmp_path, monkeypatch):
         (folder / 'response.image').write_bytes((folder / 'repaired.png').read_bytes())
         handoff.write_json(folder / 'response.json', {**request, 'sha256': handoff.digest(folder / 'repaired.png')})
     monkeypatch.setattr(handoff.time, 'sleep', respond)
-    fixed = handoff.repair_boundary(tmp_path, source, 7, {'pose': 'unchanged'}, phase='inference')
+    reference = tmp_path / 'next.png'
+    Image.new('RGB', (8, 8), 'blue').save(reference)
+    fixed = handoff.repair_boundary(tmp_path, source, 7, {'pose': 'unchanged'}, phase='inference',
+        **({'reference': reference, 'reference_frame_index': 8} if with_context else {}))
+    if with_context:
+        assert (fixed.parent / 'reference.png').read_bytes() == reference.read_bytes()
+        metadata = json.loads((fixed.parent / 'camera.json').read_text())
+        assert metadata['reference_frame_index'] == 8
+        assert metadata['reference_sha256'] == handoff.digest(reference)
     assert source.read_bytes() == fixed.read_bytes() != original
     assert fixed.with_name('before.png').read_bytes() == original
     assert json.loads(fixed.with_name('camera.json').read_text())['camera'] == {'pose': 'unchanged'}
@@ -211,7 +227,8 @@ def test_service_keeps_polling_and_publishes_pixels_before_response(tmp_path, mo
     ident = 'b' * 32
     uploaded = []
     source = tmp_path / 'remote-before.png'; Image.new('RGB', (8, 8)).save(source)
-    request = {'id': ident, 'input_sha256': handoff.digest(source)}
+    request = {'id': ident, 'input_sha256': handoff.digest(source),
+               'gpt_image_context': 'closest_repaired_image', 'reference_sha256': handoff.digest(source)}
     def ssh(command):
         return json.dumps(request) if '/request.json' in command else ''
     def sync(src, dst):
@@ -220,6 +237,7 @@ def test_service_keeps_polling_and_publishes_pixels_before_response(tmp_path, mo
         else:
             uploaded.append(Path(src).name)
     def edit(folder, request, cfg):
+        assert (folder / 'reference.png').read_bytes() == source.read_bytes()
         started.set()
         assert gate.wait(5)
         (folder / 'response.image').write_bytes(source.read_bytes())
@@ -326,3 +344,33 @@ def test_reconstruction_uses_handoffs_and_first_reference_excluding_last_endpoin
         {**request, 'runtime': {'handoff_generation': False}}, trajectory)
     assert len(transforms['frames']) == 16
     assert supervision['selected_indices'] == original
+
+
+def test_context_edit_uses_second_attachment_and_checks_reference(tmp_path):
+    from splat_explorer.splatfix.image_repair import DEFAULT_PROMPT
+    Image.new('RGB', (16, 8), 'red').save(tmp_path / 'before.png')
+    Image.new('RGB', (16, 8), 'blue').save(tmp_path / 'reference.png')
+    request = {'id': 'a' * 32, 'input_sha256': handoff.digest(tmp_path / 'before.png'),
+               'gpt_image_context': 'closest_repaired_image',
+               'reference_sha256': handoff.digest(tmp_path / 'reference.png')}
+    calls = []
+    def edit(target, references, prompt):
+        calls.append((target, references, prompt))
+        return SimpleNamespace(error=None, images=[target.read_bytes()])
+    handoff.edit_request(tmp_path, request, backend=SimpleNamespace(edit_with_references=edit))
+    assert calls == [(tmp_path / 'before.png', [tmp_path / 'reference.png'], DEFAULT_PROMPT +
+                     ' Align color grading and palette with the context from second attachment reference image.')]
+    assert 'error' not in json.loads((tmp_path / 'response.json').read_text())
+    Image.new('RGB', (16, 8), 'green').save(tmp_path / 'reference.png')
+    handoff.edit_request(tmp_path, request, backend=SimpleNamespace(edit_with_references=edit))
+    assert 'reference checksum mismatch' in json.loads((tmp_path / 'response.json').read_text())['error']
+    assert len(calls) == 1
+
+
+def test_context_option_validation():
+    from splat_explorer.splatfix.artifixer.backend import validate_options
+    base = {'stage': 'repair', 'mode': 'edited'}
+    assert validate_options(base)['gpt_image_context'] == 'single_last_frame'
+    assert validate_options({**base, 'gpt_image_context': 'closest_repaired_image'})['gpt_image_context'] == 'closest_repaired_image'
+    with pytest.raises(ValueError, match='gpt_image_context'):
+        validate_options({**base, 'gpt_image_context': 'nearest'})

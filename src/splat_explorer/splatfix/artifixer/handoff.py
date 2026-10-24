@@ -16,6 +16,13 @@ def enabled(options):
     return value
 
 
+def context_mode(options):
+    value = options.get('gpt_image_context', 'single_last_frame')
+    if value not in ('single_last_frame', 'closest_repaired_image'):
+        raise ValueError('gpt_image_context must be single_last_frame or closest_repaired_image')
+    return value
+
+
 def write_json(path, value):
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(value, indent=2))
@@ -26,7 +33,7 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def repair_boundary(root, source, frame_index, camera, *, phase):
+def repair_boundary(root, source, frame_index, camera, *, phase, reference=None, reference_frame_index=None):
     """Block until the manager commits a repair, retaining the exact camera/index."""
     from PIL import Image
     mailbox = Path(os.environ['SPLATFIX_HANDOFF_MAILBOX'])
@@ -36,6 +43,11 @@ def repair_boundary(root, source, frame_index, camera, *, phase):
     shutil.copy2(source, folder / 'before.png')
     request = {'id': ident, 'frame_index': frame_index, 'camera': camera,
                'phase': phase, 'input_sha256': digest(source)}
+    if reference is not None:
+        shutil.copy2(reference, folder / 'reference.png')
+        request.update(gpt_image_context='closest_repaired_image',
+                       reference_frame_index=reference_frame_index,
+                       reference_sha256=digest(folder / 'reference.png'))
     print(f'HANDOFF_REPAIR_WAIT: {phase} frame {frame_index}', flush=True)
     write_json(mailbox / 'request.json', request)
     response = folder / 'response.json'
@@ -60,6 +72,8 @@ def repair_boundary(root, source, frame_index, camera, *, phase):
     archive.mkdir(parents=True, exist_ok=True)
     for name in ('before.png', 'repaired.png', 'response.image', 'response.json'):
         shutil.copy2(folder / name, archive / name)
+    if (folder / 'reference.png').is_file():
+        shutil.copy2(folder / 'reference.png', archive / 'reference.png')
     if (folder / 'response-original.png').is_file():
         shutil.copy2(folder / 'response-original.png', archive / 'response-original.png')
     write_json(archive / 'camera.json', request)
@@ -75,15 +89,22 @@ def edit_request(folder, request, cfg=None, backend=None):
     from ..image_repair import DEFAULT_PROMPT
     from ...image_edit_gpt import GptImageEditBackend
     from ...image_edit import SCENE_RUN_GPT_IMAGE_MODEL
+    mode = context_mode(request)
+    prompt = DEFAULT_PROMPT
+    if mode == 'closest_repaired_image':
+        prompt += ' Align color grading and palette with the context from second attachment reference image.'
     result = {'id': request['id'], 'input_sha256': request['input_sha256'],
-              'model': SCENE_RUN_GPT_IMAGE_MODEL, 'prompt': DEFAULT_PROMPT}
+              'model': SCENE_RUN_GPT_IMAGE_MODEL, 'prompt': prompt, 'gpt_image_context': mode}
     try:
         if digest(folder / 'before.png') != request['input_sha256']:
             raise ValueError('Handoff input checksum mismatch')
+        if mode == 'closest_repaired_image' and digest(folder / 'reference.png') != request['reference_sha256']:
+            raise ValueError('Handoff reference checksum mismatch')
         raw = folder / 'response.image'
         if not raw.exists():
             backend = backend or GptImageEditBackend.from_config(cfg, model=SCENE_RUN_GPT_IMAGE_MODEL)
-            answer = backend.edit(folder / 'before.png', DEFAULT_PROMPT)
+            answer = (backend.edit_with_references(folder / 'before.png', [folder / 'reference.png'], prompt)
+                      if mode == 'closest_repaired_image' else backend.edit(folder / 'before.png', prompt))
             if answer.error or not answer.images:
                 raise RuntimeError(answer.error or 'Handoff repair returned no image')
             temporary = raw.with_suffix('.tmp')
@@ -159,6 +180,8 @@ class HandoffService:
                 self.done.add(ident)
                 return
             self.sync(self.endpoint + ':' + self.remote + '/' + ident + '/before.png', str(folder / 'before.png'))
+        if self.remote and context_mode(request) == 'closest_repaired_image':
+            self.sync(self.endpoint + ':' + self.remote + '/' + ident + '/reference.png', str(folder / 'reference.png'))
         if (folder / 'response.json').is_file():
             from concurrent.futures import Future
             future = Future()

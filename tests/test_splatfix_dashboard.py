@@ -929,7 +929,7 @@ def test_custom_selection_creates_portable_checkpoint_without_job(studio, tmp_pa
         studio.start_custom({'scene_id': 'room', 'views': 25})
 
 
-@pytest.mark.parametrize('status', ['error', 'stopped', 'gpu_expired'])
+@pytest.mark.parametrize('status', ['error', 'stopped', 'gpu_expired', 'stopping', 'completed'])
 def test_restart_queues_saved_settings_without_old_execution_state(studio, status):
     original = studio.create({'stage': 'select', 'scene_id': 'room', 'views': 9,
         'resolution_profile': 'training', 'scheduled_at': '2099-01-01T00:00:00+00:00',
@@ -954,23 +954,25 @@ def test_restart_queues_saved_settings_without_old_execution_state(studio, statu
     assert next(j for j in studio.jobs() if j['run_id'] == ident)['restart_supported']
 
 
-@pytest.mark.parametrize('status', ['queued', 'running', 'stopping', 'completed'])
-def test_restart_rejects_active_and_successful_jobs(studio, status):
+@pytest.mark.parametrize('status', ['queued', 'waiting_gpu', 'starting', 'running'])
+def test_restart_rejects_pending_and_running_jobs(studio, status):
     run = studio.create({'stage': 'select', 'scene_id': 'room'})
     studio.store.set_status(run['run_id'], status)
     with pytest.raises(ValueError, match='Only failed'):
         studio.restart(run['run_id'])
     assert len(studio.store.list_runs()) == 1
+    assert not next(j for j in studio.jobs() if j['run_id'] == run['run_id'])['restart_supported']
 
 
-def test_restart_repeat_job_reuses_its_fixed_checkpoint_and_custom_settings(studio):
+@pytest.mark.parametrize('status', ['error', 'stopping', 'completed'])
+def test_restart_repeat_job_reuses_its_fixed_checkpoint_and_custom_settings(studio, status):
     cp = checkpoint(studio)
     run = studio.store.create_run({'pipeline': 'splatfix', 'scene_id': 'room', 'splatfix': {
         'stage': 'repair', 'checkpoint': str(cp.root), 'mode': 'baseline',
         'max_gaussians': 2_500_000, 'initial_image_seeding': False,
         'generated_rgb_loss': True, 'regularization_profile': 'base_mcmc'}})
     (cp.root / 'repeat-repair.json').write_text('{"parent_run":"saved-parent"}')
-    studio.store.set_status(run.run_id, 'error')
+    studio.store.set_status(run.run_id, status)
     restarted = studio.restart(run.run_id)
     assert restarted['config'] == run.config.to_dict()
     assert (cp.root / 'repeat-repair.json').read_text() == '{"parent_run":"saved-parent"}'
