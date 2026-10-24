@@ -28,15 +28,15 @@ def validate_strength(strength):
 
 
 def vignette_strength(height, width, strength):
-    """Elliptical smoothstep: flat central half-radius, full noise at the rim."""
+    """Tall ellipse matching the lime guide, with a narrower soft outer band."""
     import numpy as np
     x = np.linspace(-1, 1, width) if width > 1 else np.zeros(1)
     y = np.linspace(-1, 1, height) if height > 1 else np.zeros(1)
-    radius = np.sqrt(y[:, None] ** 2 + x[None, :] ** 2)
-    t = np.clip((radius - .5) / .5, 0, 1)
+    radius = np.sqrt(y[:, None] ** 2 + (x[None, :] / .72) ** 2)
+    t = np.clip((radius - .85) / .15, 0, 1)
     feather = t * t * (3 - 2 * t)
     # Do not reduce a base strength that already exceeds the edge target.
-    return strength + (max(strength, 80) - strength) * feather
+    return strength + (max(strength, 95) - strength) * feather
 
 
 def add_gaussian_noise(source, destination, *, strength, seed, vignette=False):
@@ -64,8 +64,9 @@ def add_gaussian_noise(source, destination, *, strength, seed, vignette=False):
             'sigma_8bit': strength * 255 / 100, 'seed': seed,
             'clipping': '0_255', 'color_space': 'encoded_rgb',
             'vignette': {'enabled': vignette, 'shape': 'ellipse', 'falloff': 'smoothstep',
-                         'inner_radius': .5, 'outer_radius': 1.,
-                         'edge_strength_percent': max(strength, 80) if vignette else strength}}
+                         'inner_radius': .85, 'outer_radius': 1.,
+                         'axis_scale_x': .72, 'axis_scale_y': 1.,
+                         'edge_strength_percent': max(strength, 95) if vignette else strength}}
 
 
 def sprinkle_repaired_pixels(source, reference, destination, *, strength, seed, vignette=False):
@@ -97,5 +98,6 @@ def sprinkle_repaired_pixels(source, reference, destination, *, strength, seed, 
             'replaced_pixels': int(selected.sum()), 'total_pixels': int(selected.size),
             'reference_source_size': reference_size, 'reference_fit': 'cover_center_crop',
             'vignette': {'enabled': vignette, 'shape': 'ellipse', 'falloff': 'smoothstep',
-                         'inner_radius': .5, 'outer_radius': 1.,
-                         'edge_strength_percent': max(strength, 80) if vignette else strength}}
+                         'inner_radius': .85, 'outer_radius': 1.,
+                         'axis_scale_x': .72, 'axis_scale_y': 1.,
+                         'edge_strength_percent': max(strength, 95) if vignette else strength}}

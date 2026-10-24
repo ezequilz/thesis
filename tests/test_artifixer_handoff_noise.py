@@ -58,7 +58,7 @@ def test_repair_sends_noisy_first_image_and_clean_reference(tmp_path, with_conte
     assert 'error' not in result
     assert result['noise']['strength_percent'] == 25
     assert result['noise']['vignette']['enabled'] is True
-    assert result['noise']['vignette']['edge_strength_percent'] == 80
+    assert result['noise']['vignette']['edge_strength_percent'] == 95
     assert result['noise']['input_sha256'] == digest(tmp_path/'repair-input.png')
     assert source.read_bytes() == original and reference.read_bytes() == clean_reference
     edit_request(tmp_path,request,backend=backend)
@@ -86,18 +86,18 @@ def test_new_jobs_default_to_noise_but_historical_runtime_stays_off():
 
 def test_vignette_is_elliptical_feathered_and_capped():
     from splat_explorer.splatfix.artifixer.handoff_noise import vignette_strength, noise_options
-    field = vignette_strength(721,1281,25)
-    assert field[360,640] == 25
-    assert field[360,800] == 25  # Quarter-radius is still the flat center.
-    assert field[360,960] == 25  # Transition begins at half-radius.
-    assert field[360,1120] == pytest.approx(52.5)
-    assert field[630,640] == pytest.approx(52.5)  # Same normalized elliptical radius.
-    assert np.all(field[0] == 80) and np.all(field[-1] == 80)
-    assert np.all(field[:,0] == 80) and np.all(field[:,-1] == 80)
-    assert field.max() == 80
-    assert np.max(np.abs(np.diff(field[360]))) < .3  # No hard band at the border.
+    field = vignette_strength(2001,2001,25)
+    assert field[1000,1000] == 25
+    assert field[1000,1600] == 25  # Flat center inside the narrower horizontal axis.
+    assert field[1800,1000] == 25  # Taller protected center, matching the lime guide.
+    assert field[1000,1666] == pytest.approx(60)
+    assert field[1925,1000] == pytest.approx(60)  # Same elliptical midpoint.
+    assert np.all(field[0] == 95) and np.all(field[-1] == 95)
+    assert np.all(field[:,0] == 95) and np.all(field[:,-1] == 95)
+    assert field.max() == 95
+    assert np.max(np.abs(np.diff(field[1000]))) < 1.0  # Soft despite the narrower band.
     np.testing.assert_allclose(field,field[::-1,::-1])
-    assert np.all(vignette_strength(10,20,90) == 90)
+    assert np.all(vignette_strength(10,20,98) == 98)
     with pytest.raises(ValueError,match='vignette'):
         noise_options({'handoff_noise_vignette':'yes'})
 
@@ -125,7 +125,7 @@ def test_pixel_sprinkle_replaces_whole_pixels_with_elliptical_probability(tmp_pa
     assert np.all(pixels[selected] == [210,220,230])
     assert np.all(pixels[~selected] == [10,20,30])
     assert selected[300:420,560:720].mean() == pytest.approx(.25,abs=.02)
-    assert selected[:20].mean() == pytest.approx(.8,abs=.02)
+    assert selected[:20].mean() == pytest.approx(.95,abs=.03)
     assert meta['replaced_pixels'] == selected.sum()
     first = output.read_bytes()
     sprinkle_repaired_pixels(source,reference,output,strength=25,seed=42,vignette=True)
