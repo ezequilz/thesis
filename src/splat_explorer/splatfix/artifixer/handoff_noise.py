@@ -15,7 +15,7 @@ def noise_options(options):
     if mode not in ('gaussian', 'repaired_pixel_sprinkle'):
         raise ValueError('handoff_noise_mode must be gaussian or repaired_pixel_sprinkle')
     if enabled and mode == 'repaired_pixel_sprinkle' and options.get('gpt_image_context') == 'single_last_frame':
-        raise ValueError('Repaired pixel sprinkle requires closest or initial repaired image context')
+        raise ValueError('Repaired pixel sprinkle requires closest/initial repaired image or original RGB capture context')
     validate_strength(strength)
     return {'handoff_add_noise': enabled, 'handoff_noise_strength': float(strength),
             'handoff_noise_vignette': vignette, 'handoff_noise_mode': mode}

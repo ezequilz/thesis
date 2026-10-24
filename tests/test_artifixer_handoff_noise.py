@@ -136,7 +136,7 @@ def test_pixel_sprinkle_replaces_whole_pixels_with_elliptical_probability(tmp_pa
         assert np.all(np.asarray(Image.open(output)) == color)
 
 
-@pytest.mark.parametrize('context', ['closest_repaired_image', 'initial_repaired_image'])
+@pytest.mark.parametrize('context', ['closest_repaired_image', 'initial_repaired_image', 'original_rgb_capture'])
 def test_sprinkle_sends_only_composite_with_single_image_prompt(tmp_path,context):
     import json
     from types import SimpleNamespace
@@ -166,9 +166,9 @@ def test_sprinkle_sends_only_composite_with_single_image_prompt(tmp_path,context
     assert len(calls)==1 and calls[0]==(tmp_path/'repair-input.png').read_bytes()
 
 
-def test_sprinkle_requires_a_repaired_reference():
+def test_sprinkle_requires_a_reference():
     from splat_explorer.splatfix.artifixer.handoff_noise import noise_options
-    with pytest.raises(ValueError,match='requires closest or initial'):
+    with pytest.raises(ValueError,match='requires closest/initial'):
         noise_options({'handoff_add_noise':True,'handoff_noise_mode':'repaired_pixel_sprinkle',
                        'gpt_image_context':'single_last_frame'})
     with pytest.raises(ValueError,match='handoff_noise_mode'):

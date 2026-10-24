@@ -18,8 +18,8 @@ def enabled(options):
 
 def context_mode(options):
     value = options.get('gpt_image_context', 'single_last_frame')
-    if value not in ('single_last_frame', 'closest_repaired_image', 'initial_repaired_image'):
-        raise ValueError('gpt_image_context must be single_last_frame, closest_repaired_image or initial_repaired_image')
+    if value not in ('single_last_frame', 'closest_repaired_image', 'initial_repaired_image', 'original_rgb_capture'):
+        raise ValueError('gpt_image_context must be single_last_frame, closest_repaired_image, initial_repaired_image or original_rgb_capture')
     return value
 
 

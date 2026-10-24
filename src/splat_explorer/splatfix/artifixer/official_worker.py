@@ -790,6 +790,12 @@ def inference(root, request, trajectory, plus=False):
                         context = {'reference': initial_context[1],
                                    'reference_frame_index': initial_context[0],
                                    'reference_context': 'initial_repaired_image'}
+                    elif cfg.get('gpt_image_context') == 'original_rgb_capture':
+                        # Reuse the run-resolution staged RGB at the exact handoff pose,
+                        # including in the plus pass; never use a regenerated render.
+                        context = {'reference': cp / trajectory['frames'][seed_index]['rgb'],
+                                   'reference_frame_index': seed_index,
+                                   'reference_context': 'original_rgb_capture'}
                     if cfg.get('handoff_add_noise', False):
                         context['noise'] = {key: cfg[key] for key in ('handoff_add_noise', 'handoff_noise_strength', 'handoff_noise_vignette', 'handoff_noise_mode') if key in cfg}
                     seed_path = repair_boundary(root, source, seed_index,

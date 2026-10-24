@@ -29,7 +29,7 @@ def test_options_opt_in_and_scoped():
 
 
 @pytest.mark.parametrize('add_noise', [False, True])
-@pytest.mark.parametrize('context_mode', ['single_last_frame', 'closest_repaired_image', 'initial_repaired_image'])
+@pytest.mark.parametrize('context_mode', ['single_last_frame', 'closest_repaired_image', 'initial_repaired_image', 'original_rgb_capture'])
 @pytest.mark.parametrize('plus', [False, True])
 @pytest.mark.parametrize('insertion', [False, True])
 def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatch, plus, insertion, context_mode, add_noise):
@@ -98,6 +98,10 @@ def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatc
         elif context_mode == 'initial_repaired_image':
             assert str(reference) == request['references'][1]
             assert reference_frame_index == 0
+            assert reference_context == context_mode
+        elif context_mode == 'original_rgb_capture':
+            assert reference == tmp_path / f'{index}.png'
+            assert reference_frame_index == index
             assert reference_context == context_mode
         else:
             assert reference is None
@@ -199,7 +203,7 @@ def test_repair_archives_full_response_and_fits_changed_aspect(tmp_path):
     assert result['reconstruction_resize']['method'] == 'cover_center_crop'
 
 
-@pytest.mark.parametrize('reference_context', ['closest_repaired_image', 'initial_repaired_image'])
+@pytest.mark.parametrize('reference_context', ['closest_repaired_image', 'initial_repaired_image', 'original_rgb_capture'])
 @pytest.mark.parametrize('with_context', [False, True])
 def test_boundary_handshake_replaces_only_same_index(tmp_path, monkeypatch, with_context, reference_context):
     mailbox = tmp_path / 'mailbox'; mailbox.mkdir()
@@ -231,7 +235,7 @@ def test_boundary_handshake_replaces_only_same_index(tmp_path, monkeypatch, with
     assert list(tmp_path.glob('0*.png')) == [source]
 
 
-@pytest.mark.parametrize('mode', ['closest_repaired_image', 'initial_repaired_image'])
+@pytest.mark.parametrize('mode', ['closest_repaired_image', 'initial_repaired_image', 'original_rgb_capture'])
 def test_service_keeps_polling_and_publishes_pixels_before_response(tmp_path, monkeypatch, mode):
     import threading
     gate = threading.Event()
@@ -359,7 +363,7 @@ def test_reconstruction_uses_handoffs_and_first_reference_excluding_last_endpoin
     assert supervision['selected_indices'] == original
 
 
-@pytest.mark.parametrize('mode', ['closest_repaired_image', 'initial_repaired_image'])
+@pytest.mark.parametrize('mode', ['closest_repaired_image', 'initial_repaired_image', 'original_rgb_capture'])
 def test_context_edit_uses_second_attachment_and_checks_reference(tmp_path, mode):
     from splat_explorer.splatfix.image_repair import DEFAULT_PROMPT
     Image.new('RGB', (16, 8), 'red').save(tmp_path / 'before.png')
