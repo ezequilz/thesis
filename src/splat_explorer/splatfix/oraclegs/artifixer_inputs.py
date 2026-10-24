@@ -60,6 +60,7 @@ def source_assets(studio, row):
 
 def handoff_assets(studio, row, trajectory, references, predictions, data):
     """Use completed inference handoffs at their exact cameras, like fitting does."""
+    backward_enabled = data('request.json').get('runtime', {}).get('handoff_backward_pass', False)
     state = data('inference-references.json')
     series = data('inference-seeding.json').get('series', [])
     original = [a['frame_index'] for a in trajectory['anchors']]
@@ -85,7 +86,7 @@ def handoff_assets(studio, row, trajectory, references, predictions, data):
             source = studio.result_artifact(row['_manifest'], raw)
         if source is None or not source.is_file() or digest(source) != expected:
             raise ValueError('Handoff reference is missing or its checksum does not match')
-        if old == last:
+        if old == last and not backward_enabled:
             continue  # Generation context only; excluded from trusted fitting references.
         anchors.append({**trajectory['anchors'][slot], 'frame_index': new})
         repaired.append(source)
@@ -113,8 +114,28 @@ def handoff_assets(studio, row, trajectory, references, predictions, data):
             raise ValueError('Handoff trajectory seed disagrees with the completed repaired references')
         seeds.append(seed)
         normalized_segments.append({'indices': generated, 'seed_index': seed})
-    if len(seeds) != len(set(seeds)) or set(seeds) != retained_indices:
+    forward_seeds = retained_indices - ({last} if backward_enabled else set())
+    if len(seeds) != len(set(seeds)) or set(seeds) != forward_seeds:
         raise ValueError('Handoff trajectories do not cover the completed repaired reference set')
+    if backward_enabled:
+        from ..artifixer.official_worker import handoff_backward_jobs
+        backward = data('inference-backward.json')
+        expected_jobs = handoff_backward_jobs(trajectory, indices)
+        records = backward.get('series', [])
+        if backward.get('complete') is not True or len(records) != len(expected_jobs):
+            raise ValueError('Completed backward inference metadata is missing or incomplete')
+        replacements = set()
+        reverse_segments = []
+        for record, expected in zip(records, expected_jobs):
+            if (any(record.get(key) != value for key, value in expected.items())
+                    or record.get('output') != 'inference'
+                    or record.get('reference_frame_indices') != indices):
+                raise ValueError('Backward inference trajectory disagrees with repaired references')
+            replacements.update(expected['export_global_indices'])
+            reverse_segments.append({'indices': expected['export_global_indices'],
+                                     'seed_index': expected['seed_global_index'], 'direction': 'reverse'})
+        normalized_segments = [{**segment, 'indices': [i for i in segment['indices'] if i not in replacements]}
+                               for segment in normalized_segments] + reverse_segments
     # Repaired boundaries are trusted references, never duplicate synthetic targets.
     excluded = set(original) | retained_indices
     predictions = {i: path for i, path in predictions.items() if i not in excluded}
@@ -123,8 +144,9 @@ def handoff_assets(studio, row, trajectory, references, predictions, data):
     trajectory = {**trajectory, 'anchors': anchors, 'segments': normalized_segments,
                   'handoff_export': {'reference_frame_indices': [a['frame_index'] for a in anchors],
                                      'original_reference_slots': retained_slots,
-                                     'excluded_original_reference_indices': sorted(set(original) - {first}),
-                                     'policy': 'first original repair and completed handoffs; actual single-split generation seeds'}}
+                                     'excluded_original_reference_indices': sorted(set(original) - ({first, last} if backward_enabled else {first})),
+                                     'policy': ('first/last original repairs and completed handoffs; actual forward/backward seeds'
+                                                if backward_enabled else 'first original repair and completed handoffs; actual single-split generation seeds')}}
     return trajectory, repaired, predictions
 
 

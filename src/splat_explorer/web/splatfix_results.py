@@ -261,7 +261,7 @@ class ResultCatalog:
                     preview = read_json(manifest.parent / 'input-preview.json', {})
                     for item in preview.get('reference_images', []):
                         plan['reconstruction_files'].append(self.studio.result_artifact(manifest, item['path']))
-                    for name in ('inference-references.json', 'inference-seeding.json'):
+                    for name in ('inference-references.json', 'inference-seeding.json', 'inference-backward.json'):
                         plan['reconstruction_files'].append(manifest.parent / name)
                 # Preserve any additional saved input/output camera exports too.
                 for pattern in ('*trajectory*.json', '*transforms*.json', '*poses*.json', '*cameras*.json'):

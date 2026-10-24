@@ -662,3 +662,31 @@ def test_handoff_reduction_plan_retains_metadata_and_original_trajectory(tmp_pat
     assert {root/'inference-references.json', root/'inference-seeding.json'} <= kept
     assert {root/f'ref{i}.png' for i in range(6)} <= kept
     assert root/'handoffs/inference/00002/repaired.png' in kept
+
+
+@pytest.mark.parametrize('complete', [False, True])
+def test_backward_handoff_export_assigns_final_half_to_existing_final_repair(tmp_path, complete):
+    from splat_explorer.splatfix.artifixer.official_worker import handoff_backward_jobs
+    studio, row = handoff_fixture(tmp_path)
+    root = row['_manifest'].parent
+    request = json.loads((root/'request.json').read_text())
+    request['runtime']['handoff_backward_pass'] = True
+    atomic_json(root/'request.json', request)
+    trajectory = json.loads((root/'preview-trajectory.json').read_text())
+    state = json.loads((root/'inference-references.json').read_text())
+    records = [{**job, 'output':'inference', 'reference_frame_indices':state['frame_indices']}
+               for job in handoff_backward_jobs(trajectory, state['frame_indices'])]
+    atomic_json(root/'inference-backward.json', {'complete':complete, 'series':records})
+    if not complete:
+        with pytest.raises(ValueError, match='backward inference metadata'):
+            export_inputs(studio,row,tmp_path/'export','sfm')
+        return
+    manifest = export_inputs(studio,row,tmp_path/'export','sfm')
+    assert len(manifest['views']) == 6
+    targets = {t['target_index']:t for t in manifest['trajectory']['frames']}
+    assert targets[13]['reference_index'] == 4  # Forward near half.
+    assert targets[14]['reference_index'] == 5  # Existing final repair seeds reverse far half.
+    assert manifest['artifixer_source']['handoff']['reference_frame_indices'] == [2,0,5,8,11,15]
+    for chunk in plan_chunks(manifest,mode='within_trajectory'):
+        assert chunk['source_frame'] == 0
+        assert chunk['image_names'][0] == chunk['source_image']

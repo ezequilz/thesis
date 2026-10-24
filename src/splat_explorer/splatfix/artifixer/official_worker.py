@@ -685,6 +685,98 @@ def initial_seed_index(cfg, segment, indices, neighbors):
     return seed
 
 
+def handoff_backward_jobs(trajectory, reference_indices):
+    """Reverse far halves from handoff repairs, or the existing final endpoint."""
+    original = {a['frame_index'] for a in trajectory['anchors']}
+    trusted = set(reference_indices)
+    jobs = []
+    for leg, segment in enumerate(trajectory['segments']):
+        indices = segment.get('indices')
+        if indices is None:
+            indices = list(range(segment['start'], segment['start'] + segment['count']))
+        generated = [i for i in indices if i not in original]
+        if not generated:
+            continue
+        # Interior legs end at their new handoff pose. The final leg uses
+        # the existing repaired final anchor, without another GPT request.
+        seed = generated[-1] if generated[-1] in trusted else max(original)
+        if seed not in trusted:
+            raise ValueError('Backward leg has no repaired endpoint')
+        targets = [i for i in generated if i not in trusted]
+        midpoint = (len(targets) + 1) // 2
+        reverse = targets[midpoint:][::-1]
+        if reverse:
+            jobs.append({'leg_index': leg, 'seed_global_index': seed,
+                         'generation_global_indices': [seed, *reverse],
+                         'export_global_indices': reverse})
+    return jobs
+
+
+def run_handoff_backward(root, request, trajectory, state, *, pipe, args, device,
+                         encoded_prompt, cameras, plus=False):
+    """Regenerate inward halves, then replace only their forward predictions."""
+    import numpy as np
+    import torch
+    from PIL import Image
+    from model_eval.run_inference import process_item
+    from model_training.data.utils import compute_camera_rays
+    phase = 'plus' if plus else 'inference'
+    cp = Path(request['checkpoint_root'])
+    cfg = request['runtime']
+    slots = list(range(len(state['frame_indices'])))
+    neighbors = [state['frame_indices'][i] for i in slots]
+    paths = [state['paths'][i] for i in slots]
+    def rgb(path):
+        with Image.open(path) as image:
+            return torch.from_numpy(np.array(image.convert('RGB'))).permute(2, 0, 1).float() / 255
+    references = torch.stack([rgb(path) for path in paths])
+    render_dir = Path(json.loads((root / 'distillation.json').read_text())['render_dir']) if plus else None
+    prediction = root / phase / 'splatfix/frames/batch_0000/pred'
+    backward_output = root / (phase + '-backward')
+    archive = root / (phase + '-forward-original') / 'splatfix/frames/batch_0000/pred'
+    records = []
+    manifest = root / (phase + '-backward.json')
+    manifest.write_text(json.dumps({'complete': False, 'series': []}, indent=2))
+    with torch.inference_mode():
+        for job in handoff_backward_jobs(trajectory, state['frame_indices']):
+            indices, seed = job['generation_global_indices'], job['seed_global_index']
+            if plus:
+                renders = torch.stack([rgb(render_dir / 'renders' / f'{i:05d}.png') for i in indices])
+                opacity = torch.stack([torch.from_numpy(np.array(Image.open(render_dir / 'opacity' / f'{i:05d}.png').convert('L'), dtype=np.float32) / 255) for i in indices])
+            else:
+                renders = torch.stack([rgb(cp / trajectory['frames'][i]['rgb']) for i in indices])
+                opacity = torch.stack([torch.from_numpy(np.load(cp / trajectory['frames'][i]['opacity'], allow_pickle=False)) for i in indices])
+            renders[0] = references[neighbors.index(seed)]
+            opacity[0] = 1
+            valid = torch.ones(len(indices), dtype=torch.bool)
+            valid[0] = False
+            item = {'scene_id': 'splatfix', 'rgb_rendered': renders, 'rgb_neighbors': references,
+                    'opacity': opacity, 'encoded_prompt': encoded_prompt,
+                    'frame_indices': torch.tensor(indices), 'valid_frames_mask': valid}
+            item.update(compute_camera_rays(cameras, indices, neighbors, scale=request['camera_scale'],
+                        image_shape=renders.shape[-2:], skip_vae_check=True))
+            pipe.clear_inference_caches()
+            if cfg.get('image_cache_insertion', False):
+                pipe.starter_inference_audit = None
+            print(f'HANDOFF_BACKWARD: {phase} leg {job["leg_index"]} seed {seed}', flush=True)
+            process_item(pipe, item, args, backward_output, 0, device, pipe.vae.config.scale_factor_temporal)
+            if cfg.get('image_cache_insertion', False) and not (pipe.starter_inference_audit or {}).get('encoded_starter_preserved'):
+                raise RuntimeError('Backward starter preservation was not verified')
+            archive.mkdir(parents=True, exist_ok=True)
+            for index in job['export_global_indices']:
+                filename = f'{index:05d}.png'
+                generated = backward_output / 'splatfix/frames/batch_0000/pred' / filename
+                with Image.open(generated) as image, Image.open(prediction / filename) as previous:
+                    if image.size != previous.size:
+                        raise ValueError('Backward prediction dimensions changed')
+                shutil.copy2(prediction / filename, archive / filename)
+                shutil.copy2(generated, prediction / filename)
+            records.append({**job, 'reference_frame_indices': neighbors, 'reference_paths': paths,
+                            'output': phase, 'cache_preservation': cfg.get('image_cache_insertion', False)})
+            manifest.write_text(json.dumps({'complete': False, 'series': records}, indent=2))
+    manifest.write_text(json.dumps({'complete': True, 'series': records}, indent=2))
+
+
 def inference(root, request, trajectory, plus=False):
     import numpy as np
     import torch
@@ -697,9 +789,9 @@ def inference(root, request, trajectory, plus=False):
     encoded_prompt, _ = load_encoded_prompt([Path(request['caption_path'])])
     cfg = request['runtime']
     if __package__:
-        from .handoff import enabled, repair_boundary
+        from .handoff import enabled, repair_boundary, backward_enabled
     else:
-        from handoff import enabled, repair_boundary
+        from handoff import enabled, repair_boundary, backward_enabled
     handoff = enabled(cfg)
     if handoff and (request.get('repair_policy') == 'endpoints' or
                     request.get('trajectory_mode') != 'authors_orbit' or
@@ -876,6 +968,9 @@ def inference(root, request, trajectory, plus=False):
                            'sha256': [caption_digest(path) for path in active_reference_paths]}
         (root / ('plus-references.json' if plus else 'inference-references.json')).write_text(
             json.dumps(reference_state, indent=2))
+        if backward_enabled(cfg):
+            run_handoff_backward(root, request, trajectory, reference_state, pipe=pipe, args=args,
+                                 device=device, encoded_prompt=encoded_prompt, cameras=cameras, plus=plus)
     if plus:
         result = json.loads((root / 'distillation.json').read_text())
         result.update(repair_policy=request.get('repair_policy', 'all'),
@@ -993,21 +1088,23 @@ def reconstruction_supervision(root, request, trajectory):
     if not request.get('runtime', {}).get('handoff_generation', False):
         return unique_supervision(trajectory, request['references'])
     state = load_handoff_references(root, request, trajectory)
-    # Keep the endpoint in generation context, but exclude its inconsistent RGB
-    # and camera from this consistency experiment's fitting catalogue entirely.
+    # Forward-only preserves the historical endpoint exclusion. The backward
+    # pass uses that existing repair as a seed, so retain it for fitting too.
     endpoint = max(state['original_frame_indices'])
-    retained_slots = [i for i, old in enumerate(state['original_frame_indices']) if old != endpoint]
+    include_endpoint = request.get('runtime', {}).get('handoff_backward_pass', False)
+    retained_slots = [i for i, old in enumerate(state['original_frame_indices']) if include_endpoint or old != endpoint]
     anchors = [{**trajectory['anchors'][i], 'frame_index': state['frame_indices'][i]}
                for i in retained_slots]
     references = [state['paths'][i] for i in retained_slots]
     displaced = [old for old, new in zip(state['original_frame_indices'], state['frame_indices']) if old != new]
-    excluded = sorted(set(displaced) | {endpoint})
+    excluded = sorted(set(displaced) | (set() if include_endpoint else {endpoint}))
     transforms, supervision = unique_supervision({**trajectory, 'anchors': anchors}, references,
                                                  excluded_indices=set(excluded))
     supervision.update(handoff_references=state, excluded_original_reference_indices=excluded,
-                       excluded_endpoint_frame_index=endpoint,
+                       excluded_endpoint_frame_index=None if include_endpoint else endpoint,
                        reconstruction_reference_slots=retained_slots,
-                       policy='first reference and repaired handoffs are ground truth at their exact cameras; displaced references and final endpoint excluded')
+                       policy=('first/last original repairs and completed handoffs at exact cameras; displaced references excluded'
+                               if include_endpoint else 'first reference and repaired handoffs are ground truth at their exact cameras; displaced references and final endpoint excluded'))
     return transforms, supervision
 
 

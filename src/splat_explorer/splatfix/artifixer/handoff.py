@@ -16,6 +16,13 @@ def enabled(options):
     return value
 
 
+def backward_enabled(options):
+    value = options.get('handoff_backward_pass', False)
+    if type(value) is not bool:
+        raise ValueError('handoff_backward_pass must be a boolean')
+    return value
+
+
 def context_mode(options):
     value = options.get('gpt_image_context', 'single_last_frame')
     if value not in ('single_last_frame', 'closest_repaired_image', 'initial_repaired_image', 'original_rgb_capture'):

@@ -91,8 +91,9 @@ def digest_file(path):
 
 def validate_runtime(runtime=None):
     cfg = {**DEFAULT_RUNTIME, **(runtime or {})}
-    from .handoff import enabled, context_mode
+    from .handoff import enabled, context_mode, backward_enabled
     cfg['handoff_generation'] = enabled(cfg)
+    cfg['handoff_backward_pass'] = backward_enabled(cfg)
     cfg['gpt_image_context'] = context_mode(cfg)
     from .handoff_noise import noise_options
     cfg.update(noise_options(cfg))

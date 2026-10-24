@@ -25,8 +25,9 @@ def validate_options(raw):
             raise ValueError('benchmark_runs must be a positive integer')
         result['benchmark_runs'] = runs
     if raw['stage'] == 'repair':
-        from .handoff import enabled, context_mode
+        from .handoff import enabled, context_mode, backward_enabled
         result['handoff_generation'] = enabled(raw)
+        result['handoff_backward_pass'] = backward_enabled({'handoff_backward_pass': True, **raw})
         result['gpt_image_context'] = context_mode({'gpt_image_context': 'closest_repaired_image', **raw})
         from .handoff_noise import noise_options
         default_noise_mode = ('repaired_pixel_sprinkle' if result['handoff_generation']

@@ -28,11 +28,12 @@ def test_options_opt_in_and_scoped():
     assert 'handoff_generation' not in validate_options({'stage': 'benchmark'})
 
 
+@pytest.mark.parametrize('backward', [False, True])
 @pytest.mark.parametrize('add_noise', [False, True])
 @pytest.mark.parametrize('context_mode', ['single_last_frame', 'closest_repaired_image', 'initial_repaired_image', 'original_rgb_capture'])
 @pytest.mark.parametrize('plus', [False, True])
 @pytest.mark.parametrize('insertion', [False, True])
-def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatch, plus, insertion, context_mode, add_noise):
+def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatch, plus, insertion, context_mode, add_noise, backward):
     class Tensor(np.ndarray):
         def permute(self, *axes): return self.transpose(axes)
         def float(self): return self.astype(np.float32)
@@ -139,7 +140,17 @@ def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatc
             'original_frame_indices': [3, 0, 6, 9, 12, 15],
             'frame_indices': [2, 0, 5, 8, 11, 15], 'paths': prior_paths,
             'sha256': [handoff.digest(path) for path in prior_paths]}))
+    backward_calls = []
+    def backwards(root, req, traj, state, **kwargs):
+        assert len(repaired) == 4 and len(items) == 5
+        assert state['frame_indices'] == [2, 0, 5, 8, 11, 15]
+        assert all(Path(path).is_file() for path in state['paths'])
+        assert kwargs['plus'] == plus
+        backward_calls.append(state)
+    monkeypatch.setattr(official_worker, 'run_handoff_backward', backwards)
+    request['runtime']['handoff_backward_pass'] = backward
     official_worker.inference(tmp_path, request, trajectory, plus=plus)
+    assert len(backward_calls) == int(backward)
     assert events == ['clear', 'generate'] + ['repair', 'clear', 'generate'] * 4
     expected_rays = [([0, 1, 2], [3, 0, 6, 9, 12, 15]),
                     ([2, 4, 5], [2, 0, 6, 9, 12, 15]),
@@ -353,6 +364,12 @@ def test_reconstruction_uses_handoffs_and_first_reference_excluding_last_endpoin
     assert Path(paths[-1]).is_file()
     assert request['references'] == paths
     assert [a['frame_index'] for a in trajectory['anchors']] == original
+    _, reverse_supervision = official_worker.reconstruction_supervision(
+        tmp_path, {**request, 'runtime': {'handoff_generation': True, 'handoff_backward_pass': True}}, trajectory)
+    assert reverse_supervision['reconstruction_reference_slots'] == list(range(6))
+    assert reverse_supervision['excluded_endpoint_frame_index'] is None
+    assert len(reverse_supervision['selected_indices']) == 6
+    assert reverse_supervision['groups'][reverse_supervision['selected_indices'][-1]]['reference'] == paths[-1]
     Path(replacements[1]).write_bytes(b'corrupted')
     with pytest.raises(ValueError, match='checksum'):
         official_worker.reconstruction_supervision(tmp_path, request, trajectory)

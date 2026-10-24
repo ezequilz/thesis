@@ -32,6 +32,10 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('repair').checkpoint,'/saved/cp');
   assert.equal(payload('repair').mode,'edited');
   assert.equal(payload('repair').handoff_generation,false);
+  assert.equal(payload('repair').handoff_backward_pass,true);
+  $('handoff-backward-pass').value='off';
+  assert.equal(payload('repair').handoff_backward_pass,false);
+  $('handoff-backward-pass').value='on';
   assert.equal(payload('repair').gpt_image_context,'closest_repaired_image');
   $('gpt-image-context').value='original_rgb_capture';
   assert.equal(payload('repair').gpt_image_context,'original_rgb_capture');
