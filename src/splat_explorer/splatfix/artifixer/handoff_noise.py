@@ -53,14 +53,19 @@ def vignette_strength(height, width, strength, size='larger', edge_strength=None
     feather = t * t * (3 - 2 * t)
     edge = max(strength, profile['edge_strength_percent']) if edge_strength is None else edge_strength
     validate_strength(edge)
-    return strength + (edge - strength) * feather
+    center_t = np.clip(radius / inner, 0, 1)
+    center_feather = center_t * center_t * (3 - 2 * center_t)
+    interior = strength * (.5 + .5 * center_feather)
+    return interior + (edge - strength) * feather
 
 
 def vignette_metadata(vignette, strength, size, edge_strength=None):
     profile = vignette_profile(size)
     edge = max(strength, profile['edge_strength_percent']) if edge_strength is None else edge_strength
     validate_strength(edge)
-    return {**profile, 'enabled': vignette, 'edge_strength_percent': edge if vignette else strength}
+    return {**profile, 'enabled': vignette, 'edge_strength_percent': edge if vignette else strength,
+            'center_strength_percent': strength * .5 if vignette else strength,
+            'inner_boundary_strength_percent': strength, 'center_falloff': 'smoothstep' if vignette else None}
 
 
 def add_gaussian_noise(source, destination, *, strength, seed, vignette=False, vignette_size='larger', edge_strength=None):

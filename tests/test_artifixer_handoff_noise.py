@@ -87,9 +87,9 @@ def test_new_jobs_default_to_noise_but_historical_runtime_stays_off():
 def test_vignette_is_elliptical_feathered_and_capped():
     from splat_explorer.splatfix.artifixer.handoff_noise import vignette_strength, noise_options
     field = vignette_strength(2001,2001,25)
-    assert field[1000,1000] == 25
-    assert field[1000,1480] == 25  # Flat center inside the narrower horizontal axis.
-    assert field[1650,1000] == 25  # Taller protected center, matching the lime guide.
+    assert field[1000,1000] == 12.5
+    assert field[1000,1252] == pytest.approx(18.75)  # Halfway through inner radius.
+    assert field[1700,1000] == pytest.approx(25)  # Full selected strength at inner boundary.
     assert field[1000,1612] == pytest.approx(60)
     assert field[1850,1000] == pytest.approx(60)  # Same elliptical midpoint.
     assert np.all(field[0] == 95) and np.all(field[-1] == 95)
@@ -97,19 +97,19 @@ def test_vignette_is_elliptical_feathered_and_capped():
     assert field.max() == 95
     assert np.max(np.abs(np.diff(field[1000]))) < 1.0  # Soft despite the narrower band.
     np.testing.assert_allclose(field,field[::-1,::-1])
-    assert np.all(vignette_strength(10,20,98) == 98)
+    assert vignette_strength(10,20,98).max() == 98
     with pytest.raises(ValueError,match='vignette'):
         noise_options({'handoff_noise_vignette':'yes'})
 
 
-def test_vignette_preserves_center_and_increases_edge_noise(tmp_path):
+def test_vignette_reduces_center_and_increases_edge_noise(tmp_path):
     source = tmp_path/'before.png'
     Image.new('RGB',(640,360),(128,128,128)).save(source)
     add_gaussian_noise(source,tmp_path/'uniform.png',strength=25,seed=7)
     add_gaussian_noise(source,tmp_path/'vignette.png',strength=25,seed=7,vignette=True)
     uniform = np.asarray(Image.open(tmp_path/'uniform.png'),dtype=float)
     vignette = np.asarray(Image.open(tmp_path/'vignette.png'),dtype=float)
-    np.testing.assert_array_equal(uniform[150:210,280:360],vignette[150:210,280:360])
+    assert vignette[170:190,310:330].std() == pytest.approx(uniform[170:190,310:330].std() * .5, rel=.06)
     assert vignette[:20].std() > uniform[:20].std() * 1.35
 
 
@@ -124,7 +124,7 @@ def test_pixel_sprinkle_replaces_whole_pixels_with_elliptical_probability(tmp_pa
     selected = pixels[:,:,0] == 210
     assert np.all(pixels[selected] == [210,220,230])
     assert np.all(pixels[~selected] == [10,20,30])
-    assert selected[300:420,560:720].mean() == pytest.approx(.25,abs=.02)
+    assert selected[340:380,620:660].mean() == pytest.approx(.125,abs=.025)
     assert selected[:20].mean() == pytest.approx(.95,abs=.03)
     assert meta['replaced_pixels'] == selected.sum()
     first = output.read_bytes()
@@ -180,7 +180,9 @@ def test_smaller_vignette_restores_previous_profile():
     field = vignette_strength(721, 1281, 25, 'smaller')
     x, y = np.linspace(-1, 1, 1281), np.linspace(-1, 1, 721)
     t = np.clip((np.sqrt(y[:, None] ** 2 + x[None, :] ** 2) - .5) / .5, 0, 1)
-    np.testing.assert_array_equal(field, 25 + 55 * (t * t * (3 - 2 * t)))
+    outer = t > 0
+    np.testing.assert_array_equal(field[outer], (25 + 55 * (t * t * (3 - 2 * t)))[outer])
+    assert field[360,640] == 12.5
     assert field[360,1120] == pytest.approx(52.5)
     assert field.max() == 80
     assert noise_options({})['handoff_vignette_size'] == 'larger'
@@ -217,7 +219,7 @@ def test_edge_strength_is_independent_and_defaults_follow_size(size,default):
     assert noise_options({'handoff_vignette_size':size})['handoff_vignette_edge_strength'] == default
     for edge in (0,10,70,100):
         field = vignette_strength(101,201,25,size,edge_strength=edge)
-        assert field[50,100] == 25
+        assert field[50,100] == 12.5
         np.testing.assert_allclose(field[0],edge,atol=1e-12)
         np.testing.assert_allclose(field[:,0],edge,atol=1e-12)
         assert noise_options({'handoff_vignette_edge_strength':edge})['handoff_vignette_edge_strength'] == edge
