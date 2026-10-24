@@ -45,6 +45,8 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('benchmark').handoff_add_noise,undefined);
   $('gpt-image-context').value='closest_repaired_image';
   assert.equal(payload('repair').gpt_image_context,'closest_repaired_image');
+  $('gpt-image-context').value='initial_repaired_image';
+  assert.equal(payload('repair').gpt_image_context,'initial_repaired_image');
   assert.equal(payload('benchmark').gpt_image_context,undefined);
   $('handoff-generation').value='on';
   assert.equal(payload('repair').handoff_generation,true);

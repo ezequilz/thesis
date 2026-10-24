@@ -752,6 +752,7 @@ def inference(root, request, trajectory, plus=False):
     insertion_audits = []
     seeding_audits = []
     previous_boundary = None
+    initial_context = None
     handoff_records = []
     with torch.inference_mode():
         for segment, reference_order, directory in jobs:
@@ -772,6 +773,7 @@ def inference(root, request, trajectory, plus=False):
                     seed_index = initial_seed_index({**cfg, 'initial_image_seeding': True},
                                                     segment, indices, all_neighbors)
                     seed_path = Path(active_reference_paths[all_neighbors.index(seed_index)])
+                    initial_context = (seed_index, seed_path)
                 else:
                     replaced_index = initial_seed_index({**cfg, 'initial_image_seeding': True},
                                                         segment, indices, all_neighbors)
@@ -784,6 +786,10 @@ def inference(root, request, trajectory, plus=False):
                     if cfg.get('gpt_image_context', 'single_last_frame') == 'closest_repaired_image':
                         context = {'reference': Path(active_reference_paths[reference_slot]),
                                    'reference_frame_index': active_neighbors[reference_slot]}
+                    elif cfg.get('gpt_image_context') == 'initial_repaired_image':
+                        context = {'reference': initial_context[1],
+                                   'reference_frame_index': initial_context[0],
+                                   'reference_context': 'initial_repaired_image'}
                     if cfg.get('handoff_add_noise', False):
                         context['noise'] = {key: cfg[key] for key in ('handoff_add_noise', 'handoff_noise_strength', 'handoff_noise_vignette') if key in cfg}
                     seed_path = repair_boundary(root, source, seed_index,

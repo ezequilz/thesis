@@ -29,7 +29,7 @@ def test_options_opt_in_and_scoped():
 
 
 @pytest.mark.parametrize('add_noise', [False, True])
-@pytest.mark.parametrize('context_mode', ['single_last_frame', 'closest_repaired_image'])
+@pytest.mark.parametrize('context_mode', ['single_last_frame', 'closest_repaired_image', 'initial_repaired_image'])
 @pytest.mark.parametrize('plus', [False, True])
 @pytest.mark.parametrize('insertion', [False, True])
 def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatch, plus, insertion, context_mode, add_noise):
@@ -89,12 +89,16 @@ def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatc
         Image.new('RGB', (8, 8), (100 + i,) * 3).save(path)
         refs.append(str(path))
     repaired = []
-    def repair(root, source, index, camera, *, phase, reference=None, reference_frame_index=None, noise=None):
+    def repair(root, source, index, camera, *, phase, reference=None, reference_frame_index=None, noise=None, reference_context='closest_repaired_image'):
         assert noise == ({'handoff_add_noise': True, 'handoff_noise_strength': 25, 'handoff_noise_vignette': True} if add_noise else None)
         if context_mode == 'closest_repaired_image':
             slot = [0, 2, 3, 4][len(repaired)]
             assert str(reference) == (prior_paths if plus else request['references'])[slot]
             assert reference_frame_index == ([2, 5, 8, 11] if plus else [3, 6, 9, 12])[len(repaired)]
+        elif context_mode == 'initial_repaired_image':
+            assert str(reference) == request['references'][1]
+            assert reference_frame_index == 0
+            assert reference_context == context_mode
         else:
             assert reference is None
         events.append('repair')
@@ -195,8 +199,9 @@ def test_repair_archives_full_response_and_fits_changed_aspect(tmp_path):
     assert result['reconstruction_resize']['method'] == 'cover_center_crop'
 
 
+@pytest.mark.parametrize('reference_context', ['closest_repaired_image', 'initial_repaired_image'])
 @pytest.mark.parametrize('with_context', [False, True])
-def test_boundary_handshake_replaces_only_same_index(tmp_path, monkeypatch, with_context):
+def test_boundary_handshake_replaces_only_same_index(tmp_path, monkeypatch, with_context, reference_context):
     mailbox = tmp_path / 'mailbox'; mailbox.mkdir()
     monkeypatch.setenv('SPLATFIX_HANDOFF_MAILBOX', str(mailbox))
     source = tmp_path / '00007.png'; Image.new('RGB', (8, 8)).save(source)
@@ -212,12 +217,13 @@ def test_boundary_handshake_replaces_only_same_index(tmp_path, monkeypatch, with
     reference = tmp_path / 'next.png'
     Image.new('RGB', (8, 8), 'blue').save(reference)
     fixed = handoff.repair_boundary(tmp_path, source, 7, {'pose': 'unchanged'}, phase='inference',
-        **({'reference': reference, 'reference_frame_index': 8} if with_context else {}))
+        **({'reference': reference, 'reference_frame_index': 8, 'reference_context': reference_context} if with_context else {}))
     assert (fixed.parent / 'repair-input.png').read_bytes() == original
     if with_context:
         assert (fixed.parent / 'reference.png').read_bytes() == reference.read_bytes()
         metadata = json.loads((fixed.parent / 'camera.json').read_text())
         assert metadata['reference_frame_index'] == 8
+        assert metadata['gpt_image_context'] == reference_context
         assert metadata['reference_sha256'] == handoff.digest(reference)
     assert source.read_bytes() == fixed.read_bytes() != original
     assert fixed.with_name('before.png').read_bytes() == original
@@ -225,7 +231,8 @@ def test_boundary_handshake_replaces_only_same_index(tmp_path, monkeypatch, with
     assert list(tmp_path.glob('0*.png')) == [source]
 
 
-def test_service_keeps_polling_and_publishes_pixels_before_response(tmp_path, monkeypatch):
+@pytest.mark.parametrize('mode', ['closest_repaired_image', 'initial_repaired_image'])
+def test_service_keeps_polling_and_publishes_pixels_before_response(tmp_path, monkeypatch, mode):
     import threading
     gate = threading.Event()
     started = threading.Event()
@@ -233,7 +240,7 @@ def test_service_keeps_polling_and_publishes_pixels_before_response(tmp_path, mo
     uploaded = []
     source = tmp_path / 'remote-before.png'; Image.new('RGB', (8, 8)).save(source)
     request = {'id': ident, 'input_sha256': handoff.digest(source),
-               'gpt_image_context': 'closest_repaired_image', 'reference_sha256': handoff.digest(source)}
+               'gpt_image_context': mode, 'reference_sha256': handoff.digest(source)}
     def ssh(command):
         return json.dumps(request) if '/request.json' in command else ''
     def sync(src, dst):
@@ -352,12 +359,13 @@ def test_reconstruction_uses_handoffs_and_first_reference_excluding_last_endpoin
     assert supervision['selected_indices'] == original
 
 
-def test_context_edit_uses_second_attachment_and_checks_reference(tmp_path):
+@pytest.mark.parametrize('mode', ['closest_repaired_image', 'initial_repaired_image'])
+def test_context_edit_uses_second_attachment_and_checks_reference(tmp_path, mode):
     from splat_explorer.splatfix.image_repair import DEFAULT_PROMPT
     Image.new('RGB', (16, 8), 'red').save(tmp_path / 'before.png')
     Image.new('RGB', (16, 8), 'blue').save(tmp_path / 'reference.png')
     request = {'id': 'a' * 32, 'input_sha256': handoff.digest(tmp_path / 'before.png'),
-               'gpt_image_context': 'closest_repaired_image',
+               'gpt_image_context': mode,
                'reference_sha256': handoff.digest(tmp_path / 'reference.png')}
     calls = []
     def edit(target, references, prompt):
@@ -379,5 +387,6 @@ def test_context_option_validation():
     assert validate_options(base)['gpt_image_context'] == 'closest_repaired_image'
     assert validate_options({**base, 'gpt_image_context': 'single_last_frame'})['gpt_image_context'] == 'single_last_frame'
     assert validate_options({**base, 'gpt_image_context': 'closest_repaired_image'})['gpt_image_context'] == 'closest_repaired_image'
+    assert validate_options({**base, 'gpt_image_context': 'initial_repaired_image'})['gpt_image_context'] == 'initial_repaired_image'
     with pytest.raises(ValueError, match='gpt_image_context'):
         validate_options({**base, 'gpt_image_context': 'nearest'})

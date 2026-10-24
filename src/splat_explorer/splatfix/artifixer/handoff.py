@@ -18,8 +18,8 @@ def enabled(options):
 
 def context_mode(options):
     value = options.get('gpt_image_context', 'single_last_frame')
-    if value not in ('single_last_frame', 'closest_repaired_image'):
-        raise ValueError('gpt_image_context must be single_last_frame or closest_repaired_image')
+    if value not in ('single_last_frame', 'closest_repaired_image', 'initial_repaired_image'):
+        raise ValueError('gpt_image_context must be single_last_frame, closest_repaired_image or initial_repaired_image')
     return value
 
 
@@ -33,7 +33,7 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def repair_boundary(root, source, frame_index, camera, *, phase, reference=None, reference_frame_index=None, noise=None):
+def repair_boundary(root, source, frame_index, camera, *, phase, reference=None, reference_frame_index=None, noise=None, reference_context='closest_repaired_image'):
     """Block until the manager commits a repair, retaining the exact camera/index."""
     from PIL import Image
     mailbox = Path(os.environ['SPLATFIX_HANDOFF_MAILBOX'])
@@ -51,7 +51,7 @@ def repair_boundary(root, source, frame_index, camera, *, phase, reference=None,
         request.update(noise_options(noise))
     if reference is not None:
         shutil.copy2(reference, folder / 'reference.png')
-        request.update(gpt_image_context='closest_repaired_image',
+        request.update(gpt_image_context=context_mode({'gpt_image_context': reference_context}),
                        reference_frame_index=reference_frame_index,
                        reference_sha256=digest(folder / 'reference.png'))
     print(f'HANDOFF_REPAIR_WAIT: {phase} frame {frame_index}', flush=True)
@@ -99,14 +99,14 @@ def edit_request(folder, request, cfg=None, backend=None):
     from ...image_edit import SCENE_RUN_GPT_IMAGE_MODEL
     mode = context_mode(request)
     prompt = DEFAULT_PROMPT
-    if mode == 'closest_repaired_image':
+    if mode != 'single_last_frame':
         prompt += ' Align color grading and visual quality details with the reference image in the second attachment.'
     result = {'id': request['id'], 'input_sha256': request['input_sha256'],
               'model': SCENE_RUN_GPT_IMAGE_MODEL, 'prompt': prompt, 'gpt_image_context': mode}
     try:
         if digest(folder / 'before.png') != request['input_sha256']:
             raise ValueError('Handoff input checksum mismatch')
-        if mode == 'closest_repaired_image' and digest(folder / 'reference.png') != request['reference_sha256']:
+        if mode != 'single_last_frame' and digest(folder / 'reference.png') != request['reference_sha256']:
             raise ValueError('Handoff reference checksum mismatch')
         from .handoff_noise import noise_options, add_gaussian_noise
         noise = noise_options(request)
@@ -124,7 +124,7 @@ def edit_request(folder, request, cfg=None, backend=None):
         if not raw.exists():
             backend = backend or GptImageEditBackend.from_config(cfg, model=SCENE_RUN_GPT_IMAGE_MODEL)
             answer = (backend.edit_with_references(repair_input, [folder / 'reference.png'], prompt)
-                      if mode == 'closest_repaired_image' else backend.edit(repair_input, prompt))
+                      if mode != 'single_last_frame' else backend.edit(repair_input, prompt))
             if answer.error or not answer.images:
                 raise RuntimeError(answer.error or 'Handoff repair returned no image')
             temporary = raw.with_suffix('.tmp')
@@ -200,7 +200,7 @@ class HandoffService:
                 self.done.add(ident)
                 return
             self.sync(self.endpoint + ':' + self.remote + '/' + ident + '/before.png', str(folder / 'before.png'))
-        if self.remote and context_mode(request) == 'closest_repaired_image':
+        if self.remote and context_mode(request) != 'single_last_frame':
             self.sync(self.endpoint + ':' + self.remote + '/' + ident + '/reference.png', str(folder / 'reference.png'))
         if (folder / 'response.json').is_file():
             from concurrent.futures import Future
