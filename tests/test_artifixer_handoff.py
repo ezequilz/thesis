@@ -275,7 +275,7 @@ def test_worker_sets_and_restores_private_mailbox(tmp_path, monkeypatch):
     assert json.loads((tmp_path / 'worker-status.json').read_text())['status'] == 'error'
 
 
-def test_reconstruction_uses_final_six_references_at_repaired_poses(tmp_path, monkeypatch):
+def test_reconstruction_uses_handoffs_and_first_reference_excluding_last_endpoint(tmp_path, monkeypatch):
     original = [0, 3, 6, 9, 12, 15]
     final = [0, 2, 5, 8, 11, 15]
     frames = []
@@ -298,15 +298,19 @@ def test_reconstruction_uses_final_six_references_at_repaired_poses(tmp_path, mo
              'sha256': [handoff.digest(path) for path in replacements]}
     (tmp_path / 'inference-references.json').write_text(json.dumps(state))
     transforms, supervision = official_worker.reconstruction_supervision(tmp_path, request, trajectory)
-    kept = [0, 1, 2, 4, 5, 7, 8, 10, 11, 13, 14, 15]
+    kept = [0, 1, 2, 4, 5, 7, 8, 10, 11, 13, 14]
     assert len(transforms['frames']) == len(kept)
     assert supervision['distillation_to_original'] == kept
-    assert [supervision['original_to_distillation'][i] for i in original[1:-1]] == [None] * 4
+    assert [supervision['original_to_distillation'][i] for i in original[1:]] == [None] * 5
     selected = supervision['selected_indices']
-    assert len(selected) == 6
-    assert [supervision['groups'][i]['reference'] for i in selected] == replacements
-    assert [transforms['frames'][i]['transform_matrix'][0][3] for i in selected] == final
+    assert len(selected) == 5
+    assert [supervision['groups'][i]['reference'] for i in selected] == replacements[:-1]
+    assert [transforms['frames'][i]['transform_matrix'][0][3] for i in selected] == final[:-1]
     assert [g['source_index'] for g in supervision['groups'] if g['reference'] is None] == [1, 4, 7, 10, 13, 14]
+    assert supervision['excluded_endpoint_frame_index'] == 15
+    assert supervision['reconstruction_reference_slots'] == [0, 1, 2, 3, 4]
+    assert json.loads((tmp_path / 'inference-references.json').read_text()) == state
+    assert Path(paths[-1]).is_file()
     assert request['references'] == paths
     assert [a['frame_index'] for a in trajectory['anchors']] == original
     Path(replacements[1]).write_bytes(b'corrupted')

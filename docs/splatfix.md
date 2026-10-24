@@ -1304,8 +1304,10 @@ using the handoff camera rather than the displaced reference camera. Replacement
 accumulate; the first and last trajectory references remain unchanged. Original
 checkpoint repairs and all generated/debug outputs remain saved. This replacement
 also defines reconstruction ground truth: the completed replacement set is used
-at its exact handoff cameras, alongside the unchanged first and last references.
-Displaced interior reference cameras are excluded from fitting. Initial-image
+at its exact handoff cameras, alongside the unchanged first reference.
+For this consistency experiment, the original last endpoint image and its camera
+are excluded from reconstruction, along with the displaced interior references.
+The last endpoint remains saved and supplied during generation. Initial-image
 seeding is mandatory in this mode; the separate cache-preservation setting still
 controls whether its clean latent is retained. Renderer and loss settings remain
 unchanged. The subsequent ArtiFixer3D+ pass starts with the completed inference
@@ -1323,7 +1325,8 @@ camera. The repaired RGB replaces the original boundary PNG at the same global
 index; the restarted seed is masked out of generated export. This adds no duplicate
 camera or numbering gap. Distillation compacts the remaining cameras after
 excluding displaced references and records the original-to-final index mapping.
-`inference-references.json` records the exact ground-truth paths, camera indices
-and checksums; `plus-references.json` records the final plus-generation set. `inference-handoffs.json`, `plus-handoffs.json`
+`inference-references.json` records the final generation reference paths, camera
+indices and checksums. `supervision.json` records the reconstruction subset and
+excluded endpoint; `plus-references.json` records the final plus-generation set. `inference-handoffs.json`, `plus-handoffs.json`
 and the seeding logs record each restart. This mode incurs one paid image edit
 per transition per inference pass and keeps the GPU allocation while waiting.

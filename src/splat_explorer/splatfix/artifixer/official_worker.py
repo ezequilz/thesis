@@ -975,13 +975,21 @@ def reconstruction_supervision(root, request, trajectory):
     if not request.get('runtime', {}).get('handoff_generation', False):
         return unique_supervision(trajectory, request['references'])
     state = load_handoff_references(root, request, trajectory)
-    anchors = [{**anchor, 'frame_index': index}
-               for anchor, index in zip(trajectory['anchors'], state['frame_indices'])]
+    # Keep the endpoint in generation context, but exclude its inconsistent RGB
+    # and camera from this consistency experiment's fitting catalogue entirely.
+    endpoint = max(state['original_frame_indices'])
+    retained_slots = [i for i, old in enumerate(state['original_frame_indices']) if old != endpoint]
+    anchors = [{**trajectory['anchors'][i], 'frame_index': state['frame_indices'][i]}
+               for i in retained_slots]
+    references = [state['paths'][i] for i in retained_slots]
     displaced = [old for old, new in zip(state['original_frame_indices'], state['frame_indices']) if old != new]
-    transforms, supervision = unique_supervision({**trajectory, 'anchors': anchors}, state['paths'],
-                                                 excluded_indices=set(displaced))
-    supervision.update(handoff_references=state, excluded_original_reference_indices=displaced,
-                       policy='completed handoff references are ground truth at their exact cameras; displaced references excluded')
+    excluded = sorted(set(displaced) | {endpoint})
+    transforms, supervision = unique_supervision({**trajectory, 'anchors': anchors}, references,
+                                                 excluded_indices=set(excluded))
+    supervision.update(handoff_references=state, excluded_original_reference_indices=excluded,
+                       excluded_endpoint_frame_index=endpoint,
+                       reconstruction_reference_slots=retained_slots,
+                       policy='first reference and repaired handoffs are ground truth at their exact cameras; displaced references and final endpoint excluded')
     return transforms, supervision
 
 
