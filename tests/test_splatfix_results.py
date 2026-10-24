@@ -1524,3 +1524,151 @@ def test_saved_gallery_and_urls_reuse_deduplicated_artifacts(tmp_path):
     assert len(images) == 1
     assert images[0]['url'] == studio.file_url(original)
     assert len([item for item in saved['checkpoints'] if item['name'].endswith('.ckpt')]) == 1
+
+
+def test_fast_detail_skips_expensive_sections_and_unrelated_run_sizes(tmp_path, monkeypatch):
+    studio, run, _ = setup(tmp_path)
+    calls = []
+    def section(row, name):
+        calls.append(name)
+        return {name + '_loaded': True}
+    monkeypatch.setattr(studio.results, '_detail_section', section)
+    monkeypatch.setattr(studio.store, 'output_size_bytes', lambda *_: pytest.fail('Detail must not calculate run sizes'))
+    fast = studio.results.run_detail(run.name, deferred=True)
+    assert fast['run_id'] == run.name and fast['gallery']['frames'] == []
+    assert set(fast['deferred_sections']) == {'training', 'artifacts', 'previews', 'anchor'}
+    assert calls == []
+    assert studio.results.detail_section(run.name, 'anchor') == {'anchor_loaded': True}
+    assert calls == ['anchor']
+    assert studio.results.detail_section('missing', 'training') is None
+    with pytest.raises(ValueError, match='Unknown detail section'):
+        studio.results.detail_section(run.name, 'invalid')
+
+
+def test_detail_sections_are_independent(tmp_path, monkeypatch):
+    import splat_explorer.web.artifixer_anchor_chart as charts
+    import splat_explorer.web.training_logs as logs
+    studio, run, _ = setup(tmp_path)
+    monkeypatch.setattr(charts, 'anchor_chart', lambda *_: (_ for _ in ()).throw(RuntimeError('slow chart failed')))
+    monkeypatch.setattr(logs, 'export_training_logs', lambda *_: ([], None, None))
+    assert studio.results.run_detail(run.name, deferred=True)['run_id'] == run.name
+    assert studio.results.detail_section(run.name, 'training')['logs'] == []
+    assert studio.results.detail_section(run.name, 'artifacts')['saved_artifacts']['checkpoints']
+    with pytest.raises(RuntimeError, match='slow chart failed'):
+        studio.results.detail_section(run.name, 'anchor')
+
+
+def test_background_detail_sections_render_independently_and_retry():
+    import shutil
+    import subprocess
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node required for dashboard logic')
+    script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const elements=new Map(), requests=[];
+const get=id=>{if(!elements.has(id))elements.set(id,{addEventListener(){}});return elements.get(id)};
+const context=vm.createContext({document:{getElementById:get,addEventListener(){}},window:{addEventListener(){}},
+location:{search:'?id=job'},URLSearchParams,ResizeObserver:class{observe(){}},
+fetch:url=>new Promise((resolve,reject)=>requests.push({url,resolve,reject})),clearTimeout(){},setTimeout(){},assert});
+vm.runInContext(fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0],context);
+(async()=>{
+vm.runInContext(`
+let rendered=[];showAnchor=r=>rendered.push('anchor');showLogs=r=>rendered.push('logs');showTraining=r=>rendered.push('training');
+currentDetail={deferred_sections:['anchor','training']};loadDetailSections('job',currentDetail);
+loadDetailSections('job',currentDetail);
+`,context);
+assert.equal(requests.length,3); // initial metadata plus exactly one request per section
+requests.find(r=>r.url.includes('section=training')).resolve({ok:true,json:async()=>({logs:[]})});
+await new Promise(setImmediate);
+vm.runInContext(`assert.equal(rendered.join(','),'logs,training');assert.ok($('backgroundStatus').textContent.includes('anchor'));`,context);
+requests.find(r=>r.url.includes('section=anchor')).reject(Error('failed'));
+await new Promise(setImmediate);
+vm.runInContext(`assert.ok($('backgroundStatus').textContent.includes('Refresh to retry'));loadDetailSections('job',currentDetail);`,context);
+requests.filter(r=>r.url.includes('section=anchor')).at(-1).resolve({ok:true,json:async()=>({anchor_chart:{url:'/chart'}})});
+await new Promise(setImmediate);
+vm.runInContext(`assert.ok(rendered.includes('anchor'));assert.equal(currentDetail.anchor_chart.url,'/chart');`,context);
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+    subprocess.run([node, '-e', script, 'src/splat_explorer/web/static/splatfix_result_detail.html'], check=True)
+
+
+def test_catalog_cache_returns_cards_without_waiting_for_size_scan(tmp_path, monkeypatch):
+    import threading
+    studio, _, _ = setup(tmp_path)
+    catalog = studio.results
+    started, finish = threading.Event(), threading.Event()
+    calls = []
+    def entries(*, cached_sizes_only=False):
+        calls.append(cached_sizes_only)
+        if cached_sizes_only:
+            return [{'id': 'run', 'output_size_bytes': None}]
+        started.set()
+        assert finish.wait(5)
+        return [{'id': 'run', 'output_size_bytes': 42}]
+    monkeypatch.setattr(catalog, 'entries', entries)
+    try:
+        first = catalog.catalog_snapshot()
+        assert started.wait(5)
+        assert first['results'][0]['output_size_bytes'] is None
+        assert first['refreshing']
+        first['results'].clear()  # callers cannot mutate the cached snapshot
+        again = catalog.catalog_snapshot(refresh=True)
+        assert again['results'][0]['id'] == 'run'
+        assert calls == [True, False]  # concurrent requests share one refresh
+    finally:
+        finish.set()
+        # Join only the worker belonging to this catalog test.
+        for thread in threading.enumerate():
+            if thread.name == 'results-catalog':
+                thread.join(5)
+    assert catalog.catalog_snapshot()['results'][0]['output_size_bytes'] == 42
+    assert calls == [True, False]
+
+
+def test_catalog_invalidated_during_refresh_cannot_publish_old_rows(tmp_path, monkeypatch):
+    studio, _, _ = setup(tmp_path)
+    catalog = studio.results
+    catalog._catalog_rows = [{'id': 'old'}]
+    revision = catalog._catalog_revision
+    def entries():
+        catalog.invalidate_catalog()
+        return [{'id': 'deleted'}]
+    monkeypatch.setattr(catalog, 'entries', entries)
+    catalog._refresh_catalog(revision)
+    assert catalog._catalog_rows is None
+    assert not catalog._catalog_refreshing
+
+
+def test_catalog_refresh_failure_keeps_last_good_snapshot(tmp_path, monkeypatch):
+    studio, _, _ = setup(tmp_path)
+    catalog = studio.results
+    catalog._catalog_rows = [{'id': 'saved'}]
+    monkeypatch.setattr(catalog, 'entries', lambda: (_ for _ in ()).throw(OSError('transfer in progress')))
+    catalog._refresh_catalog(catalog._catalog_revision)
+    assert catalog._catalog_rows == [{'id': 'saved'}]
+    assert catalog._catalog_error and not catalog._catalog_refreshing
+
+
+def test_cached_size_lookup_does_not_walk_run_files(tmp_path, monkeypatch):
+    import os
+    studio, run, _ = setup(tmp_path)
+    studio.store.set_status(run.name, 'stopped')
+    monkeypatch.setattr(os, 'scandir', lambda *_: pytest.fail('Cold list must not scan output trees'))
+    assert studio.store.output_size_bytes(run.name, cached_only=True) is None
+
+
+def test_card_preview_resolves_only_first_verified_input(tmp_path, monkeypatch):
+    studio, _, root = setup(tmp_path)
+    pred = root / 'inference/splatfix/frames/batch_0000/pred'
+    pred.mkdir(parents=True)
+    for index in range(100):
+        (pred / f'{index}.png').write_bytes(b'image')
+    (root / 'supervision.json').write_text(json.dumps({'groups': [
+        {'source_index': 0, 'reference': True}, {'source_index': 2}, {'source_index': 10}]}))
+    urls = []
+    monkeypatch.setattr(studio, 'file_url', lambda path: urls.append(path.name) or '/' + path.name)
+    gallery, allowed = studio.results._reconstruction_gallery(root / 'result.json', {}, limit=1)
+    assert allowed == {2, 10}
+    assert [frame['index'] for frame in gallery['frames']] == [2]
+    assert urls == ['2.png']

@@ -20,11 +20,13 @@ def file_url(run_id, relative):
     return '/api/splatfix/worldexplorer/file?' + urlencode({'id': run_id, 'path': str(relative)})
 
 
-def entries(catalog):
+def entries(catalog, *, key=None):
     base = Path(catalog.cfg.output.dir).resolve() / 'worldexplorer'
     rows = []
     for path in sorted(base.glob('we_*/job.json')):
         run_id = path.parent.name
+        if key and run_id != key:
+            continue
         if not RUN_ID.fullmatch(run_id) or path.parent.is_symlink() or not safe_file(path.parent, path):
             continue
         try:
@@ -60,17 +62,25 @@ def entries(catalog):
     return rows
 
 
-def run_detail(catalog, row):
+def run_detail(catalog, row, *, deferred=False, section=None):
     run_id = row['run_id']
     root = Path(catalog.cfg.output.dir).resolve() / 'worldexplorer' / run_id / 'results'
     row.pop('_manifest')
     row.pop('_paths')
+    if deferred:
+        row.update(deferred_sections=['media', 'training'],
+                   gallery={'frames': [], 'verified_inputs': True, 'reference_count': None},
+                   reference_images=[], original_rgb_images=[], comparison_gallery=[])
+        return row
     groups, videos, logs = {}, [], []
-    for path in sorted(root.rglob('*')):
+    paths = sorted(root.rglob('*.log')) + sorted(root.rglob('*.txt')) if section == 'training' else sorted(root.rglob('*'))
+    for path in paths:
         if not safe_file(root, path) or '.training-metrics' in path.parts:
             continue
         relative = path.relative_to(root)
         item = {'name': str(relative), 'label': str(relative), 'url': file_url(run_id, relative)}
+        if section == 'training' and path.suffix.lower() not in {'.log', '.txt'}:
+            continue
         if path.suffix.lower() in IMAGES:
             group = groups.setdefault(str(relative.parent), [])
             group.append({**item, 'index': len(group)})
@@ -79,27 +89,32 @@ def run_detail(catalog, row):
         elif path.suffix.lower() in {'.log', '.txt'}:
             logs.append({**item, 'partial': False, 'size': path.stat().st_size,
                          'modified': path.stat().st_mtime_ns})
-    try:
-        exports, chart, error = export_training_logs(root, event_subdir='nerfstudio_output')
-    except OSError as exc:
-        exports, chart, error = [], None, str(exc)
-    for source, path in exports:
-        logs.append({'name': str(source.relative_to(root)) + ' (decoded scalars)',
-                     'url': file_url(run_id, path.relative_to(root)), 'partial': False,
-                     'size': path.stat().st_size, 'modified': path.stat().st_mtime_ns})
-    if chart:
-        row['training_metrics'] = {'url': file_url(run_id, chart.relative_to(root)),
-                                   'modified': chart.stat().st_mtime_ns,
-                                   'name': 'WorldExplorer · TensorBoard training scalars', 'format': 'scalars'}
-    if error:
-        row['training_metrics_error'] = error
+    if section != 'media':
+        row.update(training_metrics=None, training_metrics_error=None)
+        try:
+            exports, chart, error = export_training_logs(root, event_subdir='nerfstudio_output')
+        except OSError as exc:
+            exports, chart, error = [], None, str(exc)
+        for source, path in exports:
+            logs.append({'name': str(source.relative_to(root)) + ' (decoded scalars)',
+                         'url': file_url(run_id, path.relative_to(root)), 'partial': False,
+                         'size': path.stat().st_size, 'modified': path.stat().st_mtime_ns})
+        if chart:
+            row['training_metrics'] = {'url': file_url(run_id, chart.relative_to(root)),
+                                       'modified': chart.stat().st_mtime_ns,
+                                       'name': 'WorldExplorer · TensorBoard training scalars', 'format': 'scalars'}
+        if error:
+            row['training_metrics_error'] = error
+    if section == 'training':
+        return {key: value for key, value in {**row, 'logs': logs}.items()
+                if key in ('logs', 'training_metrics', 'training_metrics_error')}
     ordered = sorted(groups, key=lambda name: ('selected_for_vggt' not in name, name))
     row.update(worldexplorer={'image_groups': [{'name': name, 'frames': groups[name]} for name in ordered],
                               'videos': videos}, logs=logs,
                gallery={'frames': [], 'verified_inputs': True, 'stage': 'WorldExplorer · saved images',
                         'reference_count': None, 'expected_count': None},
                reference_images=[], original_rgb_images=[], comparison_gallery=[])
-    return row
+    return {key: row[key] for key in ('worldexplorer',)} if section == 'media' else row
 
 
 def review_views(catalog, row):

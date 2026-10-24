@@ -33,12 +33,12 @@ def validate_strength(strength):
 
 
 def vignette_profile(size):
-    if size not in ('larger', 'smaller'):
-        raise ValueError('handoff_vignette_size must be larger or smaller')
+    if size not in ('larger', 'smaller', 'very_large'):
+        raise ValueError('handoff_vignette_size must be larger, smaller or very_large')
     return {'size': size, 'shape': 'ellipse', 'falloff': 'smoothstep',
-            'inner_radius': .70 if size == 'larger' else .5, 'outer_radius': 1.,
-            'axis_scale_x': .72 if size == 'larger' else 1., 'axis_scale_y': 1.,
-            'edge_strength_percent': 95 if size == 'larger' else 80}
+            'inner_radius': .5 if size == 'smaller' else .70, 'outer_radius': 1.,
+            'axis_scale_x': 1. if size == 'smaller' else .72, 'axis_scale_y': 1.15 if size == 'very_large' else 1.,
+            'edge_strength_percent': 80 if size == 'smaller' else 95}
 
 
 def vignette_strength(height, width, strength, size='larger', edge_strength=None):
@@ -47,7 +47,7 @@ def vignette_strength(height, width, strength, size='larger', edge_strength=None
     profile = vignette_profile(size)
     x = np.linspace(-1, 1, width) if width > 1 else np.zeros(1)
     y = np.linspace(-1, 1, height) if height > 1 else np.zeros(1)
-    radius = np.sqrt(y[:, None] ** 2 + (x[None, :] / profile['axis_scale_x']) ** 2)
+    radius = np.sqrt((y[:, None] / profile['axis_scale_y']) ** 2 + (x[None, :] / profile['axis_scale_x']) ** 2)
     inner = profile['inner_radius']
     t = np.clip((radius - inner) / (1 - inner), 0, 1)
     feather = t * t * (3 - 2 * t)

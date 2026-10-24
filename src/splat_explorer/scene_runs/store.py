@@ -17,6 +17,7 @@ import stat
 import tempfile
 import threading
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -183,14 +184,17 @@ class SceneRunStore:
             ids[a], ids[b] = ids[b], ids[a]
             _atomic_write_json(self.root / 'queue-order.json', {'run_ids': ids})
 
-    def output_size_bytes(self, run_id: str, *, refresh: bool = False) -> int | None:
+    def output_size_bytes(self, run_id: str, *, refresh: bool = False, cached_only: bool = False) -> int | None:
         """Snapshot an inactive run's regular files once, persisting across restarts.
 
         The cache is separate from worker-owned status to avoid overwriting
         progress. A changed lifecycle state invalidates the snapshot. Symlinks
         and the cache itself are excluded; failed scans are retried next time.
+        cached_only returns None on a miss without traversing the output tree.
         """
-        with self._output_size_lock:
+        # Cache files are atomically replaced. Metadata-only readers must not
+        # wait behind a potentially long recursive size scan.
+        with nullcontext() if cached_only else self._output_size_lock:
             run = self.get_run(run_id)
             if run.state.status not in (RunStatus.COMPLETED, RunStatus.ERROR, RunStatus.STOPPED, RunStatus.GPU_EXPIRED):
                 return None
@@ -208,6 +212,9 @@ class SceneRunStore:
                     return size
             except (OSError, ValueError):
                 pass
+
+            if cached_only:
+                return None
 
             inodes = {}
 

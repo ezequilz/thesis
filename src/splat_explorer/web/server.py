@@ -1332,7 +1332,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if self.command == "GET" and path == "/api/splatfix":
                 self._send_json(studio.snapshot())
             elif self.command == "GET" and path == "/api/splatfix/results":
-                self._send_json({"results": studio.results.entries()})
+                query = parse_qs(urlsplit(self.path).query)
+                self._send_json(studio.results.catalog_snapshot(refresh=query.get("refresh") == ["1"]))
             elif self.command == "POST" and path == "/api/splatfix/results/delete-hidden":
                 if not isinstance(body, dict):
                     raise ValueError("Request must be an object")
@@ -1445,8 +1446,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, **result})
             elif self.command == "GET" and path == "/api/splatfix/results/run":
                 key = parse_qs(urlsplit(self.path).query).get("id", [""])[0]
-                result = studio.results.run_detail(key)
-                self._send_json(result or {"error": "Result not found"}, 200 if result else 404)
+                query = parse_qs(urlsplit(self.path).query)
+                section = query.get("section", [None])[0]
+                if section and section not in studio.results.DETAIL_SECTIONS:
+                    self._send_json({"error": "Unknown detail section"}, 400)
+                    return
+                result = (studio.results.detail_section(key, section) if section else
+                          studio.results.run_detail(key, deferred=query.get("deferred") == ["1"]))
+                self._send_json(result if result is not None else {"error": "Result not found"}, 200 if result is not None else 404)
             elif path == "/api/splatfix/results/viser":
                 query = parse_qs(urlsplit(self.path).query)
                 key = query.get("id", [""])[0]
@@ -1506,6 +1513,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "not found"}, 404)
         except (ValueError, TypeError, KeyError, FileNotFoundError) as exc:
             self._send_json({"ok": False, "error": str(exc)}, 400)
+        finally:
+            if self.command == "POST" and path != "/api/splatfix/results/viser":
+                self.app.splatfix.results.invalidate_catalog()
 
     def _serve_scene_runs_post(self, path: str, body: dict) -> None:
         from .scene_run_studio import SceneRunValidationError

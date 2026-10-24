@@ -42,7 +42,7 @@ Promise.resolve(vm.runInContext(`(async()=>{
   $('gpt-image-context').value='closest_repaired_image';
   assert.equal(payload('repair').handoff_add_noise,true);
   assert.equal(payload('repair').handoff_noise_strength,25);
-  assert.equal(payload('repair').handoff_vignette_size,'larger');
+  assert.equal(payload('repair').handoff_vignette_size,'very_large');
   assert.equal(payload('repair').handoff_vignette_edge_strength,95);
   $('handoff-vignette-size').value='smaller';
   assert.equal(payload('repair').handoff_vignette_size,'smaller');
@@ -362,7 +362,7 @@ def test_result_gallery_polling_stops_after_images_or_terminal_state():
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0];
 const elements=new Map();
-const get=id=>{if(!elements.has(id))elements.set(id,{value:'',textContent:'',innerHTML:'',addEventListener(){},querySelector(){return{}},querySelectorAll(){return[]},before(){},after(){},replaceWith(){},setAttribute(){},open:false});return elements.get(id)};
+const get=id=>{if(!elements.has(id))elements.set(id,{value:'',textContent:'',innerHTML:'',addEventListener(){},querySelector(){return{}},querySelectorAll(){return[]},before(){},after(){},replaceWith(){},replaceChildren(){},setAttribute(){},open:false});return elements.get(id)};
 let calls=0,timer=null,lastDelay=null;
 let result={run_id:'run',status:'running',kind:'ArtiFixer3D',metrics:{},gallery:{frames:[]}};
 const document={getElementById:get,querySelectorAll:()=>[],hidden:false,addEventListener(){}};
@@ -405,7 +405,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
    get('oracleInit').value='source_splat';get('oracleAttentionBatching').value=mode;
    context.fetch=async(url,options)=>{
      assert.equal(url,'/api/splatfix/results/reconstruct-artifixer');
-     assert.deepEqual(JSON.parse(options.body),{id:'run',initialization:'source_splat',oracle_attention_batching:mode});
+     assert.deepEqual(JSON.parse(options.body),{id:'run',initialization:'source_splat',oracle_attention_batching:mode,oracle_artifixer_input:'',oracle_artifixer_reference_assignment:''});
      return {ok:true,json:async()=>({ok:true,run:{run_id:'new-run'}})};
    };
    await get('oracleStart').onclick();

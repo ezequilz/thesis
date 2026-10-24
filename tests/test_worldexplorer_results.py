@@ -46,6 +46,7 @@ def test_worldexplorer_uses_shared_catalog_media_endpoints_and_viser(tmp_path):
         query = parse_qs(urlsplit(url).query)
         assert api.file(query['id'][0], query['path'][0]).is_file()
     viewer = ResultViser(studio.results, background=False)
+    viewer.detail(ID)  # Resolve the review session before reading cached PLY paths.
     assert viewer.ply_paths(ID)['repaired'].name == 'splat.ply'
     assert studio.results.review_views(ID) == []
     studio.results.set_hidden(ID, True)
@@ -165,7 +166,7 @@ def test_worldexplorer_gallery_uses_existing_popup_and_folder_navigation():
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const elements=new Map();
 const get=id=>{if(!elements.has(id))elements.set(id,{style:{},addEventListener(){},showModal(){this.open=true}});return elements.get(id)};
-const context=vm.createContext({document:{getElementById:get,querySelectorAll:()=>[]},
+const context=vm.createContext({document:{getElementById:get,querySelectorAll:()=>[],addEventListener(){}},window:{addEventListener(){}},
 location:{search:''},URLSearchParams,ResizeObserver:class{observe(){}},
 fetch:()=>new Promise(()=>{}),clearTimeout(){},setTimeout(){},assert});
 vm.runInContext(fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0],context);
@@ -186,3 +187,15 @@ showWorld({});assert.equal($('worldMedia').hidden,true);
 `,context);
 '''
     subprocess.run(['node', '-e', script, 'src/splat_explorer/web/static/splatfix_result_detail.html'], check=True)
+
+
+def test_worldexplorer_fast_details_defer_media_and_training(tmp_path, monkeypatch):
+    import splat_explorer.web.worldexplorer_details as details
+    studio, _, _ = setup(tmp_path)
+    monkeypatch.setattr(details, 'export_training_logs', lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('slow decoder')))
+    fast = studio.results.run_detail(ID, deferred=True)
+    assert fast['deferred_sections'] == ['media', 'training']
+    assert fast['gallery']['frames'] == []
+    media = studio.results.detail_section(ID, 'media')
+    assert media['worldexplorer']['image_groups']
+    assert 'training_metrics' not in media

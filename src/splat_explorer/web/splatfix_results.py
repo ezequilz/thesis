@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import tempfile
 import shutil
 import threading
+import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -23,6 +26,56 @@ class ResultCatalog:
         self._visor = None
         self._visibility_lock = threading.Lock()
         self._run_storage_lock = threading.Lock()
+        self._catalog_lock = threading.Lock()
+        self._catalog_rows = None
+        self._catalog_time = 0.0
+        self._catalog_revision = 0
+        self._catalog_refreshing = False
+        self._catalog_error = False
+
+    def invalidate_catalog(self):
+        """Discard snapshots after a mutation, including any in-flight old result."""
+        with self._catalog_lock:
+            self._catalog_revision += 1
+            self._catalog_rows = None
+            self._catalog_time = 0.0
+
+    def catalog_snapshot(self, *, refresh=False):
+        """Serve cached cards immediately; one worker updates expensive file sizes.
+
+        A cold request reads metadata and existing size snapshots only. Completed
+        snapshots live for 15 seconds; stale cards remain usable during refresh.
+        """
+        with self._catalog_lock:
+            if self._catalog_rows is None:
+                self._catalog_rows = self.entries(cached_sizes_only=True)
+                self._catalog_time = 0.0
+            stale = refresh or not self._catalog_time or time.monotonic() - self._catalog_time >= 15
+            if stale and not self._catalog_refreshing:
+                self._catalog_refreshing = True
+                self._catalog_error = False
+                threading.Thread(target=self._refresh_catalog,
+                                 args=(self._catalog_revision,), daemon=True,
+                                 name='results-catalog').start()
+            return {'results': deepcopy(self._catalog_rows),
+                    'refreshing': self._catalog_refreshing,
+                    'refresh_error': self._catalog_error}
+
+    def _refresh_catalog(self, revision):
+        try:
+            rows = self.entries()
+        except Exception:
+            logging.getLogger(__name__).exception('Could not refresh results catalog')
+            # Preserve the last successful cards and retry on the next poll.
+            with self._catalog_lock:
+                self._catalog_refreshing = False
+                self._catalog_error = True
+            return
+        with self._catalog_lock:
+            if revision == self._catalog_revision:
+                self._catalog_rows = rows
+                self._catalog_time = time.monotonic()
+            self._catalog_refreshing = False
 
     def reconstruct_artifixer(self, key, initialization='source_splat', *, oracle_attention_batching='within_trajectory',
                               oracle_artifixer_input='new_only', oracle_artifixer_reference_assignment='trajectory'):
@@ -319,7 +372,7 @@ class ResultCatalog:
             self._visor = ResultViser(self)
         return self._visor
 
-    def entries(self, *, private=False, review_key=None):
+    def entries(self, *, private=False, review_key=None, detail_key=None, cached_sizes_only=False):
         rows = []
         for run in self.studio.store.list_runs():
             root = Path(run.path)
@@ -332,6 +385,11 @@ class ResultCatalog:
             candidates += sorted(p for p in (root / 'gpu/results').glob('*/input-preview.json')
                                  if not any((p.parent / name).is_file() for name in
                                             ('result.json', 'partial-result.json', 'inference-preview.json')))
+            if detail_key and detail_key != run.run_id:
+                if not any(p.resolve().is_relative_to(self.studio.root.resolve()) and any(
+                    hashlib.sha256(str(p.with_name(name).resolve().relative_to(self.studio.root.resolve())).encode()).hexdigest()[:20] == detail_key
+                    for name in ('result.json', 'partial-result.json')) for p in candidates):
+                    continue
             if review_key and review_key != run.run_id:
                 candidates = [p for p in candidates
                     if p.resolve().is_relative_to(self.studio.root.resolve()) and any(
@@ -342,7 +400,7 @@ class ResultCatalog:
             record = run.to_dict()
             record['custom_name'] = self.read_name(run.run_id)
             record['color'] = self.read_color(run.run_id)
-            record['output_size_bytes'] = None if review_key else self.studio.store.output_size_bytes(run.run_id)
+            record['output_size_bytes'] = None if review_key or detail_key else self.studio.store.output_size_bytes(run.run_id, cached_only=cached_sizes_only)
             comments_path = root / 'comments.md'
             try:
                 record['has_notes'] = not comments_path.is_symlink() and bool(comments_path.read_text(encoding='utf-8').strip())
@@ -420,7 +478,8 @@ class ResultCatalog:
                 rows.append(self._row(record['run_id'], record, original if original.is_file() else None,
                     repaired if repaired.is_file() else None, {}, {}, None, None))
         from .worldexplorer_details import entries as worldexplorer_entries
-        rows.extend(worldexplorer_entries(self))
+        if not detail_key or detail_key.startswith('we_'):
+            rows.extend(worldexplorer_entries(self, key=detail_key))
         visibility = self.visibility_records()
         for row in rows:
             row['hidden'] = visibility.get(row['run_id'], {}).get('hidden', False)
@@ -444,7 +503,7 @@ class ResultCatalog:
         if manifest:
             preview = self.studio.plus_previews(manifest, result)
             if not preview:
-                gallery, _ = self._reconstruction_gallery(manifest, result)
+                gallery, _ = self._reconstruction_gallery(manifest, result, limit=1)
                 preview = [frame['url'] for frame in gallery['frames'][:1]]
                 preview_label = 'img 1 preview'
             if not preview:
@@ -494,7 +553,7 @@ class ResultCatalog:
                 'limitation': result.get('limitation'), 'config': config,
                 '_manifest': manifest, '_paths': {'original': original, 'repaired': repaired}}
 
-    def _reconstruction_gallery(self, manifest, result):
+    def _reconstruction_gallery(self, manifest, result, *, limit=None):
         """Share input selection and ordering between gallery and card preview."""
         root = manifest.parent
         gallery = {'frames': [], 'reference_count': None, 'verified_inputs': False,
@@ -538,22 +597,27 @@ class ResultCatalog:
                         allowed -= set(refs)
                         gallery['verified_inputs'] = True
         if prediction and prediction.is_dir():
-            frames = [p for p in prediction.glob('*.png') if p.stem.isdigit()
-                      and p.resolve().is_relative_to(root.resolve())]
+            frames = [p for p in prediction.glob('*.png') if p.stem.isdigit()]
+            safe_root = root.resolve()
             for frame in sorted(frames, key=lambda p: int(p.stem)):
                 index = int(frame.stem)
-                if allowed is None or index in allowed:
+                if (allowed is None or index in allowed) and frame.resolve().is_relative_to(safe_root):
                     gallery['frames'].append({'index': index, 'name': frame.name,
                                               'url': self.studio.file_url(frame)})
+                    if limit is not None and len(gallery['frames']) >= limit:
+                        break
         gallery['count'] = len(gallery['frames'])
         gallery['expected_count'] = len(allowed) if allowed is not None else None
         return gallery, allowed
 
-    def run_detail(self, key):
+    def run_detail(self, key, *, deferred=False):
         """List first-pass inputs without reading pixel data or trusting remote paths."""
         row = self.detail(key)
         if row is None:
             return None
+        if row['kind'] == 'WorldExplorer':
+            from .worldexplorer_details import run_detail
+            return run_detail(self, row, deferred=deferred)
         row['comments'] = self.read_comments(row['run_id'])
         settings_path = self.studio.root / row['run_id'] / 'settings.json'
         row['settings_snapshot'] = read_json(settings_path, None)
@@ -574,9 +638,6 @@ class ResultCatalog:
                 'name': path.name, 'path': str(path.relative_to(run_root)),
                 'url': self.studio.file_url(path), 'snapshot': read_json(path, None),
             })
-        if row['kind'] == 'WorldExplorer':
-            from .worldexplorer_details import run_detail
-            return run_detail(self, row)
         if row['kind'] == 'ArtiFixer3D':
             from ..splatfix.artifixer.repeat_repair import repeat_inputs
             try:
@@ -586,6 +647,11 @@ class ResultCatalog:
                     ('Rebuilds the camera trajectory from saved checkpoint poses and recorded interpolation settings.' if not orbit else ''))}
             except (ValueError, OSError, KeyError, TypeError) as exc:
                 row['artifixer_repeat'] = {'ready': False, 'reason': str(exc)}
+        if deferred:
+            row['deferred_sections'] = ['training', 'artifacts', 'previews', 'anchor']
+        else:
+            for section in ('training', 'artifacts', 'previews', 'anchor'):
+                row.update(self._detail_section(row, section))
         source_row = dict(row)
         manifest = row.pop('_manifest')
         row.pop('_paths')
@@ -604,90 +670,13 @@ class ResultCatalog:
         row['original_rgb_images'] = []
         row['stage_comparison'] = None
         row['comparison_gallery'] = []
-        # Keep full logs separate from the bounded live-worker snapshot.
-        run_root = (self.studio.root / row['run_id']).resolve()
-        # Checkpoint downloads can precede every result/preview manifest.
-        # Keep these separate from verified reconstruction or inference outputs.
-        row['saved_artifacts'] = {'image_groups': [], 'checkpoints': []}
-        saved = row['saved_artifacts']
-        groups = {}
-        seen_artifacts = set()
-        gpu = run_root / 'gpu'
-        for path in sorted(gpu.rglob('*')):
-            if path.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.pt', '.pth', '.ckpt', '.ply', '.json'):
-                continue
-            resolved = path.resolve()
-            if not resolved.is_relative_to(run_root) or not resolved.is_file():
-                continue
-            relative = path.relative_to(gpu)
-            url = self.studio.file_url(path)
-            info = resolved.stat()
-            identity = (info.st_dev, info.st_ino)
-            if identity in seen_artifacts:
-                continue
-            seen_artifacts.add(identity)
-            if path.suffix.lower() in ('.pt', '.pth', '.ckpt', '.ply') or path.name == 'checkpoint.json':
-                saved['checkpoints'].append({'name': str(relative), 'url': url})
-            elif path.suffix.lower() in ('.png', '.jpg', '.jpeg'):
-                name = str(relative.parent)
-                groups.setdefault(name, []).append({'name': path.name, 'url': url})
-        saved['image_groups'] = [{'name': name, 'images': images} for name, images in groups.items()]
-        candidates = list(run_root.glob('*.log')) + list((run_root / 'gpu').glob('*.log'))
-        decoded_names = {}
-        if manifest:
-            result_root = manifest.parent.absolute()
-            candidates += [p for p in result_root.rglob('*.log')
-                           if '.training-metrics' not in p.parts and p.resolve().is_relative_to(result_root.resolve())]
-            from .training_logs import export_training_logs
-            try:
-                exports, chart, error = export_training_logs(result_root)
-            except OSError as exc:
-                exports, chart, error = [], None, f'Training metric export unavailable: {exc}'
-            for source, exported in exports:
-                candidates.append(exported)
-                decoded_names[exported] = str(source.relative_to(run_root)) + ' (decoded scalars)'
-            if chart:
-                row['training_metrics'] = {
-                    'url': self.studio.file_url(chart),
-                    'modified': chart.stat().st_mtime_ns,
-                    'name': 'ArtiFixer · TensorBoard training scalars',
-                    'format': 'scalars',
-                }
-            if error:
-                row['training_metrics_error'] = error
-        else:
-            candidates += list((run_root / 'gpu/results').glob('*/*.log'))
-        row['logs'] = []
-        seen = set()
-        for path in sorted(candidates, key=lambda p: (p.name == 'live-stage.log', str(p))):
-            resolved = path.resolve()
-            if resolved in seen or not resolved.is_relative_to(run_root) or not resolved.is_file():
-                continue
-            seen.add(resolved)
-            stat = resolved.stat()
-            row['logs'].append({
-                'name': decoded_names.get(path, str(path.relative_to(run_root))),
-                'url': self.studio.file_url(resolved),
-                'partial': path.name == 'live-stage.log',
-                'size': stat.st_size,
-                'modified': stat.st_mtime_ns,
-            })
         if row['kind'] == 'OracleGS' or (manifest and read_json(manifest, {}).get('reconstruction_method') == 'oraclegs'):
-            from .oraclegs_details import build_details
-            pending = manifest or self.studio.root / row['run_id'] / 'gpu/results/oraclegs/result.json'
-            row['oraclegs'] = build_details(self.studio, pending, read_json(manifest, {}) if manifest else {})
             return row
         if manifest is None:
-            if row['kind'].startswith('G4Splat'):
-                from .g4splat_details import build_details
-                pending = self.studio.root / row['run_id'] / 'gpu/results/g4splat/result.json'
-                row['g4splat'] = build_details(self.studio, pending, {})
             return row
         result = read_json(manifest, {})
         root = manifest.parent
         if result.get('reconstruction_method') == 'g4splat' or row['kind'].startswith('G4Splat'):
-            from .g4splat_details import build_details
-            row['g4splat'] = build_details(self.studio, manifest, result)
             return row
         gallery, allowed = self._reconstruction_gallery(manifest, result)
         row['gallery'] = gallery
@@ -710,12 +699,6 @@ class ResultCatalog:
             row['artifixer_oraclegs'] = {'ready':False, 'reason':str(exc)}
         from ..splatfix.resolution import PROFILE_LABELS
         recorded_request = read_json(root / 'request.json', {})
-        from .artifixer_anchor_chart import anchor_chart
-        try:
-            row['anchor_chart'] = anchor_chart(self.studio, manifest, row['run_id'])
-        except (OSError, ValueError, KeyError, TypeError):
-            # Partial downloads and reduced archives may not contain the arrays.
-            row['anchor_chart'] = None
         profile = (result.get('resolution_policy') or {}).get('profile') or recorded_request.get('resolution_profile')
         row['resolution_setting'] = PROFILE_LABELS.get(profile, 'Early original resolution · unversioned run')
         def local(raw):
@@ -842,6 +825,111 @@ class ResultCatalog:
                 gallery['reference_count'] = len(row['reference_images'])
         return row
 
+    DETAIL_SECTIONS = frozenset(('training', 'artifacts', 'previews', 'anchor', 'media'))
+
+    def detail_section(self, key, section):
+        """Load one independent expensive section without rebuilding other sections."""
+        if section not in self.DETAIL_SECTIONS:
+            raise ValueError('Unknown detail section')
+        row = self.detail(key)
+        return self._detail_section(row, section) if row else None
+
+    def _detail_section(self, source, section):
+        if source['kind'] == 'WorldExplorer':
+            from .worldexplorer_details import run_detail
+            return run_detail(self, dict(source), section=section) if section in ('media', 'training') else {}
+        row = {}
+        manifest = source.get('_manifest')
+        run_root = (self.studio.root / source['run_id']).resolve()
+        if section == 'artifacts':
+            # Checkpoint downloads can precede every result/preview manifest.
+            # Keep these separate from verified reconstruction or inference outputs.
+            row['saved_artifacts'] = {'image_groups': [], 'checkpoints': []}
+            saved = row['saved_artifacts']
+            groups = {}
+            seen_artifacts = set()
+            gpu = run_root / 'gpu'
+            for path in sorted(gpu.rglob('*')):
+                if path.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.pt', '.pth', '.ckpt', '.ply', '.json'):
+                    continue
+                resolved = path.resolve()
+                if not resolved.is_relative_to(run_root) or not resolved.is_file():
+                    continue
+                relative = path.relative_to(gpu)
+                url = self.studio.file_url(path)
+                info = resolved.stat()
+                identity = (info.st_dev, info.st_ino)
+                if identity in seen_artifacts:
+                    continue
+                seen_artifacts.add(identity)
+                if path.suffix.lower() in ('.pt', '.pth', '.ckpt', '.ply') or path.name == 'checkpoint.json':
+                    saved['checkpoints'].append({'name': str(relative), 'url': url})
+                elif path.suffix.lower() in ('.png', '.jpg', '.jpeg'):
+                    name = str(relative.parent)
+                    groups.setdefault(name, []).append({'name': path.name, 'url': url})
+            saved['image_groups'] = [{'name': name, 'images': images} for name, images in groups.items()]
+        elif section == 'training':
+            row.update(training_metrics=None, training_metrics_error=None)
+            candidates = list(run_root.glob('*.log')) + list((run_root / 'gpu').glob('*.log'))
+            decoded_names = {}
+            if manifest:
+                result_root = manifest.parent.absolute()
+                candidates += [p for p in result_root.rglob('*.log')
+                               if '.training-metrics' not in p.parts and p.resolve().is_relative_to(result_root.resolve())]
+                from .training_logs import export_training_logs
+                try:
+                    exports, chart, error = export_training_logs(result_root)
+                except OSError as exc:
+                    exports, chart, error = [], None, f'Training metric export unavailable: {exc}'
+                for source, exported in exports:
+                    candidates.append(exported)
+                    decoded_names[exported] = str(source.relative_to(run_root)) + ' (decoded scalars)'
+                if chart:
+                    row['training_metrics'] = {
+                        'url': self.studio.file_url(chart),
+                        'modified': chart.stat().st_mtime_ns,
+                        'name': 'ArtiFixer · TensorBoard training scalars',
+                        'format': 'scalars',
+                    }
+                if error:
+                    row['training_metrics_error'] = error
+            else:
+                candidates += list((run_root / 'gpu/results').glob('*/*.log'))
+            row['logs'] = []
+            seen = set()
+            for path in sorted(candidates, key=lambda p: (p.name == 'live-stage.log', str(p))):
+                resolved = path.resolve()
+                if resolved in seen or not resolved.is_relative_to(run_root) or not resolved.is_file():
+                    continue
+                seen.add(resolved)
+                stat = resolved.stat()
+                row['logs'].append({
+                    'name': decoded_names.get(path, str(path.relative_to(run_root))),
+                    'url': self.studio.file_url(resolved),
+                    'partial': path.name == 'live-stage.log',
+                    'size': stat.st_size,
+                    'modified': stat.st_mtime_ns,
+                })
+        elif section == 'anchor' and manifest and source['kind'].startswith('ArtiFixer'):
+            from .artifixer_anchor_chart import anchor_chart
+            try:
+                row['anchor_chart'] = anchor_chart(self.studio, manifest, source['run_id'])
+            except (OSError, ValueError, KeyError, TypeError):
+                # Partial downloads and reduced archives may not contain the arrays.
+                row['anchor_chart'] = None
+        elif section == 'previews':
+            result = read_json(manifest, {}) if manifest else {}
+            method = result.get('reconstruction_method')
+            if source['kind'] == 'OracleGS' or method == 'oraclegs':
+                from .oraclegs_details import build_details
+                pending = manifest or run_root / 'gpu/results/oraclegs/result.json'
+                row['oraclegs'] = build_details(self.studio, pending, result)
+            elif source['kind'].startswith('G4Splat') or method == 'g4splat':
+                from .g4splat_details import build_details
+                pending = manifest or run_root / 'gpu/results/g4splat/result.json'
+                row['g4splat'] = build_details(self.studio, pending, result)
+        return row
+
     def review_views(self, key, *, row=None):
         from .review_cameras import checkpoint_views, benchmark_views, historical_views
         row = row if row is not None else self.detail(key)
@@ -865,7 +953,7 @@ class ResultCatalog:
         return historical_views(self.studio.root / row['run_id'])
 
     def detail(self, key, *, review=False):
-        for row in self.entries(private=True, review_key=key if review else None):
+        for row in self.entries(private=True, review_key=key if review else None, detail_key=None if review else key):
             if row['id'] == key or row['run_id'] == key:
                 return row
             manifest = row['_manifest']

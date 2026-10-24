@@ -226,3 +226,20 @@ def test_edge_strength_is_independent_and_defaults_follow_size(size,default):
     for bad in (-1,101,True,'95',None,float('nan')):
         with pytest.raises(ValueError,match='strength'):
             noise_options({'handoff_vignette_edge_strength':bad})
+
+
+def test_very_large_ellipse_extends_vertically_and_is_new_job_default():
+    from splat_explorer.splatfix.artifixer.handoff_noise import vignette_strength, vignette_profile
+    from splat_explorer.splatfix.artifixer.backend import validate_options
+    larger = vignette_strength(721,1281,25,'larger')
+    very_large = vignette_strength(721,1281,25,'very_large')
+    np.testing.assert_array_equal(very_large[360], larger[360])
+    assert very_large[360,640] == 12.5
+    assert very_large[60,640] < larger[60,640]
+    assert very_large.max() == 95
+    np.testing.assert_allclose(very_large, very_large[::-1,::-1])
+    assert vignette_profile('very_large')['axis_scale_y'] == 1.15
+    options = validate_options({'stage':'repair', 'handoff_generation':True})
+    assert options['handoff_vignette_size'] == 'very_large'
+    assert options['handoff_vignette_edge_strength'] == 95
+    assert validate_options({'stage':'repair', 'handoff_vignette_size':'smaller'})['handoff_vignette_size'] == 'smaller'
