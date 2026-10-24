@@ -34,6 +34,10 @@ def generated_loss_options(raw):
     for key, value in result.items():
         if type(value) is not bool:
             raise ValueError(f'{key} must be a boolean')
+    weight = raw.get('generated_rgb_loss_weight', 1.0)
+    if type(weight) not in (int, float) or weight not in (0.1, 1.0):
+        raise ValueError('generated_rgb_loss_weight must be 0.1 or 1.0')
+    result['generated_rgb_loss_weight'] = float(weight)
     return result
 
 
@@ -72,13 +76,14 @@ def validate_regularization(profile):
 
 
 def reconstruction_recipe(profile='artifixer', *, source_ply=False,
-                          generated_rgb_loss=False, generated_lpips_downscale=True, max_gaussians=1_000_000):
+                          generated_rgb_loss=False, generated_lpips_downscale=True, max_gaussians=1_000_000,
+                          generated_rgb_loss_weight=1.0):
     """Record recipe identity and the effective generated-image loss multipliers."""
     validate_regularization(profile)
     loss_options = reconstruction_overrides(locals())
     return {'version': 'artifixer3d-generated-loss-choice-v2',
             **loss_options,
-            'lambda_reconlosses_override': 1.0 if generated_rgb_loss else 0.0,
+            'lambda_reconlosses_override': generated_rgb_loss_weight if generated_rgb_loss else 0.0,
             'lambda_lpips_override': 0.1 if generated_lpips_downscale else 1.0,
             'config_name': ARTIFIXER3D_CONFIG, 'steps': ARTIFIXER3D_STEPS,
             'initialization': 'full_splat_ply' if source_ply else 'fresh',
@@ -155,7 +160,8 @@ def shared_distillation_cameras(official):
 
 @contextmanager
 def reconstruction_settings(profile='artifixer', *, source_ply=None,
-                            generated_rgb_loss=False, generated_lpips_downscale=True, max_gaussians=1_000_000):
+                            generated_rgb_loss=False, generated_lpips_downscale=True, max_gaussians=1_000_000,
+                          generated_rgb_loss_weight=1.0):
     validate_regularization(profile)
     reconstruction_overrides(locals())
     if profile == 'artifixer' and source_ply is None and not generated_rgb_loss and generated_lpips_downscale and max_gaussians == 1_000_000:
@@ -170,7 +176,7 @@ def reconstruction_settings(profile='artifixer', *, source_ply=None,
             config.strategy.add.max_n_gaussians = max_gaussians
         if generated_rgb_loss or not generated_lpips_downscale:
             # Only the override (generated-image) branch consumes these weights.
-            config.loss['lambda_reconlosses_override'] = 1.0 if generated_rgb_loss else 0.0
+            config.loss['lambda_reconlosses_override'] = generated_rgb_loss_weight if generated_rgb_loss else 0.0
             config.loss['lambda_lpips_override'] = 0.1 if generated_lpips_downscale else 1.0
             if generated_rgb_loss:
                 config.loss['lambda_l1_override'] = config.loss['lambda_l1']

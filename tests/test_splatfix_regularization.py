@@ -64,33 +64,35 @@ def test_config_inheritance_is_scoped_and_preserves_other_settings(monkeypatch, 
 
 
 @pytest.mark.parametrize('pipeline', ['authors_3dgut', 'authors_3dgut_viser_rgb', 'legacy_gsplat'])
+@pytest.mark.parametrize('weight', [0.1, 1.0])
 @pytest.mark.parametrize('rgb', [False, True])
 @pytest.mark.parametrize('downscale', [False, True])
-def test_generated_loss_job_choices_survive_pipeline(pipeline, rgb, downscale):
+def test_generated_loss_job_choices_survive_pipeline(pipeline, rgb, downscale, weight):
     options = validate_job(dict(stage='repair', checkpoint='saved', artifixer_pipeline=pipeline,
-                                generated_rgb_loss=rgb, generated_lpips_downscale=downscale))
+                                generated_rgb_loss=rgb, generated_lpips_downscale=downscale, generated_rgb_loss_weight=weight))
     policy = worker.validate_reconstruction_options(options)
     assert policy['generated_rgb_loss'] is rgb
     assert policy['generated_lpips_downscale'] is downscale
     recipe = worker.reconstruction_recipe(**worker.generated_loss_options(policy))
-    assert recipe['lambda_reconlosses_override'] == float(rgb)
+    assert recipe['lambda_reconlosses_override'] == float(rgb) * weight
     assert recipe['lambda_lpips_override'] == (0.1 if downscale else 1.0)
     assert recipe['custom_reconstruction_overrides'] == (rgb or not downscale)
 
 
 def test_generated_loss_defaults_and_validation():
     options = validate_job(dict(stage='repair', checkpoint='saved'))
-    assert worker.generated_loss_options(options) == dict(generated_rgb_loss=False, generated_lpips_downscale=True)
-    for key in worker.generated_loss_options({}):
+    assert worker.generated_loss_options(options) == dict(generated_rgb_loss=False, generated_lpips_downscale=True, generated_rgb_loss_weight=1.0)
+    for key in ('generated_rgb_loss', 'generated_lpips_downscale'):
         for value in ['off', 'on', 0, 1, None]:
             with pytest.raises(ValueError, match=key):
                 validate_job(dict(stage='repair', checkpoint='saved', **{key: value}))
 
 
+@pytest.mark.parametrize('weight', [0.1, 1.0])
 @pytest.mark.parametrize('rgb', [False, True])
 @pytest.mark.parametrize('downscale', [False, True])
 @pytest.mark.parametrize('profile', ['artifixer', 'base_mcmc'])
-def test_generated_loss_config_and_reference_isolation(monkeypatch, rgb, downscale, profile):
+def test_generated_loss_config_and_reference_isolation(monkeypatch, rgb, downscale, profile, weight):
     # Model the pinned upstream branches with nonzero synthetic losses so that
     # toggling either weight independently changes the generated total only.
     sparse = SimpleNamespace(loss=dict(use_lpips_override=True, lambda_l1=0.8, lambda_ssim=0.2,
@@ -113,12 +115,12 @@ def test_generated_loss_config_and_reference_isolation(monkeypatch, rgb, downsca
     package.threedgrut_training = training
     monkeypatch.setitem(sys.modules, 'data_processing', package)
     monkeypatch.setitem(sys.modules, training.__name__, training)
-    with worker.reconstruction_settings(profile, generated_rgb_loss=rgb, generated_lpips_downscale=downscale):
+    with worker.reconstruction_settings(profile, generated_rgb_loss=rgb, generated_lpips_downscale=downscale, generated_rgb_loss_weight=weight):
         trainer = training.Trainer3DGRUT()
         trainer.conf = training.compose_3dgrut_config(worker.ARTIFIXER3D_CONFIG, [], '/pinned')
         reg = 0.05 if profile == 'base_mcmc' else 0
         assert trainer.get_losses(SimpleNamespace(is_override=True), {})['total_loss'] == pytest.approx(
-            (0.5 if downscale else 5) + (2.2 if rgb else 0) + reg)
+            (0.5 if downscale else 5) + (2.2 * weight if rgb else 0) + reg)
         assert trainer.get_losses(SimpleNamespace(is_override=False), {})['total_loss'] == pytest.approx(2.2 + reg)
         for key in ('lambda_l1', 'lambda_ssim', 'use_lpips_override'):
             assert trainer.conf.loss[key] == sparse.loss[key]
@@ -162,3 +164,10 @@ def test_gaussian_limit_reaches_training_and_restores_compose(monkeypatch, limit
         assert config.loss == sparse.loss
     assert training.compose_3dgrut_config is compose
     assert sparse.strategy.add.max_n_gaussians == 1_000_000
+
+
+@pytest.mark.parametrize('weight', [False, True, 0, -0.1, 0.5, float('nan'), float('inf'), '0.1', None])
+def test_invalid_generated_rgb_weight_rejected(weight):
+    with pytest.raises(ValueError, match='generated_rgb_loss_weight'):
+        validate_job(dict(stage='repair', checkpoint='saved', generated_rgb_loss=True,
+                          generated_rgb_loss_weight=weight))

@@ -71,13 +71,14 @@ Promise.resolve(vm.runInContext(`(async()=>{
   $('handoff-generation').value='off';
   for(const pipeline of ['authors_3dgut','authors_3dgut_viser_rgb','legacy_gsplat']){
     $('artifixer-pipeline').value=pipeline;
-    for(const rgb of ['on','off'])for(const downscale of ['on','off']){
+    for(const rgb of ['on','off','0.1'])for(const downscale of ['on','off']){
       $('artifixer-generated-rgb-loss').value=rgb;
       $('artifixer-generated-lpips-downscale').value=downscale;
       renderArtifixerPipeline();
       assert.equal($('artifixer-generated-rgb-loss').disabled,false);
       assert.equal($('artifixer-generated-lpips-downscale').disabled,false);
-      assert.equal(payload('repair').generated_rgb_loss,rgb==='on');
+      assert.equal(payload('repair').generated_rgb_loss,rgb!=='off');
+      assert.equal(payload('repair').generated_rgb_loss_weight,rgb==='0.1'?0.1:1);
       assert.equal(payload('repair').generated_lpips_downscale,downscale==='on');
       assert.equal(payload('benchmark').generated_rgb_loss,undefined);
     }
