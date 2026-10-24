@@ -20,7 +20,7 @@ def test_log_mapping_accepts_only_current_job_logs():
             phase_log_target(root, '/dss/jobs/run_123', raw)
 
 
-def test_mirror_reads_bounded_tail_no_more_than_once_per_15_seconds(tmp_path):
+def test_mirror_reads_bounded_tail_no_more_than_once_per_10_seconds(tmp_path):
     commands = []
     clock = [0.0]
     def ssh(command):
@@ -34,10 +34,10 @@ def test_mirror_reads_bounded_tail_no_more_than_once_per_15_seconds(tmp_path):
     assert f'tail -c {LOG_BYTES} --' in commands[0]
     assert 'realpath /dss/job/results/reconstruct.log' in commands[0]
     assert 'case "$target" in "$root"/*)' in commands[0]
-    clock[0] = 14.9
+    clock[0] = 9.9
     assert not mirror.poll({'phase': 'plus', 'log': '/workspace/job/results/plus.log'})
     assert len(commands) == 1
-    clock[0] = 15.0
+    clock[0] = 10.0
     assert mirror.poll(state)
     assert len(commands) == 2
     metadata = json.loads((tmp_path / 'gpu/live-stage.json').read_text())

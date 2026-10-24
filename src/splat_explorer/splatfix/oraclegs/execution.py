@@ -4,6 +4,7 @@ import shlex
 import time
 from pathlib import Path
 from ..checkpoint import Checkpoint, atomic_json
+from ..remote_poll import wait_for_remote_poll
 from .inputs import export_inputs
 from .repair import DEFAULT_RUNTIME
 
@@ -184,11 +185,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
             if state.get('status') not in ('completed', 'error', 'stopped'):
                 state = {'status': 'error', 'message': 'OracleGS launcher exited without terminal worker status: ' + exited.strip()}
             break
-        # Remain responsive to stop/deadline without repeatedly querying SSH.
-        for _ in range(10):
-            time.sleep(1)
-            if stop():
-                break
+        wait_for_remote_poll(stop)
     # Connection/transfer failures keep the remote identity unresolved, allowing
     # reattachment and transfer retry before the shared lease is released.
     from ..persistence import persist_remote_run

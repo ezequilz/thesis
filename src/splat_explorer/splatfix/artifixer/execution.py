@@ -5,6 +5,7 @@ import shlex
 import time
 from pathlib import Path
 from ..checkpoint import Checkpoint, atomic_json
+from ..remote_poll import wait_for_remote_poll
 
 
 def persist_checkpoint_caches(downloaded, checkpoint_root):
@@ -293,7 +294,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 raise RuntimeError('GPU launcher exited before stage completion (code ' + exited.strip() + '); inspect the GPU stage log')
             if time.monotonic() - started > 24 * 3600:
                 raise TimeoutError('GPU stage exceeded 24 hours; inspect remote stage.log')
-            time.sleep(2)
+            wait_for_remote_poll(stop)
     except BaseException as exc:
         primary_error = exc
         try:

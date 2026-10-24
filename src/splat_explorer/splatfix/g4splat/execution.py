@@ -4,6 +4,7 @@ import shlex
 import time
 from pathlib import Path
 from ..checkpoint import Checkpoint, atomic_json
+from ..remote_poll import wait_for_remote_poll
 from ..resolution import prepare_repair_checkpoint
 from .inputs import export_inputs
 from .repair import DEFAULT_RUNTIME
@@ -127,7 +128,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
             if state.get('status') not in ('completed', 'error', 'stopped'):
                 state = {'status': 'error', 'message': 'G4Splat launcher exited without terminal worker status: ' + exited.strip()}
             break
-        time.sleep(2)
+        wait_for_remote_poll(stop)
     # Connection/transfer failures keep the remote identity unresolved, allowing
     # reattachment and transfer retry before the shared lease is released.
     from ..persistence import persist_remote_run

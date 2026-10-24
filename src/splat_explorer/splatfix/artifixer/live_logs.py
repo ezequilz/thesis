@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 from ..checkpoint import atomic_json
 
 LOG_BYTES = 64 * 1024
-POLL_SECONDS = 15.0
+POLL_SECONDS = 10.0
 
 
 def phase_log_target(container_root, remote_root, raw):
