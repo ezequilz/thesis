@@ -780,6 +780,15 @@ const click=()=>get('results').onclick({target:{closest:()=>({dataset:{run:'test
  confirmed=true;fail=true;await click();assert.equal(calls,1);assert.equal(vm.runInContext('rows.length',context),2);assert.equal(get('error').textContent,'Delete failed');
  fail=false;await click();assert.equal(vm.runInContext('rows.length',context),0);assert.match(get('notice').textContent,/Permanently deleted test/);
  load();vm.runInContext('rows.forEach(r=>r.can_archive=false);render()',context);await click();assert.equal(calls,2);assert.equal(prompts,3);
+ load();vm.runInContext("rows[0].backed_up=true;rows[0].backup_path='/history/test';render()",context);
+ assert.match(get('results').innerHTML,/class="tag backup-tag" title="Backup: \/history\/test">Backed up/);
+ assert.match(get('results').innerHTML,/<article class="">/);
+ get('backed-up').checked=true;get('backed-up').onchange();
+ assert.equal(get('count').textContent,'1 / 2 runs');
+ get('backed-up').checked=false;get('backed-up').onchange();
+ assert.equal(get('count').textContent,'2 / 2 runs');
+ confirmed=false;await click();assert.equal(calls,3);assert.equal(prompts,3);assert.equal(vm.runInContext('rows.length',context),0);
+
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''
     subprocess.run([node, '-e', script, 'src/splat_explorer/web/static/splatfix_results.html'], check=True)
@@ -996,6 +1005,9 @@ def test_backup_reduce_verifies_independent_full_copy(tmp_path):
     report = studio.results.reduce_run(root.name, backup=True)
     backup = Path(report['backup_path'])
     assert backup == tmp_path / 'run_history' / root.name
+    row = studio.results.entries()[0]
+    assert row['backed_up'] is True
+    assert row['backup_path'] == str(backup)
     assert all((backup / name).read_bytes() == data for name, data in before.items())
     assert (backup / 'gpu/inputs/source-initialization.ply').stat().st_ino != (result / 'original.ply').stat().st_ino
 
@@ -1042,7 +1054,7 @@ const click=()=>get('results').onclick({target:{closest:()=>({dataset:{run:'test
  load();assert.match(get('results').innerHTML,/Backup &amp; reduce/);
  await click();assert.equal(calls,0);
  confirmed=true;await click();assert.equal(calls,1);assert.equal(vm.runInContext('rows[0].reduced',context),true);assert.match(get('notice').textContent,/1.0 KiB/);assert.match(get('results').innerHTML,/Reduced -12.1 GiB/);
- load();backup=true;await click();assert.equal(calls,2);assert.match(get('notice').textContent,/Full backup: \/history\/test/);
+ load();backup=true;await click();assert.equal(calls,2);assert.match(get('notice').textContent,/Full backup: \/history\/test/);assert.match(get('results').innerHTML,/>Backed up<\/span>/);assert.equal(vm.runInContext('rows[0].backed_up',context),true);
  load();backup=false;preserve=true;
  assert.ok(get('results').innerHTML.indexOf('data-action="reduce-reconstruction"')<get('results').innerHTML.indexOf('data-action="reduce"'));
  confirmed=false;await click();assert.equal(calls,2);
@@ -1480,3 +1492,13 @@ def test_review_lookup_skips_catalog_bookkeeping(tmp_path, monkeypatch):
     monkeypatch.setattr(studio.results, '_row', unexpected)
     row = studio.results.detail(key, review=True)
     assert row['_paths']['repaired'] == root / 'artifixer3d.ply'
+
+
+@pytest.mark.parametrize('backup_path', [None, '', '   ', False, 123, []])
+def test_runs_without_recorded_backup_are_not_backed_up(tmp_path, backup_path):
+    studio, root, _ = setup(tmp_path)
+    assert studio.results.entries()[0]['backed_up'] is False
+    (root / 'reduction.json').write_text(json.dumps({'reduced': True, 'backup_path': backup_path}))
+    row = studio.results.entries()[0]
+    assert row['backed_up'] is False
+    assert row['backup_path'] is None

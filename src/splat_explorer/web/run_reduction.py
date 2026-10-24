@@ -160,6 +160,19 @@ def reduce_artifixer(root, plans, history=None, *, before_size_bytes=None, expor
     keep.add(root / 'comments.md')
     keep.update(p for p in files(root) if not p.is_symlink() and
                 (p.suffix in ('.log', '.jsonl') or p.name.startswith('events.out.tfevents')))
+    # Handoff gallery artifacts live in both local/GPU mailboxes and result
+    # archives. Keep their images verbatim and metadata for labels/deduplication
+    # in every reduction mode, including incomplete handoffs.
+    handoffs = list((root / 'handoff').glob('*')) + list((root / 'gpu/handoff').glob('*'))
+    handoffs += list((root / 'gpu/results').glob('*/handoffs/*/*'))
+    for folder in handoffs:
+        for name in ('before.png', 'response-original.png', 'repaired.png',
+                     'repair-input.png', 'reference.png', 'camera.json', 'request.json', 'response.json'):
+            path = folder / name
+            if path.is_file():
+                if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+                    raise ValueError('Cannot preserve linked handoff artifacts')
+                keep.add(path)
     sequences = []
     incomplete_frames = []
     copies = []

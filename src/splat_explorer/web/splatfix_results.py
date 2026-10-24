@@ -433,7 +433,10 @@ class ResultCatalog:
     def _row(self, key, record, original, repaired, result, metrics, metrics_file, manifest):
         config = record.get('config', {})
         options = config.get('splatfix', {})
-        before = read_json(self.studio.root / record['run_id'] / 'reduction.json', {}).get('before_size_bytes')
+        reduction = read_json(self.studio.root / record['run_id'] / 'reduction.json', {})
+        before = reduction.get('before_size_bytes')
+        backup_path = reduction.get('backup_path')
+        backup_path = backup_path if isinstance(backup_path, str) and backup_path.strip() else None
         after = record.get('output_size_bytes')
         saved_bytes = max(0, before - after) if type(before) is int and type(after) is int else None
         preview = []
@@ -468,6 +471,8 @@ class ResultCatalog:
                 'created_at': record.get('state', {}).get('created_at'), 'status': status,
                 'output_size_bytes': record.get('output_size_bytes'),
                 'reduction_saved_bytes': saved_bytes,
+                'backup_path': backup_path,
+                'backed_up': backup_path is not None,
                 'reduced': (self.studio.root / record['run_id'] / 'reduction.json').is_file(),
                 'can_reduce': (options.get('reconstruction_method') in ('oraclegs', 'artifixer') or result.get('reconstruction_method') in ('oraclegs', 'artifixer') or (manifest is not None and not options.get('reconstruction_method') and not result.get('reconstruction_method'))) and not (self.studio.root / record['run_id'] / 'reduction.json').exists(),
                 'can_archive': record.get('state', {}).get('status') in ('completed', 'error', 'stopped', 'gpu_expired'),
