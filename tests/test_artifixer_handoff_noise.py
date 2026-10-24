@@ -290,7 +290,7 @@ def test_blur_defaults_and_validation():
     from splat_explorer.splatfix.artifixer.handoff_noise import noise_options
     from splat_explorer.splatfix.artifixer.backend import validate_options
     assert noise_options({})['handoff_blur_radius'] == 0
-    assert validate_options({'stage':'repair','handoff_generation':True})['handoff_blur_radius'] == .5
+    assert validate_options({'stage':'repair','handoff_generation':True})['handoff_blur_radius'] == .25
     for bad in (-1,11,True,'1',None,float('nan')):
         with pytest.raises(ValueError,match='handoff_blur_radius'):
             noise_options({'handoff_blur_radius':bad})

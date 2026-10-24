@@ -42,7 +42,7 @@ Promise.resolve(vm.runInContext(`(async()=>{
   $('gpt-image-context').value='closest_repaired_image';
   assert.equal(payload('repair').handoff_add_noise,true);
   assert.equal(payload('repair').handoff_noise_strength,25);
-  assert.equal(payload('repair').handoff_blur_radius,0.5);
+  assert.equal(payload('repair').handoff_blur_radius,0.25);
   $('handoff-blur-radius').value='0';
   assert.equal(payload('repair').handoff_blur_radius,0);
   $('handoff-blur-radius').value='0.8';
@@ -406,11 +406,11 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
  await get('refresh').onclick();assert.equal(timer,null);
  result={...result,kind:'ArtiFixer3D',gallery:{frames:[],verified_inputs:true,expected_count:0}};
  await get('refresh').onclick();assert.equal(timer,null);
- for(const mode of ['within_trajectory','global']){
-   get('oracleInit').value='source_splat';get('oracleAttentionBatching').value=mode;
+ for(const initialization of ['source_splat','point_cloud','repaired_splat','repaired_point_cloud','sfm']) for(const mode of ['within_trajectory','global']){
+   get('oracleInit').value=initialization;get('oracleAttentionBatching').value=mode;
    context.fetch=async(url,options)=>{
      assert.equal(url,'/api/splatfix/results/reconstruct-artifixer');
-     assert.deepEqual(JSON.parse(options.body),{id:'run',initialization:'source_splat',oracle_attention_batching:mode,oracle_artifixer_input:'',oracle_artifixer_reference_assignment:''});
+     assert.deepEqual(JSON.parse(options.body),{id:'run',initialization,oracle_attention_batching:mode,oracle_artifixer_input:'',oracle_artifixer_reference_assignment:''});
      return {ok:true,json:async()=>({ok:true,run:{run_id:'new-run'}})};
    };
    await get('oracleStart').onclick();

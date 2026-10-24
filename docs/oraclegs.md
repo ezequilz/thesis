@@ -606,9 +606,17 @@ available initial inference images. The optional ArtiFixer3D+ outputs are
 excluded. The action requires the saved camera trajectory, reference snapshots,
 and all expected inference outputs to be downloaded.
 
-**Starting PLY + source depth** defaults to the original starting Gaussian PLY,
-including its SH parameters, and depth rendered from that PLY at the six saved
-reference cameras. Invalid depth pixels are masked. This combination bypasses
+**Repaired PLY • source points + source depth** is the default on ArtiFixer
+result pages. It initializes fresh Gaussians from repaired positions and DC colors.
+**Repaired PLY + source depth** imports the full repaired Gaussian PLY, including
+SH parameters. Both prefer `repaired.ply`, falling back to `interrupted.ply` when
+only an interrupted checkpoint is available; neither silently uses the original.
+**Original PLY + source depth** and **Original PLY • source points + source depth**
+retain the original full-splat and fresh-point behavior respectively. Every PLY
+option renders depth from the selected snapshot at the saved reference cameras.
+The reuse API retains `source_splat` and `point_cloud` for the original choices;
+`repaired_splat` and `repaired_point_cloud` select repaired geometry and normalize
+to the same worker algorithms. Snapshot metadata records the choice and filename. Invalid depth pixels are masked. This combination bypasses
 COLMAP and predicted-depth estimation/alignment; six repaired views alone may
 have no verified feature matches. **From scratch · SfM + predicted depth** still
 requires triangulation and predicted-depth alignment. Both retain VGGT attention

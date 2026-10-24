@@ -42,6 +42,7 @@ def fixture(tmp_path):
     atomic_json(root/'inference-preview.json', {'prediction_frames':'pred','reconstruction_inputs':[6,7]})
     atomic_json(root/'result.json', {})
     source_ply(root/'original.ply')
+    source_ply(root/'repaired.ply')
     studio = SimpleNamespace(result_artifact=lambda manifest, raw:SplatfixStudio.result_artifact(None,manifest,raw))
     row = {'_manifest':root/'result.json','kind':'ArtiFixer3D','mode':'edited','run_id':'parent','id':'result', '_paths':{'original':root/'original.ply'}}
     return studio,row
@@ -441,18 +442,22 @@ def test_invalid_input_selection_and_missing_originals_rejected(tmp_path):
 
 @pytest.mark.parametrize('selection', [None, 'new_only', 'original_and_new'])
 @pytest.mark.parametrize('assignment', [None, 'trajectory', 'camera_proximity'])
-def test_reconstruction_endpoint_forwards_input_selection(selection, assignment):
+@pytest.mark.parametrize('initialization', [None, 'source_splat', 'point_cloud', 'repaired_splat', 'repaired_point_cloud', 'sfm'])
+def test_reconstruction_endpoint_forwards_input_selection(selection, assignment, initialization):
     from splat_explorer.web.server import DashboardHandler
     calls, replies = [], []
-    results = SimpleNamespace(reconstruct_artifixer=lambda *args, **kwargs: calls.append((args, kwargs)) or {'run_id': 'queued'})
+    results = SimpleNamespace(invalidate_catalog=lambda: None, reconstruct_artifixer=lambda *args, **kwargs: calls.append((args, kwargs)) or {'run_id': 'queued'})
     handler = SimpleNamespace(app=SimpleNamespace(splatfix=SimpleNamespace(results=results)),
                               command='POST', _send_json=lambda body, *args: replies.append(body))
     body = {'id': 'run'}
+    if initialization is not None:
+        body['initialization'] = initialization
     if selection is not None:
         body['oracle_artifixer_input'] = selection
     if assignment is not None:
         body['oracle_artifixer_reference_assignment'] = assignment
     DashboardHandler._serve_splatfix(handler, '/api/splatfix/results/reconstruct-artifixer', body)
+    assert calls[0][0] == ('run', initialization or 'repaired_point_cloud')
     assert calls[0][1]['oracle_artifixer_reference_assignment'] == (assignment or 'trajectory')
     assert calls[0][1]['oracle_artifixer_input'] == (selection or 'new_only')
     assert replies == [{'ok': True, 'run': {'run_id': 'queued'}}]
@@ -690,3 +695,59 @@ def test_backward_handoff_export_assigns_final_half_to_existing_final_repair(tmp
     for chunk in plan_chunks(manifest,mode='within_trajectory'):
         assert chunk['source_frame'] == 0
         assert chunk['image_names'][0] == chunk['source_image']
+
+
+@pytest.mark.parametrize('selection,algorithm', [
+    ('repaired_splat', 'source_splat'), ('repaired_point_cloud', 'point_cloud')])
+@pytest.mark.parametrize('completed', [True, False])
+def test_repaired_initialization_and_depth_use_selected_snapshot(tmp_path, monkeypatch, selection, algorithm, completed):
+    from splat_explorer.splatfix.oraclegs import artifixer_inputs
+    studio, row = fixture(tmp_path)
+    root = row['_manifest'].parent
+    # Distinct valid files make accidental reuse of the original detectable.
+    original = (root/'original.ply').read_bytes()
+    (root/'repaired.ply').write_bytes(original.replace(b'end_header', b'comment repaired\nend_header'))
+    (root/'distill.interrupted').mkdir()
+    interrupted = root/'distill.interrupted/interrupted.ply'
+    interrupted.write_bytes(original.replace(b'end_header', b'comment interrupted\nend_header'))
+    atomic_json(root/'partial-result.json', {'splat_path': str(interrupted)})
+    row['_manifest'] = root/'partial-result.json'
+    if not completed:
+        (root/'repaired.ply').unlink()
+    selected = root/'repaired.ply' if completed else interrupted
+    render_depth = artifixer_inputs.stage_saved_pose_depth
+    rendered = []
+    def check_depth_source(destination, frames):
+        rendered.append((destination/'source-initialization.ply').read_bytes())
+        return render_depth(destination, frames)
+    monkeypatch.setattr(artifixer_inputs, 'stage_saved_pose_depth', check_depth_source)
+    manifest = export_inputs(studio, row, tmp_path/'inputs', selection)
+    validate_assets(tmp_path/'inputs', manifest)
+    assert manifest['oracle_initialization'] == algorithm
+    assert manifest['oracle_depth_source'] == 'source_splat'
+    assert manifest['artifixer_source']['ply_filename'] == selected.name
+    assert manifest['artifixer_source']['initialization'] == selection
+    assert rendered == [selected.read_bytes()]
+    assert rendered[0] != original
+
+
+def test_default_queue_uses_repaired_points_and_missing_repair_does_not_queue(tmp_path):
+    from test_splatfix_results import setup
+    studio, _, _ = setup(tmp_path/'dashboard')
+    _, row = fixture(tmp_path)
+    row.update(config={'splatfix': {}}, scene='room')
+    studio.results.detail = lambda key: row
+    queued = studio.results.reconstruct_artifixer('result')
+    options = queued['config']['splatfix']
+    assert options['oracle_initialization'] == 'point_cloud'
+    snapshot = Path(options['oracle_artifixer_inputs'])
+    manifest = json.loads((snapshot/'inputs.json').read_text())
+    assert manifest['artifixer_source']['initialization'] == 'repaired_point_cloud'
+    (row['_manifest'].parent/'repaired.ply').unlink()
+    before = len(studio.store.list_runs())
+    with pytest.raises(ValueError, match='no repaired.ply or interrupted.ply'):
+        studio.results.reconstruct_artifixer('result')
+    assert len(studio.store.list_runs()) == before
+    assert len(list(snapshot.parent.iterdir())) == 1
+    # Original selections remain usable when no repaired output exists.
+    studio.results.reconstruct_artifixer('result', 'point_cloud')

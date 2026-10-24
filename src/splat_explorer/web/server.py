@@ -1363,7 +1363,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif self.command == "POST" and path == "/api/splatfix/results/reconstruct-artifixer":
                 if not isinstance(body, dict):
                     raise ValueError("Request must be an object")
-                result = studio.results.reconstruct_artifixer(body.get("id"), body.get("initialization", "source_splat"),
+                result = studio.results.reconstruct_artifixer(body.get("id"), body.get("initialization", "repaired_point_cloud"),
                     oracle_attention_batching=body.get("oracle_attention_batching", "within_trajectory"),
                     oracle_artifixer_input=body.get("oracle_artifixer_input", "new_only"),
                     oracle_artifixer_reference_assignment=body.get("oracle_artifixer_reference_assignment", "trajectory"))

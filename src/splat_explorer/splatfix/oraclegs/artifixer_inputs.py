@@ -8,6 +8,46 @@ from ..jobs import read_json
 from .backend import validate_options
 from .source_geometry import digest, inspect_ply, stage_saved_pose_depth
 
+# UI selections are separate from the worker's initialization algorithm.
+INITIALIZATIONS = {
+    'source_splat': ('original', 'source_splat'),
+    'point_cloud': ('original', 'point_cloud'),
+    'repaired_splat': ('repaired', 'source_splat'),
+    'repaired_point_cloud': ('repaired', 'point_cloud'),
+    'sfm': (None, 'sfm'),
+}
+
+
+def initialization_source(studio, row, source_kind):
+    if source_kind == 'original':
+        source = row['_paths'].get('original')
+        if source is not None and Path(source).is_file():
+            return Path(source)
+        raise ValueError('Original starting PLY is unavailable; select from scratch')
+    # Completed/partial manifests retain nested and remote artifact paths.
+    # Resolve all candidates through the existing containment boundary.
+    manifest = row['_manifest']
+    candidates = ['repaired.ply']
+    for name in ('result.json', 'partial-result.json'):
+        metadata = studio.result_artifact(manifest, name)
+        if metadata is not None:
+            candidates.append(read_json(metadata, {}).get('splat_path'))
+    candidates.extend([row.get('_paths', {}).get('repaired'),
+                       'artifixer3d.ply', 'interrupted.ply',
+                       'distill.interrupted/interrupted.ply'])
+    available = []
+    for candidate in candidates:
+        source = studio.result_artifact(manifest, candidate)
+        if source is not None and source.is_file():
+            available.append(source)
+    # Never let a partial-result page override an available completed repair.
+    for interrupted in (False, True):
+        for source in available:
+            if (source.name == 'interrupted.ply') == interrupted:
+                return source
+    raise ValueError('Repaired PLY is unavailable (no repaired.ply or interrupted.ply); select Original PLY or from scratch')
+
+
 AXES = np.diag([1., -1., -1., 1.])
 
 
@@ -190,8 +230,10 @@ def export_inputs(studio, row, destination, initialization, *, oracle_attention_
         raise ValueError('oracle_artifixer_reference_assignment must be trajectory or camera_proximity')
     if oracle_artifixer_input not in ('new_only', 'original_and_new'):
         raise ValueError('oracle_artifixer_input must be new_only or original_and_new')
-    if initialization not in ('source_splat', 'point_cloud', 'sfm'):
-        raise ValueError('Initialization must be source_splat, point_cloud, or sfm')
+    if initialization not in INITIALIZATIONS:
+        raise ValueError('Initialization must be one of: ' + ', '.join(INITIALIZATIONS))
+    selection = initialization
+    source_kind, initialization = INITIALIZATIONS[selection]
     options = validate_options({'oracle_reference_mode':'all', 'oracle_adapter':'saved_poses',
                                 'oracle_initialization':initialization,
                                 'oracle_attention_batching':oracle_attention_batching,
@@ -245,11 +287,12 @@ def export_inputs(studio, row, destination, initialization, *, oracle_attention_
     if trajectory.get('handoff_export'):
         manifest['artifixer_source']['handoff'] = trajectory['handoff_export']
     if initialization in ('source_splat', 'point_cloud'):
-        source = row['_paths']['original']
-        if source is None:
-            raise ValueError('Original starting PLY is unavailable; select from scratch')
+        source = initialization_source(studio, row, source_kind)
         count, degree = inspect_ply(source)
         shutil.copyfile(source, root/'source-initialization.ply')
+        manifest['artifixer_source']['initialization'] = selection
+        manifest['artifixer_source']['ply_source'] = source_kind
+        manifest['artifixer_source']['ply_filename'] = source.name
         manifest['source_initialization'] = {'path':'source-initialization.ply', 'sha256':digest(root/'source-initialization.ply'), 'gaussian_count':count, 'sh_degree':degree}
         manifest['source_splat_used_for_initialization'] = True
         manifest['source_depth'] = stage_saved_pose_depth(root, frames[:len(views)])
