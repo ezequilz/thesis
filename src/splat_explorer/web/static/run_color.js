@@ -42,7 +42,7 @@
     attributeChangedCallback() { if (this.isConnected) this.render(); }
     render() {
       const filter = this.hasAttribute('filter');
-      const options = filter ? {'*': ['All colors', 'conic-gradient(#dd7770, #d7bf69, #85b883, #7aa9de, #ad91d3, #dd7770)'], ...palette} : palette;
+      const options = filter ? {'*': ['All colors', 'conic-gradient(#dd7770, #d7bf69, #85b883, #7aa9de, #ad91d3, #dd7770)'], colored: ['Colored', 'linear-gradient(135deg, #dd7770, #d7bf69, #85b883, #7aa9de, #ad91d3)'], ...palette} : palette;
       const run = this.getAttribute('run-id');
       const requested = filter ? (this.getAttribute('color') ?? '*') : (state.get(run)?.color ?? this.getAttribute('color'));
       const color = requested in options ? requested : '';
