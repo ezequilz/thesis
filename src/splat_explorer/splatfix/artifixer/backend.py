@@ -29,7 +29,10 @@ def validate_options(raw):
         result['handoff_generation'] = enabled(raw)
         result['gpt_image_context'] = context_mode({'gpt_image_context': 'closest_repaired_image', **raw})
         from .handoff_noise import noise_options
-        result.update(noise_options({'handoff_add_noise': True, 'handoff_noise_vignette': True, **raw}))
+        default_noise_mode = ('repaired_pixel_sprinkle' if result['handoff_generation']
+                              and result['gpt_image_context'] != 'single_last_frame' else 'gaussian')
+        result.update(noise_options({'handoff_add_noise': True, 'handoff_noise_vignette': True,
+                                     'handoff_noise_mode': default_noise_mode, **raw}))
         if result['handoff_generation']:
             if raw.get('mode', 'edited') != 'edited' or raw.get('image_trajectory') == 'endpoints':
                 raise ValueError('Handoff generation requires edited checkpoint trajectories')

@@ -72,6 +72,10 @@ def test_new_jobs_default_to_noise_but_historical_runtime_stays_off():
     options = validate_options({'stage':'repair', 'mode':'edited', 'handoff_generation':True})
     assert options['handoff_add_noise'] is True
     assert options['handoff_noise_strength'] == 25
+    assert options['handoff_noise_mode'] == 'repaired_pixel_sprinkle'
+    assert noise_options({})['handoff_noise_mode'] == 'gaussian'
+    assert validate_options({'stage':'repair', 'mode':'edited', 'handoff_generation':True,
+                             'handoff_noise_mode':'gaussian'})['handoff_noise_mode'] == 'gaussian'
     assert options['handoff_noise_vignette'] is True
     assert noise_options({})['handoff_noise_vignette'] is False
     assert noise_options({})['handoff_add_noise'] is False
@@ -107,3 +111,65 @@ def test_vignette_preserves_center_and_increases_edge_noise(tmp_path):
     vignette = np.asarray(Image.open(tmp_path/'vignette.png'),dtype=float)
     np.testing.assert_array_equal(uniform[150:210,280:360],vignette[150:210,280:360])
     assert vignette[:20].std() > uniform[:20].std() * 1.35
+
+
+def test_pixel_sprinkle_replaces_whole_pixels_with_elliptical_probability(tmp_path):
+    from splat_explorer.splatfix.artifixer.handoff_noise import sprinkle_repaired_pixels
+    source, reference, output = [tmp_path/n for n in ('source.png','reference.png','output.png')]
+    Image.new('RGB',(1280,720),(10,20,30)).save(source)
+    Image.new('RGB',(1280,720),(210,220,230)).save(reference)
+    original, ref_bytes = source.read_bytes(), reference.read_bytes()
+    meta = sprinkle_repaired_pixels(source,reference,output,strength=25,seed=42,vignette=True)
+    pixels = np.asarray(Image.open(output))
+    selected = pixels[:,:,0] == 210
+    assert np.all(pixels[selected] == [210,220,230])
+    assert np.all(pixels[~selected] == [10,20,30])
+    assert selected[300:420,560:720].mean() == pytest.approx(.25,abs=.02)
+    assert selected[:20].mean() == pytest.approx(.8,abs=.02)
+    assert meta['replaced_pixels'] == selected.sum()
+    first = output.read_bytes()
+    sprinkle_repaired_pixels(source,reference,output,strength=25,seed=42,vignette=True)
+    assert output.read_bytes() == first
+    assert source.read_bytes() == original and reference.read_bytes() == ref_bytes
+    for strength,color in [(0,[10,20,30]),(100,[210,220,230])]:
+        sprinkle_repaired_pixels(source,reference,output,strength=strength,seed=42)
+        assert np.all(np.asarray(Image.open(output)) == color)
+
+
+@pytest.mark.parametrize('context', ['closest_repaired_image', 'initial_repaired_image'])
+def test_sprinkle_sends_only_composite_with_single_image_prompt(tmp_path,context):
+    import json
+    from types import SimpleNamespace
+    from splat_explorer.splatfix.artifixer.handoff import edit_request, digest
+    from splat_explorer.splatfix.image_repair import DEFAULT_PROMPT
+    source, reference = tmp_path/'before.png', tmp_path/'reference.png'
+    Image.new('RGB',(64,32),'red').save(source)
+    Image.new('RGB',(64,32),'blue').save(reference)
+    request = {'id':'b'*32, 'input_sha256':digest(source), 'reference_sha256':digest(reference),
+               'gpt_image_context':context,'handoff_add_noise':True,'handoff_noise_strength':25,
+               'handoff_noise_vignette':True,'handoff_noise_mode':'repaired_pixel_sprinkle'}
+    calls=[]
+    def edit(path,prompt):
+        assert prompt == DEFAULT_PROMPT and 'second attachment' not in prompt
+        assert path.name == 'repair-input.png'
+        assert path.read_bytes() != source.read_bytes()
+        assert path.read_bytes() != reference.read_bytes()
+        calls.append(path.read_bytes())
+        return SimpleNamespace(error=None,images=[source.read_bytes()])
+    backend=SimpleNamespace(edit=edit,edit_with_references=lambda *args:pytest.fail('Sprinkle must send one attachment'))
+    edit_request(tmp_path,request,backend=backend)
+    result=json.loads((tmp_path/'response.json').read_text())
+    assert 'error' not in result
+    assert result['attachment_count'] == 1 and result['reference_attached'] is False
+    assert result['noise']['reference_sha256'] == digest(reference)
+    edit_request(tmp_path,request,backend=backend)
+    assert len(calls)==1 and calls[0]==(tmp_path/'repair-input.png').read_bytes()
+
+
+def test_sprinkle_requires_a_repaired_reference():
+    from splat_explorer.splatfix.artifixer.handoff_noise import noise_options
+    with pytest.raises(ValueError,match='requires closest or initial'):
+        noise_options({'handoff_add_noise':True,'handoff_noise_mode':'repaired_pixel_sprinkle',
+                       'gpt_image_context':'single_last_frame'})
+    with pytest.raises(ValueError,match='handoff_noise_mode'):
+        noise_options({'handoff_noise_mode':'unknown'})

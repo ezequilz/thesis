@@ -98,24 +98,31 @@ def edit_request(folder, request, cfg=None, backend=None):
     from ...image_edit_gpt import GptImageEditBackend
     from ...image_edit import SCENE_RUN_GPT_IMAGE_MODEL
     mode = context_mode(request)
+    from .handoff_noise import noise_options, add_gaussian_noise, sprinkle_repaired_pixels
+    noise = noise_options(request)
+    sprinkle = noise['handoff_add_noise'] and noise['handoff_noise_mode'] == 'repaired_pixel_sprinkle'
+    attach_reference = mode != 'single_last_frame' and not sprinkle
     prompt = DEFAULT_PROMPT
-    if mode != 'single_last_frame':
+    if attach_reference:
         prompt += ' Align color grading and visual quality details with the reference image in the second attachment.'
     result = {'id': request['id'], 'input_sha256': request['input_sha256'],
-              'model': SCENE_RUN_GPT_IMAGE_MODEL, 'prompt': prompt, 'gpt_image_context': mode}
+              'model': SCENE_RUN_GPT_IMAGE_MODEL, 'prompt': prompt, 'gpt_image_context': mode,
+              'reference_attached': attach_reference, 'attachment_count': 2 if attach_reference else 1}
     try:
         if digest(folder / 'before.png') != request['input_sha256']:
             raise ValueError('Handoff input checksum mismatch')
         if mode != 'single_last_frame' and digest(folder / 'reference.png') != request['reference_sha256']:
             raise ValueError('Handoff reference checksum mismatch')
-        from .handoff_noise import noise_options, add_gaussian_noise
-        noise = noise_options(request)
         repair_input = folder / 'before.png'
         if noise['handoff_add_noise']:
             repair_input = folder / 'repair-input.png'
-            result['noise'] = add_gaussian_noise(folder / 'before.png', repair_input,
-                strength=noise['handoff_noise_strength'], seed=int(request['input_sha256'][:16], 16),
-                vignette=noise['handoff_noise_vignette'])
+            options = {'strength': noise['handoff_noise_strength'],
+                       'seed': int(request['input_sha256'][:16], 16),
+                       'vignette': noise['handoff_noise_vignette']}
+            result['noise'] = (sprinkle_repaired_pixels(folder / 'before.png', folder / 'reference.png', repair_input, **options)
+                               if sprinkle else add_gaussian_noise(folder / 'before.png', repair_input, **options))
+            if sprinkle:
+                result['noise']['reference_sha256'] = request['reference_sha256']
             result['noise']['enabled'] = True
             result['noise']['input_sha256'] = digest(repair_input)
         else:
@@ -124,7 +131,7 @@ def edit_request(folder, request, cfg=None, backend=None):
         if not raw.exists():
             backend = backend or GptImageEditBackend.from_config(cfg, model=SCENE_RUN_GPT_IMAGE_MODEL)
             answer = (backend.edit_with_references(repair_input, [folder / 'reference.png'], prompt)
-                      if mode != 'single_last_frame' else backend.edit(repair_input, prompt))
+                      if attach_reference else backend.edit(repair_input, prompt))
             if answer.error or not answer.images:
                 raise RuntimeError(answer.error or 'Handoff repair returned no image')
             temporary = raw.with_suffix('.tmp')

@@ -15,7 +15,7 @@ def test_dashboard_stage_payloads_and_frozen_schedule_selection():
 const fs=require('fs'), vm=require('vm'), assert=require('assert/strict');
 const source=fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0];
 const elements=new Map();
-const get=id=>{if(!elements.has(id))elements.set(id,{value:id==='artifixer-max-gaussians'?'1000000':'',textContent:'',innerHTML:'',disabled:false,valid:true,opened:false,
+const get=id=>{if(!elements.has(id))elements.set(id,{value:id==='artifixer-max-gaussians'?'1000000':id==='handoff-add-noise'?'repaired_pixel_sprinkle':'',textContent:'',innerHTML:'',disabled:false,valid:true,opened:false,
   selectedOptions:[{textContent:'Other scene'}],classList:{toggle(){}},style:{},addEventListener(){},querySelectorAll(){return[]},
   setCustomValidity(message){this.valid=!message},reportValidity(){return this.valid},showModal(){this.opened=true},close(){this.opened=false}});return elements.get(id)};
 const context=vm.createContext({document:{getElementById:get,querySelectorAll(){return [{id:"future-setting",name:"",type:"select-one",tagName:"SELECT",value:"future",labels:[{textContent:"Future setting"}],selectedOptions:[{value:"future",textContent:"Future option"}],matches(){return false},getClientRects(){return [{}]}}]}},fetch:()=>new Promise(()=>{}),setInterval(){},setTimeout(){},assert});
@@ -35,6 +35,12 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('repair').gpt_image_context,'closest_repaired_image');
   assert.equal(payload('repair').handoff_add_noise,true);
   assert.equal(payload('repair').handoff_noise_strength,25);
+  assert.equal(payload('repair').handoff_noise_mode,'repaired_pixel_sprinkle');
+  $('handoff-add-noise').value='on';
+  assert.equal(payload('repair').handoff_noise_mode,'gaussian');
+  $('handoff-add-noise').value='repaired_pixel_sprinkle';
+  assert.equal(payload('repair').handoff_noise_mode,'repaired_pixel_sprinkle');
+  assert.equal(payload('repair').handoff_add_noise,true);
   assert.equal(payload('repair').handoff_noise_vignette,true);
   $('handoff-noise-vignette').value='off';
   assert.equal(payload('repair').handoff_noise_vignette,false);
