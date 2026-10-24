@@ -8,6 +8,8 @@ import random
 def plan_chunks(manifest, max_images=96, *, mode="within_trajectory", seed=23, extra_targets=()):
     """Shuffle target contexts, repeat every reference, and assign endpoint queries.
 
+    The assigned repaired reference is always image zero: VGGT uses its first
+    image as the coordinate frame. Shuffle only synthetic context, never this slot.
     Distance is trajectory parameter distance to its endpoints, not a global
     Euclidean pose metric. Midpoint ties deterministically use the start view.
     """

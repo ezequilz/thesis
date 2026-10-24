@@ -251,6 +251,18 @@ class ResultCatalog:
                 trajectory, references, _ = source_assets(self.studio, row)
                 plan['trajectory'] = trajectory
                 plan['reconstruction_files'] = references
+                if trajectory.get('handoff_export'):
+                    # Preserve the original generation segments for validating the
+                    # completed handoff metadata again after storage reduction.
+                    request = read_json(manifest.parent / 'request.json', {})
+                    original = (self.studio.result_artifact(manifest, 'preview-trajectory.json')
+                                or self.studio.result_artifact(manifest, request.get('trajectory')))
+                    plan['trajectory'] = read_json(original, {})
+                    preview = read_json(manifest.parent / 'input-preview.json', {})
+                    for item in preview.get('reference_images', []):
+                        plan['reconstruction_files'].append(self.studio.result_artifact(manifest, item['path']))
+                    for name in ('inference-references.json', 'inference-seeding.json'):
+                        plan['reconstruction_files'].append(manifest.parent / name)
                 # Preserve any additional saved input/output camera exports too.
                 for pattern in ('*trajectory*.json', '*transforms*.json', '*poses*.json', '*cameras*.json'):
                     plan['reconstruction_files'].extend(manifest.parent.rglob(pattern))

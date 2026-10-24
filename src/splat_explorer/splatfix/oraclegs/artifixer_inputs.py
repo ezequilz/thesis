@@ -52,8 +52,80 @@ def source_assets(studio, row):
         raise ValueError('Inference input index manifest is unavailable')
     if not set(expected) <= set(predictions) or not set(predictions) <= set(range(len(cameras))):
         raise ValueError('Wait for all ArtiFixer inference images to download')
+    if request.get('runtime', {}).get('handoff_generation', False):
+        return handoff_assets(studio, row, trajectory, references, predictions, data)
     return trajectory, references, predictions
 
+
+
+def handoff_assets(studio, row, trajectory, references, predictions, data):
+    """Use completed inference handoffs at their exact cameras, like fitting does."""
+    state = data('inference-references.json')
+    series = data('inference-seeding.json').get('series', [])
+    original = [a['frame_index'] for a in trajectory['anchors']]
+    indices, paths, hashes = (state.get(key, []) for key in ('frame_indices', 'paths', 'sha256'))
+    if (state.get('original_frame_indices') != original or
+            not len(indices) == len(paths) == len(hashes) == len(original) or
+            any(type(i) is not int for i in indices) or len(set(indices)) != len(indices)):
+        raise ValueError('Completed handoff reference set is missing or invalid; wait for inference artifacts')
+    first, last = min(original), max(original)
+    anchors, repaired, retained_slots = [], [], []
+    for slot, (old, new, raw, expected) in enumerate(zip(original, indices, paths, hashes)):
+        if not 0 <= new < len(trajectory['transforms']['frames']):
+            raise ValueError('Handoff reference camera is outside trajectory')
+        if old in (first, last):
+            if new != old:
+                raise ValueError('Handoff must preserve endpoint cameras')
+            # Original paths can live outside the downloaded result directory;
+            # input-preview contains a byte-for-byte copy of each original RGB.
+            source = references[slot]
+        else:
+            if new in original:
+                raise ValueError('Interior reference was not replaced by a generated handoff')
+            source = studio.result_artifact(row['_manifest'], raw)
+        if source is None or not source.is_file() or digest(source) != expected:
+            raise ValueError('Handoff reference is missing or its checksum does not match')
+        if old == last:
+            continue  # Generation context only; excluded from trusted fitting references.
+        anchors.append({**trajectory['anchors'][slot], 'frame_index': new})
+        repaired.append(source)
+        retained_slots.append(slot)
+    # The worker runs nonempty single-split segments in order. Each later seed
+    # is the preceding segment's final generated frame, repaired in place.
+    legs = []
+    for segment in trajectory.get('segments', []):
+        generated = segment.get('indices')
+        if generated is None:
+            generated = list(range(segment['start'], segment['start'] + segment['count']))
+        generated = [i for i in generated if i not in original]
+        if generated:
+            legs.append(generated)
+    if not legs or len(series) != len(legs):
+        raise ValueError('Completed handoff trajectory seeding metadata is missing or incomplete')
+    retained_indices = {a['frame_index'] for a in anchors}
+    seeds = []
+    normalized_segments = []
+    for leg_index, (generated, audit) in enumerate(zip(legs, series)):
+        seed = audit.get('seed_global_index')
+        expected_seed = first if leg_index == 0 else legs[leg_index - 1][-1]
+        if (audit.get('output') != 'inference' or not audit.get('enabled') or
+                seed != expected_seed or seed not in retained_indices):
+            raise ValueError('Handoff trajectory seed disagrees with the completed repaired references')
+        seeds.append(seed)
+        normalized_segments.append({'indices': generated, 'seed_index': seed})
+    if len(seeds) != len(set(seeds)) or set(seeds) != retained_indices:
+        raise ValueError('Handoff trajectories do not cover the completed repaired reference set')
+    # Repaired boundaries are trusted references, never duplicate synthetic targets.
+    excluded = set(original) | retained_indices
+    predictions = {i: path for i, path in predictions.items() if i not in excluded}
+    if not predictions:
+        raise ValueError('Handoff run has no generated non-reference images to export')
+    trajectory = {**trajectory, 'anchors': anchors, 'segments': normalized_segments,
+                  'handoff_export': {'reference_frame_indices': [a['frame_index'] for a in anchors],
+                                     'original_reference_slots': retained_slots,
+                                     'excluded_original_reference_indices': sorted(set(original) - {first}),
+                                     'policy': 'first original repair and completed handoffs; actual single-split generation seeds'}}
+    return trajectory, repaired, predictions
 
 
 def trajectory_references(studio, row, trajectory, predictions):
@@ -63,8 +135,8 @@ def trajectory_references(studio, row, trajectory, predictions):
     anchors = {a['frame_index']: i for i, a in enumerate(trajectory['anchors'])}
     # Endpoint reconstruction consumes only front-to-back inference. The reverse
     # output is separate, even when its cameras coincide with these predictions.
-    if len(anchors) == 2 or (request.get('trajectory_mode') == 'authors_orbit'
-                            and request.get('runtime', {}).get('split_mode') == 'no-split'):
+    if not trajectory.get('handoff_export') and (len(anchors) == 2 or (request.get('trajectory_mode') == 'authors_orbit'
+                            and request.get('runtime', {}).get('split_mode') == 'no-split')):
         segments = [{'indices': sorted(predictions), 'cache_seed_index': trajectory['anchors'][0]['frame_index']}]
     else:
         segments = trajectory.get('segments', [])
@@ -148,6 +220,8 @@ def export_inputs(studio, row, destination, initialization, *, oracle_attention_
                      'reference_index':next(t['reference_index'] for t in targets if t['segment_index'] == i),
                      'target_indices':[t['target_index'] for t in targets if t['segment_index'] == i]}
                     for i in sorted({t['segment_index'] for t in targets})]}, 'camera_convention':'opengl_c2w'}
+    if trajectory.get('handoff_export'):
+        manifest['artifixer_source']['handoff'] = trajectory['handoff_export']
     if initialization in ('source_splat', 'point_cloud'):
         source = row['_paths']['original']
         if source is None:

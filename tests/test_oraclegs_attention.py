@@ -27,6 +27,7 @@ def test_complete_unique_targets_all_references_and_nearest_source(mode,count):
     contexts = {}
     for c in chunks:
         assert set(c['reference_images']) == refs
+        assert c['source_frame'] == 0
         assert c['image_names'][0] == c['source_image']
         assert c['source_image'] == f"ref_{c['source_reference_index']:06d}.png"
         assert len(c['image_names']) <= 96
@@ -62,6 +63,8 @@ def test_shuffle_reproducibility_and_midpoint_tie():
 
 
 def test_options_reach_remote_runtime():
+    assert plan_chunks(manifest()) == plan_chunks(manifest(), mode='within_trajectory')
+    assert all(len(c['segment_indices']) == 1 for c in plan_chunks(manifest()))
     assert validate_options({})['oracle_attention_batching'] == 'within_trajectory'
     assert job_runtime({}, {})['oracle_attention_batching'] == 'within_trajectory'
     assert job_runtime({},validate_options({'oracle_attention_batching':'global'}))['oracle_attention_batching'] == 'global'
@@ -125,6 +128,19 @@ def test_runner_exports_only_the_assigned_source_map(tmp_path,monkeypatch,mode):
     for c in chunks:
         for name in c['target_images']:
             assert float((output/name).read_text()) == pytest.approx(c['source_reference_index']+.165)
+    # Reject a shuffled first slot before any additional model inference.
+    from copy import deepcopy
+    for move_source_marker in (False, True):
+        corrupted = deepcopy(chunks)
+        chunk = corrupted[0]
+        chunk['reference_images'][0], chunk['reference_images'][1] = chunk['reference_images'][1], chunk['reference_images'][0]
+        chunk['image_names'] = chunk['reference_images'] + chunk['context_target_images']
+        if move_source_marker:
+            chunk['source_frame'] = 1
+        before = len(calls)
+        with pytest.raises(ValueError, match='reference-grounded attention chunk'):
+            run_attention({'seed':23, 'image_dir':str(inputs), 'output_dir':str(output), 'chunks':corrupted})
+        assert len(calls) == before
     # Missing one reference must fail before inference, even if targets exist.
     (inputs/'ref_000005.png').unlink()
     with pytest.raises(ValueError,match='chunk|input'):

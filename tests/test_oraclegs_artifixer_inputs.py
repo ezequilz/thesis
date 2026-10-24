@@ -548,3 +548,117 @@ def test_invalid_reference_assignment_rejected_before_staging(tmp_path):
     with pytest.raises(ValueError, match='oracle_artifixer_reference_assignment'):
         export_inputs(studio, row, tmp_path/'inputs', 'sfm', oracle_artifixer_reference_assignment='invalid')
     assert not (tmp_path/'inputs').exists()
+
+
+def handoff_fixture(tmp_path):
+    from splat_explorer.splatfix.oraclegs.source_geometry import digest
+    studio, row = fixture(tmp_path)
+    root = row['_manifest'].parent
+    trajectory = json.loads((root/'preview-trajectory.json').read_text())
+    original = [3, 0, 6, 9, 12, 15]  # Storage order need not be temporal order.
+    final = [2, 0, 5, 8, 11, 15]
+    trajectory['anchors'] = [{'view_id':str(i), 'frame_index':frame} for i,frame in enumerate(original)]
+    cameras = []
+    for i in range(16):
+        pose = np.eye(4); pose[0,3] = i
+        cameras.append({'transform_matrix':pose.tolist()})
+    trajectory['transforms']['frames'] = cameras
+    legs = [[1,2], [4,5], [7,8], [10,11], [13,14]]
+    trajectory['segments'] = [{'indices':leg, 'cache_seed_index':seed}
+                              for leg,seed in zip(legs, [0,3,6,9,12])]
+    atomic_json(root/'preview-trajectory.json', trajectory)
+    for p in (root/'pred').glob('*.png'):
+        p.unlink()
+    for leg in legs:
+        for i in leg:
+            Image.new('RGB', (16,8), (0,i,0)).save(root/'pred'/f'{i:05d}.png')
+    paths, hashes = [], []
+    for slot, (old,new) in enumerate(zip(original,final)):
+        source = root/f'ref{slot}.png'
+        if new != old:
+            source = root/'handoffs/inference'/f'{new:05d}'/'repaired.png'
+            source.parent.mkdir(parents=True)
+            Image.new('RGB', (16,8), (100+new,0,0)).save(source)
+        # Exercise rebasing LRZ paths and copied original reference fallback.
+        paths.append('/workspace/results/source/'+str(source.relative_to(root)) if new != old
+                     else '/workspace/checkpoint/views/'+str(slot)+'/repaired.png')
+        hashes.append(digest(source))
+    atomic_json(root/'request.json', {'trajectory_mode':'authors_orbit',
+        'runtime':{'handoff_generation':True, 'split_mode':'single-split'}})
+    atomic_json(root/'inference-references.json', {'original_frame_indices':original,
+        'frame_indices':final, 'paths':paths, 'sha256':hashes})
+    atomic_json(root/'inference-seeding.json', {'series':[
+        {'output':'inference', 'enabled':True, 'seed_global_index':i} for i in [0,2,5,8,11]]})
+    atomic_json(root/'inference-preview.json', {'prediction_frames':'pred',
+        'reconstruction_inputs':[i for leg in legs for i in leg]})
+    return studio, row
+
+
+@pytest.mark.parametrize('batching', ['within_trajectory', 'global'])
+@pytest.mark.parametrize('initialization', ['sfm', 'point_cloud'])
+def test_handoff_export_uses_actual_repaired_seeds_and_single_split_legs(tmp_path, batching, initialization):
+    studio,row = handoff_fixture(tmp_path)
+    destination = tmp_path/'export'
+    manifest = export_inputs(studio,row,destination,initialization,oracle_attention_batching=batching)
+    refs = manifest['views']
+    assert len(refs) == 5
+    assert [Image.open(destination/v['image']).getpixel((0,0))[0] for v in refs] == [102,1,105,108,111]
+    frames = json.loads((destination/'scene/transforms.json').read_text())['frames']
+    assert [f['transform_matrix'][0][3] for f in frames[:5]] == [2,0,5,8,11]
+    targets = manifest['trajectory']['frames']
+    assert [t['target_index'] for t in targets] == [1,4,7,10,13,14]
+    assert [t['reference_index'] for t in targets] == [1,0,2,3,4,4]
+    assert [t['segment_index'] for t in targets] == [0,1,2,3,4,4]
+    assert manifest['artifixer_source']['handoff']['reference_frame_indices'] == [2,0,5,8,11]
+    chunks = plan_chunks(manifest,mode=batching)
+    for chunk in chunks:
+        assert chunk['source_frame'] == 0
+        assert chunk['image_names'][0] == chunk['source_image']
+        for index in chunk['target_indices']:
+            target = next(t for t in targets if t['target_index'] == index)
+            assert chunk['source_image'] == Path(refs[target['reference_index']]['image']).name
+        if batching == 'within_trajectory':
+            assert len(chunk['segment_indices']) == 1
+    if initialization == 'point_cloud':
+        assert len(manifest['source_depth']['views']) == 5
+    validate_assets(destination,manifest)
+
+
+@pytest.mark.parametrize('corruption', ['missing_state','missing_series','wrong_seed','wrong_hash','missing_image','unchanged_anchor','wrong_camera'])
+def test_handoff_export_rejects_incomplete_or_inconsistent_artifacts(tmp_path,corruption):
+    studio,row = handoff_fixture(tmp_path)
+    root = row['_manifest'].parent
+    path = root/'inference-references.json'
+    state = json.loads(path.read_text())
+    if corruption == 'missing_state':
+        path.unlink()
+    elif corruption == 'missing_series':
+        (root/'inference-seeding.json').unlink()
+    elif corruption == 'wrong_seed':
+        series = json.loads((root/'inference-seeding.json').read_text())
+        series['series'][1]['seed_global_index'] = 3
+        atomic_json(root/'inference-seeding.json',series)
+    elif corruption == 'missing_image':
+        (root/'handoffs/inference/00002/repaired.png').unlink()
+    else:
+        if corruption == 'wrong_hash': state['sha256'][0] = 'bad'
+        if corruption == 'unchanged_anchor': state['frame_indices'][0] = 3
+        if corruption == 'wrong_camera': state['frame_indices'][0] = 99
+        atomic_json(path,state)
+    with pytest.raises(ValueError,match='[Hh]andoff|Interior'):
+        export_inputs(studio,row,tmp_path/'export','sfm')
+    assert not (tmp_path/'export').exists()
+
+
+def test_handoff_reduction_plan_retains_metadata_and_original_trajectory(tmp_path):
+    from splat_explorer.web.splatfix_results import ResultCatalog
+    studio,row = handoff_fixture(tmp_path)
+    root = row['_manifest'].parent
+    original = json.loads((root/'preview-trajectory.json').read_text())
+    plans = ResultCatalog._artifixer_plans(SimpleNamespace(studio=studio), [row], preserve_reconstruction=True)
+    plan = plans[0]
+    assert plan['trajectory'] == original
+    kept = set(plan['reconstruction_files'])
+    assert {root/'inference-references.json', root/'inference-seeding.json'} <= kept
+    assert {root/f'ref{i}.png' for i in range(6)} <= kept
+    assert root/'handoffs/inference/00002/repaired.png' in kept
