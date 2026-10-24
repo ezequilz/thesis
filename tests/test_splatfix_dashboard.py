@@ -1003,3 +1003,34 @@ def test_restart_keeps_running_and_earlier_queued_reconstructions_ahead(studio):
     assert manager._next_queued()['run_id'] == retry['run_id']
     assert studio.store.get_run(running.run_id).state.status.value == 'running'
     assert not studio.store.stop_requested(running.run_id)
+
+
+def test_queue_moves_persist_and_control_execution(studio):
+    first = studio.create({'stage': 'select', 'scene_id': 'room'})['run_id']
+    second = studio.create({'stage': 'select', 'scene_id': 'room'})['run_id']
+    third = studio.create({'stage': 'select', 'scene_id': 'room'})['run_id']
+    studio.store.update_status(first, status='running')
+    studio.store.move_queued_run(third, 'up')
+    reloaded = SceneRunStore(studio.root)
+    manager = SceneRunManager(studio.cfg, store=reloaded)
+    assert manager._next_queued()['run_id'] == third
+    assert [row['run_id'] for row in studio.jobs()] == [first, third, second]
+    assert reloaded.get_run(first).state.status.value == 'running'
+    with pytest.raises(ValueError, match='Only waiting'):
+        reloaded.move_queued_run(first, 'down')
+    studio.store.move_queued_run(third, 'down')
+    assert manager._next_queued()['run_id'] == second
+
+
+def test_queue_moves_respect_schedule_and_recovery(studio):
+    first = studio.create({'stage': 'select', 'scene_id': 'room'})['run_id']
+    future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    later = studio.create({'stage': 'select', 'scene_id': 'room', 'scheduled_at': future})['run_id']
+    studio.store.move_queued_run(later, 'up')
+    manager = SceneRunManager(studio.cfg, store=studio.store)
+    assert manager._next_queued()['run_id'] == first
+    studio.store.update_status(first, status='queued', details={'remote_dir': '/remote/job'})
+    with pytest.raises(ValueError, match='Only waiting'):
+        studio.store.move_queued_run(first, 'down')
+    with pytest.raises(ValueError, match='Direction'):
+        studio.store.move_queued_run(later, 'invalid')

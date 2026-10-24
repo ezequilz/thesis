@@ -136,6 +136,53 @@ class SceneRunStore:
         self._clock = clock
         self._output_size_lock = threading.Lock()
 
+    def ordered_queue(self, rows=None):
+        """Return waiting runs in execution order, preserving remote recovery priority."""
+        from ..splatfix.jobs import requires_gpu
+        if rows is None:
+            rows = [run.to_dict() for run in self.list_runs()]
+        try:
+            saved = _read_json(self.root / 'queue-order.json').get('run_ids', [])
+        except (OSError, ValueError):
+            saved = []
+        ranks = {run_id: index for index, run_id in enumerate(saved)}
+        queued = [row for row in rows if row['state']['status'] in ('queued', 'waiting_gpu')]
+        return sorted(queued, key=lambda row: (
+            0 if row['state'].get('details', {}).get('remote_dir') else 1,
+            0 if row['run_id'] in ranks else 1,
+            ranks.get(row['run_id'], 0),
+            1 if requires_gpu(row.get('config', {})) else 0,
+            str(row['state'].get('created_at') or ''), row['run_id'],
+        ))
+
+    def move_queued_run(self, run_id, direction):
+        """Persist an adjacent move without modifying worker-owned run state."""
+        import fcntl
+        if direction not in ('up', 'down'):
+            raise ValueError('Direction must be up or down')
+        self._ensure_root()
+        with (self.root / '.queue-order.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            run = self.get_run(run_id)
+            if run.config.pipeline != 'splatfix':
+                raise ValueError('Only Splatfix runs can be reordered here')
+            if run.state.status.value not in ('queued', 'waiting_gpu') or run.state.details.get('remote_dir'):
+                raise ValueError('Only waiting runs that have not started can be reordered')
+            rows = self.ordered_queue()
+            movable = [row['run_id'] for row in rows
+                       if row['config'].get('pipeline') == 'splatfix'
+                       and not row['state'].get('details', {}).get('remote_dir')]
+            if run_id not in movable:
+                raise ValueError('Run is no longer waiting')
+            index = movable.index(run_id)
+            target = index + (-1 if direction == 'up' else 1)
+            if not 0 <= target < len(movable):
+                return
+            ids = [row['run_id'] for row in rows]
+            a, b = ids.index(run_id), ids.index(movable[target])
+            ids[a], ids[b] = ids[b], ids[a]
+            _atomic_write_json(self.root / 'queue-order.json', {'run_ids': ids})
+
     def output_size_bytes(self, run_id: str, *, refresh: bool = False) -> int | None:
         """Snapshot an inactive run's regular files once, persisting across restarts.
 

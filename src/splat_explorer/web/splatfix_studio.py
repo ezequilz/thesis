@@ -194,11 +194,19 @@ class SplatfixStudio(SceneRunStudio):
         return '/api/splatfix/file?path=' + quote(str(Path(path).resolve()), safe='')
 
     def jobs(self):
+        queue = self.store.ordered_queue()
+        positions = {row['run_id']: index + 1 for index, row in enumerate(queue)}
+        movable = [row['run_id'] for row in queue
+                   if row['config'].get('pipeline') == 'splatfix'
+                   and not row['state'].get('details', {}).get('remote_dir')]
         rows = []
         for run in self.store.list_runs():
             if run.config.pipeline != 'splatfix':
                 continue
             row = run.to_dict()
+            row['queue_position'] = positions.get(run.run_id)
+            row['queue_move_up'] = run.run_id in movable and movable.index(run.run_id) > 0
+            row['queue_move_down'] = run.run_id in movable and movable.index(run.run_id) < len(movable) - 1
             row['restart_supported'] = run.state.status.value in ('error', 'stopped', 'gpu_expired')
             from ..splatfix.artifixer.resume import resume_available, preparation_available
             row['resume_supported'] = resume_available(run)
@@ -230,6 +238,11 @@ class SplatfixStudio(SceneRunStudio):
                                        'ply_url': self.file_url(ply) if ply.exists() else None,
                                        'plus_frames': self.plus_previews(result_file, result)})
             rows.append(row)
+        rows.sort(key=lambda row: (
+            0 if row['state']['status'] in ('starting', 'running', 'stopping') else
+            1 if row['queue_position'] is not None else 2,
+            row['queue_position'] or 0,
+        ))
         return rows
 
     def result_artifact(self, result_file, raw):

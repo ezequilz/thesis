@@ -1493,6 +1493,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not isinstance(body, dict):
                     raise ValueError("Request must be an object")
                 self._send_json({"ok": True, "job": studio.restart(body.get("run_id"))}, 201)
+            elif self.command == "POST" and path == "/api/splatfix/queue/move":
+                if not isinstance(body, dict):
+                    raise ValueError("Request must be an object")
+                studio.store.move_queued_run(body.get("run_id"), body.get("direction"))
+                self._send_json({"ok": True})
             elif self.command == "POST" and path == "/api/splatfix/cancel":
                 if not isinstance(body, dict):
                     raise ValueError("Request must be an object")

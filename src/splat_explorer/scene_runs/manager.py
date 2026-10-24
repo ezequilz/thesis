@@ -170,6 +170,9 @@ class SceneRunManager:
             from ..splatfix.jobs import is_due
             if status in QUEUE_STATUSES and (row.get("stop_requested") or is_due(row.get("config", {}))):
                 queued.append(row)
+        if hasattr(self.store, "ordered_queue"):
+            queued = self.store.ordered_queue(queued)
+            return queued[0] if queued else None
         from ..splatfix.jobs import requires_gpu
         queued.sort(key=lambda r: (
             0 if (r.get("state") or {}).get("details", {}).get("remote_dir") else (2 if requires_gpu(r.get("config", {})) else 1),

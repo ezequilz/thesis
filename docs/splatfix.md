@@ -606,8 +606,12 @@ the dashboard does not download models or provision that environment. Existing
 GPU setup alone does not establish that the official environment is installed.
 
 The queue is serialized. A running stage can delay other stages, including local
-ones. A pending unavailable GPU does not prevent a ready local stage from being
-chosen next. Cancellation stops a local stage's process group or sends the remote
+ones. By default, ready local stages are chosen before pending GPU stages.
+The dashboard displays waiting runs in execution order, with **Move up** and
+**Move down** controls for runs that have not started. Manual ordering is saved
+across restarts and takes precedence over the default local-stage preference.
+Scheduled runs still wait for their earliest start time, and remote reattachments
+retain priority. Running stages cannot be moved. Cancellation stops a local stage's process group or sends the remote
 worker its STOP marker. GPU cancellation is cooperative between rendering or
 model-worker checks. Remote reconstruction identity is saved before launch;
 a restarted manager reattaches to that job instead of launching another copy.
