@@ -1383,3 +1383,9 @@ New-job defaults are now **40% inner strength** and **87% vignette edge strength
 Current new-job defaults: **35% inner strength**, **95% edge strength**, and **0.5 px blur**. The one-third center falloff remains, giving approximately **11.67%** at the exact center. Saved explicit settings are unchanged.
 
 Pixel sprinkle applies a configurable Gaussian pre-blur (default **0.5 px**) to the ArtiFixer boundary pixels before replacement. The **Pre-blur** setting below the final blur controls `handoff_preblur_radius` (0–10 px; 0 disables it) and is independent of `handoff_blur_radius`, which still applies afterward to the composite (including when set to 0). The source file and reference pixels remain unchanged; `source_preblur` records this step in noise metadata. Classical Gaussian noise and noise-Off paths retain their existing processing.
+
+New ArtiFixer jobs default to **MCMC regularization — on** and **LPIPS downscale Off (1.0 ×)**. Explicit saved choices remain unchanged, as do historical runtime fallbacks. Native authors pipeline profiles still enforce their existing sparse-regularization recipe; the dashboard’s default Legacy Viser / gsplat pipeline uses MCMC.
+
+**Handoff generation** defaults to **On · repair generated handoffs** for new eligible edited ArtiFixer checkpoint runs. Explicit Off and historical runtime settings remain unchanged. Baseline and endpoint trajectories remain ineligible for handoff generation.
+
+New jobs default to **MCMC regularization — on · 0.2 ×** (`base_mcmc_0_2`). This multiplies the inherited opacity and scale penalty weights by 0.2 (normally 0.01 → 0.002 each) for both reference and generated views. RGB/SSIM and LPIPS weights are unchanged. Full MCMC (`base_mcmc`) and Off (`artifixer`) remain available; explicit saved selections and native authors pipeline constraints are preserved.

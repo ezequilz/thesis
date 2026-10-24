@@ -66,12 +66,12 @@ def validate_reconstruction_options(raw):
             'prompt_source': prompt_source, **reconstruction_overrides(raw)}
 
 
-REGULARIZATION_PROFILES = ('artifixer', 'base_mcmc')
+REGULARIZATION_PROFILES = ('artifixer', 'base_mcmc', 'base_mcmc_0_2')
 
 
 def validate_regularization(profile):
     if profile not in REGULARIZATION_PROFILES:
-        raise ValueError('regularization_profile must be artifixer or base_mcmc')
+        raise ValueError('regularization_profile must be artifixer, base_mcmc or base_mcmc_0_2')
     return profile
 
 
@@ -90,9 +90,10 @@ def reconstruction_recipe(profile='artifixer', *, source_ply=False,
             'training_state': 'fresh', 'start_step': 0, 'parameter_source': 'pinned_upstream',
             'initialization_source': 'original PLY; all Gaussian parameters' if source_ply else 'COLMAP points',
             'regularization_profile': profile,
+            'regularization_weight': .2 if profile == 'base_mcmc_0_2' else 1.0 if profile == 'base_mcmc' else 0.0,
             'custom_reconstruction_overrides': source_ply or profile != 'artifixer' or generated_rgb_loss or not generated_lpips_downscale or max_gaussians != 1_000_000,
-            'regularization_source': 'base_mcmc' if profile == 'base_mcmc' else 'base_gs_sparse -> base_gs',
-            'loss_adaptation': 'include regularizers in generated-view total' if profile == 'base_mcmc' else None}
+            'regularization_source': 'base_mcmc' if profile in ('base_mcmc', 'base_mcmc_0_2') else 'base_gs_sparse -> base_gs',
+            'loss_adaptation': 'include regularizers in generated-view total' if profile in ('base_mcmc', 'base_mcmc_0_2') else None}
 
 
 def reconstruction_cli_args():
@@ -189,14 +190,17 @@ def reconstruction_settings(profile='artifixer', *, source_ply=None,
             config.import_ply.enabled = True
             config.import_ply.path = str(Path(source_ply).resolve())
             config.import_ply.init_global_step = 0
-        if profile == 'base_mcmc':
+        if profile in ('base_mcmc', 'base_mcmc_0_2'):
             regularized = original_compose('base_mcmc', [], config_dir)
             for key in ('use_opacity', 'lambda_opacity', 'use_scale', 'lambda_scale'):
                 config.loss[key] = regularized.loss[key]
+            if profile == 'base_mcmc_0_2':
+                for key in ('lambda_opacity', 'lambda_scale'):
+                    config.loss[key] *= .2
         return config
 
     training.compose_3dgrut_config = compose
-    training.Trainer3DGRUT = regularized_trainer_class(original_trainer) if profile == 'base_mcmc' else original_trainer
+    training.Trainer3DGRUT = regularized_trainer_class(original_trainer) if profile in ('base_mcmc', 'base_mcmc_0_2') else original_trainer
     try:
         yield
     finally:

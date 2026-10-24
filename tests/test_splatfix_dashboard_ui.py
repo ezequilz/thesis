@@ -31,7 +31,9 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('select').scene_id,'unrelated-current-scene');
   assert.equal(payload('repair').checkpoint,'/saved/cp');
   assert.equal(payload('repair').mode,'edited');
-  assert.equal(payload('repair').handoff_generation,false);
+  assert.equal(payload('repair').regularization_profile,'base_mcmc_0_2');
+  assert.equal(payload('repair').generated_lpips_downscale,false);
+  assert.equal(payload('repair').handoff_generation,true);
   assert.equal(payload('repair').handoff_backward_pass,true);
   $('handoff-backward-pass').value='off';
   assert.equal(payload('repair').handoff_backward_pass,false);

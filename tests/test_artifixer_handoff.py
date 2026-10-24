@@ -13,11 +13,14 @@ import pytest
 from splat_explorer.splatfix.artifixer import handoff, official_worker
 
 
-def test_options_opt_in_and_scoped():
+def test_options_default_on_and_scoped():
     from splat_explorer.splatfix.artifixer.backend import validate_options
     base = {'stage': 'repair', 'mode': 'edited'}
-    assert validate_options(base)['handoff_generation'] is False
-    assert validate_options(base)['split_mode'] == 'double-split'
+    assert validate_options(base)['handoff_generation'] is True
+    assert validate_options({**base, 'handoff_generation': False})['handoff_generation'] is False
+    assert validate_options({**base, 'mode': 'baseline'})['handoff_generation'] is False
+    assert validate_options({**base, 'image_trajectory': 'endpoints'})['handoff_generation'] is False
+    assert validate_options(base)['split_mode'] == 'single-split'
     assert validate_options({**base, 'handoff_generation': True})['split_mode'] == 'single-split'
     for bad in ('on', 1, None):
         with pytest.raises(ValueError, match='boolean'):

@@ -10,7 +10,7 @@ from splat_explorer.splatfix.jobs import validate_job
 
 def test_job_regularization_selection():
     for stage, extra in [('repair', {'checkpoint': 'saved', 'artifixer_pipeline': 'legacy_gsplat'}), ('benchmark', {'source': 'dataset'})]:
-        assert validate_job({'stage': stage, **extra})['regularization_profile'] == 'artifixer'
+        assert validate_job({'stage': stage, **extra})['regularization_profile'] == 'base_mcmc_0_2'
         assert validate_job({'stage': stage, **extra, 'regularization_profile': 'base_mcmc'})['regularization_profile'] == 'base_mcmc'
         with pytest.raises(ValueError, match='regularization_profile'):
             validate_job({'stage': stage, **extra, 'regularization_profile': 'typo'})
@@ -28,7 +28,7 @@ def test_regularization_added_once(override, lpips):
 
 
 @pytest.mark.parametrize('source_ply', [None, '/original.ply'])
-@pytest.mark.parametrize('profile', ['artifixer', 'base_mcmc'])
+@pytest.mark.parametrize('profile', ['artifixer', 'base_mcmc', 'base_mcmc_0_2'])
 def test_config_inheritance_is_scoped_and_preserves_other_settings(monkeypatch, profile, source_ply):
     sparse = SimpleNamespace(loss=dict(use_opacity=False, lambda_opacity=0.0, use_scale=False,
         lambda_scale=0.0, lambda_lpips_override=0.1), model={'density': 0.1}, schedule={'stop': 25000}, resume='old.ckpt',
@@ -48,7 +48,11 @@ def test_config_inheritance_is_scoped_and_preserves_other_settings(monkeypatch, 
     with pytest.raises(RuntimeError, match='training failed'):
         with worker.reconstruction_settings(profile, source_ply=source_ply):
             config = training.compose_3dgrut_config(worker.ARTIFIXER3D_CONFIG, [], '/pinned')
-            assert config.loss == ({**sparse.loss, **base.loss} if profile == 'base_mcmc' else sparse.loss)
+            expected = {**sparse.loss, **base.loss} if profile != 'artifixer' else dict(sparse.loss)
+            if profile == 'base_mcmc_0_2':
+                expected['lambda_opacity'] *= .2
+                expected['lambda_scale'] *= .2
+            assert config.loss == expected
             if source_ply:
                 assert config.resume == ''
                 assert config.import_ingp.enabled is False
@@ -60,7 +64,7 @@ def test_config_inheritance_is_scoped_and_preserves_other_settings(monkeypatch, 
             assert config.model == sparse.model and config.schedule == sparse.schedule
             raise RuntimeError('training failed')
     assert training.compose_3dgrut_config is compose and training.Trainer3DGRUT is object
-    assert calls == [worker.ARTIFIXER3D_CONFIG] + (['base_mcmc'] if profile == 'base_mcmc' else [])
+    assert calls == [worker.ARTIFIXER3D_CONFIG] + (['base_mcmc'] if profile != 'artifixer' else [])
 
 
 @pytest.mark.parametrize('pipeline', ['authors_3dgut', 'authors_3dgut_viser_rgb', 'legacy_gsplat'])
@@ -81,7 +85,7 @@ def test_generated_loss_job_choices_survive_pipeline(pipeline, rgb, downscale, w
 
 def test_generated_loss_defaults_and_validation():
     options = validate_job(dict(stage='repair', checkpoint='saved'))
-    assert worker.generated_loss_options(options) == dict(generated_rgb_loss=False, generated_lpips_downscale=True, generated_rgb_loss_weight=1.0)
+    assert worker.generated_loss_options(options) == dict(generated_rgb_loss=False, generated_lpips_downscale=False, generated_rgb_loss_weight=1.0)
     for key in ('generated_rgb_loss', 'generated_lpips_downscale'):
         for value in ['off', 'on', 0, 1, None]:
             with pytest.raises(ValueError, match=key):
@@ -91,7 +95,7 @@ def test_generated_loss_defaults_and_validation():
 @pytest.mark.parametrize('weight', [0.1, 1.0])
 @pytest.mark.parametrize('rgb', [False, True])
 @pytest.mark.parametrize('downscale', [False, True])
-@pytest.mark.parametrize('profile', ['artifixer', 'base_mcmc'])
+@pytest.mark.parametrize('profile', ['artifixer', 'base_mcmc', 'base_mcmc_0_2'])
 def test_generated_loss_config_and_reference_isolation(monkeypatch, rgb, downscale, profile, weight):
     # Model the pinned upstream branches with nonzero synthetic losses so that
     # toggling either weight independently changes the generated total only.
@@ -118,7 +122,7 @@ def test_generated_loss_config_and_reference_isolation(monkeypatch, rgb, downsca
     with worker.reconstruction_settings(profile, generated_rgb_loss=rgb, generated_lpips_downscale=downscale, generated_rgb_loss_weight=weight):
         trainer = training.Trainer3DGRUT()
         trainer.conf = training.compose_3dgrut_config(worker.ARTIFIXER3D_CONFIG, [], '/pinned')
-        reg = 0.05 if profile == 'base_mcmc' else 0
+        reg = 0.01 if profile == 'base_mcmc_0_2' else 0.05 if profile == 'base_mcmc' else 0
         assert trainer.get_losses(SimpleNamespace(is_override=True), {})['total_loss'] == pytest.approx(
             (0.5 if downscale else 5) + (2.2 * weight if rgb else 0) + reg)
         assert trainer.get_losses(SimpleNamespace(is_override=False), {})['total_loss'] == pytest.approx(2.2 + reg)
