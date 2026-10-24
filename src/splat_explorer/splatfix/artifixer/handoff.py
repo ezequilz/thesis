@@ -136,6 +136,18 @@ def edit_request(folder, request, cfg=None, backend=None):
             result['noise']['input_sha256'] = digest(repair_input)
         else:
             result['noise'] = {'enabled': False}
+        radius = noise['handoff_blur_radius']
+        result['blur'] = {'enabled': radius > 0, 'algorithm': 'gaussian', 'radius_pixels': radius,
+                          'order': 'after_noise_or_pixel_sprinkle'}
+        if radius > 0:
+            from PIL import ImageFilter
+            with Image.open(repair_input) as prepared:
+                blurred = prepared.convert('RGB').filter(ImageFilter.GaussianBlur(radius=radius))
+            repair_input = folder / 'repair-input.png'
+            blurred.save(repair_input, format='PNG')
+        result['repair_input_sha256'] = digest(repair_input)
+        if noise['handoff_add_noise']:
+            result['noise']['input_sha256'] = result['repair_input_sha256']
         raw = folder / 'response.image'
         if not raw.exists():
             backend = backend or GptImageEditBackend.from_config(cfg, model=SCENE_RUN_GPT_IMAGE_MODEL)

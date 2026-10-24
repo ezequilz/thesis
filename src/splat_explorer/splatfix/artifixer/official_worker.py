@@ -894,8 +894,8 @@ def inference(root, request, trajectory, plus=False):
                         context = {'reference': cp / trajectory['frames'][seed_index]['rgb'],
                                    'reference_frame_index': seed_index,
                                    'reference_context': 'original_rgb_capture'}
-                    if cfg.get('handoff_add_noise', False):
-                        context['noise'] = {key: cfg[key] for key in ('handoff_add_noise', 'handoff_noise_strength', 'handoff_noise_vignette', 'handoff_noise_mode', 'handoff_vignette_size', 'handoff_vignette_edge_strength') if key in cfg}
+                    if cfg.get('handoff_add_noise', False) or cfg.get('handoff_blur_radius', 0) > 0:
+                        context['noise'] = {key: cfg[key] for key in ('handoff_add_noise', 'handoff_noise_strength', 'handoff_noise_vignette', 'handoff_noise_mode', 'handoff_vignette_size', 'handoff_vignette_edge_strength', 'handoff_blur_radius') if key in cfg}
                     seed_path = repair_boundary(root, source, seed_index,
                         {**{k: v for k, v in cameras.items() if k != 'frames'},
                          **cameras['frames'][seed_index]}, phase=directory, **context)

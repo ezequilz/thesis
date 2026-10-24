@@ -4,6 +4,9 @@ from pathlib import Path
 
 
 def noise_options(options):
+    blur = options.get('handoff_blur_radius', 0.0)
+    if type(blur) not in (int, float) or not math.isfinite(blur) or not 0 <= blur <= 10:
+        raise ValueError('handoff_blur_radius must be between 0 and 10 pixels')
     enabled = options.get('handoff_add_noise', False)
     strength = options.get('handoff_noise_strength', 25)
     if type(enabled) is not bool:
@@ -21,7 +24,7 @@ def noise_options(options):
     validate_strength(strength)
     edge = options.get('handoff_vignette_edge_strength', max(strength, vignette_profile(size)['edge_strength_percent']))
     validate_strength(edge)
-    return {'handoff_add_noise': enabled, 'handoff_noise_strength': float(strength),
+    return {'handoff_blur_radius': float(blur), 'handoff_add_noise': enabled, 'handoff_noise_strength': float(strength),
             'handoff_noise_vignette': vignette, 'handoff_noise_mode': mode,
             'handoff_vignette_size': size, 'handoff_vignette_edge_strength': float(edge)}
 

@@ -243,3 +243,54 @@ def test_very_large_ellipse_extends_vertically_and_is_new_job_default():
     assert options['handoff_vignette_size'] == 'very_large'
     assert options['handoff_vignette_edge_strength'] == 95
     assert validate_options({'stage':'repair', 'handoff_vignette_size':'smaller'})['handoff_vignette_size'] == 'smaller'
+
+
+@pytest.mark.parametrize('mode', ['off','gaussian','repaired_pixel_sprinkle'])
+def test_blur_applies_after_preparation_preserving_originals(tmp_path,mode):
+    import json
+    from types import SimpleNamespace
+    from PIL import ImageFilter
+    from splat_explorer.splatfix.artifixer.handoff import edit_request, digest
+    from splat_explorer.splatfix.artifixer.handoff_noise import sprinkle_repaired_pixels
+    source,reference = tmp_path/'before.png',tmp_path/'reference.png'
+    checker = np.indices((32,64)).sum(axis=0) % 2 * 255
+    Image.fromarray(checker.astype(np.uint8)).convert('RGB').save(source)
+    Image.new('RGB',(64,32),'blue').save(reference)
+    original,clean = source.read_bytes(),reference.read_bytes()
+    prepared = source
+    if mode != 'off':
+        prepared = tmp_path/'unblurred.png'
+        options = dict(strength=25,seed=int(digest(source)[:16],16))
+        if mode == 'gaussian': add_gaussian_noise(source,prepared,**options)
+        else: sprinkle_repaired_pixels(source,reference,prepared,**options)
+    with Image.open(prepared) as image:
+        expected = np.asarray(image.convert('RGB').filter(ImageFilter.GaussianBlur(.5)))
+    calls=[]
+    def record(path, refs, prompt):
+        np.testing.assert_array_equal(np.asarray(Image.open(path)),expected)
+        assert path.name == 'repair-input.png'
+        assert len(refs) == (0 if mode == 'repaired_pixel_sprinkle' else 1)
+        calls.append(1)
+        return SimpleNamespace(error=None,images=[original])
+    backend = SimpleNamespace(edit=lambda p,t:record(p,[],t),edit_with_references=record)
+    request = {'id':'d'*32,'input_sha256':digest(source),'reference_sha256':digest(reference),
+               'gpt_image_context':'closest_repaired_image','handoff_add_noise':mode!='off',
+               'handoff_noise_mode':mode if mode!='off' else 'gaussian','handoff_blur_radius':.5}
+    edit_request(tmp_path,request,backend=backend)
+    result = json.loads((tmp_path/'response.json').read_text())
+    assert 'error' not in result and result['blur']['radius_pixels'] == .5
+    assert result['repair_input_sha256'] == digest(tmp_path/'repair-input.png')
+    assert source.read_bytes() == original and reference.read_bytes() == clean
+    edit_request(tmp_path,request,backend=backend)
+    assert len(calls)==1
+    np.testing.assert_array_equal(np.asarray(Image.open(tmp_path/'repair-input.png')),expected)
+
+
+def test_blur_defaults_and_validation():
+    from splat_explorer.splatfix.artifixer.handoff_noise import noise_options
+    from splat_explorer.splatfix.artifixer.backend import validate_options
+    assert noise_options({})['handoff_blur_radius'] == 0
+    assert validate_options({'stage':'repair','handoff_generation':True})['handoff_blur_radius'] == .5
+    for bad in (-1,11,True,'1',None,float('nan')):
+        with pytest.raises(ValueError,match='handoff_blur_radius'):
+            noise_options({'handoff_blur_radius':bad})
