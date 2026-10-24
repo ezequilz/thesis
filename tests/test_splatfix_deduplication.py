@@ -196,3 +196,13 @@ def test_batch_backfill_skips_unfinished_runs(tmp_path):
     assert results['run_finished']['linked_files'] == 1
     assert results['run_active']['status'] == 'skipped'
     assert not (active / d.INDEX).exists()
+
+
+def test_backfill_rejects_resumed_run_with_old_receipt(tmp_path):
+    first, second = artifacts(tmp_path)
+    (tmp_path / p.RECEIPT).write_text(json.dumps(
+        {'status': 'persisted', 'remote_cleanup': 'removed'}))
+    (tmp_path / 'status.json').write_text(json.dumps({'status': 'running'}))
+    with pytest.raises(ValueError, match='inactive'):
+        d.deduplicate_persisted_run(tmp_path)
+    assert not first.samefile(second)

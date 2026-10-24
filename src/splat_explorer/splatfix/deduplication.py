@@ -132,6 +132,9 @@ def deduplicate_persisted_run(root):
     receipt = read_json(root / RECEIPT, {})
     if receipt.get('status') != 'persisted' or receipt.get('remote_cleanup') != 'removed':
         raise ValueError('Run must be fully persisted with remote cleanup complete')
+    state = read_json(root / 'status.json', {})
+    if state.get('status') not in (None, 'completed', 'stopped', 'error', 'gpu_expired'):
+        raise ValueError('Run must be inactive before backfilling artifacts')
     result = deduplicate_artifacts(root)
     receipt['deduplication'] = result
     atomic_json(root / RECEIPT, receipt)
