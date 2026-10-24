@@ -784,6 +784,8 @@ def inference(root, request, trajectory, plus=False):
                     if cfg.get('gpt_image_context', 'single_last_frame') == 'closest_repaired_image':
                         context = {'reference': Path(active_reference_paths[reference_slot]),
                                    'reference_frame_index': active_neighbors[reference_slot]}
+                    if cfg.get('handoff_add_noise', False):
+                        context['noise'] = {key: cfg[key] for key in ('handoff_add_noise', 'handoff_noise_strength') if key in cfg}
                     seed_path = repair_boundary(root, source, seed_index,
                         {**{k: v for k, v in cameras.items() if k != 'frames'},
                          **cameras['frames'][seed_index]}, phase=directory, **context)

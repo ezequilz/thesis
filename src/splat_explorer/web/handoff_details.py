@@ -20,7 +20,7 @@ def handoff_details(studio, root):
         ident = request.get('id') or response.get('id') or folder.name
         record = records.setdefault(ident, {'id': ident, 'images': {}})
         record.update({k: v for k, v in request.items() if k in ('phase', 'frame_index', 'camera')})
-        for name, label in (('before.png', 'Downloaded boundary'), ('response-original.png', 'Original GPT response'),
+        for name, label in (('before.png', 'Downloaded boundary'), ('repair-input.png', 'Noisy image sent to GPT'), ('response-original.png', 'Original GPT response'),
                             ('reference.png', 'Next repaired reference (context)'), ('repaired.png', 'Repaired handoff')):
             path = safe(name)
             if path:

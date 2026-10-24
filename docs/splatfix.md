@@ -1346,3 +1346,9 @@ In Step 4, **GPT image context** below Handoff generation defaults to **Single l
 ### OracleGS export of handoff runs
 
 OracleGS exports the completed `inference-references.json` set at the recorded camera indices, retaining the first original repair and all repaired handoffs while excluding the original final endpoint. Displaced original anchors are not used. Repaired handoffs are trusted references, not duplicate synthetic targets. `inference-seeding.json` supplies each single-split leg’s actual seed; the original segment membership determines its generated targets. Within-trajectory attention shuffles targets per leg and always places that leg’s repaired seed first in each VGGT batch. Missing, incomplete, or checksum-mismatched handoff artifacts block export rather than reverting to old anchors. The exported input manifest records the handoff reference indices and original slots.
+
+### Handoff input noise
+
+Step 4 provides **Add noise** below GPT image context, enabled by default for new ArtiFixer repair jobs, with **Noise strength (%)** defaulting to **25**. It applies independent, zero-mean additive Gaussian noise to RGB pixels of the handoff image only, clipping to 0–255. Strength is the standard deviation as a percentage of 255 (25% = 63.75 pixel levels), not a diffusion timestep or GPT creativity setting. The second reference remains unchanged. This experiment does not guarantee better repairs or preserved geometry.
+
+The original remains `before.png`; the exact model input is saved as `repair-input.png` and shown in handoff results. `response.json` records the algorithm, strength, deterministic seed, and noisy-input checksum. Noise uses a seed derived from the original image checksum, so retries reuse identical preprocessing. Settings are stored as `handoff_add_noise` and `handoff_noise_strength`; old worker requests with no noise setting retain their original behavior. Noise is never applied outside handoff repair.

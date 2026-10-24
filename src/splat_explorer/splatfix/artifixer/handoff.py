@@ -33,7 +33,7 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def repair_boundary(root, source, frame_index, camera, *, phase, reference=None, reference_frame_index=None):
+def repair_boundary(root, source, frame_index, camera, *, phase, reference=None, reference_frame_index=None, noise=None):
     """Block until the manager commits a repair, retaining the exact camera/index."""
     from PIL import Image
     mailbox = Path(os.environ['SPLATFIX_HANDOFF_MAILBOX'])
@@ -43,6 +43,12 @@ def repair_boundary(root, source, frame_index, camera, *, phase, reference=None,
     shutil.copy2(source, folder / 'before.png')
     request = {'id': ident, 'frame_index': frame_index, 'camera': camera,
                'phase': phase, 'input_sha256': digest(source)}
+    if noise is not None:
+        if __package__:
+            from .handoff_noise import noise_options
+        else:
+            from handoff_noise import noise_options
+        request.update(noise_options(noise))
     if reference is not None:
         shutil.copy2(reference, folder / 'reference.png')
         request.update(gpt_image_context='closest_repaired_image',
@@ -72,6 +78,8 @@ def repair_boundary(root, source, frame_index, camera, *, phase, reference=None,
     archive.mkdir(parents=True, exist_ok=True)
     for name in ('before.png', 'repaired.png', 'response.image', 'response.json'):
         shutil.copy2(folder / name, archive / name)
+    if (folder / 'repair-input.png').is_file():
+        shutil.copy2(folder / 'repair-input.png', archive / 'repair-input.png')
     if (folder / 'reference.png').is_file():
         shutil.copy2(folder / 'reference.png', archive / 'reference.png')
     if (folder / 'response-original.png').is_file():
@@ -100,11 +108,22 @@ def edit_request(folder, request, cfg=None, backend=None):
             raise ValueError('Handoff input checksum mismatch')
         if mode == 'closest_repaired_image' and digest(folder / 'reference.png') != request['reference_sha256']:
             raise ValueError('Handoff reference checksum mismatch')
+        from .handoff_noise import noise_options, add_gaussian_noise
+        noise = noise_options(request)
+        repair_input = folder / 'before.png'
+        if noise['handoff_add_noise']:
+            repair_input = folder / 'repair-input.png'
+            result['noise'] = add_gaussian_noise(folder / 'before.png', repair_input,
+                strength=noise['handoff_noise_strength'], seed=int(request['input_sha256'][:16], 16))
+            result['noise']['enabled'] = True
+            result['noise']['input_sha256'] = digest(repair_input)
+        else:
+            result['noise'] = {'enabled': False}
         raw = folder / 'response.image'
         if not raw.exists():
             backend = backend or GptImageEditBackend.from_config(cfg, model=SCENE_RUN_GPT_IMAGE_MODEL)
-            answer = (backend.edit_with_references(folder / 'before.png', [folder / 'reference.png'], prompt)
-                      if mode == 'closest_repaired_image' else backend.edit(folder / 'before.png', prompt))
+            answer = (backend.edit_with_references(repair_input, [folder / 'reference.png'], prompt)
+                      if mode == 'closest_repaired_image' else backend.edit(repair_input, prompt))
             if answer.error or not answer.images:
                 raise RuntimeError(answer.error or 'Handoff repair returned no image')
             temporary = raw.with_suffix('.tmp')
@@ -151,7 +170,7 @@ class HandoffService:
             folder = self.root / ident
             if self.remote:
                 target = self.endpoint + ':' + self.remote + '/' + ident + '/'
-                for name in ('response.image', 'response-original.png', 'repaired.png'):
+                for name in ('response.image', 'response-original.png', 'repaired.png', 'repair-input.png'):
                     if (folder / name).exists():
                         self.sync(str(folder / name), target + name)
                 self.sync(str(folder / 'response.json'), target + 'response.json')

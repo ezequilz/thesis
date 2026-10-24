@@ -94,6 +94,8 @@ def validate_runtime(runtime=None):
     from .handoff import enabled, context_mode
     cfg['handoff_generation'] = enabled(cfg)
     cfg['gpt_image_context'] = context_mode(cfg)
+    from .handoff_noise import noise_options
+    cfg.update(noise_options(cfg))
     from .pipeline_profile import pipeline_profile
     pipeline_profile(cfg['artifixer_pipeline'])
     from ..resolution import profile_size

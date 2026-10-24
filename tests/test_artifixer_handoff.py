@@ -28,10 +28,11 @@ def test_options_opt_in_and_scoped():
     assert 'handoff_generation' not in validate_options({'stage': 'benchmark'})
 
 
+@pytest.mark.parametrize('add_noise', [False, True])
 @pytest.mark.parametrize('context_mode', ['single_last_frame', 'closest_repaired_image'])
 @pytest.mark.parametrize('plus', [False, True])
 @pytest.mark.parametrize('insertion', [False, True])
-def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatch, plus, insertion, context_mode):
+def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatch, plus, insertion, context_mode, add_noise):
     class Tensor(np.ndarray):
         def permute(self, *axes): return self.transpose(axes)
         def float(self): return self.astype(np.float32)
@@ -88,7 +89,8 @@ def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatc
         Image.new('RGB', (8, 8), (100 + i,) * 3).save(path)
         refs.append(str(path))
     repaired = []
-    def repair(root, source, index, camera, *, phase, reference=None, reference_frame_index=None):
+    def repair(root, source, index, camera, *, phase, reference=None, reference_frame_index=None, noise=None):
+        assert noise == ({'handoff_add_noise': True, 'handoff_noise_strength': 25} if add_noise else None)
         if context_mode == 'closest_repaired_image':
             slot = [0, 2, 3, 4][len(repaired)]
             assert str(reference) == (prior_paths if plus else request['references'])[slot]
@@ -112,6 +114,7 @@ def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatc
             for i in range(16): Image.new('RGB', (8, 8)).save(tmp_path / kind / f'{i:05d}.png')
         (tmp_path / 'distillation.json').write_text(json.dumps({'render_dir': str(tmp_path)}))
     request = {'runtime': {'checkpoint': '', 'model_id': '', 'handoff_generation': True,
+                           'handoff_add_noise': add_noise, 'handoff_noise_strength': 25,
                            'split_mode': 'single-split', 'gpt_image_context': context_mode, 'initial_image_seeding': False,
                            'image_cache_insertion': insertion},
                'references': refs, 'checkpoint_root': str(tmp_path), 'seed': 1,
@@ -203,12 +206,14 @@ def test_boundary_handshake_replaces_only_same_index(tmp_path, monkeypatch, with
         folder = mailbox / request['id']
         Image.new('RGB', (8, 8), 'red').save(folder / 'repaired.png')
         (folder / 'response.image').write_bytes((folder / 'repaired.png').read_bytes())
+        (folder / 'repair-input.png').write_bytes(source.read_bytes())
         handoff.write_json(folder / 'response.json', {**request, 'sha256': handoff.digest(folder / 'repaired.png')})
     monkeypatch.setattr(handoff.time, 'sleep', respond)
     reference = tmp_path / 'next.png'
     Image.new('RGB', (8, 8), 'blue').save(reference)
     fixed = handoff.repair_boundary(tmp_path, source, 7, {'pose': 'unchanged'}, phase='inference',
         **({'reference': reference, 'reference_frame_index': 8} if with_context else {}))
+    assert (fixed.parent / 'repair-input.png').read_bytes() == original
     if with_context:
         assert (fixed.parent / 'reference.png').read_bytes() == reference.read_bytes()
         metadata = json.loads((fixed.parent / 'camera.json').read_text())
@@ -241,6 +246,7 @@ def test_service_keeps_polling_and_publishes_pixels_before_response(tmp_path, mo
         started.set()
         assert gate.wait(5)
         (folder / 'response.image').write_bytes(source.read_bytes())
+        (folder / 'repair-input.png').write_bytes(source.read_bytes())
         (folder / 'repaired.png').write_bytes(source.read_bytes())
         handoff.write_json(folder / 'response.json', request)
     monkeypatch.setattr(handoff, 'edit_request', edit)
@@ -254,9 +260,9 @@ def test_service_keeps_polling_and_publishes_pixels_before_response(tmp_path, mo
         gate.set()
         service.pending[1].result(timeout=5)
         service.poll()
-        assert uploaded == ['response.image', 'repaired.png', 'response.json']
+        assert uploaded == ['response.image', 'repaired.png', 'repair-input.png', 'response.json']
         service.poll()
-        assert len(uploaded) == 3
+        assert len(uploaded) == 4
     finally:
         gate.set()
         service.close()

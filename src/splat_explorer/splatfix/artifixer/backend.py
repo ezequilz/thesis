@@ -28,6 +28,8 @@ def validate_options(raw):
         from .handoff import enabled, context_mode
         result['handoff_generation'] = enabled(raw)
         result['gpt_image_context'] = context_mode(raw)
+        from .handoff_noise import noise_options
+        result.update(noise_options({'handoff_add_noise': True, **raw}))
         if result['handoff_generation']:
             if raw.get('mode', 'edited') != 'edited' or raw.get('image_trajectory') == 'endpoints':
                 raise ValueError('Handoff generation requires edited checkpoint trajectories')

@@ -33,6 +33,13 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('repair').mode,'edited');
   assert.equal(payload('repair').handoff_generation,false);
   assert.equal(payload('repair').gpt_image_context,'single_last_frame');
+  assert.equal(payload('repair').handoff_add_noise,true);
+  assert.equal(payload('repair').handoff_noise_strength,25);
+  $('handoff-add-noise').value='off';
+  $('handoff-noise-strength').value='12';
+  assert.equal(payload('repair').handoff_add_noise,false);
+  assert.equal(payload('repair').handoff_noise_strength,12);
+  assert.equal(payload('benchmark').handoff_add_noise,undefined);
   $('gpt-image-context').value='closest_repaired_image';
   assert.equal(payload('repair').gpt_image_context,'closest_repaired_image');
   assert.equal(payload('benchmark').gpt_image_context,undefined);
