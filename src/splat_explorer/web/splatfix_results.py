@@ -542,6 +542,8 @@ class ResultCatalog:
         row['settings_snapshot'] = read_json(settings_path, None)
         row['settings_url'] = self.studio.file_url(settings_path) if settings_path.is_file() else None
         run_root = (self.studio.root / row['run_id']).resolve()
+        from .handoff_details import handoff_details
+        row['handoff_debug'] = handoff_details(self.studio, run_root)
         manifest = row.get('_manifest')
         json_paths = [run_root / 'worker-request.json']
         if manifest:
@@ -602,7 +604,7 @@ class ResultCatalog:
             relative = path.relative_to(gpu)
             if path.suffix.lower() in ('.pt', '.pth', '.ckpt', '.ply') or path.name == 'checkpoint.json':
                 saved['checkpoints'].append({'name': str(relative), 'url': self.studio.file_url(path)})
-            elif 'checkpoint' in relative.parts and path.suffix.lower() in ('.png', '.jpg', '.jpeg'):
+            elif path.suffix.lower() in ('.png', '.jpg', '.jpeg'):
                 name = str(relative.parent)
                 groups.setdefault(name, []).append({'name': path.name, 'url': self.studio.file_url(path)})
         saved['image_groups'] = [{'name': name, 'images': images} for name, images in groups.items()]

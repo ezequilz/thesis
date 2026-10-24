@@ -60,6 +60,8 @@ def repair_boundary(root, source, frame_index, camera, *, phase):
     archive.mkdir(parents=True, exist_ok=True)
     for name in ('before.png', 'repaired.png', 'response.image', 'response.json'):
         shutil.copy2(folder / name, archive / name)
+    if (folder / 'response-original.png').is_file():
+        shutil.copy2(folder / 'response-original.png', archive / 'response-original.png')
     write_json(archive / 'camera.json', request)
     # Replace in-place: no duplicate camera, no additional index or gap.
     shutil.copy2(fixed, source)
@@ -69,7 +71,7 @@ def repair_boundary(root, source, frame_index, camera, *, phase):
 
 def edit_request(folder, request, cfg=None, backend=None):
     """Use Step 3's backend/prompt with the requested 2.5 model; retain raw bytes."""
-    from PIL import Image
+    from PIL import Image, ImageOps
     from ..image_repair import DEFAULT_PROMPT
     from ...image_edit_gpt import GptImageEditBackend
     from ...image_edit import SCENE_RUN_GPT_IMAGE_MODEL
@@ -88,9 +90,20 @@ def edit_request(folder, request, cfg=None, backend=None):
             temporary.write_bytes(answer.images[0])
             temporary.replace(raw)
         with Image.open(folder / 'before.png') as original, Image.open(raw) as edited:
-            if original.width * edited.height != original.height * edited.width:
-                raise ValueError('Handoff repair changed camera aspect ratio')
-            edited.convert('RGB').resize(original.size, Image.Resampling.LANCZOS).save(folder / 'repaired.png')
+            edited.convert('RGB').save(folder / 'response-original.png')
+            # Match prepare_repair_checkpoint: preserve full response first,
+            # then fit to the already resolution-prepared boundary's canvas.
+            width, height = original.size
+            scale = max(width / edited.width, height / edited.height)
+            crop_width, crop_height = width / scale, height / scale
+            left, top = (edited.width - crop_width) / 2, (edited.height - crop_height) / 2
+            result['reconstruction_resize'] = {
+                'source': 'response.image', 'source_kind': 'full_response',
+                'method': 'cover_center_crop', 'target_size': [width, height],
+                'source_size': list(edited.size), 'scale': scale,
+                'source_crop_box': [left, top, left + crop_width, top + crop_height]}
+            ImageOps.fit(edited.convert('RGB'), original.size, Image.Resampling.LANCZOS,
+                         centering=(.5, .5)).save(folder / 'repaired.png')
         result['sha256'] = digest(folder / 'repaired.png')
     except Exception as exc:
         result['error'] = f'{type(exc).__name__}: {exc}'
@@ -117,7 +130,7 @@ class HandoffService:
             folder = self.root / ident
             if self.remote:
                 target = self.endpoint + ':' + self.remote + '/' + ident + '/'
-                for name in ('response.image', 'repaired.png'):
+                for name in ('response.image', 'response-original.png', 'repaired.png'):
                     if (folder / name).exists():
                         self.sync(str(folder / name), target + name)
                 self.sync(str(folder / 'response.json'), target + 'response.json')
@@ -139,6 +152,7 @@ class HandoffService:
             return
         folder = self.root / ident
         folder.mkdir(parents=True, exist_ok=True)
+        write_json(folder / 'request.json', request)
         if self.remote:
             marker = shlex.quote(self.remote + '/' + ident + '/response.json')
             if self.ssh(f'if [ -f {marker} ]; then cat {marker}; fi').strip():

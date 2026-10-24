@@ -161,7 +161,7 @@ def test_generation_waits_repairs_then_seeds_exact_boundary(tmp_path, monkeypatc
         assert Image.open(tmp_path / f'boundary-{index}/repaired.png').getpixel((0, 0)) == (200 + index,) * 3
 
 
-def test_repair_archives_raw_response_and_rejects_aspect_change(tmp_path):
+def test_repair_archives_full_response_and_fits_changed_aspect(tmp_path):
     Image.new('RGB', (16, 8)).save(tmp_path / 'before.png')
     request = {'id': 'a' * 32, 'input_sha256': handoff.digest(tmp_path / 'before.png')}
     def answer(size):
@@ -177,7 +177,12 @@ def test_repair_archives_raw_response_and_rejects_aspect_change(tmp_path):
     handoff.edit_request(tmp_path, request, backend=backend)
     (tmp_path / 'response.image').write_bytes(answer((32, 32)).images[0])
     handoff.edit_request(tmp_path, request, backend=backend)
-    assert 'aspect ratio' in json.loads((tmp_path / 'response.json').read_text())['error']
+    result = json.loads((tmp_path / 'response.json').read_text())
+    assert 'error' not in result
+    assert Image.open(tmp_path / 'response-original.png').size == (32, 32)
+    assert Image.open(tmp_path / 'repaired.png').size == (16, 8)
+    assert result['reconstruction_resize']['source_crop_box'] == [0, 8, 32, 24]
+    assert result['reconstruction_resize']['method'] == 'cover_center_crop'
 
 
 def test_boundary_handshake_replaces_only_same_index(tmp_path, monkeypatch):

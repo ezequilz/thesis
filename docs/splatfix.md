@@ -1319,8 +1319,11 @@ reference set and applies the same progressive handoff strategy.
 
 The manager uses the existing Step 3 relay backend and repair prompt. No relay
 credentials are copied into GPU requests. Cancellation and deadline polling stay
-active during image editing. Repair errors, checksum errors and aspect-ratio
-changes fail the run rather than silently generating with an unrepaired seed.
+active during image editing. Repair and checksum errors fail the run rather than silently using an unrepaired
+seed. Full-size GPT responses are saved before normalization. Handoff inputs use
+the same LANCZOS resize and centered cover crop as normal checkpoint preparation,
+matching the selected boundary resolution (1280 × 720 by default). Crop and
+scale metadata are recorded with each response.
 Raw responses are retained and reused after transfer retries.
 
 Each run archives `handoffs/inference/<index>/` and `handoffs/plus/<index>/` with
