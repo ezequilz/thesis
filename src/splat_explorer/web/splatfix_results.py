@@ -304,6 +304,15 @@ class ResultCatalog:
                 trajectory, references, _ = source_assets(self.studio, row)
                 plan['trajectory'] = trajectory
                 plan['reconstruction_files'] = references
+                # Retain original RGB snapshots for debugging alongside the
+                # repaired references, including older manifest-selected paths.
+                inputs = read_json(manifest.parent / 'input-preview.json', {})
+                originals = list((manifest.parent / 'input-images/original_rgb_images').rglob('*'))
+                originals.extend(self.studio.result_artifact(manifest, item.get('path'))
+                                 for item in inputs.get('original_rgb_images', []))
+                plan['reconstruction_files'].extend(
+                    path for path in originals if path and path.is_file()
+                    and path.suffix.lower() in ('.png', '.jpg', '.jpeg'))
                 if trajectory.get('handoff_export'):
                     # Preserve the original generation segments for validating the
                     # completed handoff metadata again after storage reduction.

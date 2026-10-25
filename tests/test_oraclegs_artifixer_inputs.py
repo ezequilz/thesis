@@ -261,6 +261,12 @@ def test_reduce_keeps_reconstruction_inputs_exportable(tmp_path, backup):
     (result / 'checkpoint.pt').write_bytes(b'weights')
     (result / 'input-images/original_rgb_images').mkdir(parents=True)
     (result / 'input-images/original_rgb_images/0.png').write_bytes(b'input')
+    inputs = json.loads((result / 'input-preview.json').read_text())
+    (result / 'original-debug.jpg').write_bytes(b'original render')
+    inputs['original_rgb_images'] = [
+        {'index': 0, 'name': 'original-debug.jpg', 'path': 'original-debug.jpg'},
+        {'index': 1, 'name': 'missing.png', 'path': 'missing.png'}]
+    atomic_json(result / 'input-preview.json', inputs)
     poses = (result / 'preview-trajectory.json').read_bytes()
     (result / 'output-poses.json').write_bytes(poses)
     images = {p: p.read_bytes() for p in result.glob('ref*.png')}
@@ -271,7 +277,9 @@ def test_reduce_keeps_reconstruction_inputs_exportable(tmp_path, backup):
     assert all(p.read_bytes() == content for p, content in images.items())
     assert (result / 'output-poses.json').read_bytes() == poses
     assert not (result / 'checkpoint.pt').exists()
-    assert not (result / 'input-images/original_rgb_images').exists()
+    assert (result / 'input-images/original_rgb_images/0.png').read_bytes() == b'input'
+    assert (result / 'original-debug.jpg').read_bytes() == b'original render'
+    assert json.loads((result / 'input-preview.json').read_text()) == inputs
     assert bool(report['backup_path']) == backup
     # Exercise the actual post-inference reconstruction export after pruning.
     destination = tmp_path / 'reconstruct'
