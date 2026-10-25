@@ -25,7 +25,9 @@ def test_legacy_defaults_and_import_identity():
     assert importlib.import_module('splat_explorer.splatfix.repair') is importlib.import_module(
         'splat_explorer.splatfix.artifixer.repair')
     assert job['split_mode'] == 'double-split'
-    assert job['regularization_profile'] == 'artifixer'
+    assert job['regularization_profile'] == 'base_mcmc_0_2'
+    assert job['connected_trajectory_generation'] is True
+    assert job['handoff_generation'] is False
 
 
 def test_registered_backend_receives_validation_remote_and_worker(tmp_path, monkeypatch):

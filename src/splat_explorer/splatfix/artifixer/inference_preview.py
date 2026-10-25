@@ -118,6 +118,8 @@ class InferencePreviewMirror:
                 '--include=/benchmark-run.json', '--include=/inference-backward.json',
                 '--include=/inference-middle.json', '--include=/inference-seeding.json', '--include=/inference-references.json',
                 '--include=/inference-handoffs.json', '--include=/handoffs/***',
+                '--include=/inference-connected.json', '--include=/plus-connected.json',
+                '--include=/inference-connected/***', '--include=/plus-connected/***',
                 *(['--include=/artifixer3d.ply', '--include=/plus/***'] if relative.name == 'result.json' else []),
                 '--include=/published-test-metrics.json', '--include=/evaluation-status.json',
                 '--include=/stage-comparison*.jpg', '--include=/stage-comparison.json',

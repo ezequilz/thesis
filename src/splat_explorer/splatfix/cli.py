@@ -109,9 +109,17 @@ def repair_splat(cfg, args):
     if getattr(args, 'image_cache_insertion', None) is not None:
         runtime['image_cache_insertion'] = args.image_cache_insertion
     if method == 'artifixer':
+        if getattr(args, 'connected_bridge_seeding', None) is not None:
+            runtime['connected_bridge_seeding'] = args.connected_bridge_seeding
+        if getattr(args, 'connected_trajectory_generation', None) is not None:
+            runtime['connected_trajectory_generation'] = args.connected_trajectory_generation
         if getattr(args, 'handoff_generation', None) is not None:
             runtime['handoff_generation'] = args.handoff_generation != 'off'
             runtime['handoff_type'] = 'middle' if args.handoff_generation == 'middle' else 'boundary'
+        if (getattr(args, 'connected_trajectory_generation', None) is None
+                and (runtime.get('handoff_generation') or runtime['split_mode'] != 'double-split'
+                     or runtime.get('image_trajectory') == 'endpoints')):
+            runtime['connected_trajectory_generation'] = False
         for key in ('reconstruction_images', 'reconstruction_initialization', 'prompt_source', 'artifixer_pipeline'):
             if getattr(args, key, None) is not None:
                 runtime[key] = getattr(args, key)
@@ -202,6 +210,10 @@ def _add_stages(parser):
                         help='Generate one continuous path (no-split), whole legs, or inward halves (default); normal runs retain all references')
     repair.add_argument('--handoff-generation', choices=('on', 'off', 'middle'), default=None,
                         help='Repair generated boundaries (on), or fuse inward halves at the midpoint and retain all original repairs (middle)')
+    repair.add_argument('--connected-trajectory-generation', action=argparse.BooleanOptionalAction, default=None,
+                        help='Connect the middle third with a fresh padded block (default: on for double-split; max 64 poses per span)')
+    repair.add_argument('--connected-bridge-seeding', choices=('off', 'seed', 'seed_preserve'), default=None,
+                        help='Bridge overlap seeding: seed (default), seed_preserve (fixed latent/KV), or off')
     repair.add_argument('--prompt-source', choices=('original_anchors', 'original_and_repaired', 'worldexplorer'), default=None)
     repair.add_argument('--artifixer-pipeline', choices=('authors_3dgut', 'authors_3dgut_viser_rgb', 'legacy_gsplat'), default=None,
                         help='Legacy Viser/gsplat (default), authors 3DGUT rendering and fresh reconstruction, or Viser RGB with authors 3DGUT geometry/fitting')

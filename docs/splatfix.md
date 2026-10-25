@@ -1386,7 +1386,7 @@ Pixel sprinkle applies a configurable Gaussian pre-blur (default **0.5 px**) to 
 
 New ArtiFixer jobs default to **MCMC regularization — on** and **LPIPS downscale Off (1.0 ×)**. Explicit saved choices remain unchanged, as do historical runtime fallbacks. Native authors pipeline profiles still enforce their existing sparse-regularization recipe; the dashboard’s default Legacy Viser / gsplat pipeline uses MCMC.
 
-**Handoff generation** defaults to **On · repair generated handoffs** for new eligible edited ArtiFixer checkpoint runs. Explicit Off and historical runtime settings remain unchanged. Baseline and endpoint trajectories remain ineligible for handoff generation.
+**Handoff generation** now defaults to **Off**. Boundary and middle handoffs remain opt-in fallbacks. New double-split checkpoint runs use **Connected trajectory generation** instead; historical runtime settings and exact repeats retain their saved algorithm.
 
 New jobs default to **MCMC regularization — on · 0.2 ×** (`base_mcmc_0_2`). This multiplies the inherited opacity and scale penalty weights by 0.2 (normally 0.01 → 0.002 each) for both reference and generated views. RGB/SSIM and LPIPS weights are unchanged. Full MCMC (`base_mcmc`) and Off (`artifixer`) remain available; explicit saved selections and native authors pipeline constraints are preserved.
 
@@ -1423,3 +1423,109 @@ the reference set. The separate backwards-pass toggle applies only to boundary m
 final frame ownership and the actual seed of each pass. Original inward predictions
 are retained in `inference-middle/`, and repair inputs/results use the existing
 `handoffs/inference/` archive. OracleGS rejects incomplete or inconsistent metadata.
+
+
+### Connected trajectory generation (Step 4 default)
+
+`connected_trajectory_generation: true` uses the current causal ArtiFixer checkpoint.
+Handoff generation defaults to off. Each span between consecutive saved references
+is validated against the original double-split camera ownership and supports at
+most **64 poses including endpoints**. Longer spans fail before model allocation;
+disable this option to use an existing fallback. Single-split, no-split,
+endpoint-only, and handoff modes retain their separate paths. Explicitly enabling
+incompatible settings is rejected. Historical saved requests and exact repeats
+do not silently acquire connected generation.
+
+For a 64-pose span (local indices 0–63):
+
+- Generate inward RGB legs 0–24 and 63–39, including the existing endpoint
+  reference at the start of each call. Initial seeding and optional exact cache
+  preservation remain independently controlled for these legs.
+- Clear all temporal and cross-attention caches; use the unmodified joint sampler
+  for target renders and source opacity at 19–43 in trajectory order. Recompute
+  rays, target cameras, and neighbor cameras together in the original world frame.
+- Supply references `[0, 8, 14, 18, 19, 20, 42, 43, 44, 48, 55, 63]`.
+  Endpoints use the run's unchanged saved reference images (repaired in edited
+  mode); all other references are generated outer RGBs at their exact poses.
+- Sample all 25 targets together in one seven-latent-frame block, with four steps
+  using the existing Viser RGB / CUDA gsplat opacity path by default. Bridge
+  seeding replaces RGBs at 19, 20, 42, 43 with their generated outer counterparts
+  and sets opacity to 1 at exactly those four positions. All other rendered RGBs,
+  opacity and camera inputs are retained; there is no cache merging.
+- Publish only 21–41. Preserve 0–20 and 42–63 exactly. The four generated overlap
+  images at 19, 20, 42, 43 are diagnostic images, not final supervision.
+
+For every span length `N` from 3 to 64, calculate the middle independently:
+
+```python
+bridge_count = max(1, min(N - 2, (N + 1) // 3))
+bridge_start = (N - bridge_count) // 2
+bridge_stop = bridge_start + bridge_count  # exclusive
+window_start = max(0, bridge_start - 2)
+window_stop = min(N, bridge_stop + 2)      # exclusive
+```
+
+The one-third ratio applies to the replacement region, excluding overlaps. For
+48 poses, replace 16–31 and generate 14–33 (20 real frames); for 30, replace 10–19
+and generate 8–21 (14); for 12, replace 4–7 and generate 2–9 (8). There are two
+real overlaps per side for N ≥ 6. For 3–5 poses use the available one or two,
+including endpoint reference images where necessary. No interior means no bridge.
+
+Keep the successful inward legs. Select up to six distinct retained references
+per side, concentrating near the join and always including both original endpoints
+and every overlap. Never select a reference from the middle being replaced.
+All indices, including the reverse leg, map to the common trajectory order.
+
+The upstream `process_item` pads RGB and opacity to 25 by repeating the final real
+frame, then trims before exporting. Camera rays, poses and intrinsics are computed
+from the correspondingly padded RGB camera indices, so each additional group
+uses the final real camera rather than a repeated average of earlier cameras.
+The block remains seven latent frames with four sampling steps and fresh caches.
+Only real overlap outputs enter diagnostics; only the calculated middle is spliced
+into the final images. Padding can affect short-window quality but adds no poses.
+Each outer call uses at most 25 poses; short calls also use upstream padding.
+This runs independently before ArtiFixer3D fitting and again on the plus renders.
+All original references remain fitting supervision; generated bridge references
+never become ground truth.
+
+`inference-connected.json` and `plus-connected.json` record plans, completion,
+reference checksums, seeds, kept indices, padding counts, and real overlap
+MAE/RMSE/PSNR on RGB [0,1].
+Identical overlaps have `identical: true` and null PSNR rather than JSON infinity.
+The matching `*-connected/leg-NNN/` folders retain outer predictions, bridge
+outputs for the real window, and comparison PNGs (preserved | generated | absolute difference).
+Run details expose both boundary comparisons and metadata. These diagnostics
+measure agreement; there is no calibrated quality gate or automatic retry.
+Incomplete or invalid outputs fail before publishing any bridge images.
+
+The dashboard's **Bridge image seeding** setting is independent of outer-leg
+**Image cache insertion**. `connected_bridge_seeding` has three modes:
+
+- `seed` (default): the existing RGB/opacity seeding mechanism at every available real overlap,
+  using the unchanged joint sampler, VAE encoding, opacity mixing and re-noising.
+- `seed_preserve` (manual): the same overlap RGB inputs, plus fixed encoded latent
+  groups containing the actual overlaps throughout all four steps (0, 1 and 6
+  for the 25-frame window). A clean t=0 transformer pass captures
+  those groups' K/V at their original positions, attending only to known groups
+  during capture. Every denoising step then sees the complete block with those
+  keys/values held fixed. The normal sampler and scheduler are reused through
+  scoped adapters; original methods/processors are restored on success or failure.
+  Wan's first RGB is separate and subsequent groups contain four RGBs: these
+  groups correspond to frames 19–23 and 40–43 in the 64-pose example. Thus this
+  stronger experiment also constrains five kept neighboring frames, whose source
+  renders participate in the same encoded groups. It does not guarantee identical
+  decoded overlap pixels. Metadata records the constrained groups and verifies
+  latent/KV preservation at every layer and step. On very short windows, the
+  seed groups can cover all real frames: this also fixes the encoded middle,
+  which is explicitly flagged in metadata and run details. Padding-only groups
+  are not added to the set of preserved real seed groups.
+- `off`: the original unseeded joint bridge, retaining both sides as references.
+
+All modes generate/export the available real overlaps for comparison and publish
+only the dynamic middle (21–41 in the 64-pose example). Existing saved requests without this new field retain `off` on replay.
+
+CLI: `--connected-trajectory-generation` / `--no-connected-trajectory-generation`,
+with `--connected-bridge-seeding seed|seed_preserve|off`.
+Choosing `--handoff-generation on` or `middle` disables the default bridge unless
+you explicitly request both, which is rejected. The dashboard keeps the same
+mutual exclusion. Turning both off restores ordinary double-split generation.

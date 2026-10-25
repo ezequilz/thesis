@@ -464,12 +464,58 @@ def test_input_preview_gallery_grows_before_reconstruction_finishes(tmp_path):
     for index in (2, 10):
         (pred / f'{index:05d}.png').write_bytes(b'prediction')
         detail = studio.results.run_detail(key, deferred=True)
-        assert detail['gallery']['frames'] == []
+        assert [f['index'] for f in detail['gallery']['frames']] == ([] if index == 2 else [2])
         assert detail['gallery_pending']
         detail.update(studio.results.detail_section(key, 'gallery'))
         assert not detail['inference_ready']
         assert not detail['gallery']['verified_inputs']
         assert [f['index'] for f in detail['gallery']['frames']] == ([2] if index == 2 else [2, 10])
+
+
+def test_gallery_cache_survives_restart_and_stops_discovery_after_24_hours(tmp_path, monkeypatch):
+    from datetime import datetime
+    from splat_explorer.web.splatfix_results import ResultCatalog
+    studio, run, root = setup(tmp_path)
+    pred = root / 'inference/splatfix/frames/batch_0000/pred'
+    pred.mkdir(parents=True)
+    (pred / '00002.png').write_bytes(b'prediction')
+    source = studio.results.detail(run.name)
+    created = datetime.fromisoformat(source['created_at'].replace('Z', '+00:00')).timestamp()
+    monkeypatch.setattr('splat_explorer.web.splatfix_results.time.time', lambda: created + 86399)
+    first = studio.results.detail_section(run.name, 'gallery')
+    assert [f['index'] for f in first['gallery']['frames']] == [2]
+    (pred / '00010.png').write_bytes(b'prediction')
+    second = studio.results.detail_section(run.name, 'gallery')
+    assert [f['index'] for f in second['gallery']['frames']] == [2, 10]
+    restarted = ResultCatalog(studio)
+    monkeypatch.setattr('splat_explorer.web.splatfix_results.time.time', lambda: created + 86400)
+    monkeypatch.setattr(restarted, '_scan_gallery_section', lambda *_: pytest.fail('Old run must not scan'))
+    monkeypatch.setattr(restarted, '_reconstruction_gallery', lambda *a, **kw: pytest.fail('Old thumbnail must not scan'))
+    (pred / '00020.png').write_bytes(b'late prediction')
+    detail = restarted.run_detail(run.name, deferred=True)
+    assert 'gallery' not in detail['deferred_sections']
+    assert detail['gallery_lookup_expired'] and not detail['gallery_pending']
+    assert detail['gallery'] == second['gallery']
+    assert restarted.detail_section(run.name, 'gallery')['gallery'] == second['gallery']
+    assert restarted.run_detail(run.name)['gallery'] == second['gallery']
+    assert restarted.entries()[0]['preview_url'] == second['gallery']['frames'][0]['url']
+    forced = studio.results.detail_section(run.name, 'gallery', force=True)
+    assert [f['index'] for f in forced['gallery']['frames']] == [2, 10, 20]
+    assert restarted.run_detail(run.name, deferred=True)['gallery'] == forced['gallery']
+
+
+
+def test_old_run_without_gallery_cache_does_not_scan(tmp_path, monkeypatch):
+    from datetime import datetime
+    studio, run, _ = setup(tmp_path)
+    source = studio.results.detail(run.name)
+    created = datetime.fromisoformat(source['created_at'].replace('Z', '+00:00')).timestamp()
+    monkeypatch.setattr('splat_explorer.web.splatfix_results.time.time', lambda: created + 86401)
+    monkeypatch.setattr(studio.results, '_scan_gallery_section', lambda *_: pytest.fail('No cache is not permission to scan'))
+    detail = studio.results.run_detail(run.name, deferred=True)
+    assert detail['gallery']['frames'] == []
+    assert 'gallery' not in detail['deferred_sections']
+    assert studio.results.detail_section(run.name, 'gallery')['gallery_lookup_expired']
 
 
 def test_preview_split_references_load_even_with_verified_prediction_indices(tmp_path):
@@ -1601,20 +1647,28 @@ fetch:url=>new Promise((resolve,reject)=>requests.push({url,resolve,reject})),cl
 vm.runInContext(fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0],context);
 (async()=>{
 vm.runInContext(`
-let rendered=[];showAnchor=r=>rendered.push('anchor');showLogs=r=>rendered.push('logs');showTraining=r=>rendered.push('training');
-currentDetail={deferred_sections:['anchor','training']};loadDetailSections('job',currentDetail);
+let rendered=[];renderImageGallery=r=>rendered.push('gallery');showAnchor=r=>rendered.push('anchor');showLogs=r=>rendered.push('logs');showTraining=r=>rendered.push('training');
+currentDetail={deferred_sections:['anchor','training','gallery']};loadDetailSections('job',currentDetail);
 loadDetailSections('job',currentDetail);
 `,context);
-assert.equal(requests.length,3); // initial metadata plus exactly one request per section
+assert.equal(requests.length,4); // initial metadata plus exactly one request per section
 requests.find(r=>r.url.includes('section=training')).resolve({ok:true,json:async()=>({logs:[]})});
 await new Promise(setImmediate);
 vm.runInContext(`assert.equal(rendered.join(','),'logs,training');assert.ok($('backgroundStatus').textContent.includes('anchor'));`,context);
+requests.find(r=>r.url.includes('section=gallery')).resolve({ok:true,json:async()=>({gallery:{frames:[{index:2}]},gallery_pending:false})});
+await new Promise(setImmediate);
+vm.runInContext(`assert.ok(rendered.includes('gallery'));assert.equal(currentDetail.gallery.frames[0].index,2);`,context);
 requests.find(r=>r.url.includes('section=anchor')).reject(Error('failed'));
 await new Promise(setImmediate);
-vm.runInContext(`assert.ok($('backgroundStatus').textContent.includes('Refresh to retry'));loadDetailSections('job',currentDetail);`,context);
+vm.runInContext(`assert.ok($('backgroundStatus').textContent.includes('Refresh to retry'));currentDetail.kind='ArtiFixer3D';currentDetail.deferred_sections=['anchor','training'];loadDetailSections('job',currentDetail,true);`,context);
 requests.filter(r=>r.url.includes('section=anchor')).at(-1).resolve({ok:true,json:async()=>({anchor_chart:{url:'/chart'}})});
 await new Promise(setImmediate);
 vm.runInContext(`assert.ok(rendered.includes('anchor'));assert.equal(currentDetail.anchor_chart.url,'/chart');`,context);
+assert.ok(requests.filter(r=>r.url.includes('section=gallery')).at(-1).url.includes('&force=1'));
+requests.filter(r=>r.url.includes('section=gallery')).at(-1).resolve({ok:true,json:async()=>({gallery:{frames:[{index:2},{index:10}]},gallery_pending:false})});
+await new Promise(setImmediate);
+vm.runInContext(`assert.equal(currentDetail.gallery.frames.length,2);assert.equal(rendered.filter(x=>x==='gallery').length,2);`,context);
+
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''
     subprocess.run([node, '-e', script, 'src/splat_explorer/web/static/splatfix_result_detail.html'], check=True)

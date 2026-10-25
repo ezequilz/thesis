@@ -31,6 +31,9 @@ splatfix:
     prompt_source: worldexplorer
     reconstruction_initialization: point_cloud  # authors path always uses a fresh fit
     initial_image_seeding: true  # Seed each series, including both endpoint directions
+    handoff_generation: false  # Optional fallback with --handoff-generation on or middle
+    connected_trajectory_generation: true  # Bridge the middle third in one padded block per double-split span, max 64 poses
+    connected_bridge_seeding: seed  # off / seed / seed_preserve; independent of outer-leg seeding
     image_cache_insertion: false  # Optional exact latent/cache preservation
     repo: /workspace/third_party/ArtiFixer
     python: /workspace/artifixer-venv/bin/python

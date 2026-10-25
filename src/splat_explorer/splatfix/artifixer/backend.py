@@ -28,9 +28,7 @@ def validate_options(raw):
         result['benchmark_runs'] = runs
     if raw['stage'] == 'repair':
         from .handoff import enabled, context_mode, backward_enabled, handoff_type
-        result['handoff_generation'] = enabled({
-            'handoff_generation': raw.get('mode', 'edited') == 'edited'
-                                  and raw.get('image_trajectory') != 'endpoints', **raw})
+        result['handoff_generation'] = enabled(raw)
         result['handoff_type'] = handoff_type(raw)
         result['handoff_backward_pass'] = backward_enabled({'handoff_backward_pass': True, **raw})
         result['gpt_image_context'] = context_mode({'gpt_image_context': 'closest_repaired_image', **raw})
@@ -50,6 +48,10 @@ def validate_options(raw):
         result['image_trajectory'] = validate_image_trajectory(raw.get('image_trajectory', 'checkpoint'))
         if result['image_trajectory'] == 'endpoints':
             result['split_mode'] = 'no-split'
+        from .connected_trajectory import configure
+        result['connected_trajectory_generation'] = configure({**raw, **result})
+        from .bridge_seeding import mode as bridge_seeding_mode
+        result['connected_bridge_seeding'] = bridge_seeding_mode(raw, default='seed')
         reference_mode = raw.get('endpoint_reference_mode', 'both')
         if reference_mode not in ('both', 'initial'):
             raise ValueError('endpoint_reference_mode must be both or initial')

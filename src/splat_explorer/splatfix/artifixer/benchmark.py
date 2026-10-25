@@ -44,6 +44,8 @@ SOURCE_CAMERA_LIMITATION = LIMITATION.replace(
 def benchmark_runtime(runtime=None):
     from .repair import DEFAULT_RUNTIME, validate_runtime
     supplied = dict(runtime or {})
+    # Published benchmarks keep their original segmented inference protocol.
+    supplied['connected_trajectory_generation'] = False
     variant = supplied.get('model_variant')
     if variant is None:
         model_id = supplied.get('model_id', DEFAULT_RUNTIME['model_id'])

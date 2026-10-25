@@ -36,7 +36,7 @@ def test_middle_plan_preserves_indices_and_shared_camera(count):
 def test_middle_options_are_opt_in_and_validated():
     from splat_explorer.splatfix.artifixer.backend import validate_options
     assert validate_options({'stage': 'repair'})['handoff_type'] == 'boundary'
-    options = validate_options({'stage': 'repair', 'handoff_type': 'middle'})
+    options = validate_options({'stage': 'repair', 'handoff_generation': True, 'handoff_type': 'middle'})
     assert options['handoff_type'] == 'middle'
     assert options['split_mode'] == 'single-split'
     with pytest.raises(ValueError, match='handoff_type'):

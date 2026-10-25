@@ -37,6 +37,9 @@ DEFAULT_RUNTIME = {
     'reconstruction_images': 'distilled',
     'image_cache_insertion': False,
     'initial_image_seeding': True,
+    'handoff_generation': False,
+    'connected_trajectory_generation': True,
+    'connected_bridge_seeding': 'seed',
     'repo': '/workspace/third_party/ArtiFixer',
     'python': '/workspace/artifixer-venv/bin/python',
     'checkpoint': '/workspace/models/artifixer/artifixer-1.3b.pt',
@@ -91,6 +94,10 @@ def digest_file(path):
 
 def validate_runtime(runtime=None):
     cfg = {**DEFAULT_RUNTIME, **(runtime or {})}
+    from .connected_trajectory import configure
+    cfg['connected_trajectory_generation'] = configure(runtime or {})
+    from .bridge_seeding import mode as bridge_seeding_mode
+    cfg['connected_bridge_seeding'] = bridge_seeding_mode(cfg)
     from .handoff import enabled, context_mode, backward_enabled, handoff_type
     cfg['handoff_generation'] = enabled(cfg)
     cfg['handoff_type'] = handoff_type(cfg)
@@ -516,7 +523,18 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         if len(pose_keys) != len(cp.views):
             raise ValueError('Saved anchor poses must be distinct for authors smooth orbit')
     from .pipeline_profile import rgb_backend, geometry_backend, apply_pipeline
-    cfg = apply_pipeline(validate_runtime(runtime))
+    effective_runtime = {**(runtime or {}), 'split_mode': split_mode}
+    if cp.endpoint_only:
+        effective_runtime.update(image_trajectory='endpoints', connected_trajectory_generation=False)
+    if trajectory_mode != 'authors_orbit':
+        if effective_runtime.get('connected_trajectory_generation'):
+            raise ValueError('Connected trajectory generation requires authors-orbit trajectories')
+        effective_runtime['connected_trajectory_generation'] = False
+    if repeat:
+        # Historical repeats must not silently acquire a new inference algorithm.
+        effective_runtime['connected_trajectory_generation'] = repeat['runtime'].get('connected_trajectory_generation', False)
+        effective_runtime['connected_bridge_seeding'] = repeat['runtime'].get('connected_bridge_seeding', 'off')
+    cfg = apply_pipeline(validate_runtime(effective_runtime))
     backend = rgb_backend(cfg)
     if geometry_backend(cfg) == '3dgut' and trajectory_mode == 'legacy_local_loops':
         raise ValueError('Legacy local loops require the legacy_gsplat pipeline')

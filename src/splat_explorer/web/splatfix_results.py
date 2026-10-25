@@ -329,10 +329,14 @@ class ResultCatalog:
                 for pattern in ('*trajectory*.json', '*transforms*.json', '*poses*.json', '*cameras*.json'):
                     plan['reconstruction_files'].extend(manifest.parent.rglob(pattern))
                 for name in ('inference-directions.json', 'plus-directions.json',
-                             'inference-insertion-audit.json', 'plus-insertion-audit.json'):
+                             'inference-insertion-audit.json', 'plus-insertion-audit.json',
+                             'inference-connected.json', 'plus-connected.json'):
                     path = manifest.parent / name
                     if path.is_file():
                         plan['reconstruction_files'].append(path)
+                for phase in ('inference', 'plus'):
+                    plan['reconstruction_files'].extend(p for p in (manifest.parent / f'{phase}-connected').rglob('*')
+                                                        if p.is_file())
             plans.append(plan)
         return plans
 
@@ -509,7 +513,14 @@ class ResultCatalog:
         saved_bytes = max(0, before - after) if type(before) is int and type(after) is int else None
         preview = []
         preview_label = '3D+ image preview'
-        if manifest and load_preview:
+        gallery_source = {'_manifest': manifest, 'run_id': record['run_id'],
+                          'created_at': record.get('state', {}).get('created_at'),
+                          'reduced': (self.studio.root / record['run_id'] / 'reduction.json').is_file()}
+        if manifest and load_preview and self._gallery_lookup_expired(gallery_source):
+            cached = self._read_gallery_cache(gallery_source)
+            preview = [f['url'] for f in cached.get('gallery', {}).get('frames', [])[:1]]
+            preview_label = 'img 1 preview'
+        elif manifest and load_preview:
             preview = self.studio.plus_previews(manifest, result)
             if not preview:
                 gallery, _ = self._reconstruction_gallery(manifest, result, limit=1)
@@ -635,10 +646,13 @@ class ResultCatalog:
         from .handoff_details import handoff_details
         row['handoff_debug'] = handoff_details(self.studio, run_root)
         manifest = row.get('_manifest')
+        from .connected_details import connected_details
+        row['connected_debug'] = connected_details(self.studio, manifest)
         json_paths = [run_root / 'worker-request.json']
         if manifest:
             json_paths += [manifest.parent / name for name in (
-                'orbit-provenance.json', 'inference-directions.json')]
+                'orbit-provenance.json', 'inference-directions.json',
+                'inference-connected.json', 'plus-connected.json')]
         row['json_artifacts'] = []
         for path in json_paths:
             if not path.is_file() or not path.resolve().is_relative_to(run_root):
@@ -684,8 +698,13 @@ class ResultCatalog:
         if manifest is None:
             return row
         result = read_json(manifest, {})
-        root = manifest.parent
         if result.get('reconstruction_method') == 'g4splat' or row['kind'].startswith('G4Splat'):
+            return row
+        cached_gallery = self._read_gallery_cache(source_row)
+        row.update(cached_gallery)
+        if self._gallery_lookup_expired(source_row):
+            row['gallery_lookup_expired'] = True
+            row['gallery_pending'] = False
             return row
         if deferred:
             row['deferred_sections'].append('gallery')
@@ -694,7 +713,40 @@ class ResultCatalog:
         row.update(self._gallery_section(source_row))
         return row
 
-    def _gallery_section(self, source_row):
+    @staticmethod
+    def _gallery_lookup_expired(source):
+        """The cutoff is run creation, not the most recent visit or download."""
+        try:
+            created = datetime.fromisoformat(source['created_at'].replace('Z', '+00:00'))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            return time.time() - created.timestamp() >= 24 * 60 * 60
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return False
+
+    def _gallery_cache_path(self, source):
+        # Keep display metadata outside the GPU tree and isolate repeated passes.
+        manifest = source['_manifest']
+        key = hashlib.sha256(str(manifest.parent.resolve()).encode()).hexdigest()[:20]
+        return self.studio.root / source['run_id'] / 'gallery-cache' / (key + '.json')
+
+    def _read_gallery_cache(self, source):
+        cached = read_json(self._gallery_cache_path(source), {})
+        if cached.get('version') != 1 or cached.get('reduced') != source['reduced']:
+            return {}
+        return cached.get('display', {})
+
+    def _gallery_section(self, source_row, *, force=False):
+        if not force and self._gallery_lookup_expired(source_row):
+            return {**self._read_gallery_cache(source_row),
+                    'gallery_pending': False, 'gallery_lookup_expired': True}
+        display = self._scan_gallery_section(source_row)
+        _atomic_write_json(self._gallery_cache_path(source_row), {
+            'version': 1, 'reduced': source_row['reduced'], 'display': display,
+        })
+        return display
+
+    def _scan_gallery_section(self, source_row):
         """Inspect saved local images independently of the initial detail response."""
         manifest = source_row['_manifest']
         root = manifest.parent
@@ -852,11 +904,13 @@ class ResultCatalog:
 
     DETAIL_SECTIONS = frozenset(('training', 'artifacts', 'previews', 'anchor', 'media', 'gallery'))
 
-    def detail_section(self, key, section):
+    def detail_section(self, key, section, *, force=False):
         """Load one independent expensive section without rebuilding other sections."""
         if section not in self.DETAIL_SECTIONS:
             raise ValueError('Unknown detail section')
         row = self.detail(key)
+        if force and section == 'gallery' and row and row.get('_manifest') and row['kind'] == 'ArtiFixer3D':
+            return self._gallery_section(row, force=True)
         return self._detail_section(row, section) if row else None
 
     def _detail_section(self, source, section):

@@ -63,6 +63,25 @@ def test_missing_orbit_rejects_repeat(tmp_path):
         repeat_inputs(studio, row)
 
 
+@pytest.mark.parametrize('seeding', [None, 'off', 'seed', 'seed_preserve'])
+@pytest.mark.parametrize('setting', [None, False, True])
+def test_repeat_does_not_inherit_new_connected_default(tmp_path, setting, seeding):
+    _, row, studio, _ = fixture(tmp_path)
+    request_path = row['_manifest'].parent / 'request.json'
+    request = json.loads(request_path.read_text())
+    request['runtime'].pop('connected_trajectory_generation', None)
+    if setting is not None:
+        request['runtime']['connected_trajectory_generation'] = setting
+    request['runtime'].pop('connected_bridge_seeding', None)
+    if seeding is not None:
+        request['runtime']['connected_bridge_seeding'] = seeding
+    atomic_json(request_path, request)
+    root = tmp_path / 'repeat'; root.mkdir()
+    info = snapshot_repeat(studio, row, root)
+    assert info['runtime']['connected_trajectory_generation'] is (setting is True)
+    assert info['runtime']['connected_bridge_seeding'] == (seeding or 'off')
+
+
 @pytest.mark.parametrize('rebuild', [False, True])
 def test_repeat_rerenders_saved_poses_and_skips_interpolation(tmp_path, monkeypatch, rebuild):
     cp, row, studio, orbit = fixture(tmp_path)

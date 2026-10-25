@@ -177,6 +177,8 @@ def snapshot_repeat(studio, row, destination):
             shutil.copytree(bundle, root / 'worldexplorer-source')
         manifest['worldexplorer_source'] = 'worldexplorer-source'
     runtime = deepcopy(request['runtime'])
+    runtime.setdefault('connected_trajectory_generation', False)
+    runtime.setdefault('connected_bridge_seeding', 'off')
     for key in ('scene_path', 'source_points3d', 'worldexplorer_source', 'repeat_from'):
         runtime.pop(key, None)
     anchor_path = studio.result_artifact(row['_manifest'], 'anchor-transforms.json')

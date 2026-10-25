@@ -148,6 +148,9 @@ def execute_remote(executor, run_id, options, root, stop, update):
         runtime['handoff_type'] = options.get('handoff_type', 'boundary') if not benchmark else 'boundary'
         runtime['handoff_backward_pass'] = options.get('handoff_backward_pass', False) if not benchmark else False
         runtime['handoff_generation'] = options.get('handoff_generation', False) if not benchmark else False
+        runtime['connected_trajectory_generation'] = (options.get('connected_trajectory_generation', False)
+            if not benchmark and not (cp is not None and cp.endpoint_only) else False)
+        runtime['connected_bridge_seeding'] = options.get('connected_bridge_seeding', 'off') if not benchmark else 'off'
         runtime['initial_image_seeding'] = options.get('initial_image_seeding') if not benchmark else None
         runtime['image_cache_insertion'] = options.get('image_cache_insertion', False) if not benchmark else False
         if cp is not None and (cp.root / 'repeat-repair.json').is_file():

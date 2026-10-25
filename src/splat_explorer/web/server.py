@@ -1451,7 +1451,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if section and section not in studio.results.DETAIL_SECTIONS:
                     self._send_json({"error": "Unknown detail section"}, 400)
                     return
-                result = (studio.results.detail_section(key, section) if section else
+                result = (studio.results.detail_section(key, section, force=query.get("force") == ["1"]) if section else
                           studio.results.run_detail(key, deferred=query.get("deferred") == ["1"]))
                 self._send_json(result if result is not None else {"error": "Result not found"}, 200 if result is not None else 404)
             elif path == "/api/splatfix/results/viser":

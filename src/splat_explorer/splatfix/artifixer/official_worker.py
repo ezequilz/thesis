@@ -799,6 +799,19 @@ def inference(root, request, trajectory, plus=False):
     encoded_prompt, _ = load_encoded_prompt([Path(request['caption_path'])])
     cfg = request['runtime']
     if __package__:
+        from . import connected_trajectory
+    else:
+        import connected_trajectory
+    connected = connected_trajectory.enabled(cfg)
+    connected_plans = None
+    if connected:
+        connected_trajectory.configure(cfg)
+        connected_trajectory.bridge_seeding.mode(cfg)
+        if request.get('repair_policy') == 'endpoints' or request.get('trajectory_mode') != 'authors_orbit':
+            raise ValueError('Connected generation requires checkpoint authors-orbit trajectories')
+        # Fail before allocating the model for unsupported lengths or stale splits.
+        connected_plans = connected_trajectory.plan_legs(trajectory)
+    if __package__:
         from .handoff import enabled, repair_boundary, backward_enabled, handoff_type
     else:
         from handoff import enabled, repair_boundary, backward_enabled, handoff_type
@@ -827,6 +840,7 @@ def inference(root, request, trajectory, plus=False):
     pipe = get_eval_pipe(args, device)
     load_transformer_checkpoint(pipe.transformer, args)
     pipe.transformer.eval().requires_grad_(False)
+    normal_sampler = pipe.generate_samples_from_batch if connected else None
     if insertion:
         install_image_cache_insertion(pipe)
     cp = Path(request['checkpoint_root'])
@@ -834,7 +848,7 @@ def inference(root, request, trajectory, plus=False):
     def rgb(path):
         with Image.open(path) as im:
             return torch.from_numpy(np.array(im.convert('RGB'))).permute(2, 0, 1).float() / 255
-    all_references = torch.stack([rgb(path) for path in request['references']])
+    all_references = torch.stack([rgb(path) for path in request['references']]) if not connected else None
     all_neighbors = [a['frame_index'] for a in trajectory['anchors']]
     active_neighbors = list(all_neighbors)
     active_reference_paths = list(request['references'])
@@ -843,7 +857,7 @@ def inference(root, request, trajectory, plus=False):
         active_neighbors = state['frame_indices']
         active_reference_paths = state['paths']
         all_references = torch.stack([rgb(path) for path in active_reference_paths])
-    jobs = [] if middle else inference_jobs(request, trajectory, plus=plus)
+    jobs = [] if middle or connected else inference_jobs(request, trajectory, plus=plus)
     if request.get('repair_policy') == 'endpoints':
         (root / ('plus-directions.json' if plus else 'inference-directions.json')).write_text(json.dumps([
             {'direction': s['direction'], 'frame_indices': s['indices'],
@@ -857,6 +871,10 @@ def inference(root, request, trajectory, plus=False):
     previous_boundary = None
     initial_context = None
     handoff_records = []
+    if connected:
+        seeding_audits = connected_trajectory.run(root, request, trajectory, pipe=pipe, args=args,
+            device=device, encoded_prompt=encoded_prompt, cameras=cameras, normal_sampler=normal_sampler,
+            plans=connected_plans, plus=plus)
     if middle:
         if __package__:
             from .middle_handoff import run as run_middle_handoff
@@ -1003,6 +1021,8 @@ def inference(root, request, trajectory, plus=False):
                       plus_rgb_renderer=request.get('plus_rgb_renderer'),
                       mode=request['mode'], upstream_revision=request['upstream_revision'],
                       handoff_generation=handoff,
+                      connected_trajectory_generation=connected,
+                      connected_trajectory_diagnostics=(str(root / 'plus-connected.json') if connected else None),
                       image_cache_insertion=insertion,
                       initial_image_seeding=any(s['enabled'] for s in seeding_audits),
                       inference_target_policy=request.get('inference_target_policy', 'all_segment_frames'),

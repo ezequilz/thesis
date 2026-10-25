@@ -33,7 +33,21 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('repair').mode,'edited');
   assert.equal(payload('repair').regularization_profile,'base_mcmc_0_2');
   assert.equal(payload('repair').generated_lpips_downscale,false);
-  assert.equal(payload('repair').handoff_generation,true);
+  assert.equal(payload('repair').handoff_generation,false);
+  assert.equal(payload('repair').connected_trajectory_generation,true);
+  assert.equal(payload('repair').connected_bridge_seeding,'seed');
+  $('connected-bridge-seeding').value='seed_preserve';
+  assert.equal(payload('repair').connected_bridge_seeding,'seed_preserve');
+  $('connected-bridge-seeding').value='off';
+  assert.equal(payload('repair').connected_bridge_seeding,'off');
+  $('connected-bridge-seeding').value='seed';
+
+  assert.equal(payload('repair').split_mode,'double-split');
+  $('connected-trajectory-generation').value='off';
+  assert.equal(payload('repair').connected_trajectory_generation,false);
+  updateConnectedControls();
+  assert.equal($('connected-bridge-seeding').disabled,true);
+  $('connected-trajectory-generation').value='on';
   assert.equal(payload('repair').handoff_backward_pass,true);
   $('handoff-backward-pass').value='off';
   assert.equal(payload('repair').handoff_backward_pass,false);
@@ -84,6 +98,7 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('benchmark').gpt_image_context,undefined);
   $('handoff-generation').value='on';
   assert.equal(payload('repair').handoff_generation,true);
+  assert.equal(payload('repair').connected_trajectory_generation,false);
   assert.equal(payload('repair').split_mode,'single-split');
   assert.equal(payload('benchmark').handoff_generation,undefined);
   $('reconstruction-method').value='oraclegs';
@@ -363,7 +378,7 @@ Promise.resolve(vm.runInContext(`(async()=>{
     assert result.returncode == 0, result.stderr
 
 
-def test_result_gallery_polling_stops_after_images_or_terminal_state():
+def test_result_gallery_polling_stops_at_terminal_state():
     node = shutil.which('node')
     if node is None:
         pytest.skip('Node is required for the dashboard JavaScript logic check')
@@ -378,8 +393,8 @@ let result={run_id:'run',status:'running',kind:'ArtiFixer3D',metrics:{},gallery:
 const document={getElementById:get,querySelectorAll:()=>[],hidden:false,addEventListener(){}};
 const context=vm.createContext({document,window:{addEventListener(){}},location:{search:'?id=run'},URLSearchParams,
  ResizeObserver:class{observe(){}},
- fetch:async()=>{calls++;return{ok:true,json:async()=>result}},
- setTimeout:(fn,ms)=>{assert.ok([3000,5000,30000].includes(ms));lastDelay=ms;timer=fn;return 1},clearTimeout:()=>{timer=null}});
+ fetch:async url=>{if(url.includes('section='))return{ok:true,json:async()=>({})};calls++;return{ok:true,json:async()=>result}},
+ setTimeout:(fn,ms)=>{if(ms===0)return 0;assert.ok([3000,5000,30000].includes(ms));lastDelay=ms;timer=fn;return 1},clearTimeout:()=>{timer=null}});
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
  vm.runInContext(source,context);await flush();
@@ -388,10 +403,10 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
  document.hidden=true;timer();await flush();assert.equal(calls,1);
  document.hidden=false;
  result={...result,inference_ready:true};timer();await flush();
- assert.equal(calls,2);assert.equal(timer,null);
- assert.match(get('refreshStatus').textContent,/Auto-refresh off/);
+ assert.equal(calls,2);assert.equal(typeof timer,'function');
+ assert.match(get('refreshStatus').textContent,/Checking run status/);
  // Manual refresh still retrieves the eventual reconstruction.
- await get('refresh').onclick();assert.equal(calls,3);assert.equal(timer,null);
+ await get('refresh').onclick();assert.equal(calls,3);assert.equal(typeof timer,'function');
  // Cancellation stays live even when the gallery is already complete.
  result={...result,status:'stopping'};
  await get('refresh').onclick();assert.equal(typeof timer,'function');assert.equal(lastDelay,5000);
