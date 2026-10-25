@@ -799,10 +799,11 @@ def inference(root, request, trajectory, plus=False):
     encoded_prompt, _ = load_encoded_prompt([Path(request['caption_path'])])
     cfg = request['runtime']
     if __package__:
-        from .handoff import enabled, repair_boundary, backward_enabled
+        from .handoff import enabled, repair_boundary, backward_enabled, handoff_type
     else:
-        from handoff import enabled, repair_boundary, backward_enabled
+        from handoff import enabled, repair_boundary, backward_enabled, handoff_type
     handoff = enabled(cfg)
+    middle = handoff and handoff_type(cfg) == 'middle'
     if handoff and (request.get('repair_policy') == 'endpoints' or
                     request.get('trajectory_mode') != 'authors_orbit' or
                     cfg.get('split_mode') != 'single-split'):
@@ -842,7 +843,7 @@ def inference(root, request, trajectory, plus=False):
         active_neighbors = state['frame_indices']
         active_reference_paths = state['paths']
         all_references = torch.stack([rgb(path) for path in active_reference_paths])
-    jobs = inference_jobs(request, trajectory, plus=plus)
+    jobs = [] if middle else inference_jobs(request, trajectory, plus=plus)
     if request.get('repair_policy') == 'endpoints':
         (root / ('plus-directions.json' if plus else 'inference-directions.json')).write_text(json.dumps([
             {'direction': s['direction'], 'frame_indices': s['indices'],
@@ -856,6 +857,15 @@ def inference(root, request, trajectory, plus=False):
     previous_boundary = None
     initial_context = None
     handoff_records = []
+    if middle:
+        if __package__:
+            from .middle_handoff import run as run_middle_handoff
+        else:
+            from middle_handoff import run as run_middle_handoff
+        seeding_audits = run_middle_handoff(root, request, trajectory, pipe=pipe, args=args,
+            device=device, encoded_prompt=encoded_prompt, cameras=cameras,
+            repair_boundary=repair_boundary, digest=caption_digest,
+            previous_state=state if plus else None, plus=plus)
     with torch.inference_mode():
         for segment, reference_order, directory in jobs:
             output = root / directory
@@ -972,7 +982,7 @@ def inference(root, request, trajectory, plus=False):
                 print('SPLATFIX_STARTER_VERIFIED: ' + json.dumps(record), flush=True)
             if handoff:
                 previous_boundary = indices[-1]
-    if handoff:
+    if handoff and not middle:
         reference_state = {'original_frame_indices': all_neighbors, 'frame_indices': active_neighbors,
                            'paths': active_reference_paths,
                            'sha256': [caption_digest(path) for path in active_reference_paths]}
@@ -1076,6 +1086,22 @@ def load_handoff_references(root, request, trajectory):
     state = json.loads((root / 'inference-references.json').read_text())
     original = [a['frame_index'] for a in trajectory['anchors']]
     indices, paths, hashes = state['frame_indices'], state['paths'], state['sha256']
+    if request.get('runtime', {}).get('handoff_type', 'boundary') == 'middle':
+        if __package__:
+            from .middle_handoff import plan_legs
+        else:
+            from middle_handoff import plan_legs
+        expected = original + [job['midpoint'] for job in plan_legs(trajectory)]
+        if (state.get('policy') != 'add_midpoint_references' or
+                state['original_frame_indices'] != original or indices != expected or
+                not len(indices) == len(paths) == len(hashes)):
+            raise ValueError('Invalid additive middle handoff reference set')
+        for slot, (path, checksum) in enumerate(zip(paths, hashes)):
+            if slot < len(original) and Path(path).resolve() != Path(request['references'][slot]).resolve():
+                raise ValueError('Middle handoff must retain every original repair')
+            if caption_digest(path) != checksum:
+                raise ValueError('Handoff reference checksum mismatch')
+        return state
     if (state['original_frame_indices'] != original or
             not len(indices) == len(paths) == len(hashes) == len(original) or
             len(set(indices)) != len(indices)):
@@ -1098,6 +1124,14 @@ def reconstruction_supervision(root, request, trajectory):
     if not request.get('runtime', {}).get('handoff_generation', False):
         return unique_supervision(trajectory, request['references'])
     state = load_handoff_references(root, request, trajectory)
+    if request.get('runtime', {}).get('handoff_type', 'boundary') == 'middle':
+        anchors = [*trajectory['anchors'], *[
+            {'frame_index': i, 'view_id': f'middle_{i}'}
+            for i in state['frame_indices'][len(trajectory['anchors']):]]]
+        transforms, supervision = unique_supervision({**trajectory, 'anchors': anchors}, state['paths'])
+        supervision.update(handoff_references=state, excluded_original_reference_indices=[],
+                           policy='all original repairs plus repaired midpoint images at exact cameras')
+        return transforms, supervision
     # Forward-only preserves the historical endpoint exclusion. The backward
     # pass uses that existing repair as a seed, so retain it for fitting too.
     endpoint = max(state['original_frame_indices'])

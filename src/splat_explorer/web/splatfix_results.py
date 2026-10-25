@@ -323,7 +323,7 @@ class ResultCatalog:
                     preview = read_json(manifest.parent / 'input-preview.json', {})
                     for item in preview.get('reference_images', []):
                         plan['reconstruction_files'].append(self.studio.result_artifact(manifest, item['path']))
-                    for name in ('inference-references.json', 'inference-seeding.json', 'inference-backward.json'):
+                    for name in ('inference-references.json', 'inference-seeding.json', 'inference-backward.json', 'inference-middle.json'):
                         plan['reconstruction_files'].append(manifest.parent / name)
                 # Preserve any additional saved input/output camera exports too.
                 for pattern in ('*trajectory*.json', '*transforms*.json', '*poses*.json', '*cameras*.json'):
@@ -466,7 +466,7 @@ class ResultCatalog:
                         if provenance_root.name == manifest.parent.name and record['run_id'] in provenance_root.parts:
                             metrics, metrics_file = data, candidate
                             break
-                rows.append(self._row(key, record, original, repaired, result, metrics, metrics_file, manifest))
+                rows.append(self._row(key, record, original, repaired, result, metrics, metrics_file, manifest, load_preview=not bool(detail_key)))
             if review_key and len(rows) > first_row:
                 return rows
             if len(rows) == first_row and config.get('pipeline') == 'splatfix' and config.get('splatfix', {}).get('stage') in ('benchmark', 'repair'):
@@ -498,7 +498,7 @@ class ResultCatalog:
                 row.pop('_manifest', None)
         return rows
 
-    def _row(self, key, record, original, repaired, result, metrics, metrics_file, manifest):
+    def _row(self, key, record, original, repaired, result, metrics, metrics_file, manifest, *, load_preview=True):
         config = record.get('config', {})
         options = config.get('splatfix', {})
         reduction = read_json(self.studio.root / record['run_id'] / 'reduction.json', {})
@@ -509,7 +509,7 @@ class ResultCatalog:
         saved_bytes = max(0, before - after) if type(before) is int and type(after) is int else None
         preview = []
         preview_label = '3D+ image preview'
-        if manifest:
+        if manifest and load_preview:
             preview = self.studio.plus_previews(manifest, result)
             if not preview:
                 gallery, _ = self._reconstruction_gallery(manifest, result, limit=1)
@@ -687,6 +687,22 @@ class ResultCatalog:
         root = manifest.parent
         if result.get('reconstruction_method') == 'g4splat' or row['kind'].startswith('G4Splat'):
             return row
+        if deferred:
+            row['deferred_sections'].append('gallery')
+            row['gallery_pending'] = True
+            return row
+        row.update(self._gallery_section(source_row))
+        return row
+
+    def _gallery_section(self, source_row):
+        """Inspect saved local images independently of the initial detail response."""
+        manifest = source_row['_manifest']
+        root = manifest.parent
+        result = read_json(manifest, {})
+        row = {'reference_images': [], 'original_rgb_images': [],
+               'comparison_gallery': [], 'stage_comparison': None,
+               'plus_gallery': {'frames': []}, 'gallery_pending': False}
+        reduction = read_json(self.studio.root / source_row['run_id'] / 'reduction.json', {})
         gallery, allowed = self._reconstruction_gallery(manifest, result)
         row['gallery'] = gallery
         preview = read_json(root / 'inference-preview.json', {})
@@ -703,7 +719,7 @@ class ResultCatalog:
         from ..splatfix.oraclegs.artifixer_inputs import source_assets
         try:
             source_assets(self.studio, source_row)
-            row['artifixer_oraclegs'] = {'ready':True, 'original_available':row['original']}
+            row['artifixer_oraclegs'] = {'ready':True, 'original_available':source_row['original']}
         except (ValueError, OSError, KeyError, TypeError) as exc:
             row['artifixer_oraclegs'] = {'ready':False, 'reason':str(exc)}
         from ..splatfix.resolution import PROFILE_LABELS
@@ -724,7 +740,7 @@ class ResultCatalog:
             row['comparison_gallery'].append({'url': self.studio.file_url(chart),
                 'title': 'Trajectory and image quality',
                 'caption': metadata.get('caption', 'Camera motion and available per-view evaluation scores.')})
-        if row['reduced'] and reduction.get('method') == 'artifixer':
+        if source_row['reduced'] and reduction.get('method') == 'artifixer':
             return row
         row['preview_evaluation_status'] = read_json(root / 'preview-evaluation-status.json', {})
         row['evaluation_status'] = read_json(root / 'evaluation-status.json', {})
@@ -764,7 +780,7 @@ class ResultCatalog:
                         # /workspace. Recover only the recorded checkpoint file
                         # with the exact hash used for this run.
                         if path is None:
-                            checkpoint = row['config'].get('splatfix', {}).get('checkpoint')
+                            checkpoint = source_row['config'].get('splatfix', {}).get('checkpoint')
                             remote_checkpoint = request.get('checkpoint_root')
                             expected = reference_hashes.get(group['reference'])
                             if checkpoint and remote_checkpoint and expected:
@@ -834,7 +850,7 @@ class ResultCatalog:
                 gallery['reference_count'] = len(row['reference_images'])
         return row
 
-    DETAIL_SECTIONS = frozenset(('training', 'artifacts', 'previews', 'anchor', 'media'))
+    DETAIL_SECTIONS = frozenset(('training', 'artifacts', 'previews', 'anchor', 'media', 'gallery'))
 
     def detail_section(self, key, section):
         """Load one independent expensive section without rebuilding other sections."""
@@ -847,6 +863,8 @@ class ResultCatalog:
         if source['kind'] == 'WorldExplorer':
             from .worldexplorer_details import run_detail
             return run_detail(self, dict(source), section=section) if section in ('media', 'training') else {}
+        if section == 'gallery':
+            return self._gallery_section(source) if source.get('_manifest') and source['kind'] == 'ArtiFixer3D' else {}
         row = {}
         manifest = source.get('_manifest')
         run_root = (self.studio.root / source['run_id']).resolve()

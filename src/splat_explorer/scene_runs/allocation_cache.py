@@ -1,4 +1,4 @@
-"""Durable allocation deadline captured by Load GPU setup, never by polling."""
+"""Durable allocation deadline shared by GPU setup, dashboard, and manager."""
 from __future__ import annotations
 from datetime import datetime, timezone
 import json
@@ -20,17 +20,23 @@ def identity(cfg):
     return {key: str(cfg.get(key) or '') for key in ('job_id', 'host', 'user', 'workspace')}
 
 
-def save_loaded_allocation(cfg, allocation, *, path=None):
+def save_loaded_allocation(cfg, allocation, *, path=None, source='load_gpu_setup'):
     if allocation.get('job_id') != str(cfg['job_id']) or allocation.get('state') != 'R':
         raise ValueError('Load GPU setup did not establish the selected running allocation')
     observed = float(allocation.get('observed_at_epoch') or time.time())
+    remaining = parse_slurm_duration(allocation.get('time_left'))
     end = parse_slurm_end(allocation.get('expected_end'))
     if end is not None:
         if end.tzinfo is None:
             end = end.replace(tzinfo=ZoneInfo('Europe/Berlin'))
+            # Slurm's local end time repeats when daylight saving ends.
+            # Its remaining duration identifies which occurrence is intended.
+            if remaining is not None:
+                target = observed + remaining.total_seconds()
+                end = min((end.replace(fold=0), end.replace(fold=1)),
+                          key=lambda candidate: abs(candidate.timestamp() - target))
         deadline = end.timestamp()
     else:
-        remaining = parse_slurm_duration(allocation.get('time_left'))
         if remaining is None:
             raise ValueError('Slurm did not report an allocation deadline during GPU setup')
         deadline = observed + remaining.total_seconds()
@@ -39,7 +45,7 @@ def save_loaded_allocation(cfg, allocation, *, path=None):
     body = {**identity(cfg), 'state': 'R', 'deadline_epoch': deadline,
             'expected_end': datetime.fromtimestamp(deadline, timezone.utc).isoformat(),
             'observed_at_epoch': observed, 'setup_completed_at_epoch': time.time(),
-            'source': 'load_gpu_setup',
+            'source': source,
             **{key: allocation.get(key, '') for key in ('node', 'partition', 'mem', 'timelimit')}}
     destination = Path(path) if path is not None else cache_path()
     destination.parent.mkdir(parents=True, exist_ok=True)

@@ -1389,3 +1389,37 @@ New ArtiFixer jobs default to **MCMC regularization — on** and **LPIPS downsca
 **Handoff generation** defaults to **On · repair generated handoffs** for new eligible edited ArtiFixer checkpoint runs. Explicit Off and historical runtime settings remain unchanged. Baseline and endpoint trajectories remain ineligible for handoff generation.
 
 New jobs default to **MCMC regularization — on · 0.2 ×** (`base_mcmc_0_2`). This multiplies the inherited opacity and scale penalty weights by 0.2 (normally 0.01 → 0.002 each) for both reference and generated views. RGB/SSIM and LPIPS weights are unchanged. Full MCMC (`base_mcmc`) and Off (`artifixer`) remain available; explicit saved selections and native authors pipeline constraints are preserved.
+
+
+### Middle-of-leg handoff
+
+In Step 04, select **Handoff generation → Middle · fuse inward halves and retain all repairs**.
+The equivalent API setting is `handoff_generation: true, handoff_type: "middle"`;
+the CLI accepts `--handoff-generation middle`. Historical runs and the existing
+On option retain `handoff_type: "boundary"` behavior.
+
+Middle mode requires edited, single-split checkpoint trajectories. For each leg:
+
+1. Generate from both original repaired endpoints inward to the same saved camera index.
+   When there is no exact midpoint, the first half receives the extra camera interval.
+2. Prepare the midpoint GPT repair with the forward image as the center-weighted old
+   image and the backward image as the vignette-weighted new image. This reuses the
+   existing pixel-sprinkle, vignette, and blur settings. Motion-dependent weighting
+   is not applied. Middle mode always enables pixel sprinkle and vignette, regardless
+   of the boundary-mode noise/context toggles.
+3. Seed two outward passes with that repaired midpoint. Replace the central third
+   of the leg, rounded to the nearest frame and including the midpoint: 63 poses
+   (62 intervals) replace 21 frames. Small legs may have seed-only outward passes.
+4. Preserve every global camera index and final output frame count. Extra inference
+   work produces overlapping candidates, but only one image owns each final index.
+
+Every original GPT repair remains in the reference set. Each repaired midpoint is
+appended at its exact camera and conditions subsequent passes. Reconstruction and
+OracleGS export consume this additive set; outward generated images remain synthetic
+targets. The ArtiFixer3D+ pass reuses the completed midpoint repairs without changing
+the reference set. The separate backwards-pass toggle applies only to boundary mode.
+
+`inference-middle.json` records completed leg plans; `inference-seeding.json` records
+final frame ownership and the actual seed of each pass. Original inward predictions
+are retained in `inference-middle/`, and repair inputs/results use the existing
+`handoffs/inference/` archive. OracleGS rejects incomplete or inconsistent metadata.

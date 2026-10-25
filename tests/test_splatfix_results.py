@@ -452,6 +452,26 @@ def test_input_only_detail_shows_references_and_original_captures(tmp_path):
     assert studio.results.run_detail(row['id'])['original_rgb_images'] == []
 
 
+def test_input_preview_gallery_grows_before_reconstruction_finishes(tmp_path):
+    studio, run, root = setup(tmp_path)
+    (root / 'result.json').unlink()
+    (root / 'artifixer3d.ply').unlink()
+    (root / 'input-preview.json').write_text(json.dumps({'inputs_ready': True}))
+    pred = root / 'inference/splatfix/frames/batch_0000/pred'
+    pred.mkdir(parents=True)
+    key = studio.results.entries()[0]['id']
+    assert studio.results.run_detail(key, deferred=True)['gallery']['frames'] == []
+    for index in (2, 10):
+        (pred / f'{index:05d}.png').write_bytes(b'prediction')
+        detail = studio.results.run_detail(key, deferred=True)
+        assert detail['gallery']['frames'] == []
+        assert detail['gallery_pending']
+        detail.update(studio.results.detail_section(key, 'gallery'))
+        assert not detail['inference_ready']
+        assert not detail['gallery']['verified_inputs']
+        assert [f['index'] for f in detail['gallery']['frames']] == ([2] if index == 2 else [2, 10])
+
+
 def test_preview_split_references_load_even_with_verified_prediction_indices(tmp_path):
     studio, _, root = setup(tmp_path)
     (root / 'result.json').unlink()
@@ -614,6 +634,12 @@ moveChain(1);assert.equal(location.href,'/pass2');
 showChain({...chain,chain_position:2});assert.equal($('chainNext').disabled,true);moveChain(-1);assert.equal(location.href,'/pass1');
 assert.equal(needsGalleryPolling({...chain,status:'completed',job_status:'running',inference_ready:true}),true);
 assert.equal(needsGalleryPolling({...chain,status:'completed',job_status:'completed'}),false);
+for(const status of ['running','stopping','stopped','completed','error','gpu_expired']){
+ const run={kind:'ArtiFixer3D',status,inference_ready:true,gallery:{verified_inputs:true,expected_count:1,frames:[{}]}};
+ assert.equal(needsGalleryPolling(run),['running','stopping'].includes(status));
+ assert.equal(needsGalleryPolling({...run,reduced:true,status:'completed'}),false);
+}
+
 showChain({...chain,chain_runs:[{detail_url:'/pass1'}]});assert.equal($('chainNext').disabled,true);
 assert.ok($('chainPosition').textContent.includes('pending'));
 `,context);
@@ -1534,9 +1560,10 @@ def test_fast_detail_skips_expensive_sections_and_unrelated_run_sizes(tmp_path, 
         return {name + '_loaded': True}
     monkeypatch.setattr(studio.results, '_detail_section', section)
     monkeypatch.setattr(studio.store, 'output_size_bytes', lambda *_: pytest.fail('Detail must not calculate run sizes'))
+    monkeypatch.setattr(studio.results, '_reconstruction_gallery', lambda *a, **kw: pytest.fail('Initial detail must not scan images'))
     fast = studio.results.run_detail(run.name, deferred=True)
     assert fast['run_id'] == run.name and fast['gallery']['frames'] == []
-    assert set(fast['deferred_sections']) == {'training', 'artifacts', 'previews', 'anchor'}
+    assert set(fast['deferred_sections']) == {'training', 'artifacts', 'previews', 'anchor', 'gallery'}
     assert calls == []
     assert studio.results.detail_section(run.name, 'anchor') == {'anchor_loaded': True}
     assert calls == ['anchor']

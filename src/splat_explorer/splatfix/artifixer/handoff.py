@@ -16,6 +16,13 @@ def enabled(options):
     return value
 
 
+def handoff_type(options):
+    value = options.get('handoff_type', 'boundary')
+    if value not in ('boundary', 'middle'):
+        raise ValueError('handoff_type must be boundary or middle')
+    return value
+
+
 def backward_enabled(options):
     value = options.get('handoff_backward_pass', False)
     if type(value) is not bool:

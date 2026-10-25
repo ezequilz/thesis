@@ -2861,12 +2861,16 @@ def _login_probe_body(cfg: dict, parsed: dict[str, str]) -> dict[str, Any]:
             remote_status = {"raw": status_raw[:500]}
     uid_raw = (parsed.get("uid") or "").strip()
     if slurm:
+        slurm['observed_at_epoch'] = time.time()
         remember_live_allocation(
             job_id=str(slurm.get("job_id") or ""),
             state=str(slurm.get("state") or ""),
             mem=str(slurm.get("mem") or ""),
             partition=str(slurm.get("partition") or ""),
             node=str(slurm.get("node") or ""),
+            expected_end=str(slurm.get("expected_end") or ""),
+            time_left=str(slurm.get("time_left") or ""),
+            timelimit=str(slurm.get("timelimit") or ""),
         )
     return {
         "slurm": slurm,
@@ -3018,6 +3022,7 @@ def _run_probe_thread(
             history_start=history_start,
             history_end=history_end,
         )
+        _publish_dashboard_allocation(cfg, body)
     except Exception as exc:
         err = f"{type(exc).__name__}: {exc}"
         logger.warning("LRZ GPU probe failed: %s", err)
@@ -3029,6 +3034,31 @@ def _run_probe_thread(
         else:
             _PROBE["error"] = err
         _PROBE["inflight"] = False
+
+
+def _publish_dashboard_allocation(cfg: dict, body: dict) -> None:
+    """Pass verified dashboard readiness to the manager across processes."""
+    from .scene_runs.allocation_cache import identity, save_loaded_allocation
+
+    # A probe can finish after the user switches jobs or connections.
+    if identity(cfg) != identity(load_lrz_config()):
+        return
+    slurm = body.get('slurm') or {}
+    if slurm.get('job_id') != str(cfg.get('job_id') or '') or slurm.get('state') != 'R':
+        return
+    if not (body.get('container') or {}).get('ok'):
+        return
+    connected = pick_connected_gpu((body.get('gpu') or {}).get('gpus'))
+    matches, _reason = setup_matches_allocation(
+        body.get('setup'), job_id=str(cfg.get('job_id') or ''),
+        slurm=slurm, connected=connected,
+    )
+    if not matches:
+        return
+    try:
+        save_loaded_allocation(cfg, slurm, source='gpu_dashboard')
+    except (ValueError, OSError) as exc:
+        logger.warning('Could not publish dashboard allocation to queue manager: %s', exc)
 
 
 def reset_gpu_probe_cache() -> None:

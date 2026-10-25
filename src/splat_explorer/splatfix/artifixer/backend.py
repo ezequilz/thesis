@@ -27,10 +27,11 @@ def validate_options(raw):
             raise ValueError('benchmark_runs must be a positive integer')
         result['benchmark_runs'] = runs
     if raw['stage'] == 'repair':
-        from .handoff import enabled, context_mode, backward_enabled
+        from .handoff import enabled, context_mode, backward_enabled, handoff_type
         result['handoff_generation'] = enabled({
             'handoff_generation': raw.get('mode', 'edited') == 'edited'
                                   and raw.get('image_trajectory') != 'endpoints', **raw})
+        result['handoff_type'] = handoff_type(raw)
         result['handoff_backward_pass'] = backward_enabled({'handoff_backward_pass': True, **raw})
         result['gpt_image_context'] = context_mode({'gpt_image_context': 'closest_repaired_image', **raw})
         from .handoff_noise import noise_options

@@ -87,9 +87,9 @@ class SceneRunManager:
                     message=gpu.get("message") or "Waiting for an LRZ job in ST=R",
                     gpu=gpu,
                 )
-                # Do not turn the manager's one-second disk poll into an
-                # expensive scheduler poll.
-                self.stop_event.wait(min(self.gpu_probe_seconds, 30.0))
+                # Read the shared local record promptly after dashboard refreshes.
+                # _gpu_ready does not query the scheduler.
+                self.stop_event.wait(self.poll_seconds)
                 continue
             self._apply_gpu_deadline(run_id, gpu)
             lease = self._acquire_lease(run_id, gpu)

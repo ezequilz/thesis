@@ -108,3 +108,69 @@ def test_failed_setup_does_not_publish_deadline(tmp_path,monkeypatch):
     monkeypatch.setattr(lrz,'_setup_lrz_gpu_locked',failed)
     with pytest.raises(RuntimeError,match='setup failed'):lrz.setup_lrz_gpu(CFG)
     assert not path.exists()
+
+
+def test_dashboard_probe_unblocks_manager_with_expired_cache(tmp_path, monkeypatch):
+    from splat_explorer import repair_lrz as lrz
+    from splat_explorer.scene_runs.manager import SceneRunManager
+    from splat_explorer.config import Config
+    path = tmp_path / 'allocation.json'
+    monkeypatch.setattr(cache, 'cache_path', lambda: path)
+    monkeypatch.setattr(lrz, 'load_lrz_config', lambda: CFG)
+    saved = cache.save_loaded_allocation(CFG, allocation())
+    path.write_text(json.dumps({**saved, 'deadline_epoch': 1}))
+    manager = SceneRunManager(Config({'output': {'dir': str(tmp_path)}}))
+    assert not manager._gpu_ready()['ready']
+    body = {'slurm': allocation(), 'container': {'ok': True},
+            'setup': {'ok': True, 'job_id': '123'}}
+    monkeypatch.setattr(lrz, 'probe_lrz_gpu', lambda *a, **kw: body)
+    try:
+        lrz._run_probe_thread(CFG, None)
+        assert manager._gpu_ready()['ready']
+        assert manager._gpu_ready()['source'] == 'gpu_dashboard'
+        assert manager._gpu_ready()['deadline_epoch'] == saved['deadline_epoch']
+    finally:
+        lrz.reset_gpu_probe_cache()
+
+
+@pytest.mark.parametrize('change', [
+    {'slurm': {**allocation(), 'job_id': '456'}},
+    {'slurm': {**allocation(), 'state': 'PD'}},
+    {'slurm': {**allocation(), 'expected_end': '2000-01-01T00:00:00'}},
+    {'container': {'ok': False}},
+    {'setup': {'ok': False, 'job_id': '123'}},
+    {'setup': {'ok': True, 'job_id': '456'}},
+    {'setup': {'ok': True}},
+])
+def test_dashboard_does_not_publish_unready_allocation(tmp_path, monkeypatch, change):
+    from splat_explorer import repair_lrz as lrz
+    path = tmp_path / 'allocation.json'
+    monkeypatch.setattr(cache, 'cache_path', lambda: path)
+    monkeypatch.setattr(lrz, 'load_lrz_config', lambda: CFG)
+    body = {'slurm': allocation(), 'container': {'ok': True},
+            'setup': {'ok': True, 'job_id': '123'}, **change}
+    lrz._publish_dashboard_allocation(CFG, body)
+    assert not path.exists()
+
+
+def test_dashboard_probe_ignores_connection_switched_while_probing(tmp_path, monkeypatch):
+    from splat_explorer import repair_lrz as lrz
+    path = tmp_path / 'allocation.json'
+    monkeypatch.setattr(cache, 'cache_path', lambda: path)
+    monkeypatch.setattr(lrz, 'load_lrz_config', lambda: {**CFG, 'host': 'other'})
+    lrz._publish_dashboard_allocation(CFG, {
+        'slurm': allocation(), 'container': {'ok': True},
+        'setup': {'ok': True, 'job_id': '123'},
+    })
+    assert not path.exists()
+
+
+def test_dashboard_deadline_disambiguates_dst_clock_change(tmp_path, monkeypatch):
+    # 02:33 occurs twice in Berlin today; Slurm still has 30 minutes left.
+    observed = datetime.fromisoformat('2026-10-25T01:03:26+00:00').timestamp()
+    monkeypatch.setattr(cache.time, 'time', lambda: observed)
+    saved = cache.save_loaded_allocation(CFG, {
+        **allocation(), 'expected_end': '2026-10-25T02:33:26',
+        'time_left': '30:00', 'observed_at_epoch': observed,
+    }, path=tmp_path / 'allocation.json')
+    assert saved['deadline_epoch'] == observed + 1800
