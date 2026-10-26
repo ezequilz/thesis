@@ -18,8 +18,8 @@ dependencies = [
 [project.optional-dependencies]
 # Optional local fixed-intrinsics generated-view registration.
 pose-correction = ["opencv-python-headless>=4.10,<5"]
-# Keep capture and review on the same client. Viser 1.1.1's demand frame loop
-# charges idle time to the first keyboard movement, causing camera jumps.
+# Temporary Custom/review viewers use stable interactive controls. The main
+# Docker capture viewer separately uses 1.1.1 for low idle GPU usage.
 viewer = ["viser==1.1.0", "tensorboard>=2.16,<3"]
 # Real 3DGS rasterization. Requires an NVIDIA GPU + CUDA toolchain.
 # torch must be installed first (gsplat compiles CUDA kernels against it).

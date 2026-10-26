@@ -18,6 +18,8 @@ class SplatfixStudio(SceneRunStudio):
         from .splatfix_results import ResultCatalog
         self.results = ResultCatalog(self)
         self.benchmark_root = Path(self.cfg.output.dir).resolve() / 'benchmarks'
+        from .custom_selection_viser import CustomSelectionViser
+        self.custom_visor = CustomSelectionViser(self.cfg)
 
     def defaults(self):
         from ..splatfix.resolution import profile_size
@@ -310,12 +312,10 @@ class SplatfixStudio(SceneRunStudio):
                              'width': self.defaults()['width'], 'height': self.defaults()['height']}}
 
     def start_custom(self, body):
-        """Create a normal checkpoint and install controls in the shared Viser."""
-        import json
+        """Create a checkpoint and load its scene in the isolated Custom viewer."""
         import time
         import uuid
-        from ..rendering.viser_renderer import ViserCaptureRenderer, ViserCaptureError
-        from ..scene.catalog import SceneSpec, publish_live_scene, portable_scene_path
+        from ..scene.catalog import SceneSpec
         from ..splatfix.resolution import profile_size
         if not isinstance(body, dict):
             raise ValueError('Request must be an object')
@@ -343,17 +343,7 @@ class SplatfixStudio(SceneRunStudio):
             'scene_load': {'lod_level': spec.lod_level,
                            'min_opacity': self.cfg.get('scene', {}).get('min_opacity', 0.0)},
             'manual_scene': {'id': ident, 'generation': generation}})
-        renderer = ViserCaptureRenderer(None, url='http://localhost:' + str(
-            self.cfg.get('viewer', {}).get('render_port', 8081)))
-        try:
-            renderer._request('POST', '/manual-selection',
-                              body=json.dumps({'checkpoint': portable_scene_path(cp.root)}).encode(),
-                              content_type='application/json', timeout=10)
-        except ViserCaptureError as exc:
-            # Keep the empty checkpoint: a timeout may have installed the controls.
-            raise ValueError('Could not start Custom selection. Ensure the updated Viser is running. ' + str(exc)) from exc
-        publish_live_scene(spec, generation, reload=True, catalog_id=scene['id'])
-        return {'ok': True, 'checkpoint': str(cp.root)}
+        return self.custom_visor.start(cp)
 
     def create(self, body):
         if isinstance(body, dict) and 'oracle_artifixer_inputs' in body:

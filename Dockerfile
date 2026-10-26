@@ -18,8 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # The BuildKit pip cache keeps wheels between builds; a version bump fetches
 # only the packages whose requirement changed. scripts/start.sh skips this
 # build entirely when the Dockerfile is unchanged.
-# Keep this list in sync with pyproject.toml (core + viewer + vlm extras).
+# Core + vlm extras match pyproject.toml. The always-on capture viewer uses
+# demand rendering; the dashboard's temporary manual/review viewers use 1.1.0.
 # Do not install [apple] here: mlx-metal is macOS-only and will fail on Linux.
+ARG VISER_VERSION=1.1.1
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install \
     "numpy>=1.26" \
@@ -27,7 +29,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     "pyyaml>=6.0" \
     "scipy>=1.11" \
     "splines==0.3.3" \
-    "viser==1.1.0" \
+    "viser==${VISER_VERSION}" \
     "openai>=1.40"
 
 COPY pyproject.toml README.md ./

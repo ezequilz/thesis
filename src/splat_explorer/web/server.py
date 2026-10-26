@@ -823,6 +823,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(200, (STATIC_DIR / filename).read_bytes(), "text/html; charset=utf-8")
         elif path == "/splatfix/worldexplorer":
             self._send(200, (STATIC_DIR / "worldexplorer.html").read_bytes(), "text/html; charset=utf-8")
+        elif path == "/splatfix/custom":
+            self._send(200, (STATIC_DIR / "splatfix_custom.html").read_bytes(), "text/html; charset=utf-8")
         elif path in ("/splatfix", "/splatfix.html"):
             self._send(200, (STATIC_DIR / "splatfix.html").read_bytes(), "text/html; charset=utf-8")
         elif path.startswith("/api/splatfix"):
@@ -1331,6 +1333,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             studio = self.app.splatfix
             if self.command == "GET" and path == "/api/splatfix":
                 self._send_json(studio.snapshot())
+            elif path == "/api/splatfix/custom/session":
+                if self.command == "GET":
+                    session = parse_qs(urlsplit(self.path).query).get("session", [""])[0]
+                    result = studio.custom_visor.snapshot(session)
+                elif isinstance(body, dict) and body.get("stop"):
+                    result = studio.custom_visor.release(body.get("session"))
+                else:
+                    raise ValueError("Expected a Custom session stop request")
+                self._send_json(result)
             elif self.command == "GET" and path == "/api/splatfix/results":
                 query = parse_qs(urlsplit(self.path).query)
                 self._send_json(studio.results.catalog_snapshot(refresh=query.get("refresh") == ["1"]))
@@ -1517,7 +1528,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, KeyError, FileNotFoundError) as exc:
             self._send_json({"ok": False, "error": str(exc)}, 400)
         finally:
-            if self.command == "POST" and path != "/api/splatfix/results/viser":
+            if self.command == "POST" and path not in ("/api/splatfix/results/viser", "/api/splatfix/custom/session"):
                 self.app.splatfix.results.invalidate_catalog()
 
     def _serve_scene_runs_post(self, path: str, body: dict) -> None:

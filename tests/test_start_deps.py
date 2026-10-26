@@ -48,9 +48,13 @@ def test_viewer_install_replaces_the_idle_keyboard_regression():
                        if req.startswith("viser"))
     assert start_deps.requirement_reason(requirement, Dist("1.1.0")) is None
     assert start_deps.requirement_reason(requirement, Dist("1.1.1")) is not None
-    # Docker serves the capture viewer; the host serves results. They must use
-    # the same client instead of silently diverging on a fresh image build.
-    assert f'"{requirement}"' in (ROOT / "Dockerfile").read_text()
+    # Only temporary manual/review viewers use 1.1.0. The main viewer keeps
+    # demand rendering so an idle dashboard does not continuously redraw.
+    assert 'ARG VISER_VERSION=1.1.1' in (ROOT / "Dockerfile").read_text()
+    import yaml
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    assert compose['services']['dashboard']['build']['args']['VISER_VERSION'] == '1.1.0'
+    assert compose['services']['dashboard']['image'] != compose['services']['viewer']['image']
 
 
 def test_missing_package_is_reinstalled():

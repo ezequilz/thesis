@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Splatfix · Custom view finding</title>
+<style>
+:root{color-scheme:dark;font:14px/1.5 system-ui;color:#eef2ec;background:#101312}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden}
+iframe{display:block;width:100%;height:100%;border:0}
+#message{position:absolute;inset:0;display:grid;place-content:center;text-align:center;padding:32px;background:#101312}
+#message[hidden]{display:none}a{color:#c6e69b}#status{max-width:560px}
+#fullscreen{position:fixed;left:12px;bottom:12px;padding:7px 12px;border:1px solid #62705f;border-radius:6px;background:#191d1ae8;color:#eef2ec;cursor:pointer}
+</style>
+<iframe id="viewer" title="Custom view finding" allow="autoplay; fullscreen"></iframe>
+<div id="message"><h1>Custom view finding</h1><p id="status" role="status">Starting your selection…</p><a href="/splatfix" target="_blank" rel="noopener">Back to Splatfix</a></div>
+<button id="fullscreen" type="button">Full screen</button>
+<script>
+'use strict';
+const session=new URLSearchParams(location.search).get('session');
+const frame=document.getElementById('viewer'),message=document.getElementById('message'),status=document.getElementById('status');
+const endpoint='/api/splatfix/custom/session';
+let timer=null,closed=false;
+function stop(){
+  if(closed||!session)return;
+  closed=true;clearTimeout(timer);frame.removeAttribute('src');
+  // The server's disconnect grace permits refresh/back-forward navigation.
+  // Once the last iframe disconnects it releases the scene automatically.
+}
+async function tick(){
+  if(closed||!session)return;
+  let again=true;
+  try{
+    const response=await fetch(endpoint+'?session='+encodeURIComponent(session));
+    const state=await response.json();
+    if(closed)return;
+    if(!response.ok||!state.ok)throw Error(state.error||'Could not load Custom selection');
+    if(state.status==='ready'){
+      const url=new URL(location.href);url.port=state.viewer_port;url.pathname='/';url.search='';url.hash='';
+      if(frame.getAttribute('src')!==url.href)frame.src=url.href;
+      message.hidden=true;
+      document.title=`Custom · ${state.saved_views}/${state.target_views} views saved`;
+    }else if(['finished','closed'].includes(state.status)){
+      frame.removeAttribute('src');message.hidden=false;
+      const views=`${state.saved_views} ${state.saved_views===1?'view':'views'}`;
+      document.title=`Custom · ${views} saved`;
+      status.textContent=state.status==='finished'?`${views} saved. Your checkpoint is ready in Splatfix.`:`Selection closed. ${views} kept in Splatfix.`;
+      again=false;closed=true;
+    }else{status.textContent='Loading your selected scene…';}
+  }catch(error){message.hidden=false;status.textContent=error.message;again=false;}
+  if(again&&!closed)timer=setTimeout(tick,1500);
+}
+document.getElementById('fullscreen').onclick=()=>{
+  const operation=document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen();
+  operation?.catch(()=>{});
+};
+document.addEventListener('fullscreenchange',()=>{document.getElementById('fullscreen').textContent=document.fullscreenElement?'Exit full screen':'Full screen';});
+window.addEventListener('pagehide',stop);
+window.addEventListener('pageshow',event=>{if(event.persisted){closed=false;tick();}});
+tick();
+</script>
+</html>

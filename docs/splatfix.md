@@ -981,28 +981,29 @@ Workers launched before this change do not publish the early-preview marker.
 ### Manual view finding
 
 On `/splatfix`, choose the source scene, capture resolution, and view count, then
-click **Custom** beside **Schedule**. The shared Viser loads that scene and opens
-an ephemeral **Custom view finding** panel. Navigate in the viewer and click
+click **Custom** beside **Schedule**. A separate tab opens an isolated Viser
+1.1.0 viewer and explicitly loads that scene. The viewer fills the tab; its
+**Full screen** button also hides the browser chrome. Navigate and click
 **Save current position** for each view. Each click saves the rendered RGB and
 its calibrated OpenCV camera pose to a normal checkpoint; no VLM job is queued.
 The clicked Viser tab supplies both the pose and capture, even with other tabs open.
 
-Capture and results viewers use the same pinned Viser **1.1.0** client. Viser
-1.1.1 introduced demand rendering, but its keyboard movement integrates the
-time since the last rendered frame, including idle time. That makes the first
-short movement after a pause jump unpredictably. Keep the host viewer extra and
-Docker dependency aligned when upgrading, and test short WASD/arrow presses
-after idle pauses, tab changes, and RGB captures. The capture API's `/health`
-includes `viser_version` to identify a stale container. Camera resets and scene
-restores are sent atomically; saving a view does not reposition the live camera.
+The main embedded viewer and automated RGB capture API retain Viser **1.1.1**
+and its demand rendering to avoid continuous GPU work while idle. Temporary
+Custom and results viewers use **1.1.0** for stable keyboard controls. Custom
+has its own scene and WebGL readback on port 8084 (main viewer port + 4); it
+never publishes to the main viewer's scene mailbox or calls its capture API.
+The dashboard runtime is pinned separately, including its Docker image.
+Allow pop-ups for the dashboard so the Custom tab can open.
 
 Click **Save selection** to finish and remove the panel. You can finish early;
 the checkpoint then uses the number of views actually saved. The dashboard
 selects this checkpoint and refreshes its images and downstream readiness.
-Duplicate positions are rejected. If the shared viewer switches scenes, captures
-are refused until the requested scene is ready again. **Close (keep saved views)**
-removes the controls without deleting an incomplete selection. This feature
-requires both the dashboard and Viser processes to run the updated code.
+Duplicate positions are rejected. Main-viewer scene changes do not affect the
+Custom session. **Close (keep saved views)** or closing the tab preserves partial
+selections. Finishing stops the temporary viewer; disconnected tabs have a
+45-second reconnect grace before automatic shutdown. This feature requires the
+updated dashboard. Main-viewer rebuilds do not change the Custom runtime.
 
 ## OracleGS
 

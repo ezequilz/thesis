@@ -965,9 +965,13 @@ def test_custom_selection_creates_portable_checkpoint_without_job(studio, tmp_pa
     source.write_bytes(b'fixture scene')
     studio.scenes = lambda: [{'id': 'room', 'label': 'Room', 'path': str(source),
                              'up_axis': '-z', 'lod_level': 2}]
-    calls, published = [], []
-    monkeypatch.setattr(ViserCaptureRenderer, '_request', lambda *args, **kwargs: calls.append((args, kwargs)))
-    monkeypatch.setattr(catalog, 'publish_live_scene', lambda *args, **kwargs: published.append((args, kwargs)))
+    calls = []
+    monkeypatch.setattr(ViserCaptureRenderer, '_request', lambda *a, **kw: pytest.fail('Shared capture viewer must stay untouched'))
+    monkeypatch.setattr(catalog, 'publish_live_scene', lambda *a, **kw: pytest.fail('Main scene must stay untouched'))
+    def start(cp):
+        calls.append(cp)
+        return {'ok': True, 'checkpoint': str(cp.root), 'session': 'abc', 'viewer_path': '/splatfix/custom?session=abc'}
+    monkeypatch.setattr(studio.custom_visor, 'start', start)
     result = studio.start_custom({'scene_id': 'room', 'views': 4, 'resolution_profile': profile, 'capture_set':capture_set})
     if capture_set == 'seva':
         size = (1024,576)
@@ -979,9 +983,8 @@ def test_custom_selection_creates_portable_checkpoint_without_job(studio, tmp_pa
     assert cp.manifest['metadata']['width'] == size[0]
     assert cp.manifest['metadata']['height'] == size[1]
     cp.require_viser_images()
-    assert calls[0][0][1:3] == ('POST', '/manual-selection')
-    assert published[0][0][0].path == source
-    assert published[0][1]['catalog_id'] == 'room'
+    assert calls[0].root == cp.root
+    assert result['viewer_path'] == '/splatfix/custom?session=abc'
     assert studio.store.list_runs() == []
     assert studio.checkpoints()[0]['id'] == result['checkpoint']
     with pytest.raises(ValueError, match='available scene'):

@@ -275,13 +275,22 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal($('schedule-dialog').opened,false);
   // Custom uses the selected scene and dimensions without queueing a VLM job.
   $('views').valid=true;$('views').value='4';$('resolution-profile').value='training';
-  $('scene-capture').scrollIntoView=()=>{};
+  $('scene-capture').scrollIntoView=()=>assert.fail('Custom must not use the main viewer');
+  let opened, redirected, popupClosed=false;
+  globalThis.window={open(path,target){opened=[path,target];return {closed:false,location:{replace(path){redirected=path}},close(){popupClosed=true}}}};
   let customPath;
-  api=async(path,body)=>{customPath=path;submitted=body;return {checkpoint:'/custom/saved'}};
+  api=async(path,body)=>{assert.deepEqual(opened,['/splatfix/custom','_blank']);customPath=path;submitted=body;return {checkpoint:'/custom/saved',viewer_path:'/splatfix/custom?session=abc'}};
   await startCustom();
   assert.equal(customPath,'/custom');assert.equal(submitted.views,4);
   assert.equal(submitted.scene_id,'unrelated-current-scene');
   assert.equal(submitted.resolution_profile,'training');assert.equal(selected,'/custom/saved');
+  assert.equal(redirected,'/splatfix/custom?session=abc');
+  window.open=()=>null;
+  api=()=>assert.fail('Blocked popup must not allocate a viewer');
+  await startCustom();
+  window.open=()=>({close(){popupClosed=true}});
+  api=async()=>{throw Error('Already selecting')};
+  await startCustom();assert.equal(popupClosed,true);assert.equal(busy,false);
   api=async(path,body)=>{submitted=body;return {}};
   // Baseline is available before editing, while improved waits for every repair.
   selected='/saved/cp';const cp=state.checkpoints[0];cp.views=[{camera:{width:16,height:16},original_url:'/original.png',metadata:{selected:true},image_repair:{status:'failed',error:'retry me'}}];cp.edited=0;

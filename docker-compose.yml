@@ -35,9 +35,15 @@ services:
   # gsplat-mlx / Metal can refine 3DGS (Linux Docker has no Metal GPU).
   dashboard:
     <<: *base
+    image: splat-explorer-dashboard:latest
+    build:
+      context: .
+      args:
+        VISER_VERSION: "1.1.0"
     command: ["dashboard"]
     ports:
       - "8090:8090"
+      - "8084:8084" # Temporary Custom selection viewer, started on demand.
     env_file:
       - path: .env
         required: false
