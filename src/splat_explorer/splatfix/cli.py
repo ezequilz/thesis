@@ -119,6 +119,8 @@ def repair_splat(cfg, args):
     if getattr(args, 'image_cache_insertion', None) is not None:
         runtime['image_cache_insertion'] = args.image_cache_insertion
     if method == 'artifixer':
+        if getattr(args, 'generated_context_references', None) is not None:
+            runtime['generated_context_references'] = args.generated_context_references
         if getattr(args, 'correct_generated_pose', None) is not None:
             runtime['correct_generated_pose'] = args.correct_generated_pose
         elif args.mode == 'edited':
@@ -235,6 +237,8 @@ def _add_stages(parser):
                         help='Connect the middle third with a fresh padded block (default: on for double-split; max 64 poses per span)')
     repair.add_argument('--connected-bridge-seeding', choices=('off', 'seed', 'seed_preserve'), default=None,
                         help='Bridge overlap seeding: seed (default), seed_preserve (fixed latent/KV), or off')
+    repair.add_argument('--generated-context-references', action=argparse.BooleanOptionalAction, default=None,
+                        help='Add completed trajectory images as rotation-first camera context (default: on)')
     repair.add_argument('--prompt-source', choices=('original_anchors', 'original_and_repaired', 'worldexplorer'), default=None)
     repair.add_argument('--artifixer-pipeline', choices=('authors_3dgut', 'authors_3dgut_viser_rgb', 'legacy_gsplat'), default=None,
                         help='Legacy Viser/gsplat (default), authors 3DGUT rendering and fresh reconstruction, or Viser RGB with authors 3DGUT geometry/fitting')

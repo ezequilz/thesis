@@ -342,13 +342,15 @@ class ResultCatalog:
                     plan['reconstruction_files'].extend(manifest.parent.rglob(pattern))
                 for name in ('inference-directions.json', 'plus-directions.json',
                              'inference-insertion-audit.json', 'plus-insertion-audit.json',
-                             'inference-connected.json', 'plus-connected.json'):
+                             'inference-connected.json', 'plus-connected.json',
+                             'inference-context.json', 'plus-context.json'):
                     path = manifest.parent / name
                     if path.is_file():
                         plan['reconstruction_files'].append(path)
                 for phase in ('inference', 'plus'):
-                    plan['reconstruction_files'].extend(p for p in (manifest.parent / f'{phase}-connected').rglob('*')
-                                                        if p.is_file())
+                    for kind in ('connected', 'context'):
+                        plan['reconstruction_files'].extend(p for p in (manifest.parent / f'{phase}-{kind}').rglob('*')
+                                                            if p.is_file())
             plans.append(plan)
         return plans
 
@@ -672,7 +674,8 @@ class ResultCatalog:
         if manifest:
             json_paths += [manifest.parent / name for name in (
                 'orbit-provenance.json', 'inference-directions.json',
-                'inference-connected.json', 'plus-connected.json')]
+                'inference-connected.json', 'plus-connected.json',
+                'inference-context.json', 'plus-context.json')]
         row['json_artifacts'] = []
         for path in json_paths:
             if not path.is_file() or not path.resolve().is_relative_to(run_root):

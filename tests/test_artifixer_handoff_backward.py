@@ -21,7 +21,8 @@ def test_backward_halves_use_completed_handoffs_and_existing_final_repair():
 
 @pytest.mark.parametrize('plus', [False, True])
 @pytest.mark.parametrize('insertion', [False, True])
-def test_backward_replaces_only_far_halves_and_clears_cache(tmp_path, monkeypatch, plus, insertion):
+@pytest.mark.parametrize('generated_context', [False, True])
+def test_backward_replaces_only_far_halves_and_clears_cache(tmp_path, monkeypatch, plus, insertion, generated_context):
     class Tensor(np.ndarray):
         def permute(self, *axes): return self.transpose(axes)
         def float(self): return self.astype(np.float32)
@@ -62,7 +63,8 @@ def test_backward_replaces_only_far_halves_and_clears_cache(tmp_path, monkeypatc
         assert not item['valid_frames_mask'][0]
         assert np.all(item['opacity'][0] == 1)
         assert item['rgb_rendered'][0, 0, 0, 0] == pytest.approx((100 + indices[0]) / 255)
-        assert item['rgb_neighbors'][:, 0, 0, 0].tolist() == pytest.approx([105/255, 100/255, 112/255])
+        assert item['rgb_neighbors'][:3, 0, 0, 0].tolist() == pytest.approx([105/255, 100/255, 112/255])
+        assert len(item['rgb_neighbors']) == (5 if generated_context and events.count('generate') == 2 else 3)
         dest = output / 'splatfix/frames/batch_0000/pred'
         dest.mkdir(parents=True, exist_ok=True)
         for index, valid in zip(indices, item['valid_frames_mask']):
@@ -73,15 +75,20 @@ def test_backward_replaces_only_far_halves_and_clears_cache(tmp_path, monkeypatc
     module('model_training')
     module('model_training.data')
     def rays(cameras, indices, neighbors, **kw):
-        assert neighbors == [5, 0, 12]
+        assert neighbors[:3] == [5, 0, 12]
         return {}
     module('model_training.data.utils', compute_camera_rays=rays)
     trajectory = {'frames': frames, 'anchors': [{'frame_index': i} for i in [6, 0, 12]],
                   'segments': [{'indices': [1, 2, 3, 4, 5]}, {'indices': [7, 8, 9, 10, 11]}]}
     state = {'original_frame_indices': [6, 0, 12], 'frame_indices': [5, 0, 12], 'paths': references}
-    worker.run_handoff_backward(tmp_path, {'runtime': {'image_cache_insertion': insertion},
+    cameras = {'w': 8, 'h': 8, 'frames': []}
+    for i in range(13):
+        pose = np.eye(4); pose[0, 3] = i
+        cameras['frames'].append({'transform_matrix': pose.tolist()})
+    worker.run_handoff_backward(tmp_path, {'runtime': {'image_cache_insertion': insertion,
+        'generated_context_references': generated_context},
         'checkpoint_root': str(tmp_path), 'camera_scale': 1}, trajectory, state,
-        pipe=pipe, args=None, device=None, encoded_prompt=None, cameras={}, plus=plus)
+        pipe=pipe, args=SimpleNamespace(), device=None, encoded_prompt=None, cameras=cameras, plus=plus)
     assert events == ['clear', 'generate', 'clear', 'generate']
     for i in range(13):
         assert Image.open(prediction / f'{i:05d}.png').getpixel((0, 0))[0] == (200 if i in [3, 4, 10, 11] else i)

@@ -42,6 +42,17 @@ def test_release_below_the_specifier_is_reinstalled():
     assert "viser" in reason
 
 
+def test_viewer_install_replaces_the_idle_keyboard_regression():
+    project = start_deps.load_project(ROOT / "pyproject.toml")
+    requirement = next(req for req in project["optional-dependencies"]["viewer"]
+                       if req.startswith("viser"))
+    assert start_deps.requirement_reason(requirement, Dist("1.1.0")) is None
+    assert start_deps.requirement_reason(requirement, Dist("1.1.1")) is not None
+    # Docker serves the capture viewer; the host serves results. They must use
+    # the same client instead of silently diverging on a fresh image build.
+    assert f'"{requirement}"' in (ROOT / "Dockerfile").read_text()
+
+
 def test_missing_package_is_reinstalled():
     reason = start_deps.requirement_reason("numpy>=1.26", None)
     assert "not installed" in reason
@@ -142,7 +153,7 @@ def test_repo_pyproject_pins_are_readable():
             project, ["viewer", "vlm", "apple"]
         )
     ]
-    assert "viser>=0.2.7" in texts
+    assert "viser==1.1.0" in texts
     assert any(text.startswith("gsplat-mlx @ git+") for text in texts)
 
 

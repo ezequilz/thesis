@@ -179,6 +179,7 @@ def snapshot_repeat(studio, row, destination):
     runtime = deepcopy(request['runtime'])
     runtime.setdefault('connected_trajectory_generation', False)
     runtime.setdefault('connected_bridge_seeding', 'off')
+    runtime.setdefault('generated_context_references', False)
     for key in ('scene_path', 'source_points3d', 'worldexplorer_source', 'repeat_from'):
         runtime.pop(key, None)
     anchor_path = studio.result_artifact(row['_manifest'], 'anchor-transforms.json')

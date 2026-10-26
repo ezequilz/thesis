@@ -23,6 +23,7 @@ import json
 import logging
 import threading
 import time
+from contextlib import nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -243,19 +244,29 @@ def _install_splats(
     )
 
 
+def _set_client_camera(client, position, look_at, *, up=None, fov=None) -> None:
+    """Send one pose transaction, without intermediate orbit targets.
+
+    A new position paired with the old look-at can briefly create a huge orbit
+    radius. Viser applies a client's atomic batch together in the browser.
+    """
+    with getattr(client, "atomic", nullcontext)():
+        if up is not None:
+            client.camera.up_direction = up
+        client.camera.position = position
+        client.camera.look_at = look_at
+        if fov is not None:
+            client.camera.fov = fov
+
+
 def _apply_view(server, view: dict) -> None:
     try:
         clients = server.get_clients().values()
     except Exception:
         return
     for client in clients:
-        client.camera.up_direction = view["up"]
-        client.camera.position = view["center"]
-        client.camera.look_at = view["center"] + view["forward"]
-        try:
-            client.camera.fov = view["vfov"]
-        except Exception:
-            pass
+        _set_client_camera(client, view["center"], view["center"] + view["forward"],
+                           up=view["up"], fov=view.get("vfov"))
 
 
 def _apply_up(server, view: dict) -> None:
@@ -281,15 +292,9 @@ def _step_look_target(state: dict, fallback_forward) -> tuple[np.ndarray, np.nda
 
 def _set_client_step_camera(client, state: dict, fallback_forward, view: dict | None = None) -> None:
     position, look_at = _step_look_target(state, fallback_forward)
-    if view is not None:
-        client.camera.up_direction = view["up"]
-    client.camera.position = position
-    client.camera.look_at = look_at
-    if view is not None:
-        try:
-            client.camera.fov = view["vfov"]
-        except Exception:
-            pass
+    _set_client_camera(client, position, look_at,
+                       up=view.get("up") if view else None,
+                       fov=view.get("vfov") if view else None)
 
 
 def _snap_clients_to_step(server, state: dict, fallback_forward, view: dict | None = None) -> None:
@@ -326,9 +331,7 @@ def _snapshot_client_cameras(server) -> list[tuple]:
 def _restore_client_cameras(saved: list[tuple]) -> None:
     for client, position, look_at, up in saved:
         try:
-            client.camera.up_direction = up
-            client.camera.position = position
-            client.camera.look_at = look_at
+            _set_client_camera(client, position, look_at, up=up)
         except Exception:
             pass
 
@@ -767,13 +770,8 @@ def serve_viewer(
                 return
             except Exception:
                 pass
-        client.camera.up_direction = view["up"]
-        client.camera.position = view["center"]
-        client.camera.look_at = view["center"] + view["forward"]
-        try:
-            client.camera.fov = view["vfov"]
-        except Exception:
-            pass
+        _set_client_camera(client, view["center"], view["center"] + view["forward"],
+                           up=view["up"], fov=view["vfov"])
 
         if manual_selection is not None:
             manual_selection.apply_fov(client)
@@ -833,7 +831,7 @@ def serve_viewer(
     }
 
     def health_extra() -> dict:
-        return {"scene": dict(scene_state)}
+        return {"scene": dict(scene_state), "viser_version": viser.__version__}
 
     from ..splatfix.manual_selection import ManualSelection
     capture = _VisorCapture(server, overlay_lock, overlay_handles)

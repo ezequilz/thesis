@@ -49,7 +49,7 @@ def plan_legs(trajectory):
 
 
 def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, cameras,
-        repair_boundary, digest, previous_state=None, plus=False):
+        repair_boundary, digest, previous_state=None, plus=False, memory=None):
     import numpy as np
     import torch
     from PIL import Image
@@ -58,6 +58,12 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
 
     cfg = request['runtime']
     phase = 'plus' if plus else 'inference'
+    if __package__:
+        from .generated_context import GeneratedContext
+    else:
+        from generated_context import GeneratedContext
+    own_memory = memory is None
+    memory = memory or GeneratedContext(root, cfg, cameras, phase=phase)
     cp = Path(request['checkpoint_root'])
     original = [a['frame_index'] for a in trajectory['anchors']]
     state = ({key: list(value) if isinstance(value, list) else value for key, value in previous_state.items()}
@@ -75,9 +81,11 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
         with Image.open(path) as image:
             return torch.from_numpy(np.array(image.convert('RGB'))).permute(2, 0, 1).float() / 255
 
-    def generate(indices, leg, direction):
+    def generate(indices, leg, direction, required=()):
         seed = indices[0]
         neighbors, paths = state['frame_indices'], state['paths']
+        neighbors, paths = memory.augment(indices, neighbors, paths, required=required,
+                                          label=f'leg-{leg}-{direction}')
         references = torch.stack([rgb(path) for path in paths])
         if plus:
             renders = torch.stack([rgb(render_dir / 'renders' / f'{i:05d}.png') for i in indices])
@@ -100,13 +108,15 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
             pipe.starter_inference_audit = None
         print(f'HANDOFF_MIDDLE: {phase} leg {leg} {direction} seed {seed}', flush=True)
         if len(indices) > 1:
-            process_item(pipe, item, args, output, 0, device, pipe.vae.config.scale_factor_temporal)
+            memory.run_sequence(process_item, pipe, item, args, output, 0, device, pipe.vae.config.scale_factor_temporal)
             if cfg.get('image_cache_insertion') and not (pipe.starter_inference_audit or {}).get('encoded_starter_preserved'):
                 raise RuntimeError('Middle handoff starter preservation was not verified')
+        else:
+            memory.complete_sequence([], output / 'splatfix/frames/batch_0000/pred')
         record = {'output': phase, 'enabled': True, 'leg_index': leg, 'direction': direction,
                   'seed_global_index': seed, 'generation_global_indices': indices,
                   'export_global_indices': indices[1:], 'reference_frame_indices': list(neighbors),
-                  'reference_paths': list(paths), 'cache_preservation': cfg.get('image_cache_insertion', False)}
+                  'reference_paths': list(map(str, paths)), 'cache_preservation': cfg.get('image_cache_insertion', False)}
         if cfg.get('image_cache_insertion') and len(indices) > 1:
             reference = paths[neighbors.index(seed)]
             insertion_audits.append({**pipe.starter_inference_audit, **record,
@@ -124,7 +134,7 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
         for job in plan_legs(trajectory):
             leg, midpoint = job['leg_index'], job['midpoint']
             forward = generate(job['forward'], leg, 'forward')
-            backward = generate(job['backward'], leg, 'backward')
+            backward = generate(job['backward'], leg, 'backward', required=job['forward'][1:][-2:])
             source = prediction / f'{midpoint:05d}.png'
             if midpoint not in state['frame_indices']:
                 # The two images have the exact same global camera. Reuse the
@@ -153,4 +163,6 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
     write_json(root / (phase + '-references.json'), state)
     write_json(root / (phase + '-seeding.json'), {'series': audits})
     write_json(manifest, {'complete': True, 'legs': records})
+    if own_memory:
+        memory.finish()
     return audits

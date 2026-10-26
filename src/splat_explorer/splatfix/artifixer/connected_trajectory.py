@@ -15,10 +15,11 @@ import tempfile
 
 if __package__:
     from .handoff import digest, write_json
-    from . import bridge_seeding
+    from . import bridge_seeding, generated_context
 else:  # Standalone worker in the pinned authors' environment.
     from handoff import digest, write_json
     import bridge_seeding
+    import generated_context
 
 
 BLOCK_FRAMES = 25
@@ -150,6 +151,8 @@ def publish_middle(bridge, prediction, indices):
 def inference_settings(request):
     runtime = request['runtime']
     return {'camera_scale': request['camera_scale'],
+            **({'generated_context_references': generated_context.POLICY}
+               if generated_context.enabled(runtime) else {}),
             'initial_image_seeding': runtime.get('initial_image_seeding') is not False,
             'image_cache_insertion': runtime.get('image_cache_insertion', False),
             'model_id': runtime.get('model_id'), 'upstream_revision': request.get('upstream_revision')}
@@ -240,6 +243,10 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
     sampler_args.num_inference_steps = 4
     sampler_args.replace_if_exists = True
     seeding_audits = []
+    memory = generated_context.GeneratedContext(root, request['runtime'], cameras, phase=phase)
+    if memory.enabled:
+        manifest['reference_policy'] = ('all repaired and existing bridge references; '
+            'up to six generated additions per outer call, two nearest-camera additions per bridge')
 
     def rgb(path):
         with Image.open(path) as image:
@@ -329,17 +336,23 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
             archive = root / f'{phase}-connected' / f'leg-{leg:03d}'
             archive.mkdir(parents=True, exist_ok=True)
             print(f'CONNECTED_OUTER: {phase} leg {leg}, {len(plan["trajectory_indices"])} poses', flush=True)
+            previous_tail = []
             for direction, indices in enumerate(plan['outer_generation_indices']):
                 seed = indices[0]
                 # Missing/None retains the existing endpoint-seeded half policy.
                 seeding = (request['runtime'].get('initial_image_seeding') is not False
                            or request['runtime'].get('image_cache_insertion', False))
                 generation = indices if seeding else indices[1:]
-                generate(generation, anchor_ids, list(anchors.values()), output,
+                reference_ids, reference_paths = memory.augment(
+                    generation, anchor_ids, list(anchors.values()), required=previous_tail,
+                    label=f'leg-{leg}-outer-{direction}')
+                generate(generation, reference_ids, reference_paths, output,
                          seed=seed if seeding else None, noise_seed=request['seed'] + leg * 3 + direction)
                 if request['runtime'].get('image_cache_insertion', False):
                     if not (getattr(pipe, 'starter_inference_audit', None) or {}).get('encoded_starter_preserved'):
                         raise RuntimeError('Connected outer-leg starter preservation was not verified')
+                memory.complete_sequence(indices[1:], prediction)
+                previous_tail = indices[1:][-2:]
                 seeding_audits.append({'output': phase, 'enabled': seeding, 'seed_global_index': seed,
                                       'cache_preservation': request['runtime'].get('image_cache_insertion', False),
                                       'generation_global_indices': generation,
@@ -358,7 +371,17 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
                     shutil.copyfile(prediction / f'{i:05d}.png', outer / f'{i:05d}.png')
             reference_ids = plan['reference_indices']
             reference_paths = [anchors[i] if i in anchors else outer / f'{i:05d}.png' for i in reference_ids]
-            reference_records = [{'frame_index': i, 'kind': 'endpoint_reference' if i in anchors else 'generated_outer',
+            if memory.enabled:
+                # Preserve the tested bridge context; add missing repaired views
+                # and a small lookup budget instead of trading away outer RGBs.
+                reference_ids = anchor_ids + [i for i in reference_ids if i not in anchors]
+                reference_paths = [anchors[i] if i in anchors else outer / f'{i:05d}.png' for i in reference_ids]
+                reference_ids, reference_paths = memory.augment(
+                    plan['target_indices'], reference_ids, reference_paths,
+                    required=plan['overlap_indices'], exclude=plan['keep_indices'],
+                    limit=generated_context.BRIDGE_ADDITIONAL_REFERENCES, label=f'leg-{leg}-bridge')
+            reference_records = [{'frame_index': i, 'kind': ('endpoint_reference' if i in anchors else
+                                  'generated_outer' if i in plan['reference_indices'] else 'generated_context'),
                                   'path': str(p), 'sha256': digest(p)} for i, p in zip(reference_ids, reference_paths)]
             bridge_output = archive / 'bridge'
             print(f'CONNECTED_BRIDGE: {phase} leg {leg}, targets {plan["target_indices"]}, references {reference_ids}', flush=True)
@@ -398,6 +421,7 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
             publish_middle(bridge, prediction, plan['keep_indices'])
             if any(digest(prediction / f'{i:05d}.png') != checksum for i, checksum in retained.items()):
                 raise RuntimeError('Connected generation modified a preserved outer image')
+            memory.complete_sequence(plan['keep_indices'], prediction)
             manifest['legs'].append({**plan, 'status': 'complete', 'references': reference_records,
                                      'seeding': seed_metadata,
                                      'bridge_noise_seed': request['seed'] + leg * 3 + 2,
@@ -412,6 +436,7 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
     manifest['prediction_sha256'] = {name: digest(prediction / name) for name in sorted(expected)}
     manifest['reference_sha256'] = [digest(path) for path in request['references']]
     manifest['complete'] = True
+    memory.finish()
     write_json(manifest_path, manifest)
     write_json(root / f'{phase}-seeding.json', {'series': seeding_audits})
     return seeding_audits

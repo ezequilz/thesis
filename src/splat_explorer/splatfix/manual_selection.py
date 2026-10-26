@@ -65,7 +65,11 @@ class ManualSelection:
             aspect = float(getattr(client.camera, 'aspect', 1024 / 576))
             if not np.isfinite(aspect) or aspect <= 0:
                 aspect = 1024 / 576
-            client.camera.fov = float(2 * np.arctan(np.tan(np.radians(54. if self.seva else self.horizontal_fov) / 2) / aspect))
+            fov = float(2 * np.arctan(np.tan(np.radians(54. if self.seva else self.horizontal_fov) / 2) / aspect))
+            # Save clicks should not queue another projection change when the
+            # preview already has the requested FOV.
+            if not np.isclose(float(client.camera.fov), fov, rtol=0, atol=1e-6):
+                client.camera.fov = fov
 
     def save_seva(self, image, camera):
         from .oraclegs.captures import save_capture

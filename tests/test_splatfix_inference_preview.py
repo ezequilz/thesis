@@ -61,6 +61,10 @@ def test_real_transfer_filters_exclude_large_artifacts(tmp_path):
     (pred.parent / 'input.png').write_bytes(b'input')
     (remote / 'prepared').mkdir()
     (remote / 'prepared/model.pt').write_bytes(b'large')
+    (remote / 'inference-context.json').write_text('{"complete": true}')
+    context = remote / 'inference-context/sequence-001'
+    context.mkdir(parents=True)
+    (context / '00001.png').write_bytes(b'context')
     local = tmp_path / 'local'
     local.mkdir()
     def transfer(argv):
@@ -75,7 +79,9 @@ def test_real_transfer_filters_exclude_large_artifacts(tmp_path):
     worker.finish()
     saved = local / 'gpu/results/run'
     assert (saved / 'inference-preview.json').exists()
-    assert len(list(saved.rglob('*.png'))) == 3
+    assert len(list(saved.rglob('*.png'))) == 4
+    assert json.loads((saved / 'inference-context.json').read_text())['complete']
+    assert (saved / 'inference-context/sequence-001/00001.png').read_bytes() == b'context'
     assert not list(saved.rglob('*.ply')) and not list(saved.rglob('*.pt'))
 
 

@@ -723,14 +723,20 @@ def handoff_backward_jobs(trajectory, reference_indices):
 
 
 def run_handoff_backward(root, request, trajectory, state, *, pipe, args, device,
-                         encoded_prompt, cameras, plus=False):
+                         encoded_prompt, cameras, plus=False, memory=None):
     """Regenerate inward halves, then replace only their forward predictions."""
     import numpy as np
     import torch
     from PIL import Image
     from model_eval.run_inference import process_item
     from model_training.data.utils import compute_camera_rays
+    if __package__:
+        from .generated_context import GeneratedContext
+    else:
+        from generated_context import GeneratedContext
     phase = 'plus' if plus else 'inference'
+    own_memory = memory is None
+    memory = memory or GeneratedContext(root, request['runtime'], cameras, phase=phase)
     cp = Path(request['checkpoint_root'])
     cfg = request['runtime']
     slots = list(range(len(state['frame_indices'])))
@@ -750,6 +756,10 @@ def run_handoff_backward(root, request, trajectory, state, *, pipe, args, device
     with torch.inference_mode():
         for job in handoff_backward_jobs(trajectory, state['frame_indices']):
             indices, seed = job['generation_global_indices'], job['seed_global_index']
+            neighbors, paths = memory.augment(indices, state['frame_indices'], state['paths'],
+                                               label=f'backward-{job["leg_index"]}')
+            if memory.enabled:
+                references = torch.stack([rgb(path) for path in paths])
             if plus:
                 renders = torch.stack([rgb(render_dir / 'renders' / f'{i:05d}.png') for i in indices])
                 opacity = torch.stack([torch.from_numpy(np.array(Image.open(render_dir / 'opacity' / f'{i:05d}.png').convert('L'), dtype=np.float32) / 255) for i in indices])
@@ -769,7 +779,7 @@ def run_handoff_backward(root, request, trajectory, state, *, pipe, args, device
             if cfg.get('image_cache_insertion', False):
                 pipe.starter_inference_audit = None
             print(f'HANDOFF_BACKWARD: {phase} leg {job["leg_index"]} seed {seed}', flush=True)
-            process_item(pipe, item, args, backward_output, 0, device, pipe.vae.config.scale_factor_temporal)
+            memory.run_sequence(process_item, pipe, item, args, backward_output, 0, device, pipe.vae.config.scale_factor_temporal)
             if cfg.get('image_cache_insertion', False) and not (pipe.starter_inference_audit or {}).get('encoded_starter_preserved'):
                 raise RuntimeError('Backward starter preservation was not verified')
             archive.mkdir(parents=True, exist_ok=True)
@@ -781,10 +791,12 @@ def run_handoff_backward(root, request, trajectory, state, *, pipe, args, device
                         raise ValueError('Backward prediction dimensions changed')
                 shutil.copy2(prediction / filename, archive / filename)
                 shutil.copy2(generated, prediction / filename)
-            records.append({**job, 'reference_frame_indices': neighbors, 'reference_paths': paths,
+            records.append({**job, 'reference_frame_indices': neighbors, 'reference_paths': list(map(str, paths)),
                             'output': phase, 'cache_preservation': cfg.get('image_cache_insertion', False)})
             manifest.write_text(json.dumps({'complete': False, 'series': records}, indent=2))
     manifest.write_text(json.dumps({'complete': True, 'series': records}, indent=2))
+    if own_memory:
+        memory.finish()
 
 
 def inference(root, request, trajectory, plus=False):
@@ -799,9 +811,11 @@ def inference(root, request, trajectory, plus=False):
     encoded_prompt, _ = load_encoded_prompt([Path(request['caption_path'])])
     cfg = request['runtime']
     if __package__:
-        from . import connected_trajectory
+        from . import connected_trajectory, generated_context
     else:
         import connected_trajectory
+        import generated_context
+    generated_context.enabled(cfg)  # Validate before allocating model weights.
     connected = connected_trajectory.enabled(cfg)
     connected_plans = None
     if connected:
@@ -845,6 +859,8 @@ def inference(root, request, trajectory, plus=False):
         install_image_cache_insertion(pipe)
     cp = Path(request['checkpoint_root'])
     cameras = opengl_transforms(trajectory)
+    memory = (generated_context.GeneratedContext(root, cfg, cameras, phase='plus' if plus else 'inference')
+              if not connected else None)
     def rgb(path):
         with Image.open(path) as im:
             return torch.from_numpy(np.array(im.convert('RGB'))).permute(2, 0, 1).float() / 255
@@ -883,7 +899,7 @@ def inference(root, request, trajectory, plus=False):
         seeding_audits = run_middle_handoff(root, request, trajectory, pipe=pipe, args=args,
             device=device, encoded_prompt=encoded_prompt, cameras=cameras,
             repair_boundary=repair_boundary, digest=caption_digest,
-            previous_state=state if plus else None, plus=plus)
+            previous_state=state if plus else None, plus=plus, memory=memory)
     with torch.inference_mode():
         for segment, reference_order, directory in jobs:
             output = root / directory
@@ -950,6 +966,11 @@ def inference(root, request, trajectory, plus=False):
                 if seed_index not in neighbors:
                     raise ValueError('Series seed must be a trusted reference camera')
                 indices = [seed_index, *[i for i in indices if i != seed_index]]
+            reference_paths = [active_reference_paths[i] for i in reference_order]
+            neighbors, reference_paths = memory.augment(indices, neighbors, reference_paths,
+                                                        label=f'{directory}-{len(seeding_audits)}')
+            if memory.enabled:
+                references = torch.stack([rgb(path) for path in reference_paths])
             if plus:
                 renders = torch.stack([rgb(render_dir / 'renders' / f'{i:05d}.png') for i in indices])
                 opacity = torch.stack([torch.from_numpy(np.array(Image.open(render_dir / 'opacity' / f'{i:05d}.png').convert('L'), dtype=np.float32) / 255) for i in indices])
@@ -969,7 +990,7 @@ def inference(root, request, trajectory, plus=False):
             seeding_audits.append({'output': directory, 'enabled': seed_index is not None,
                                    'seed_global_index': seed_index, 'cache_preservation': insertion,
                                    **({'reference_frame_indices': list(neighbors),
-                                       'reference_paths': [active_reference_paths[i] for i in reference_order]}
+                                       'reference_paths': list(map(str, reference_paths))}
                                       if handoff else {})})
             (root / ('plus-seeding.json' if plus else 'inference-seeding.json')).write_text(
                 json.dumps({'series': seeding_audits}, indent=2))
@@ -983,7 +1004,7 @@ def inference(root, request, trajectory, plus=False):
             pipe.clear_inference_caches()
             if insertion:
                 pipe.starter_inference_audit = None
-            process_item(pipe, item, args, output, 0, device, pipe.vae.config.scale_factor_temporal)
+            memory.run_sequence(process_item, pipe, item, args, output, 0, device, pipe.vae.config.scale_factor_temporal)
             if insertion:
                 audit = pipe.starter_inference_audit
                 if not audit or not audit.get('encoded_starter_preserved'):
@@ -1008,7 +1029,9 @@ def inference(root, request, trajectory, plus=False):
             json.dumps(reference_state, indent=2))
         if backward_enabled(cfg):
             run_handoff_backward(root, request, trajectory, reference_state, pipe=pipe, args=args,
-                                 device=device, encoded_prompt=encoded_prompt, cameras=cameras, plus=plus)
+                                 device=device, encoded_prompt=encoded_prompt, cameras=cameras, plus=plus, memory=memory)
+    if memory is not None:
+        memory.finish()
     if plus:
         result = json.loads((root / 'distillation.json').read_text())
         result.update(repair_policy=request.get('repair_policy', 'all'),

@@ -34,6 +34,7 @@ splatfix:
     handoff_generation: false  # Optional fallback with --handoff-generation on or middle
     connected_trajectory_generation: true  # Bridge the middle third in one padded block per double-split span, max 64 poses
     connected_bridge_seeding: seed  # off / seed / seed_preserve; independent of outer-leg seeding
+    generated_context_references: true  # Prior-sequence boundary and rotation-first camera references (Off restores legacy)
     image_cache_insertion: false  # Optional exact latent/cache preservation
     repo: /workspace/third_party/ArtiFixer
     python: /workspace/artifixer-venv/bin/python

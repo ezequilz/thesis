@@ -172,6 +172,34 @@ def test_live_seva_fov_respects_viewport_aspect(selection):
     assert np.degrees(event.client.camera.fov)==pytest.approx(54.)
 
 
+def test_manual_fov_only_changes_projection_when_needed(selection):
+    session, event, _ = selection
+    session.horizontal_fov = 77.
+    writes = []
+
+    class Camera:
+        aspect = 1.
+        _fov = np.pi / 3
+
+        @property
+        def fov(self):
+            return self._fov
+
+        @fov.setter
+        def fov(self, value):
+            writes.append(value)
+            self._fov = value
+
+    event.client.camera = Camera()
+    session.apply_fov(event.client)
+    session.apply_fov(event.client)
+    assert writes == pytest.approx([np.radians(77.)])
+    event.client.camera.aspect = 2.
+    session.apply_fov(event.client)
+    assert len(writes) == 2
+    assert writes[-1] == pytest.approx(2 * np.arctan(np.tan(np.radians(77.) / 2) / 2))
+
+
 def test_77_degree_horizontal_capture(selection):
     session, event, captures = selection
     session.horizontal_fov = 77.

@@ -185,7 +185,8 @@ def inference_fixture(tmp_path, monkeypatch, request):
                 assert item['rgb_rendered'][slot, 1, 0, 0] == np.float32(green / 255)
 
             assert item['valid_frames_mask'].all()
-            refs = state['plan']['reference_indices']
+            refs = (rays[-1][1] if state['request']['runtime'].get('generated_context_references')
+                    else state['plan']['reference_indices'])
             assert item['rgb_neighbors'].shape[0] == len(refs)
             assert item['rgb_neighbors'][:, 0, 0, 0].tolist() == pytest.approx([
                 (100 + i if i in (0, count - 1) else 10 if i < state['plan']['keep_indices'][0] else 20) / 255 for i in refs])
@@ -235,6 +236,101 @@ def inference_fixture(tmp_path, monkeypatch, request):
                  normal_sampler=normal_sampler, starter_sampler=starter_sampler, calls=calls, rays=rays,
                  events=events, seeds=seeds, missing_frame=None)
     return state
+
+
+@pytest.mark.parametrize('inference_fixture', [3, 5, 12, 64], indirect=True)
+@pytest.mark.parametrize('bridge_mode', ['off', 'seed'])
+def test_generated_context_pins_tail_and_overlaps_with_fresh_caches(inference_fixture, bridge_mode):
+    f = inference_fixture
+    f['request']['runtime'].update(generated_context_references=True, connected_bridge_seeding=bridge_mode)
+    official_worker.inference(f['root'], f['request'], f['trajectory'])
+    rows = json.loads((f['root'] / 'inference-context.json').read_text())['sequences']
+    assert not rows[0]['generated_references']
+    assert all(row['complete'] for row in rows)
+    if len(f['plan']['outer_generation_indices']) == 2:
+        tail = f['plan']['outer_generation_indices'][0][1:][-2:]
+        assert [r['frame_index'] for r in rows[1]['generated_references'] if r['reason'] == 'boundary'] == tail
+    bridge = rows[-1]
+    assert bridge['base_reference_indices'][:2] == [f['count'] - 1, 0]
+    assert set(f['plan']['reference_indices']) <= set(bridge['base_reference_indices'])
+    assert set(f['plan']['overlap_indices']) <= set(bridge['reference_indices'])
+    assert set(f['plan']['keep_indices']).isdisjoint(bridge['reference_indices'])
+    assert len(bridge['generated_references']) <= 2
+    assert f['events'] == ['clear', 'generate', 'clear'] * len(rows)
+    assert [r[1] for r in f['rays']] == [r['reference_indices'] for r in rows]
+    for row, (_, item, _, _) in zip(rows, f['calls']):
+        for record in row['generated_references']:
+            index = record['frame_index']
+            pixel = np.asarray(Image.open(record['path']))[0, 0] / 255
+            assert item['rgb_neighbors'][row['reference_indices'].index(index), :, 0, 0] == pytest.approx(pixel)
+    connected.validate_completed(f['root'], f['request'], f['trajectory'])
+    f['request']['runtime']['generated_context_references'] = False
+    with pytest.raises(ValueError, match='settings mismatch'):
+        connected.validate_completed(f['root'], f['request'], f['trajectory'])
+
+
+def test_generated_context_across_spans_keeps_all_repairs_and_published_middle(inference_fixture, monkeypatch):
+    f = inference_fixture
+    first, second = trajectory_for(32), trajectory_for(33, offset=31)
+    trajectory = f['trajectory']
+    trajectory.update(anchors=[{'frame_index': i} for i in [63, 0, 31]],
+                      segments=first['segments'] + second['segments'])
+    path = f['root'] / 'ref-31.png'
+    Image.new('RGB', (8, 8), (131, 0, 0)).save(path)
+    f['request']['references'].append(str(path))
+    f['request']['runtime']['generated_context_references'] = True
+    def process(pipe, item, args, output, *rest):
+        assert f['events'][-1] == 'clear'
+        f['events'].append('generate')
+        folder = output / 'splatfix/frames/batch_0000/pred'
+        folder.mkdir(parents=True)
+        for index, valid in zip(item['frame_indices'], item['valid_frames_mask']):
+            if valid:
+                Image.new('RGB', (8, 8), (200 if output.name == 'bridge' else 10, int(index), 0)).save(folder / f'{index:05d}.png')
+    monkeypatch.setattr(sys.modules['model_eval.run_inference'], 'process_item', process)
+    official_worker.inference(f['root'], f['request'], trajectory)
+    manifest = json.loads((f['root'] / 'inference-context.json').read_text())
+    rows = manifest['sequences']
+    assert manifest['complete'] and len(rows) == 6
+    assert all(row['base_reference_indices'][:3] == [63, 0, 31] for row in rows)
+    assert rows[3]['generated_references']
+    prior = set(range(1, 31))
+    for record in rows[3]['generated_references']:
+        assert record['frame_index'] in prior
+        assert record['source_sequence'] < 3
+        if record['frame_index'] in connected.plan_legs(trajectory)[0]['keep_indices']:
+            assert record['source_sequence'] == 2
+            assert Image.open(record['path']).getpixel((0, 0))[0] == 200
+    # A retry starts empty, even with the entire previous result on disk.
+    official_worker.inference(f['root'], f['request'], trajectory)
+    retry = json.loads((f['root'] / 'inference-context.json').read_text())
+    assert retry['sequences'][0]['generated_references'] == []
+
+
+@pytest.mark.parametrize('endpoint', [False, True])
+def test_ordinary_sequences_extend_camera_and_rgb_references_together(inference_fixture, monkeypatch, endpoint):
+    f = inference_fixture
+    f['request']['runtime'].update(connected_trajectory_generation=False, generated_context_references=True)
+    if endpoint:
+        f['request']['repair_policy'] = 'endpoints'
+        f['trajectory']['anchors'].reverse()
+        f['request']['references'].reverse()
+    calls = []
+    def process(pipe, item, args, output, *rest):
+        assert f['events'][-1] == 'clear'
+        calls.append(item)
+        folder = output / 'splatfix/frames/batch_0000/pred'
+        folder.mkdir(parents=True)
+        for index, valid in zip(item['frame_indices'], item['valid_frames_mask']):
+            if valid:
+                Image.new('RGB', (8, 8), (10, int(index), 0)).save(folder / f'{index:05d}.png')
+    monkeypatch.setattr(sys.modules['model_eval.run_inference'], 'process_item', process)
+    official_worker.inference(f['root'], f['request'], f['trajectory'])
+    rows = json.loads((f['root'] / 'inference-context.json').read_text())['sequences']
+    assert not rows[0]['generated_references'] and rows[1]['generated_references']
+    assert len(calls[0]['rgb_neighbors']) == 2 and len(calls[1]['rgb_neighbors']) == 8
+    assert f['rays'][1][1] == rows[1]['reference_indices']
+    assert all(r['source_sequence'] == 0 for r in rows[1]['generated_references'])
 
 
 @pytest.mark.parametrize('bridge_mode', [None, 'off', 'seed'])
@@ -334,9 +430,11 @@ def test_diagnostics_expose_both_sides_and_reject_external_images(tmp_path):
 
 
 @pytest.mark.parametrize('bridge_mode', ['off', 'seed'])
-def test_plus_uses_its_own_renders_and_generated_references(inference_fixture, monkeypatch, bridge_mode):
+@pytest.mark.parametrize('generated_context', [False, True])
+def test_plus_uses_its_own_renders_and_generated_references(inference_fixture, monkeypatch, bridge_mode, generated_context):
     f = inference_fixture
     f['request']['runtime']['connected_bridge_seeding'] = bridge_mode
+    f['request']['runtime']['generated_context_references'] = generated_context
     # Use an exact 0.25 float from RGB's channel read for this contract fixture.
     # PNG opacity is quantized, so assert the real expected 64/255 separately.
     root = f['root']
@@ -358,6 +456,23 @@ def test_plus_uses_its_own_renders_and_generated_references(inference_fixture, m
                   normal_sampler=f['normal_sampler'], plus=True)
     assert json.loads((root / 'plus-connected.json').read_text())['complete']
     assert not (root / 'inference').exists()
+    if generated_context:
+        context = json.loads((root / 'plus-context.json').read_text())
+        assert context['complete'] and context['phase'] == 'plus'
+        assert not context['sequences'][0]['generated_references']
+        assert all('/plus/' in r['source_path'] for row in context['sequences'] for r in row['generated_references'])
+
+
+def test_explicit_context_off_matches_historical_outputs_and_manifest(inference_fixture):
+    f = inference_fixture
+    official_worker.inference(f['root'], f['request'], f['trajectory'])
+    files = [f['root'] / 'inference-connected.json', f['root'] / 'inference-seeding.json',
+             *sorted((f['root'] / 'inference/splatfix/frames/batch_0000/pred').glob('*.png'))]
+    before = [p.read_bytes() for p in files]
+    f['request']['runtime']['generated_context_references'] = False
+    official_worker.inference(f['root'], f['request'], f['trajectory'])
+    assert [p.read_bytes() for p in files] == before
+    assert not (f['root'] / 'inference-context.json').exists()
 
 
 @pytest.mark.parametrize('inference_fixture', [3, 4, 5, 6, 12, 19, 25, 30, 48, 57, 63], indirect=True)

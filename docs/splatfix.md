@@ -987,6 +987,15 @@ an ephemeral **Custom view finding** panel. Navigate in the viewer and click
 its calibrated OpenCV camera pose to a normal checkpoint; no VLM job is queued.
 The clicked Viser tab supplies both the pose and capture, even with other tabs open.
 
+Capture and results viewers use the same pinned Viser **1.1.0** client. Viser
+1.1.1 introduced demand rendering, but its keyboard movement integrates the
+time since the last rendered frame, including idle time. That makes the first
+short movement after a pause jump unpredictably. Keep the host viewer extra and
+Docker dependency aligned when upgrading, and test short WASD/arrow presses
+after idle pauses, tab changes, and RGB captures. The capture API's `/health`
+includes `viser_version` to identify a stale container. Camera resets and scene
+restores are sent atomically; saving a view does not reposition the live camera.
+
 Click **Save selection** to finish and remove the panel. You can finish early;
 the checkpoint then uses the number of views actually saved. The dashboard
 selects this checkpoint and refreshes its images and downstream readiness.
@@ -1517,6 +1526,53 @@ are retained in `inference-middle/`, and repair inputs/results use the existing
 
 
 ### Connected trajectory generation (Step 4 default)
+
+Step 4's **Generated context references** control defaults to **On** for new runs.
+Use `generated_context_references: true` or CLI `--generated-context-references`;
+`--no-generated-context-references` restores the legacy policy. Off preserves
+the existing reference sets, model calls, cache resets, seeds and bridge behavior
+described below. Historical requests and exact repeats without this setting stay off.
+
+When enabled, each independent sequence receives its saved repaired references
+plus up to **six additional** generated references from completed sequences in
+this same inference pass. For connected trajectories, the first outer call has no generated
+context; the second reserves slots for the first call's last two real exports
+(in generation order). The bridge retains its **existing fixed outer references**,
+including its two overlap images on each side (fewer on short spans), adds any
+missing repaired references, and uses up to **two additional** camera-matched
+generated images. Thus a six-anchor, 64-pose span can use up to 18 bridge references
+(6 repaired + 10 existing outer + 2 selected). The remaining outer-leg slots,
+including on later spans' first legs, use camera matching.
+
+Selection adapts WorldExplorer/SEVA's nearest-rotation voting across every real
+target camera. The score is `SO(3) angle / pi + 0.05 * d / (d + scene_extent)`;
+`scene_extent` is the diagonal of the full trajectory camera-center bounding box.
+Thus position is scale-invariant and can outweigh at most nine degrees of rotation.
+Candidates more than 90 degrees from a target receive no vote from that target.
+Boundary references take priority even if they would not win camera matching;
+other duplicate poses are omitted, with deterministic camera-index tie breaking.
+Bridge interior predictions are excluded from its references; later sequences
+see the published bridge middle and the retained outer images. Overlaps remain
+the outer images, never regenerated diagnostic overlaps or padding.
+
+The same lookup runs between ordinary, endpoint, and handoff sequences and in the
+ArtiFixer3D+ image pass. Each invocation starts with an empty pool, so the first
+sequence cannot inherit predictions from an earlier invocation or retry. Only
+freshly verified real exports enter memory. Reference RGB and camera IDs are
+extended together before ray computation, without changing the camera convention,
+scale, caption, repaired supervision, denoising, or sequence cache-reset policy.
+No updates occur inside a running autoregressive sequence.
+
+`inference-context.json` / `plus-context.json` record the policy, completion,
+sequence targets, reference IDs, boundary/lookup reasons, votes, source sequence,
+paths and SHA-256 hashes. Selected generated RGBs are snapshotted under
+`inference-context/` / `plus-context/`, so later replacement of a source prediction
+cannot invalidate the selection evidence. Connected completion validation binds
+the context policy to the saved inference settings. These JSON logs appear in
+result details; preview downloads and reconstruction-preserving storage reduction
+retain the logs and selected RGB snapshots. Additional reference encoding
+and attention cost GPU memory/time; image quality still needs a paired GPU run
+with identical inputs and seed, comparing this option on and off.
 
 `connected_trajectory_generation: true` uses the current causal ArtiFixer checkpoint.
 Handoff generation defaults to off. Each span between consecutive saved references

@@ -40,6 +40,7 @@ DEFAULT_RUNTIME = {
     'handoff_generation': False,
     'connected_trajectory_generation': True,
     'connected_bridge_seeding': 'seed',
+    'generated_context_references': True,
     'repo': '/workspace/third_party/ArtiFixer',
     'python': '/workspace/artifixer-venv/bin/python',
     'checkpoint': '/workspace/models/artifixer/artifixer-1.3b.pt',
@@ -100,6 +101,8 @@ def validate_runtime(runtime=None):
     cfg['connected_trajectory_generation'] = configure(runtime or {})
     from .bridge_seeding import mode as bridge_seeding_mode
     cfg['connected_bridge_seeding'] = bridge_seeding_mode(cfg)
+    from .generated_context import enabled as context_enabled
+    cfg['generated_context_references'] = context_enabled(cfg)
     from .handoff import enabled, context_mode, backward_enabled, handoff_type
     cfg['handoff_generation'] = enabled(cfg)
     cfg['handoff_type'] = handoff_type(cfg)
@@ -549,6 +552,7 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         # Historical repeats must not silently acquire a new inference algorithm.
         effective_runtime['connected_trajectory_generation'] = repeat['runtime'].get('connected_trajectory_generation', False)
         effective_runtime['connected_bridge_seeding'] = repeat['runtime'].get('connected_bridge_seeding', 'off')
+        effective_runtime['generated_context_references'] = repeat['runtime'].get('generated_context_references', False)
     cfg = apply_pipeline(validate_runtime(effective_runtime))
     backend = rgb_backend(cfg)
     if geometry_backend(cfg) == '3dgut' and trajectory_mode == 'legacy_local_loops':

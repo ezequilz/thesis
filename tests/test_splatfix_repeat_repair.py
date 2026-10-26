@@ -82,6 +82,20 @@ def test_repeat_does_not_inherit_new_connected_default(tmp_path, setting, seedin
     assert info['runtime']['connected_bridge_seeding'] == (seeding or 'off')
 
 
+@pytest.mark.parametrize('setting', [None, False, True])
+def test_repeat_preserves_generated_context_policy(tmp_path, setting):
+    _, row, studio, _ = fixture(tmp_path)
+    path = row['_manifest'].parent / 'request.json'
+    request = json.loads(path.read_text())
+    request['runtime'].pop('generated_context_references', None)
+    if setting is not None:
+        request['runtime']['generated_context_references'] = setting
+    atomic_json(path, request)
+    root = tmp_path / 'repeat'; root.mkdir()
+    info = snapshot_repeat(studio, row, root)
+    assert info['runtime']['generated_context_references'] is (setting is True)
+
+
 @pytest.mark.parametrize('rebuild', [False, True])
 def test_repeat_rerenders_saved_poses_and_skips_interpolation(tmp_path, monkeypatch, rebuild):
     cp, row, studio, orbit = fixture(tmp_path)

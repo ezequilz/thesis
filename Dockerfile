@@ -27,7 +27,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     "pyyaml>=6.0" \
     "scipy>=1.11" \
     "splines==0.3.3" \
-    "viser>=0.2.7" \
+    "viser==1.1.0" \
     "openai>=1.40"
 
 COPY pyproject.toml README.md ./

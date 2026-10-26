@@ -668,6 +668,10 @@ def test_handoff_reduction_plan_retains_metadata_and_original_trajectory(tmp_pat
     studio,row = handoff_fixture(tmp_path)
     root = row['_manifest'].parent
     original = json.loads((root/'preview-trajectory.json').read_text())
+    (root/'inference-context.json').write_text('{"complete": true}')
+    context = root/'inference-context/sequence-001'
+    context.mkdir(parents=True)
+    (context/'00001.png').write_bytes(b'generated context snapshot')
     plans = ResultCatalog._artifixer_plans(SimpleNamespace(studio=studio), [row], preserve_reconstruction=True)
     plan = plans[0]
     assert plan['trajectory'] == original
@@ -675,6 +679,7 @@ def test_handoff_reduction_plan_retains_metadata_and_original_trajectory(tmp_pat
     assert {root/'inference-references.json', root/'inference-seeding.json'} <= kept
     assert {root/f'ref{i}.png' for i in range(6)} <= kept
     assert root/'handoffs/inference/00002/repaired.png' in kept
+    assert {root/'inference-context.json', context/'00001.png'} <= kept
 
 
 @pytest.mark.parametrize('complete', [False, True])

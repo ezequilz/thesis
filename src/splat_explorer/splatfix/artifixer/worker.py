@@ -15,6 +15,7 @@ def execute(root):
     if request.get('stage') != 'benchmark':
         request.setdefault('runtime', {}).setdefault('artifixer_pipeline', 'legacy_gsplat')
         request['runtime'].setdefault('initial_image_seeding', None)  # Preserve historical requests.
+        request['runtime'].setdefault('generated_context_references', False)
     last_phase = 'validation'
     def publish(**body):
         nonlocal last_phase

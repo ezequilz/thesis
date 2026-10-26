@@ -51,6 +51,15 @@ def test_escaping_result_does_not_enter_catalog(tmp_path):
     assert studio.results.entries() == []
 
 
+def test_context_selection_logs_are_exposed_in_result_details(tmp_path):
+    studio, _, result = setup(tmp_path)
+    evidence = {'complete': True, 'sequences': [{'reference_indices': [1, 2]}]}
+    (result / 'inference-context.json').write_text(json.dumps(evidence))
+    row = studio.results.run_detail(studio.results.entries()[0]['id'])
+    artifact, = [a for a in row['json_artifacts'] if a['name'] == 'inference-context.json']
+    assert artifact['snapshot'] == evidence and artifact['url']
+
+
 def test_fresh_fit_disables_highlight(tmp_path):
     studio, _, _ = setup(tmp_path)
     key = studio.results.entries()[0]['id']

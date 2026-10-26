@@ -41,6 +41,12 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('repair').handoff_generation,false);
   assert.equal(payload('repair').connected_trajectory_generation,true);
   assert.equal(payload('repair').connected_bridge_seeding,'seed');
+  assert.equal(payload('repair').generated_context_references,true);
+  $('generated-context-references').value='on';
+  assert.equal(payload('repair').generated_context_references,true);
+  assert.equal(payload('benchmark').generated_context_references,undefined);
+  $('generated-context-references').value='off';
+  assert.equal(payload('repair').generated_context_references,false);
   $('connected-bridge-seeding').value='seed_preserve';
   assert.equal(payload('repair').connected_bridge_seeding,'seed_preserve');
   $('connected-bridge-seeding').value='off';

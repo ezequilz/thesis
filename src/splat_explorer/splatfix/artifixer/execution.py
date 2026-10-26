@@ -163,6 +163,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
         runtime['connected_trajectory_generation'] = (options.get('connected_trajectory_generation', False)
             if not benchmark and not (cp is not None and cp.endpoint_only) else False)
         runtime['connected_bridge_seeding'] = options.get('connected_bridge_seeding', 'off') if not benchmark else 'off'
+        runtime['generated_context_references'] = options.get('generated_context_references', False) if not benchmark else False
         runtime['initial_image_seeding'] = options.get('initial_image_seeding') if not benchmark else None
         runtime['image_cache_insertion'] = options.get('image_cache_insertion', False) if not benchmark else False
         runtime['correct_generated_pose'] = options.get('correct_generated_pose', False) if not benchmark else False

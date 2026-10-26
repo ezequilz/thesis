@@ -126,6 +126,8 @@ class InferencePreviewMirror:
                 '--include=/inference-handoffs.json', '--include=/handoffs/***',
                 '--include=/inference-connected.json', '--include=/plus-connected.json',
                 '--include=/inference-connected/***', '--include=/plus-connected/***',
+                '--include=/inference-context.json', '--include=/plus-context.json',
+                '--include=/inference-context/***', '--include=/plus-context/***',
                 *(['--include=/artifixer3d.ply', '--include=/plus/***'] if relative.name == 'result.json' else []),
                 '--include=/published-test-metrics.json', '--include=/evaluation-status.json',
                 '--include=/stage-comparison*.jpg', '--include=/stage-comparison.json',

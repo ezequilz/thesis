@@ -52,6 +52,8 @@ def validate_options(raw):
         result['connected_trajectory_generation'] = configure({**raw, **result})
         from .bridge_seeding import mode as bridge_seeding_mode
         result['connected_bridge_seeding'] = bridge_seeding_mode(raw, default='seed')
+        from .generated_context import enabled as context_enabled
+        result['generated_context_references'] = context_enabled({'generated_context_references': True, **raw})
         reference_mode = raw.get('endpoint_reference_mode', 'both')
         if reference_mode not in ('both', 'initial'):
             raise ValueError('endpoint_reference_mode must be both or initial')

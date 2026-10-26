@@ -44,7 +44,8 @@ def test_middle_options_are_opt_in_and_validated():
 
 
 @pytest.mark.parametrize('insertion', [False, True])
-def test_middle_passes_fit_and_export_keep_originals(tmp_path, monkeypatch, insertion):
+@pytest.mark.parametrize('generated_context', [False, True])
+def test_middle_passes_fit_and_export_keep_originals(tmp_path, monkeypatch, insertion, generated_context):
     class Tensor(np.ndarray):
         def permute(self, *axes): return self.transpose(axes)
         def float(self): return self.astype(np.float32)
@@ -105,10 +106,17 @@ def test_middle_passes_fit_and_export_keep_originals(tmp_path, monkeypatch, inse
         source.write_bytes(fixed.read_bytes())
         return fixed
     request = {'checkpoint_root': str(tmp_path), 'references': refs, 'camera_scale': 1,
-               'runtime': {'handoff_generation': True, 'handoff_type': 'middle', 'image_cache_insertion': insertion}}
-    kwargs = dict(pipe=pipe, args=None, device=None, encoded_prompt=None, cameras=cameras,
+               'runtime': {'handoff_generation': True, 'handoff_type': 'middle', 'image_cache_insertion': insertion,
+                           'generated_context_references': generated_context}}
+    kwargs = dict(pipe=pipe, args=SimpleNamespace(), device=None, encoded_prompt=None, cameras=cameras,
                   repair_boundary=repair, digest=digest)
     middle_handoff.run(tmp_path, request, trajectory, **kwargs)
+    if generated_context:
+        context = json.loads((tmp_path / 'inference-context.json').read_text())
+        assert context['complete']
+        assert not context['sequences'][0]['generated_references']
+        assert [r['frame_index'] for r in context['sequences'][1]['generated_references'] if r['reason'] == 'boundary'] == [4, 5]
+        assert all(5 not in [r['frame_index'] for r in row['generated_references']] for row in context['sequences'][2:])
     assert events == ['clear', 'forward', 'clear', 'backward', 'repair', 'clear', 'fuse_backward', 'clear', 'fuse_forward']
     state = official_worker.load_handoff_references(tmp_path, request, trajectory)
     assert state['frame_indices'] == [10, 0, 5]
