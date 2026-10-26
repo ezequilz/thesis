@@ -14,10 +14,12 @@ def install_snapshot_marker():
     def save(self, iteration):
         result = original(self, iteration)
         path = Path(self.model_path)/f'point_cloud/iteration_{iteration}/point_cloud.ply'
-        marker = Path(self.model_path)/'saved-snapshot.json'
-        temporary = marker.with_suffix('.tmp')
-        temporary.write_text(json.dumps({'iteration':int(iteration), 'size_bytes':path.stat().st_size}))
-        temporary.replace(marker)
+        record = json.dumps({'iteration':int(iteration), 'size_bytes':path.stat().st_size})
+        # Per-iteration receipts allow the reviewer to reject unfinished writes.
+        for marker in (path.parent/'saved-snapshot.json', Path(self.model_path)/'saved-snapshot.json'):
+            temporary = marker.with_suffix('.tmp')
+            temporary.write_text(record)
+            temporary.replace(marker)
         return result
     scene.Scene.save = save
 

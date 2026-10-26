@@ -235,6 +235,8 @@ def prepare_repair_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE, *,
             from .artifixer.native_renderer import capture_native
             capture_native(source, cameras, destinations, artifixer_runtime, should_stop)
         else:
+            if (artifixer_runtime or {}).get('source_rgb_prepared'):
+                raise ValueError('Prepared source anchor RGB cache is missing; refusing a late Viser capture')
             (capture_rgb_fn or capture_rgb)(source, cameras, destinations, up_axis=metadata.get('up_axis', '-y'),
                         lod_level=metadata.get('scene_load', {}).get('lod_level', 0), should_stop=should_stop)
     if reuse_artifixer_inputs:

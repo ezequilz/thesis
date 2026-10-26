@@ -656,6 +656,30 @@ launch GPU work. The manager waits for the current lease owner to finish and
 checks GPU availability before executing each queued reconstruction.
 
 
+### Reconstruction iterations testing
+
+On an ArtiFixer run’s details page, enable **Reconstruction iterations testing**
+under **Reconstruct with OracleGS** before queuing. This optional setting is off
+by default. It runs the normal full OracleGS optimization with the configured
+iteration budget (22,000 by default), saving a PLY at every 1,000 iterations and
+at the final iteration, including a final iteration that is not a multiple of
+1,000. Existing training settings and initialization choices still apply.
+
+The setting is recorded as `oracle_iterations_testing` in the queued settings
+and worker runtime; `recipe.json` records the save schedule. Each successful
+PLY save gets a size-checked completion receipt. The normal result download
+retains all these snapshots. Failed or incomplete saves are excluded from review.
+
+After download, **Review splat** opens the latest saved checkpoint. Use the
+left/right arrows in the top legend to step through checkpoints in numerical
+order while preserving the camera pose. The arrows stop at the first and last
+checkpoint. Original/repaired comparison and saved-camera navigation still work.
+The details page also lists individual PLY downloads. A graceful stop adds its
+saved iteration even when it falls between scheduled checkpoints. This option
+uses additional disk space; reducing a run retains the final PLY and removes
+intermediate checkpoints under the existing reduction policy.
+
+
 ### Fresh OracleGS initialization from source points
 
 Both the ArtiFixer result reconstruction form and `/splatfix` offer `point_cloud`

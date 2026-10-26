@@ -78,9 +78,38 @@ def execute(root):
                 completed_results.append(str(Path(prior) / 'result.json'))
                 pass_progress({'phase': 'pass_complete', 'output_dir': prior})
         else:
+            source_plan = read_json(request['source_plan']) if request.get('source_plan') else None
+            if request.get('prepare_source_first'):
+                def preparation_progress(event):
+                    progress({**event, 'phase': 'source_' + event['phase'],
+                              'message': 'Lean source preparation: ' + event['phase']})
+                prepared = run_repair(request['checkpoint'], root / 'source-preparation',
+                    mode=request['mode'], frames=request['frames'], span_fraction=request['span_fraction'],
+                    runtime=request['runtime'], should_stop=stop, on_progress=preparation_progress,
+                    prepare_source_only=True)
+                source_plan = read_json(prepared['source_plan'])
+                atomic_json(root / 'source-plan.json', source_plan)
+                publish(status='running', phase='awaiting_source_capture',
+                        message='Exact trajectory ready; waiting for Viser RGB captures and full staging',
+                        source_plan=str(root / 'source-plan.json'))
+                while not (root / 'full-staging.json').is_file():
+                    if stop():
+                        raise InterruptedError('Stopped before full staging')
+                    failure = read_json(root / 'source-capture-error.json', {})
+                    if failure:
+                        raise RuntimeError(failure.get('error', 'Source trajectory capture failed'))
+                    time.sleep(.5)
+                staged = read_json(root / 'full-staging.json')
+                if staged.get('source_plan_sha256') != source_plan['sha256']:
+                    raise ValueError('Full staging does not match the prepared source trajectory')
+                if staged.get('worldexplorer_source'):
+                    request['runtime']['worldexplorer_source'] = staged['worldexplorer_source']
+                request['source_plan'] = str(root / 'source-plan.json')
+                atomic_json(root / 'worker-request.json', request)
             result = run_repair(request['checkpoint'], request['output'], mode=request['mode'],
                                 frames=request['frames'], span_fraction=request['span_fraction'],
-                                runtime=request['runtime'], should_stop=stop, on_progress=progress)
+                                runtime=request['runtime'], should_stop=stop, on_progress=progress,
+                                **({'source_plan': source_plan} if source_plan else {}))
             finalize_run_evaluation(result['output_dir'], request['runtime'], should_stop=stop, on_progress=progress)
         publish(status='completed', phase='finished', result=result, completed_results=completed_results)
     except InterruptedError as exc:

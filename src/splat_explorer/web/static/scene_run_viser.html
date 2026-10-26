@@ -27,9 +27,9 @@
     border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer;
     background: var(--accent); color: #091525; font-weight: 650;
   }
-  #view-nav {display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim)}
-  #view-nav button {padding:2px 7px;font-size:14px;background:transparent;color:var(--text);border:1px solid var(--border)}
-  #view-nav[hidden] {display:none}
+  #view-nav, #iteration-nav {display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim)}
+  #view-nav button, #iteration-nav button {padding:2px 7px;font-size:14px;background:transparent;color:var(--text);border:1px solid var(--border)}
+  #view-nav[hidden], #iteration-nav[hidden] {display:none}
   #highlight { background: transparent; color: var(--dim); border: 1px solid var(--border); }
   #highlight[aria-pressed="true"] { background: #302527; color: #d9a5a5; border-color: #705053; }
   header { flex-wrap: wrap; }
@@ -48,6 +48,7 @@
   <h1>splat-explorer <span id="title">· visor</span></h1>
   <span id="hint" class="hint">Loading repaired splat…</span>
   <span class="spacer"></span>
+  <span id="iteration-nav" hidden role="group" aria-label="Reconstruction iterations"><button id="iteration-prev" aria-label="Previous iteration checkpoint" disabled>←</button><span id="iteration-index" aria-live="polite"></span><button id="iteration-next" aria-label="Next iteration checkpoint" disabled>→</button></span>
   <span id="view-nav" hidden><button id="view-prev" aria-label="Previous saved view" disabled>‹</button><span id="view-index"></span><button id="view-next" aria-label="Next saved view" disabled>›</button></span>
   <a href="/scene-runs">scene runs</a>
   <button id="highlight" type="button" aria-pressed="false" disabled
@@ -74,6 +75,7 @@ let inactiveTimer = null;
 let state = null, pending = false, timer = null, started = false, closed = false, revision = 0;
 
 function plyLabel(which) {
+  if (which === "repaired" && state?.iteration_count) return `OracleGS · ${Number(state.iteration).toLocaleString()} iterations`;
   return which === "original" ? "scene_original.ply" : "scene_repaired.ply";
 }
 function setOverlay(text, isError) {
@@ -95,6 +97,11 @@ function render() {
   $("view-index").textContent = `View ${(state?.view_index ?? 0)+1} / ${state?.view_count || 0}${state?.view_label ? ' · '+state.view_label : ''}`;
   $("view-index").title = state?.view_label || "";
   $("view-prev").disabled = $("view-next").disabled = pending || status !== "ready" || state?.view_count < 2;
+  $("iteration-nav").hidden = !state?.iteration_count;
+  $("iteration-index").textContent = `${Number(state?.iteration || 0).toLocaleString()} iterations · ${(state?.iteration_index ?? 0)+1} / ${state?.iteration_count || 0}`;
+  const iterationBusy = pending || !["ready", "error"].includes(status);
+  $("iteration-prev").disabled = iterationBusy || !(state?.iteration_index > 0);
+  $("iteration-next").disabled = iterationBusy || !(state?.iteration_index < state?.iteration_count - 1);
   highlight.disabled = pending || status !== "ready" || !state?.highlight_available;
   highlight.setAttribute("aria-pressed", String(Boolean(state?.highlight)));
   flip.disabled = pending || status === "loading" || !otherReady;
@@ -115,7 +122,7 @@ function render() {
   if (status === "ready" && state.viewer_url) {
     setOverlay("");
     hint.classList.remove("err");
-    hint.textContent = state?.highlight ? "repair difference · faint → strong red (approximate)" : showing === "original" ? "original splat" : "repaired splat";
+    hint.textContent = state?.highlight ? "repair difference · faint → strong red (approximate)" : showing === "original" ? "original splat" : state?.iteration_count ? `OracleGS · ${Number(state.iteration).toLocaleString()} iterations` : "repaired splat";
     return;
   }
   const loadingWhich = state?.which || "repaired";
@@ -191,6 +198,8 @@ async function changeView(body) {
 };
 $("view-prev").onclick = () => { if(!$("view-prev").disabled) changeView({view_delta:-1}); };
 $("view-next").onclick = () => { if(!$("view-next").disabled) changeView({view_delta:1}); };
+$("iteration-prev").onclick = () => { if(!$("iteration-prev").disabled) changeView({iteration_delta:-1}); };
+$("iteration-next").onclick = () => { if(!$("iteration-next").disabled) changeView({iteration_delta:1}); };
 flip.onclick = () => { if (!flip.disabled) changeView({toggle: true}); };
 highlight.onclick = () => { if (!highlight.disabled) changeView({which: "repaired", highlight: !state?.highlight}); };
 window.addEventListener("keydown", event => { if(event.code === "Space" && !event.repeat && event.target === document.body){event.preventDefault();flip.click();} });

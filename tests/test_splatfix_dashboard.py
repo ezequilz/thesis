@@ -233,6 +233,9 @@ def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypat
     source.write_text('offline source fixture')
     cp.manifest['scene_path'] = str(source)
     cp.save()
+    # Planning/capture ordering has separate integration coverage. This test
+    # isolates detached-job reattachment and historical reconstruction options.
+    monkeypatch.setattr('splat_explorer.splatfix.artifixer.preflight.prepare_source_captures', lambda *a, **kw: None)
     staged = []
     def stage(source, destination):
         staged.append(source)

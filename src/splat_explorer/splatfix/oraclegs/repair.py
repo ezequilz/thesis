@@ -19,7 +19,7 @@ DEFAULT_RUNTIME = {'repo':'/workspace/third_party/OracleGS',
     'depth_weights':'/workspace/models/oraclegs/depth_anything_v2_vitl.pth',
     'oracle_source_reference':'nearest', 'oracle_reference_mode':'scene_memory', 'oracle_preset':'spiral_expanding', 'oracle_preset_scale':0.25, 'oracle_split_mode':'single-split', 'seva_fit':'crop', 'auto_setup':True, 'seva_resolution':'576p', 'oracle_adapter':'trajectory', 'oracle_target_frames':240,
     'seva_geometry_guidance':'off', 'oracle_depth_source':'predicted', 'oracle_initialization':'sfm',
-    'oracle_attention_batching':'within_trajectory', 'oracle_worldexplorer_attention':'weighted', 'oracle_path_order':None, 'iterations':22000, 'cap_max':1800000, 'seed':23}
+    'oracle_attention_batching':'within_trajectory', 'oracle_worldexplorer_attention':'weighted', 'oracle_path_order':None, 'oracle_iterations_testing':False, 'iterations':22000, 'cap_max':1800000, 'seed':23}
 
 
 def validate_runtime(runtime):
@@ -177,6 +177,12 @@ def seva_request(inputs, output, manifest, runtime, segment=None):
     return request
 
 
+def save_iterations(runtime):
+    final = runtime['iterations']
+    scheduled = range(1000, final + 1, 1000) if runtime.get('oracle_iterations_testing') else (3000, 7000, 15000)
+    return sorted({i for i in scheduled if i <= final} | {final})
+
+
 def training_args(dataset, model, n, runtime):
     return ['-s',str(dataset),'-m',str(model),'-r','1','--init_type','sfm',
             '--num_train_views',str(n),'--cap_max',str(runtime['cap_max']),
@@ -184,7 +190,7 @@ def training_args(dataset, model, n, runtime):
             '--noise_lr','500000','--gt_synth_schedule','--gt_synth_ratio','1',
             '--lambda_lpips','0.3','--lambda_dssim_synth','0.3','--synth_attention_dir',
             '--depths','depths','--save_iterations',
-            *[str(i) for i in sorted({i for i in (3000,7000,15000,runtime['iterations']) if i <= runtime['iterations']})]]
+            *map(str, save_iterations(runtime))]
 
 
 def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, on_progress=lambda event:None):
@@ -240,6 +246,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
         'attention_batching':runtime['oracle_attention_batching'],
         'worldexplorer_attention':manifest.get('oracle_worldexplorer_attention', 'weighted'),
         'schedule':'released train.py (differs from Beta schedule in paper)',
+        'save_iterations':save_iterations(runtime),
         'held_out_evaluation':'Unavailable: generated target images are not held-out GT',
         'graceful_stop':'In-memory stop-only hook after completed optimizer/MCMC iteration; atomic PLY export; 240s timeout',
         'runtime':runtime, 'commands':[]}
@@ -375,6 +382,7 @@ def run_prepared(inputs, output_dir, *, runtime=None, should_stop=lambda:False, 
     ply = output/'oraclegs.ply'
     shutil.copyfile(native,ply)
     result = {'reconstruction_method':'oraclegs','splat_path':str(ply),'mode':manifest['mode'],
+              'saved_iteration':runtime['iterations'],
               'method_variant':recipe['method_variant'],'input_manifest':str(inputs/'inputs.json'),
               'recipe':str(output/'recipe.json'),'camera_alignment':str(output/'camera-alignment.json'),'output_dir':str(output)}
     atomic_json(output/'result.json',result)

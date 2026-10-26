@@ -1366,7 +1366,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 result = studio.results.reconstruct_artifixer(body.get("id"), body.get("initialization", "repaired_full"),
                     oracle_attention_batching=body.get("oracle_attention_batching", "within_trajectory"),
                     oracle_artifixer_input=body.get("oracle_artifixer_input", "new_only"),
-                    oracle_artifixer_reference_assignment=body.get("oracle_artifixer_reference_assignment", "trajectory"))
+                    oracle_artifixer_reference_assignment=body.get("oracle_artifixer_reference_assignment", "trajectory"),
+                    oracle_iterations_testing=body.get("oracle_iterations_testing", False))
                 self._send_json({"ok": True, "run": result})
             elif self.command == "POST" and path == "/api/splatfix/results/save-inference-videos":
                 if not isinstance(body, dict):
@@ -1467,6 +1468,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         result = visor.heartbeat(key, client=body.get("client"))
                     elif "view_delta" in body:
                         result = visor.move_view(key, body["view_delta"], client=body.get("client"))
+                    elif "iteration_delta" in body:
+                        result = visor.move_iteration(key, body["iteration_delta"], client=body.get("client"))
                     else:
                         result = visor.show(key, which=body.get("which"), toggle=bool(body.get("toggle")), client=body.get("client"))
                 else:

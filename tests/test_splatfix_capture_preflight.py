@@ -171,3 +171,136 @@ def test_remote_reattachment_does_not_capture_or_stage_again(source, monkeypatch
     with pytest.raises(RuntimeError, match='existing remote job mirroring'):
         execute_remote(executor, 'test', {'stage': 'repair', 'mode': 'baseline', 'checkpoint': str(cp.root), **runtime},
                        root, lambda: False, lambda **kw: None)
+
+
+def make_plan(cp, runtime, output, count=205):
+    from splat_explorer.splatfix.artifixer.source_plan import build
+    prepared = prepare_repair_checkpoint(cp, output, runtime['resolution_profile'],
+        artifixer_runtime=runtime, reuse_artifixer_inputs=True)
+    left, right = [camera_from_record(v).c2w for v in prepared.views]
+    poses = []
+    for t in np.linspace(0, 1, count):
+        pose = left.copy(); pose[:3, 3] = left[:3, 3] * (1-t) + right[:3, 3] * t
+        poses.append(pose.tolist())
+    return build(prepared, runtime, {'poses': poses, 'provenance': {'segments': [
+        {'full_frame_indices': list(range(1, count-1))}]}},
+        {'camera_scale': .025, 'camera_scale_provenance': 'official MoGe fixture'})
+
+
+def test_all_205_source_frames_precede_full_staging_and_replay_needs_no_viewer(source, monkeypatch):
+    cp, root, runtime, captures, _ = source
+    from splat_explorer.splatfix.artifixer.source_staging import SourceStagingMirror
+    runtime = {**runtime, 'reconstruction_images': 'distilled', 'source_rgb_prepared': True}
+    initial = preflight.prepare_source_captures(cp, {**runtime, 'source_rgb_prepared': False}, root)
+    plan = make_plan(cp, runtime, root / 'gpu-prepared')
+    atomic_json(root / 'worker-request.json', {'prepare_source_first': True, 'runtime': runtime,
+                                             'source_checkpoint_sha256': initial['checkpoint_sha256']})
+    transfers = []
+    def sync(source, destination, **kw):
+        assert len(captures) == 205, 'Full staging must follow every source trajectory capture'
+        transfers.append((source, destination))
+    mirror = SourceStagingMirror(root, '/remote/job', '/workspace/job', cp, 'u@h',
+                                lambda _: json.dumps(plan), sync)
+    mirror.poll({'phase': 'awaiting_source_capture'})
+    assert transfers[0][0] == str(cp.root) + '/'
+    assert transfers[-1][0] == str(root / 'full-staging.json')
+    assert json.loads((root / 'full-staging.json').read_text())['source_plan_sha256'] == plan['sha256']
+    mirror.poll({'phase': 'awaiting_source_capture'})  # restart/publication retry only sends the barrier
+    assert len(transfers) == 3 and len(captures) == 205
+    monkeypatch.setattr(preflight, 'CaptureSession', lambda *a, **kw: pytest.fail('Future run must reuse all RGBs'))
+    again = preflight.prepare_source_captures(cp, runtime, root)
+    assert again['source_plan'] and again['captured_frames'] == 0 and again['trajectory_frames'] == 205
+
+
+def test_lean_checkpoint_omits_large_trajectory_cache_and_unselected_images(source):
+    cp, root, runtime, _, _ = source
+    from splat_explorer.splatfix.artifixer.source_staging import lean_checkpoint
+    initial = preflight.prepare_source_captures(cp, runtime, root)
+    cache = Path(initial['input_cache'])
+    for name, kind in [('anchors', 'scale_anchors'), ('large', 'authors_orbit')]:
+        folder = cache / 'trajectories' / name; folder.mkdir(parents=True)
+        atomic_json(folder / 'trajectory.json', {'recipe': {'kind': kind}})
+        (folder / 'geometry.npy').write_bytes(b'geometry fixture')
+    (cp.root / 'unselected.png').write_bytes(b'not needed for planning')
+    lean = lean_checkpoint(cp, initial, root / 'lean')
+    assert (lean / 'checkpoint.json').is_file()
+    assert len(list(lean.glob('views/*/original.png'))) == 2
+    assert list(lean.glob('artifixer-inputs/*/trajectories/anchors/geometry.npy'))
+    assert not list(lean.glob('artifixer-inputs/*/trajectories/large'))
+    assert not (lean / 'unselected.png').exists()
+
+
+def test_trajectory_capture_failure_never_full_stages(source, monkeypatch):
+    cp, root, runtime, _, _ = source
+    from splat_explorer.splatfix.artifixer.source_staging import SourceStagingMirror
+    runtime = {**runtime, 'reconstruction_images': 'distilled'}
+    initial = preflight.prepare_source_captures(cp, runtime, root)
+    plan = make_plan(cp, runtime, root / 'gpu-prepared')
+    def fail(*a, **kw):
+        raise RuntimeError('Viser disconnected')
+    monkeypatch.setattr(preflight, 'CaptureSession', fail)
+    atomic_json(root / 'worker-request.json', {'prepare_source_first': True, 'runtime': runtime,
+                                             'source_checkpoint_sha256': initial['checkpoint_sha256']})
+    transfers = []
+    mirror = SourceStagingMirror(root, '/remote/job', '/workspace/job', cp, 'u@h',
+                                lambda _: json.dumps(plan), lambda *a, **kw: transfers.append(a))
+    mirror.poll({'phase': 'awaiting_source_capture'})
+    assert len(transfers) == 1 and transfers[0][0].endswith('source-capture-error.json')
+    assert not (root / 'full-staging.json').exists()
+
+
+def test_full_worker_refuses_missing_anchor_cache(source, monkeypatch):
+    cp, root, runtime, _, _ = source
+    monkeypatch.setattr('splat_explorer.splatfix.viser_capture.capture_rgb', lambda *a, **kw: pytest.fail('No late capture allowed'))
+    with pytest.raises(ValueError, match='refusing a late Viser capture'):
+        prepare_repair_checkpoint(cp, root / 'missing', 'training', reuse_artifixer_inputs=True,
+                                  artifixer_runtime={**runtime, 'source_rgb_prepared': True})
+
+
+def test_executor_stages_lean_plans_captures_all_then_stages_full(source, monkeypatch):
+    cp, root, runtime, captures, _ = source
+    from splat_explorer import repair_lrz as lrz
+    from splat_explorer.scene_runs.lrz_transport import LrzSceneRunTransport
+    from splat_explorer.splatfix.artifixer.execution import execute_remote
+    monkeypatch.setattr(lrz, 'load_lrz_config', lambda: {'workspace': '/dss/work', 'user': 'u', 'host': 'h'})
+    monkeypatch.setattr(LrzSceneRunTransport, 'validate', lambda _: None)
+    monkeypatch.setattr(lrz, 'sync_code_to_dss', lambda _: None)
+    monkeypatch.setattr(lrz, 'rsync_ssh_cmd', lambda _: 'ssh')
+    monkeypatch.setattr(lrz, '_remote_pythonpath_exports', lambda _: '')
+    monkeypatch.setattr(lrz, 'container_srun_prefix', lambda _: 'srun ')
+    monkeypatch.setattr('splat_explorer.splatfix.artifixer.execution.wait_for_remote_poll', lambda _: None)
+    monkeypatch.setattr('splat_explorer.splatfix.downloads.enqueue', lambda *a, **kw: None)
+    stages = []
+    def sync(argv):
+        source, destination = argv[-2:]
+        if source == str(root / 'lean-checkpoint') + '/':
+            assert len(captures) == 2
+            stages.append('lean')
+        if source == str(cp.root) + '/':
+            assert len(captures) == 205
+            stages.append('full')
+        if source == str(root / 'full-staging.json'):
+            assert stages == ['lean', 'plan', 'full']
+            stages.append('released')
+    monkeypatch.setattr(lrz, '_mux_run', sync)
+    def ssh(cfg, command, **kw):
+        body = ''
+        if command.startswith('cat ') and command.endswith('/source-plan.json'):
+            request = json.loads((root / 'worker-request.json').read_text())
+            body = json.dumps(make_plan(cp, request['runtime'], root / 'gpu-prepared'))
+            stages.append('plan')
+        elif 'worker-status.json' in command:
+            body = json.dumps({'status': 'completed', 'phase': 'finished'} if 'released' in stages else
+                              {'status': 'running', 'phase': 'awaiting_source_capture'})
+        elif 'until = time.monotonic() + 30' in command:
+            body = 'exited'
+        return SimpleNamespace(returncode=0, stdout=body, stderr='')
+    monkeypatch.setattr(lrz, '_ssh_run', ssh)
+    details = {}
+    executor = SimpleNamespace(cfg={}, store=SimpleNamespace(get_run=lambda _: SimpleNamespace(state=SimpleNamespace(details=details))))
+    options = {'stage': 'repair', 'mode': 'baseline', 'checkpoint': str(cp.root), 'frames': 25,
+               'span_fraction': .04, 'regularization_profile': 'artifixer', **runtime}
+    execute_remote(executor, 'test', options, root, lambda: False, lambda **kw: details.update(kw))
+    assert stages == ['lean', 'plan', 'full', 'released']
+    request = json.loads((root / 'worker-request.json').read_text())
+    assert request['prepare_source_first'] and request['runtime']['source_rgb_prepared']

@@ -18,7 +18,7 @@ from .staging_cache import capture_prepared_rgb, digest
 
 
 def prepare_source_captures(checkpoint, runtime, root, *, should_stop=lambda: False,
-                            progress=lambda **event: None, url=None):
+                            progress=lambda **event: None, url=None, source_plan=None):
     """Warm immutable input caches, without rendering CUDA geometry locally.
 
     New authored orbits depend on GPU MoGe scale. Their intermediate poses
@@ -73,7 +73,15 @@ def prepare_source_captures(checkpoint, runtime, root, *, should_stop=lambda: Fa
                 if not path.resolve().is_relative_to(cache.resolve()) or digest(path) != expected:
                     raise ValueError(f'Saved trajectory changed before staging: {relative}')
             trajectories += 1
-        orbit = repeat.get('orbit') if repeat else None
+        from .source_plan import identity, signature, validate
+        plan_path = cache / 'source-plans' / (signature(identity(prepared, runtime)) + '.json')
+        if source_plan is None and not repeat and plan_path.is_file():
+            source_plan = json.loads(plan_path.read_text())
+        if source_plan is not None:
+            validate(source_plan, prepared, runtime)
+            plan_path.parent.mkdir(exist_ok=True)
+            atomic_json(plan_path, source_plan)
+        orbit = source_plan['orbit'] if source_plan else (repeat.get('orbit') if repeat else None)
         if orbit:
             poses = np.asarray(orbit['poses'], dtype=np.float64)
             if poses.ndim != 3 or poses.shape[1:] != (4, 4) or not np.isfinite(poses).all():
@@ -82,20 +90,55 @@ def prepare_source_captures(checkpoint, runtime, root, *, should_stop=lambda: Fa
             cameras = [replace(anchor, position=pose[:3, 3], rotation=pose[:3, :3]) for pose in poses]
             destinations = [Path(temporary) / f'{index:05d}.png' for index in range(len(cameras))]
             metadata = prepared.manifest.get('metadata', {})
+            cached_frames = cached_orbit_rgb(cache, prepared, poses)
+            from ..checkpoint import camera_to_record
+            import shutil
+            by_camera = {json.dumps(camera_to_record(camera), sort_keys=True): path
+                         for camera, path in zip(cameras, cached_frames)} if cached_frames else {}
+            def capture_orbit(requested, paths):
+                missing, missing_paths = [], []
+                for camera, path in zip(requested, paths):
+                    cached = by_camera.get(json.dumps(camera_to_record(camera), sort_keys=True))
+                    if cached:
+                        shutil.copy2(cached, path)
+                    else:
+                        missing.append(camera)
+                        missing_paths.append(path)
+                if missing:
+                    capture(prepared.manifest['scene_path'], missing, missing_paths,
+                        up_axis=metadata.get('up_axis', '-y'),
+                        lod_level=metadata.get('scene_load', {}).get('lod_level', 0), should_stop=should_stop)
             capture_prepared_rgb(prepared, cameras, destinations,
-                lambda requested, paths: capture(prepared.manifest['scene_path'], requested, paths,
-                    up_axis=metadata.get('up_axis', '-y'),
-                    lod_level=metadata.get('scene_load', {}).get('lod_level', 0), should_stop=should_stop),
-                cache_root=cache)
+                                 capture_orbit, cache_root=cache)
         if should_stop():
             raise InterruptedError('Cancelled before staging')
         if digest(checkpoint.root / 'checkpoint.json') != manifest_hash:
             raise ValueError('Checkpoint changed during Viser preflight; start a new run with the updated views')
         result = {'checkpoint_sha256': manifest_hash, 'captured_frames': captured,
                   'anchor_count': len(prepared.views), 'verified_trajectories': trajectories,
-                  'input_cache': str(cache), 'known_repeat_orbit': bool(orbit),
-                  'remaining_source_captures': 'none for exact repeat' if orbit else 'new intermediate poses after GPU metric alignment'}
+                  'input_cache': str(cache), 'known_repeat_orbit': bool(repeat and orbit),
+                  'trajectory_frames': len(orbit['poses']) if orbit else 0,
+                  'source_plan': str(plan_path) if source_plan else None,
+                  'remaining_source_captures': 'none' if orbit else 'pending lean GPU metric alignment and trajectory plan'}
         atomic_json(root / 'source-capture-preflight.json', result)
     progress(phase='viser_preflight', message=(f'Source RGB ready before staging · {captured} captured · '
              f'{trajectories} cached trajectories verified'), source_capture_preflight=result)
     return result
+
+
+def cached_orbit_rgb(cache, checkpoint, poses):
+    """Reuse checked Viser trajectory pixels, including pre-plan historical caches."""
+    views = [{k: v[k] for k in ('id', 'camera', 'original_rgb')} for v in checkpoint.views]
+    source = checkpoint.manifest.get('source_fingerprint', checkpoint.manifest['scene_path'])
+    hashes = [digest(checkpoint.image_path(view)) for view in checkpoint.views]
+    for path in sorted((cache / 'trajectories').glob('*/trajectory.json')):
+        data = json.loads(path.read_text())
+        recipe = data.get('recipe', {})
+        if (recipe.get('anchor_rgb_policy') != 'viser' or recipe.get('source') != source
+                or recipe.get('views') != views or recipe.get('rgb') != hashes
+                or recipe.get('scene_load', {}) != checkpoint.manifest.get('metadata', {}).get('scene_load', {})):
+            continue
+        previous = np.asarray((recipe.get('orbit') or {}).get('poses', []))
+        if previous.shape == poses.shape and np.allclose(previous, poses, rtol=0, atol=1e-12):
+            return [cache / frame['rgb'] for frame in data['frames']]
+    return []

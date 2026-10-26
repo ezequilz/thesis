@@ -37,6 +37,19 @@ def persist_checkpoint_caches(downloaded, checkpoint_root):
                         dirs_exist_ok=True, symlinks=True,
                         ignore=lambda directory, names: [name for name in names
                             if (Path(directory) / name).is_symlink()])
+    plans = downloaded / 'source-plans'
+    if plans.is_dir():
+        from .source_plan import signature
+        for path in plans.glob('*.json'):
+            plan = json.loads(path.read_text())
+            if (path.is_symlink() or path.stem != signature(plan['identity'])
+                    or plan.get('sha256') != signature({k: v for k, v in plan.items() if k != 'sha256'})):
+                raise ValueError('Invalid saved source trajectory plan')
+            destination = checkpoint_root / 'source-plans' / path.name
+            destination.parent.mkdir(exist_ok=True)
+            if destination.is_file() and json.loads(destination.read_text()) != plan:
+                raise ValueError('Conflicting saved source trajectory plans')
+            atomic_json(destination, plan)
     captions = downloaded / 'captions'
     if not captions.is_dir():
         return
@@ -164,6 +177,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 progress=update, url=executor.cfg.get('renderer', {}).get('viser_url') or None)
         if capture_stop():
             raise InterruptedError('Cancelled before GPU staging')
+        lean = bool(preflight and not preflight.get('source_plan') and not preflight.get('known_repeat_orbit'))
         # No source/code upload or allocation setup before the Viser preflight.
         # Reattachment only needs DSS/SSH, even if the allocation has expired.
         if not saved.get('remote_dir'):
@@ -174,8 +188,9 @@ def execute_remote(executor, run_id, options, root, stop, update):
                     lrz.setup_lrz_gpu({**cfg, 'artifixer_required': True, 'artifixer_model': options['model']},
                                       qwen_required=False)
             LrzSceneRunTransport(executor.cfg, run_id, root).validate()
-        update(message='Source captures ready; staging checkpoint and source on LRZ' if preflight else
-               'Staging checkpoint and source on the configured LRZ allocation', phase='staging')
+        update(message='Staging six-view inputs and source for GPU depth, opacity, MoGe alignment and trajectory planning' if lean else
+               'Source captures ready; staging checkpoint and source on LRZ' if preflight else
+               'Staging checkpoint and source on the configured LRZ allocation', phase='source_staging' if lean else 'staging')
         lrz.sync_code_to_dss(cfg)
         if benchmark:
             from ..jobs import registered_benchmark
@@ -208,7 +223,11 @@ def execute_remote(executor, run_id, options, root, stop, update):
                     from .staging_cache import digest
                     if digest(cp.root / 'checkpoint.json') != preflight['checkpoint_sha256']:
                         raise ValueError('Checkpoint changed after Viser preflight; start a new run with the updated views')
-                sync(str(cp.root) + '/', endpoint + ':' + remote_dir + '/checkpoint/',
+                staged_checkpoint = cp.root
+                if lean:
+                    from .source_staging import lean_checkpoint
+                    staged_checkpoint = lean_checkpoint(cp, preflight, root / 'lean-checkpoint')
+                sync(str(staged_checkpoint) + '/', endpoint + ':' + remote_dir + '/checkpoint/',
                      exclude=('worldexplorer-source/',))
             source = Path(cp.manifest['scene_path'])
             from ...scene.catalog import openable_scene_path
@@ -225,13 +244,19 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 remote_scene = container_dir + '/source/' + source.name
             from ..worldexplorer.source import stage_checkpoint_source
             originals = (stage_checkpoint_source(cp, root / 'worldexplorer-source')
-                         if runtime['reconstruction_images'] == 'all' else None)
+                         if not lean and runtime['reconstruction_images'] == 'all' else None)
             if originals:
                 sync(originals + '/', endpoint + ':' + remote_dir + '/worldexplorer-source/')
                 runtime['worldexplorer_source'] = container_dir + '/worldexplorer-source'
             runtime['scene_path'] = remote_scene
             request = {'checkpoint': container_dir + '/checkpoint', 'output': container_dir + '/results',
                        'runtime': runtime, **{k: options[k] for k in ('mode', 'frames', 'span_fraction')}}
+            if preflight:
+                runtime['source_rgb_prepared'] = True
+                request['source_checkpoint_sha256'] = preflight['checkpoint_sha256']
+                request['prepare_source_first'] = lean
+                if preflight.get('source_plan'):
+                    request['source_plan'] = container_dir + '/checkpoint/' + str(Path(preflight['source_plan']).relative_to(cp.root))
         request['reconstruction_method'] = 'artifixer'
         request['stop_at_epoch'] = executor.store.get_run(run_id).state.details.get('effective_deadline')
         safety = executor.cfg.get('splatfix', {})
@@ -251,7 +276,9 @@ def execute_remote(executor, run_id, options, root, stop, update):
         if stop():
             raise InterruptedError('Cancelled before GPU launch')
         # Save location before launch so a manager restart can reattach safely.
-        update(phase='reconstruction', message='Authors’ fresh reconstruction running on LRZ', remote_dir=remote_dir)
+        update(phase='source_preparation' if lean else 'reconstruction',
+               message='GPU computing source depth, opacity, MoGe scale and exact trajectory poses' if lean else
+               'Authors’ fresh reconstruction running on LRZ', remote_dir=remote_dir)
         ssh(launcher)
     from .live_logs import PhaseLogMirror
     log_mirror = PhaseLogMirror(root, container_dir, remote_dir, ssh)
@@ -266,6 +293,10 @@ def execute_remote(executor, run_id, options, root, stop, update):
         capture_pipeline = json.loads((cp.root / 'repeat-repair.json').read_text())['runtime'].get('artifixer_pipeline')
     native = capture_pipeline == 'authors_3dgut'
     capture_mirror = None if benchmark or native else CaptureMirror(
+        root, remote_dir, container_dir, cp, endpoint, ssh, sync,
+        url=executor.cfg.get('renderer', {}).get('viser_url') or None, should_stop=capture_stop, progress=update)
+    from .source_staging import SourceStagingMirror
+    source_staging = None if benchmark or native else SourceStagingMirror(
         root, remote_dir, container_dir, cp, endpoint, ssh, sync,
         url=executor.cfg.get('renderer', {}).get('viser_url') or None, should_stop=capture_stop, progress=update)
     handoff_service = None
@@ -299,6 +330,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
             if state != last and state:
                 last = state
                 update(phase=state.get('phase', 'reconstruction'), message=state.get('message') or state.get('phase', 'Running'))
+            if not stop() and source_staging is not None:
+                source_staging.poll(state)
             if state.get('status') in ('completed', 'error', 'stopped'):
                 break
             exited = ssh('if [ -f ' + shlex.quote(remote_dir + '/launcher-exit') + ' ]; then cat ' + shlex.quote(remote_dir + '/launcher-exit') + '; fi')
@@ -351,8 +384,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
                               *(['/results/*/prepared/**/depth/'] if benchmark else [])),
                     checkpoint=cp.root if cp is not None else None,
                     diagnostics_only=(not benchmark and state.get('status') == 'error'
-                        and state.get('failed_phase') in
-                        ('validation', 'anchor_geometry', 'trajectory', 'scale', 'orbit', 'caption')))
+                        and (state.get('failed_phase', '').startswith('source_') or state.get('failed_phase') in
+                        ('validation', 'anchor_geometry', 'trajectory', 'scale', 'orbit', 'caption', 'awaiting_source_capture'))))
     if state['status'] == 'stopped' or stop():
         raise InterruptedError('GPU reconstruction cancelled')
     if state['status'] != 'completed':

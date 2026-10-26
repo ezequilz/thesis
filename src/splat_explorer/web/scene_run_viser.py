@@ -222,6 +222,7 @@ class SceneRunViser:
         toggle: bool = False,
         highlight: bool = False,
         client: str | None = None,
+        reload: bool = False,
     ) -> dict[str, Any]:
         run_id = str(run_id)
         if self.detail(run_id) is None:
@@ -281,7 +282,9 @@ class SceneRunViser:
                 snap.update(ok=False, message=self._error, error=self._error)
                 return snap
 
-            if self._run_id == run_id and requested in self._scenes and self._status == "ready":
+            if reload and self._run_id == run_id:
+                self._scenes.pop(requested, None)
+            if not reload and self._run_id == run_id and requested in self._scenes and self._status == "ready":
                 # Hidden splat groups still enter Viser's global depth sort.
                 # Keep alternatives in Python, never in the browser sorter:
                 # distant reconstruction outliers otherwise corrupt even the
@@ -303,7 +306,7 @@ class SceneRunViser:
                 and self._status in {"ready", "loading"}
             )
             already = (
-                self._run_id == run_id
+                not reload and self._run_id == run_id
                 and self._which == requested
                 and self._status in {"ready", "loading"}
             )

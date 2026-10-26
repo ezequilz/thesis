@@ -393,6 +393,8 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
         if backend == 'viser':
             from .staging_cache import capture_prepared_rgb
             def capture(requested, destinations):
+                if (runtime or {}).get('source_rgb_prepared'):
+                    raise ValueError('Prepared source trajectory RGB cache is missing; refusing a late Viser capture')
                 capture_rgb(source_path, requested, destinations,
                             up_axis=cp.manifest.get('metadata', {}).get('up_axis', '-y'),
                             lod_level=cp.manifest.get('metadata', {}).get('scene_load', {}).get('lod_level', 0),
@@ -487,7 +489,8 @@ def run_worker(command, *, cwd, env, log_path, should_stop, handoff_cfg=None):
 
 def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frames=25,
                span_fraction=.04, seed=42, camera_scale=None, should_stop=lambda: False,
-               on_progress=lambda event: None, trajectory_mode='authors_orbit', image_repair_cfg=None):
+               on_progress=lambda event: None, trajectory_mode='authors_orbit', image_repair_cfg=None,
+               prepare_source_only=False, source_plan=None):
     """Run independently with cached authors local captioning; never merge PLYs."""
     if mode not in ('edited', 'baseline'):
         raise ValueError('mode must be edited or baseline')
@@ -526,6 +529,8 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                 raise ValueError('Reference dimensions differ from saved camera')
     if trajectory_mode not in ('authors_orbit', 'legacy_local_loops'):
         raise ValueError('Unknown trajectory_mode')
+    if (prepare_source_only or source_plan) and trajectory_mode != 'authors_orbit':
+        raise ValueError('Source preparation requires authors-orbit trajectories')
     if trajectory_mode == 'authors_orbit':
         pose_keys = {tuple(camera_from_record(view).c2w.ravel()) for view in cp.views}
         if len(pose_keys) < 2:
@@ -569,6 +574,11 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
     cp = prepare_repair_checkpoint(cp, root / 'checkpoint', cfg['resolution_profile'],
                                    scene_path=cfg.get('scene_path'), should_stop=should_stop, reuse_artifixer_inputs=True,
                                    artifixer_runtime=cfg, preserve_repaired_images=bool(repeat))
+    if source_plan is not None:
+        from .source_plan import validate
+        validate(source_plan, cp, cfg)
+        camera_scale = source_plan['camera_scale']
+    planned_orbit = source_plan['orbit'] if source_plan else (repeat.get('orbit') if repeat else None)
     references = [str(cp.image_path(view, repaired=mode == 'edited')) for view in cp.repair_views]
     if repeat and repeat.get('expected_reference_sha256'):
         if [digest_file(path) for path in references] != repeat['expected_reference_sha256']:
@@ -584,14 +594,14 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
             raise ValueError('Checkpoint camera poses changed since the parent run')
     on_progress({'phase': 'anchor_geometry' if trajectory_mode == 'authors_orbit' else 'trajectory'})
     if trajectory_mode == 'authors_orbit':
-        trajectory_root, trajectory = prepare_saved_path(cp, orbit=repeat['orbit'] if repeat else None, should_stop=should_stop, scene_path=cfg.get('scene_path'), runtime=cfg)
+        trajectory_root, trajectory = prepare_saved_path(cp, orbit=None if prepare_source_only else planned_orbit, should_stop=should_stop, scene_path=cfg.get('scene_path'), runtime=cfg)
     else:
         trajectory_root, trajectory = prepare_trajectory(cp, frames=frames, span_fraction=span_fraction, should_stop=should_stop, scene_path=cfg.get('scene_path'))
     if mode == 'baseline':
         references = [str(cp.root / anchor['original_rgb']) for anchor in trajectory['anchors']]
     initialization = prepare_splat_initialization(
         cfg.get('scene_path') or cp.manifest['scene_path'], root / 'initialization.ply'
-    ) if cfg.get('reconstruction_initialization', 'point_cloud') == 'full_splat' else None
+    ) if not prepare_source_only and cfg.get('reconstruction_initialization', 'point_cloud') == 'full_splat' else None
     points = cfg.get('source_points3d') or str(cp.root / trajectory['points3d'])
     request = {'repair_policy': 'endpoints' if cp.endpoint_only else 'all',
                'reconstruction_method': 'artifixer', 'resolution_profile': cfg['resolution_profile'],
@@ -628,7 +638,7 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
             'Mixed-renderer application variant; selected/GPT-edited references and source-splat points remain application inputs.')
     from ..worldexplorer.source import stage_checkpoint_source
     originals = None
-    if cfg.get('reconstruction_images', 'distilled') == 'all':
+    if not prepare_source_only and cfg.get('reconstruction_images', 'distilled') == 'all':
         originals = cfg.get('worldexplorer_source') or stage_checkpoint_source(
             cp, root / 'worldexplorer-source')
     request.update(reconstruction_images=cfg.get('reconstruction_images', 'distilled'),
@@ -643,18 +653,24 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         if not request['worldexplorer_prompt']:
             raise ValueError('Original WorldExplorer prompt is unavailable for this scene')
     if repeat:
-        shutil.copy2(cfg.get('scene_path') or cp.manifest['scene_path'], root / 'original.ply')
+        if not prepare_source_only:
+            shutil.copy2(cfg.get('scene_path') or cp.manifest['scene_path'], root / 'original.ply')
         request['repeat_repair'] = {k: repeat[k] for k in (
             'parent_result', 'parent_run', 'repair_pass', 'parent_incomplete', 'parent_splat', 'trajectory_replay') if k in repeat}
         if repeat.get('orbit'):
             request['orbit_provenance'] = repeat['orbit']['provenance']
+    if source_plan:
+        request.update(camera_scale_provenance=source_plan['camera_scale_provenance'],
+                       scale_estimate=source_plan.get('scale_estimate'),
+                       orbit_provenance=source_plan['orbit']['provenance'],
+                       source_plan_sha256=source_plan['sha256'])
     atomic_json(root / 'request.json', request)
     env = runtime_environment(cfg)
     if cfg.get('handoff_generation') and not env.get('SPLATFIX_HANDOFF_MAILBOX'):
         env['SPLATFIX_HANDOFF_MAILBOX'] = str(root / 'handoff-mailbox')
         env['SPLATFIX_HANDOFF_LOCAL'] = '1'
     try:
-        phases = (('scale',) if camera_scale is None else ()) + (('orbit',) if trajectory_mode == 'authors_orbit' and not (repeat and repeat.get('orbit')) else ()) + ('caption', 'infer', 'distill', 'plus')
+        phases = (('scale',) if camera_scale is None else ()) + (('orbit',) if trajectory_mode == 'authors_orbit' and not planned_orbit else ()) + (() if prepare_source_only else ('caption', 'infer', 'distill', 'plus'))
         for phase in phases:
             if should_stop():
                 raise InterruptedError('Splatfix repair stopped')
@@ -686,6 +702,11 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                 full = json.loads((root / 'orbit-full.json').read_text())
                 poses = np.asarray([frame['transform_matrix'] for frame in full['frames']]) @ np.diag([1., -1., -1., 1.])
                 orbit = {'poses': poses.tolist(), 'provenance': {key: value for key, value in orbit_provenance.items() if key != 'source_transforms'}}
+                planned_orbit = orbit
+                if prepare_source_only:
+                    # Return exact official poses before any intermediate RGB,
+                    # opacity rendering, captioning or reconstruction staging.
+                    continue
                 trajectory_root, trajectory = prepare_saved_path(cp, orbit=orbit, should_stop=should_stop, scene_path=cfg.get('scene_path'), runtime=cfg)
                 if mode == 'baseline':
                     references = [str(cp.root / anchor['original_rgb']) for anchor in trajectory['anchors']]
@@ -726,6 +747,11 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                                camera_scale_provenance='official MoGe alignment on original rendered geometry, metric_scale * 0.01',
                                scale_estimate=measured)
                 atomic_json(root / 'request.json', request)
+        if prepare_source_only:
+            from .source_plan import build
+            plan = build(cp, cfg, planned_orbit, request)
+            atomic_json(root / 'source-plan.json', plan)
+            return {'source_plan': str(root / 'source-plan.json'), 'output_dir': str(root)}
         result = json.loads((root / 'result.json').read_text())
         if not Path(result['splat_path']).is_file():
             raise RuntimeError('Authors reconstruction did not produce its isolated PLY')

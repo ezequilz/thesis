@@ -101,12 +101,8 @@ def test_remote_caption_returns_to_checkpoint_and_is_staged_for_other_mode(tmp_p
     monkeypatch.setattr(lrz, '_ssh_run', lambda cfg, command, **kwargs: SimpleNamespace(
         returncode=0, stderr='', stdout=('exited' if 'until = time.monotonic() + 30' in command else 'removed' if 'shutil.rmtree(p)' in command else json.dumps({'status': 'completed'}) if 'worker-status.json' in command else '')))
     executor = SplatfixExecutor(cfg, store)
-    class Session:
-        def __init__(self, *args, **kwargs):
-            pass
-        def render(self, camera):
-            return np.zeros((camera.height, camera.width, 3), dtype=np.uint8)
-    monkeypatch.setattr('splat_explorer.splatfix.artifixer.preflight.CaptureSession', Session)
+    # Isolate cache publication; source-preparation staging is tested separately.
+    monkeypatch.setattr('splat_explorer.splatfix.artifixer.preflight.prepare_source_captures', lambda *a, **kw: None)
     for mode in ('baseline', 'edited'):
         job = studio.create({'stage': 'repair', 'mode': mode, 'checkpoint': str(cp.root), 'prompt_source': 'original_anchors', 'correct_generated_pose': False})
         executor.execute(job['run_id'])

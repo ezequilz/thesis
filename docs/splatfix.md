@@ -329,20 +329,33 @@ Checksums reject damaged caches. Captures of the newly reconstructed ArtiFixer3D
 scene still run per reconstruction; source/checkpoint uploads to LRZ also remain.
 Existing checkpoints populate this cache on their next run.
 
-For Viser-based ArtiFixer runs, a local `viser_preflight` now checks the source
-RGB cache first and captures missing calibrated anchor views **before any LRZ
-code/checkpoint upload or GPU setup**. It uses the selected resolution and
-accepted pose corrections, verifies cached trajectory checksums in place, and
-persists captures for retries. Failure or cancellation stops before staging.
-The worker reuses these exact anchor RGBs when it renders CUDA opacity/depth;
-it does not ask the browser to capture the anchors again. Exact repeat orbits
-are already known, so their missing intermediate RGBs are captured early too.
-Reattachment to an already launched job skips preflight. Native 3DGUT and
-photographic benchmarks do not need it.
+For Viser-based ArtiFixer runs, a local `viser_preflight` checks the source RGB
+cache and captures missing calibrated anchors before LRZ upload. It uses the
+selected resolution and accepted pose corrections. A valid saved source plan
+or exact repeat orbit lets it also capture every missing trajectory RGB locally
+before any staging. Existing trajectory RGB caches are checksum-checked and
+reused; selection thumbnails never substitute for calibrated source captures.
 
-A new authored orbit still needs the GPU's MoGe metric alignment to define its
-intermediate poses. Missing RGBs at those new poses are captured afterward;
-valid cached trajectories continue to avoid that capture. ArtiFixer3D+ renders
+When the trajectory is not yet known, staging proceeds in two parts:
+
+1. Upload only selected view RGBs, repairs, the anchor capture cache (plus any
+   existing anchor geometry/scale cache), source splat and worker code. Large
+   trajectory caches and optional WorldExplorer reconstruction images stay local.
+2. On the GPU, render the original method's anchor depth and opacity, run its
+   official MoGe 2 metric alignment, and compute the exact authored trajectory.
+   The worker publishes a portable source plan, then waits at a durable barrier.
+3. Viser captures **all** missing source trajectory RGBs (including 200+ frame
+   paths) on the desktop. Only after that succeeds does the manager upload the
+   full checkpoint/caches and optional reconstruction inputs, then release the
+   worker to reconstruct using that exact measured scale and those exact poses.
+
+Plans are keyed by source, calibrated anchor RGBs/cameras, renderer, alignment
+sampling, split policy and upstream revision. The worker does not repeat scale
+estimation or interpolation after capture, and refuses a missing prepared source
+RGB cache instead of silently requesting a late browser capture. Capture failure
+or cancellation prevents full staging and reconstruction. Manager reattachment
+resumes the existing barrier without launching a second GPU job. Native 3DGUT
+and photographic benchmarks retain their existing path. ArtiFixer3D+ captures
 the newly reconstructed splat and necessarily remains a later capture phase.
 
 Photographic benchmark inputs use a separate bounds-based policy: fit within

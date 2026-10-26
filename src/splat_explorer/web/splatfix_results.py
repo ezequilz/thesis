@@ -78,11 +78,13 @@ class ResultCatalog:
             self._catalog_refreshing = False
 
     def reconstruct_artifixer(self, key, initialization='repaired_full', *, oracle_attention_batching='within_trajectory',
-                              oracle_artifixer_input='new_only', oracle_artifixer_reference_assignment='trajectory'):
+                              oracle_artifixer_input='new_only', oracle_artifixer_reference_assignment='trajectory',
+                              oracle_iterations_testing=False):
         """Snapshot inputs, then enqueue through the normal manager/GPU lease path."""
         import tempfile
         from ..splatfix.oraclegs.artifixer_inputs import export_inputs
         from ..splatfix.oraclegs.backend import validate_options
+        validate_options({'oracle_iterations_testing':oracle_iterations_testing})
         with self._run_storage_lock:
             row = self.detail(key)
             if row is None:
@@ -100,7 +102,7 @@ class ResultCatalog:
                 options = {'stage':'repair', 'reconstruction_method':'oraclegs', 'mode':'edited',
                            'checkpoint':row['config'].get('splatfix', {}).get('checkpoint', ''),
                            'resolution_profile':'training', 'oracle_artifixer_inputs':str(destination.resolve()),
-                           **validate_options(manifest)}
+                           **validate_options({**manifest, 'oracle_iterations_testing':oracle_iterations_testing})}
                 run = self.studio.store.create_run({'pipeline':'splatfix', 'splatfix':options,
                     'scene_id':row['scene'], 'width':manifest['resolution'][0],
                     'height':manifest['resolution'][1], 'duration_seconds':24*3600})
@@ -660,6 +662,10 @@ class ResultCatalog:
         from .handoff_details import handoff_details
         row['handoff_debug'] = handoff_details(self.studio, run_root)
         manifest = row.get('_manifest')
+        from .oraclegs_checkpoints import iteration_checkpoints
+        row['iteration_checkpoints'] = [
+            {'iteration':item['iteration'], 'url':self.studio.file_url(item['path'])}
+            for item in iteration_checkpoints(row)]
         from .connected_details import connected_details
         row['connected_debug'] = connected_details(self.studio, manifest)
         json_paths = [run_root / 'worker-request.json']
@@ -1065,6 +1071,8 @@ class ResultViser(SceneRunViser):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._rows = {}
+        self._checkpoints = {}
+        self._checkpoint_indices = {}
 
     def detail(self, run_id):
         # Resolve once per review session, never from polling or under _lock.
@@ -1072,6 +1080,9 @@ class ResultViser(SceneRunViser):
             row = self.studio.detail(run_id, review=True)
             if row is not None:
                 self._rows[run_id] = row
+                from .oraclegs_checkpoints import iteration_checkpoints
+                self._checkpoints[run_id] = iteration_checkpoints(row)
+                self._checkpoint_indices[run_id] = len(self._checkpoints[run_id]) - 1
             return row
         return self._rows[run_id]
 
@@ -1081,10 +1092,34 @@ class ResultViser(SceneRunViser):
     def _stop_locked(self):
         super()._stop_locked()
         self._rows.clear()
+        self._checkpoints.clear()
+        self._checkpoint_indices.clear()
 
     def ply_paths(self, run_id):
         row = self._rows.get(run_id)
-        return row['_paths'] if row else {'original': None, 'repaired': None}
+        paths = dict(row['_paths']) if row else {'original': None, 'repaired': None}
+        checkpoints = self._checkpoints.get(run_id, [])
+        if checkpoints:
+            paths['repaired'] = checkpoints[self._checkpoint_indices[run_id]]['path']
+        return paths
+
+    def move_iteration(self, run_id, delta, *, client=None):
+        if type(delta) is not int or delta not in (-1, 1):
+            raise ValueError('iteration_delta must be -1 or 1')
+        with self._lock:
+            checkpoints = self._checkpoints.get(run_id, [])
+            paths = self.ply_paths(run_id)
+            if self._run_id != run_id or self._status not in ('ready', 'error') or not checkpoints:
+                return {**self._snapshot_locked(run_id, paths, showing=self._run_id == run_id),
+                        'ok':False, 'message':'No iteration checkpoint available yet.'}
+            current = self._checkpoint_indices[run_id]
+            index = max(0, min(len(checkpoints) - 1, current + delta))
+            if index == current:
+                return self._snapshot_locked(run_id, paths, showing=True)
+            self._checkpoint_indices[run_id] = index
+            # Cancel stale loads/preloads and retain only one reconstructed scene.
+            self._generation += 1
+        return self.show(run_id, which='repaired', client=client, reload=True)
 
     def highlight_supported(self, run_id):
         return False
@@ -1095,4 +1130,9 @@ class ResultViser(SceneRunViser):
         row = self._rows.get(run_id)
         if row:
             result['label'] = f"{row['scene']} · {row['run_id']}"
+        checkpoints = self._checkpoints.get(run_id, []) if showing else []
+        index = self._checkpoint_indices.get(run_id, -1)
+        result.update(iteration_count=len(checkpoints),
+                      iteration_index=index if checkpoints else None,
+                      iteration=checkpoints[index]['iteration'] if checkpoints else None)
         return result
