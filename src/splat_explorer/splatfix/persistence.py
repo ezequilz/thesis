@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import uuid
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 from .checkpoint import atomic_json
@@ -12,6 +13,22 @@ from .jobs import read_json
 
 RECEIPT = 'remote-persistence.json'
 IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp', '.tif', '.tiff', '.exr', '.npy', '.npz'}
+
+
+@contextmanager
+def artifact_lock(root):
+    import fcntl
+    with (Path(root) / '.artifact-publish.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+@contextmanager
+def checkpoint_cache_lock(root):
+    import fcntl
+    with (Path(root) / '.cache-publication.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def remote_path(cfg, run_id):
@@ -116,12 +133,19 @@ else:
 
 
 def cleanup_persisted(lrz, cfg, root, run_id):
+    import fcntl
+    with (Path(root) / '.remote-reuse.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _cleanup_persisted(lrz, cfg, root, run_id)
+
+
+def _cleanup_persisted(lrz, cfg, root, run_id):
     root = Path(root)
     receipt = read_json(root / RECEIPT, {})
     remote = remote_path(cfg, run_id)
     if receipt.get('status') != 'persisted' or receipt.get('remote_dir') != remote:
         return
-    if receipt.get('remote_cleanup') == 'removed':
+    if receipt.get('remote_cleanup') in ('removed', 'retained_for_reuse'):
         return
     try:
         result = _ssh(lrz, cfg, shlex.join(['python3', '-c', _DELETE, remote]))
@@ -132,7 +156,7 @@ def cleanup_persisted(lrz, cfg, root, run_id):
     atomic_json(root / RECEIPT, receipt)
 
 
-def persist_remote_run(lrz, cfg, root, run_id, remote, *, excludes=()):
+def persist_remote_run(lrz, cfg, root, run_id, remote, *, excludes=(), cleanup=True):
     """A successful checksum transfer plus portable targets authorizes cleanup."""
     root = Path(root)
     if remote != remote_path(cfg, run_id):
@@ -161,7 +185,7 @@ def persist_remote_run(lrz, cfg, root, run_id, remote, *, excludes=()):
             if item.is_file() and not item.is_symlink() and not target.exists():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 link_source_image(item, target)
-    argv = ['rsync', '-azc', '-e', lrz.rsync_ssh_cmd(cfg)]
+    argv = ['rsync', '-azc', '--timeout=60', '-e', lrz.rsync_ssh_cmd(cfg)]
     argv += ['--exclude=' + pattern for pattern in excludes]
     argv += [f"{cfg['user']}@{cfg['host']}:{remote}/", str(root / 'gpu') + '/']
     lrz._mux_run(argv)
@@ -171,7 +195,8 @@ def persist_remote_run(lrz, cfg, root, run_id, remote, *, excludes=()):
     atomic_json(root / RECEIPT, {'status': 'persisted', 'remote_dir': remote,
                 'excluded_patterns': list(excludes), 'remote_cleanup': 'pending',
                 'deduplication': deduplication, **verification})
-    cleanup_persisted(lrz, cfg, root, run_id)
+    if cleanup:
+        cleanup_persisted(lrz, cfg, root, run_id)
 
 
 def retry_cleanup(lrz, cfg, root):

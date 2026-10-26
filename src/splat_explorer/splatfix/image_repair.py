@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import os
+import copy
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -18,7 +19,7 @@ DEFAULT_PROMPT = (
 
 
 def repair_images(checkpoint, *, backend=None, cfg=None, prompt=DEFAULT_PROMPT, image_set='saved', view_id=None,
-                  endpoint_repair_context='initial_repair'):
+                  endpoint_repair_context='initial_repair', repair_mode='sequential', repair_request_id=None):
     """Edit missing views, committing each success so retries avoid paid repeats.
 
     The supplied backend is injectable for offline tests. By default this uses
@@ -28,12 +29,25 @@ def repair_images(checkpoint, *, backend=None, cfg=None, prompt=DEFAULT_PROMPT, 
     original-capture repairs retain their established center-crop policy.
     Response payloads containing base64 images are deliberately not copied.
     """
+    if repair_mode == 'auto':
+        if not isinstance(checkpoint, Checkpoint):
+            checkpoint = Checkpoint.load(checkpoint)
+        repair_mode = ('shared_six_native' if len(checkpoint.views) == 6 and not checkpoint.endpoint_only
+                       and view_id is None else 'sequential')
     if endpoint_repair_context not in ('initial_repair', 'prior_repair', 'rgb_only'):
         raise ValueError('endpoint_repair_context must be initial_repair, prior_repair or rgb_only')
+    if repair_mode not in ('sequential', 'shared_six', 'shared_six_native'):
+        raise ValueError('repair_mode must be sequential, shared_six or shared_six_native')
+    shared = repair_mode in ('shared_six', 'shared_six_native')
+    if shared and view_id is not None:
+        raise ValueError('Shared repair requires all six views, not a single view_id')
     if not isinstance(checkpoint, Checkpoint):
         checkpoint = Checkpoint.load(checkpoint)
     if not checkpoint.complete:
         raise ValueError('Finish selecting all requested views before image repair')
+    # Capture selection adds synthetic IDs to nested capture records. Keep the
+    # original manifest for the shared transaction's concurrency/rollback check.
+    checkpoint_before = copy.deepcopy(checkpoint.manifest) if shared else None
     if image_set == '77':
         from .oraclegs.captures import capture_77, meta_renderer
         if any(not capture_77(v).get('original_rgb') or
@@ -62,6 +76,19 @@ def repair_images(checkpoint, *, backend=None, cfg=None, prompt=DEFAULT_PROMPT, 
         views = checkpoint.repair_views
     else:
         raise ValueError('Unknown image set')
+    if shared:
+        from .shared_image_repair import repair_shared_views
+        if backend is None:
+            from ..image_edit import make_image_edit_backend
+            backend = make_image_edit_backend(cfg=cfg)
+        if repair_mode == 'shared_six_native':
+            factory = getattr(backend, 'for_shared_native', None)
+            if not callable(factory):
+                raise ValueError('Shared native repair requires the GPT Responses backend')
+            backend = factory()
+        return repair_shared_views(checkpoint, views, backend=backend, prompt=prompt,
+                                   image_set=image_set, request_id=repair_request_id,
+                                   checkpoint_before=checkpoint_before, repair_mode=repair_mode)
     pending = [v for v in views if not v.get('repaired_rgb')]
     for view in views:
         if view.get('repaired_rgb'):

@@ -72,6 +72,16 @@ class GptImageEditBackend:
         except Exception as exc:
             return ImageEditResult(error=f'{type(exc).__name__}: {exc}')
 
+    def edit_views(self, targets, prompt, response_path):
+        """Repair six labelled cameras through one shared reasoning request."""
+        from .image_edit_multiview import request_repairs
+        return request_repairs(self.client, self.model, targets, prompt, response_path)
+
+    def for_shared_native(self):
+        """Explicit experimental route; never disguise its model as Sunburst."""
+        from .image_edit_multiview import NATIVE_IMAGE_MODEL
+        return type(self)(client=self.client, model=NATIVE_IMAGE_MODEL, timeout_s=self.timeout_s)
+
 
 def _cli_relay_client(cfg=None):
     from .agent.cli_relay import CliRelayPolicy

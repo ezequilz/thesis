@@ -126,6 +126,7 @@ class SceneRunManager:
 
     def run_once(self) -> bool:
         """Run one ready queue item; useful for tests and manual recovery."""
+        self._recover_downloads()
         candidate = self._next_queued()
         if candidate is None:
             return False
@@ -325,6 +326,8 @@ class SceneRunManager:
             release()
 
     def _heartbeat(self, *, stopped: bool = False) -> None:
+        if not stopped:
+            self._recover_downloads()
         body = {
             "pid": os.getpid(),
             "status": "stopped" if stopped else "running",
@@ -334,6 +337,16 @@ class SceneRunManager:
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(body, indent=2))
         tmp.replace(path)
+
+    def _recover_downloads(self):
+        if time.monotonic() - getattr(self, '_last_download_check', -60.) < 30:
+            return
+        self._last_download_check = time.monotonic()
+        try:
+            from ..splatfix.downloads import ensure_worker
+            ensure_worker(self.root)
+        except Exception:
+            logger.exception('Could not start background artifact downloads; will retry')
 
     def _install_signals(self) -> None:
         if threading.current_thread() is not threading.main_thread():

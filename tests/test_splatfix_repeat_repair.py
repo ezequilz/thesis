@@ -27,7 +27,7 @@ def fixture(tmp_path):
     atomic_json(cp.root / 'trajectory.json', {'recipe': {'orbit': orbit}})
     atomic_json(result / 'request.json', {'checkpoint_root': str(cp.root),
         'trajectory': str(cp.root / 'trajectory.json'), 'trajectory_mode': 'authors_orbit',
-        'runtime': {**repair.DEFAULT_RUNTIME, 'initial_image_seeding': False},
+        'runtime': {**repair.DEFAULT_RUNTIME, 'initial_image_seeding': False, 'connected_trajectory_generation': False},
         'seed': 123, 'camera_scale': .027, 'mode': 'baseline'})
     row = {'id': 'result-id', 'run_id': 'prior', 'kind': 'ArtiFixer3D',
            '_manifest': result / 'result.json', '_paths': {'repaired': result / 'output.ply'}, 'repair_pass': 2}

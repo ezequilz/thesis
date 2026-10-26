@@ -15,7 +15,7 @@ def test_dashboard_stage_payloads_and_frozen_schedule_selection():
 const fs=require('fs'), vm=require('vm'), assert=require('assert/strict');
 const source=fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0];
 const elements=new Map();
-const get=id=>{if(!elements.has(id))elements.set(id,{value:id==='artifixer-max-gaussians'?'1000000':id==='handoff-add-noise'?'repaired_pixel_sprinkle':'',textContent:'',innerHTML:'',disabled:false,valid:true,opened:false,
+const get=id=>{if(!elements.has(id))elements.set(id,{value:id==='image-repair-mode'?'auto':id==='artifixer-max-gaussians'?'1000000':id==='handoff-add-noise'?'repaired_pixel_sprinkle':'',textContent:'',innerHTML:'',disabled:false,checked:false,valid:true,opened:false,
   selectedOptions:[{textContent:'Other scene'}],classList:{toggle(){}},style:{},addEventListener(){},querySelectorAll(){return[]},
   setCustomValidity(message){this.valid=!message},reportValidity(){return this.valid},showModal(){this.opened=true},close(){this.opened=false}});return elements.get(id)};
 const context=vm.createContext({document:{getElementById:get,querySelectorAll(){return [{id:"future-setting",name:"",type:"select-one",tagName:"SELECT",value:"future",labels:[{textContent:"Future setting"}],selectedOptions:[{value:"future",textContent:"Future option"}],matches(){return false},getClientRects(){return [{}]}}]}},fetch:()=>new Promise(()=>{}),setInterval(){},setTimeout(){},assert});
@@ -31,6 +31,11 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('select').scene_id,'unrelated-current-scene');
   assert.equal(payload('repair').checkpoint,'/saved/cp');
   assert.equal(payload('repair').mode,'edited');
+  assert.equal(payload('edit').repair_mode,'auto');
+  assert.equal(payload('repair').correct_generated_pose,false);
+  $('correct-generated-pose').checked=true;
+  assert.equal(payload('repair').correct_generated_pose,true);
+  $('correct-generated-pose').checked=false;
   assert.equal(payload('repair').regularization_profile,'base_mcmc_0_2');
   assert.equal(payload('repair').generated_lpips_downscale,false);
   assert.equal(payload('repair').handoff_generation,false);
@@ -370,6 +375,20 @@ Promise.resolve(vm.runInContext(`(async()=>{
   setCheckpointImageMode(cp.id,'gpt');assert.equal(checkpointImage(cp,view).url,'/seva-repair.png');
   view.seva_repaired_url=null;assert.equal(checkpointImage(cp,view).url,'/seva-rgb.png');
   assert.match(checkpointImage(cp,view).label,/RGB/);
+  view.pose_correction_status='accepted';view.pose_corrected_url='/corrected.png';
+  setCheckpointImageMode(cp.id,'corrected');
+  assert.equal(checkpointFov(cp),'saved');
+  assert.equal(checkpointImage(cp,view).url,'/corrected.png');
+  assert.match(checkpointDisplayControls(cp),/data-image-mode="corrected"/);
+  previewCheckpoint(cp.id,0);assert.equal($('preview-resize').hidden,true);
+  assert.match($('preview-caption').textContent,/accepted pose/);
+  view.pose_correction_status='rejected';view.pose_corrected_url='/retained.png';
+  assert.equal(checkpointImage(cp,view).url,'/retained.png');
+  assert.match(checkpointImage(cp,view).label,/original pose retained/);
+  view.pose_correction_status='stale';view.pose_corrected_url=null;
+  assert.equal(checkpointImage(cp,view).url,null);
+  assert.match(checkpointImage(cp,view).label,/stale/);
+  setCheckpointFov(cp.id,'seva');assert.equal(checkpointImage(cp,view).url,null);
 
 
 })()`,context)).catch(error=>{console.error(error);process.exitCode=1});

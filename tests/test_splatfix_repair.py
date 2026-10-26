@@ -130,7 +130,7 @@ def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, 
         cp.views[0]['repaired_rgb'] = str(edit.relative_to(cp.root))
         cp.save()
     trajectory_root, trajectory = repair.prepare_trajectory(cp, frames=9, renderer_factory=FakeRenderer)
-    monkeypatch.setattr(repair, 'validate_runtime', lambda runtime: {**repair.DEFAULT_RUNTIME, 'artifixer_pipeline': 'legacy_gsplat', 'reconstruction_initialization': initialization, 'reconstruction_images': images, 'worldexplorer_source': '/old/bundle'})
+    monkeypatch.setattr(repair, 'validate_runtime', lambda runtime: {**repair.DEFAULT_RUNTIME, 'connected_trajectory_generation': False, 'artifixer_pipeline': 'legacy_gsplat', 'reconstruction_initialization': initialization, 'reconstruction_images': images, 'worldexplorer_source': '/old/bundle'})
     phases = []
     def worker(command, **kwargs):
         phase = command[-1]
@@ -696,7 +696,7 @@ def test_invalid_automatic_scale_never_falls_back_to_one(tmp_path, monkeypatch, 
 
 def test_default_repair_measures_before_inference_and_reuses_identical_scale(tmp_path, monkeypatch):
     cp, trajectory, request = scale_request(tmp_path, monkeypatch)
-    monkeypatch.setattr(repair, 'validate_runtime', lambda runtime: {**repair.DEFAULT_RUNTIME, 'artifixer_pipeline': 'legacy_gsplat'})
+    monkeypatch.setattr(repair, 'validate_runtime', lambda runtime: {**repair.DEFAULT_RUNTIME, 'connected_trajectory_generation': False, 'artifixer_pipeline': 'legacy_gsplat'})
     phases = []
     def worker(command, **kwargs):
         phase = command[-1]
@@ -965,7 +965,7 @@ def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypa
     mock_scene(monkeypatch)
     from splat_explorer.splatfix import rendering
     monkeypatch.setattr(rendering, 'BundleRenderer', FakeRenderer)
-    monkeypatch.setattr(repair, 'validate_runtime', lambda _: {**repair.DEFAULT_RUNTIME, 'artifixer_pipeline': pipeline})
+    monkeypatch.setattr(repair, 'validate_runtime', lambda _: {**repair.DEFAULT_RUNTIME, 'connected_trajectory_generation': False, 'artifixer_pipeline': pipeline})
     monkeypatch.setattr('splat_explorer.splatfix.artifixer.native_renderer.NativeRenderer', lambda *a, **kw: FakeRenderer(None))
     plus_captures = []
     monkeypatch.setattr(repair, 'capture_plus_rgb', lambda *a, **kw: plus_captures.append(True))
@@ -1103,6 +1103,71 @@ def test_checkpoint_owned_geometry_replays_without_renderer(tmp_path, monkeypatc
     monkeypatch.setattr(repair, 'capture_rgb', lambda *a, **kw: pytest.fail('Must reuse captured trajectory'))
     _, replay = repair.prepare_saved_path(second, renderer_factory=lambda *a: pytest.fail('Must reuse geometry'))
     assert replay == original
+
+
+@pytest.fixture
+def cached_orbit(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from splat_explorer.splatfix.checkpoint import camera_from_record
+    cp = make_checkpoint(tmp_path)
+    cp.manifest['target_views'] = 2
+    cp.save()
+    camera = camera_from_record(cp.views[0])
+    other = replace(camera, position=camera.position + [1, 0, 0])
+    cp.add_view(np.full((32, 32, 3), 91, np.uint8), other)
+    middle = replace(camera, position=camera.position + [.5, 0, 0])
+    orbit = {'poses': [pose.c2w.tolist() for pose in (camera, middle, other)],
+             'provenance': {'split_mode': 'double-split',
+                            'segments': [{'full_frame_indices': [1], 'seed_full_frame_index': 0}],
+                            'motion_diagnostics': {'rotation_total_degrees': 90.}}}
+    mock_scene(monkeypatch)
+    root, manifest = repair.prepare_saved_path(cp, orbit=orbit, renderer_factory=FakeRenderer)
+    return cp, root, manifest
+
+
+def test_saved_orbit_reuses_viser_geometry_despite_roundoff(cached_orbit, monkeypatch):
+    from copy import deepcopy
+    cp, root, manifest = cached_orbit
+    orbit = deepcopy(manifest['recipe']['orbit'])
+    orbit['poses'][1][0][3] += 8.88e-16
+    orbit['provenance']['motion_diagnostics']['rotation_total_degrees'] += 1e-6
+    monkeypatch.setattr(repair, 'capture_rgb', lambda *a, **kw: pytest.fail('Must reuse Viser RGB'))
+    def renderer(*args):
+        pytest.fail('Must reuse gsplat opacity and depth')
+    replay_root, replay = repair.prepare_saved_path(cp, orbit=orbit, renderer_factory=renderer)
+    assert replay_root == root
+    assert replay == manifest  # Keep the actual cached camera metadata and signature.
+    (cp.root / manifest['frames'][1]['rgb']).write_bytes(b'changed')
+    with pytest.raises(ValueError, match='Saved trajectory changed'):
+        repair.prepare_saved_path(cp, orbit=orbit, renderer_factory=renderer)
+
+
+@pytest.mark.parametrize('change', ['pose', 'order', 'split', 'source', 'calibration',
+                                  'rgb', 'renderer', 'version', 'nonfinite'])
+def test_orbit_roundoff_cache_does_not_reuse_different_inputs(cached_orbit, change):
+    from copy import deepcopy
+    from splat_explorer.splatfix.artifixer.staging_cache import compatible_trajectory
+    cp, _, manifest = cached_orbit
+    recipe = deepcopy(manifest['recipe'])
+    if change == 'pose':
+        recipe['orbit']['poses'][1][0][3] += 1e-8
+    elif change == 'order':
+        recipe['orbit']['poses'].reverse()
+    elif change == 'split':
+        recipe['orbit']['provenance']['split_mode'] = 'single-split'
+    elif change == 'source':
+        recipe['source'] = 'different scene'
+    elif change == 'calibration':
+        recipe['views'][0]['camera']['width'] = 64
+    elif change == 'rgb':
+        recipe['rgb'][0] = 'different image'
+    elif change == 'renderer':
+        recipe['anchor_rgb_policy'] = '3dgut'
+    elif change == 'version':
+        recipe['trajectory_version'] += 1
+    elif change == 'nonfinite':
+        recipe['orbit']['poses'][1][0][3] = float('nan')
+    assert compatible_trajectory(cp.root / 'trajectories', recipe) is None
 
 
 def test_hybrid_preserves_native_geometry_overwrites_rgb_and_separates_caches(tmp_path, monkeypatch):

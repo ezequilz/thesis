@@ -2,6 +2,7 @@
 import json
 import shlex
 import time
+import threading
 from pathlib import Path
 from ..checkpoint import Checkpoint, atomic_json
 from ..remote_poll import wait_for_remote_poll
@@ -14,6 +15,12 @@ PREVIEW_FILTERS = ['- model/', '- combined/', '- seva-padded-inputs/', '+ */',
 
 
 def mirror_previews(lrz, cfg, endpoint, remote, root, *, phase=None):
+    from ..persistence import artifact_lock
+    with artifact_lock(root):
+        return _mirror_previews(lrz, cfg, endpoint, remote, root, phase=phase)
+
+
+def _mirror_previews(lrz, cfg, endpoint, remote, root, *, phase=None):
     """One cache writer across executor/temporary observer; failures never stop GPU work."""
     import fcntl
     from ..jobs import read_json
@@ -134,6 +141,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
     last_log = 0.
     last_preview = 0.
     preview_phase = None
+    preview_thread = None
     def mirror_log():
         nonlocal last_log
         if time.monotonic() - last_log < 60:
@@ -163,14 +171,18 @@ def execute_remote(executor, run_id, options, root, stop, update):
         # transfers; rsync publishes each file atomically (no --inplace).
         phase = state.get('phase')
         now = time.monotonic()
-        if now - last_preview >= 60 and (phase != preview_phase or phase in
+        if (preview_thread is None or not preview_thread.is_alive()) and now - last_preview >= 60 and (phase != preview_phase or phase in
                 ('seva_generation', 'vggt_attention') or preview_phase is None):
             last_preview = now
-            try:
-                transferred = mirror_previews(lrz, cfg, endpoint, remote, root, phase=phase)
-                preview_phase = phase if transferred else None
-            except Exception:
-                preview_phase = None
+            def download_preview(observed_phase=phase):
+                nonlocal preview_phase
+                try:
+                    transferred = mirror_previews(lrz, cfg, endpoint, remote, root, phase=observed_phase)
+                    preview_phase = observed_phase if transferred else None
+                except Exception:
+                    preview_phase = None
+            preview_thread = threading.Thread(target=download_preview, daemon=True)
+            preview_thread.start()
         if state:
             atomic_json(root / 'worker-status.json', state)
         if state and state != last:
@@ -186,14 +198,14 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 state = {'status': 'error', 'message': 'OracleGS launcher exited without terminal worker status: ' + exited.strip()}
             break
         wait_for_remote_poll(stop)
-    # Connection/transfer failures keep the remote identity unresolved, allowing
-    # reattachment and transfer retry before the shared lease is released.
-    from ..persistence import persist_remote_run
-    update(phase='downloading', message='OracleGS worker exited; downloading available artifacts before releasing the GPU lease')
-    persist_remote_run(lrz, cfg, root, run_id, remote)
+    from ..persistence import wait_for_exit
+    from ..downloads import enqueue
+    wait_for_exit(lrz, cfg, remote)
+    atomic_json(root / 'worker-status.json', state)
     update(remote_finished=True)
+    enqueue(cfg, root, run_id, remote, state)
     if state['status'] == 'stopped' or stop():
-        raise InterruptedError('OracleGS stopped; available artifacts downloaded')
+        raise InterruptedError('OracleGS stopped; artifacts queued for background download')
     if state['status'] != 'completed':
         raise RuntimeError(state.get('message', 'OracleGS failed'))
     return {'reconstruction_method': 'oraclegs', 'results': str(root / 'gpu/results'),

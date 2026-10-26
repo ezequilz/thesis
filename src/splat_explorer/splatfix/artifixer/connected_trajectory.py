@@ -11,6 +11,7 @@ import json
 import math
 from pathlib import Path
 import shutil
+import tempfile
 
 if __package__:
     from .handoff import digest, write_json
@@ -52,7 +53,7 @@ def plan_legs(trajectory):
     """
     count = len(trajectory['frames'])
     anchors = sorted(a['frame_index'] for a in trajectory['anchors'])
-    if count <= 1 and anchors == list(range(count)) and not trajectory['segments']:
+    if count <= 1 and anchors == list(range(count)) and all(type(i) is int for i in anchors) and not trajectory['segments']:
         return []  # No interior or pair of distinct endpoints to bridge.
     if (len(anchors) < 2 or len(set(anchors)) != len(anchors)
             or any(type(i) is not int or not 0 <= i < count for i in anchors)):
@@ -129,6 +130,74 @@ def compare_overlap(existing, generated, destination):
             'psnr_db': -10 * math.log10(mse) if mse else None, 'identical': mse == 0}
 
 
+def publish_middle(bridge, prediction, indices):
+    """Stage every new image before replacing any canonical middle image.
+
+    If copying runs out of space, nothing is published. A process interruption
+    during the final renames leaves the completion manifest false, which blocks
+    reconstruction until inference is rerun successfully.
+    """
+    with tempfile.TemporaryDirectory(prefix='.connected-publish-', dir=prediction.parent) as temporary:
+        staging = Path(temporary)
+        for i in indices:
+            name = f'{i:05d}.png'
+            shutil.copyfile(bridge / name, staging / name)
+        for i in indices:
+            name = f'{i:05d}.png'
+            (staging / name).replace(prediction / name)
+
+
+def inference_settings(request):
+    runtime = request['runtime']
+    return {'camera_scale': request['camera_scale'],
+            'initial_image_seeding': runtime.get('initial_image_seeding') is not False,
+            'image_cache_insertion': runtime.get('image_cache_insertion', False),
+            'model_id': runtime.get('model_id'), 'upstream_revision': request.get('upstream_revision')}
+
+
+def validate_completed(root, request, trajectory):
+    """Reject incomplete, stale or modified connected supervision before fitting."""
+    root = Path(root)
+    path = root / 'inference-connected.json'
+    try:
+        manifest = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise ValueError('Connected inference is not complete; rerun inference before reconstruction') from exc
+    plans = plan_legs(trajectory)
+    if (manifest.get('complete') is not True or manifest.get('schema_version') != 2
+            or manifest.get('phase') != 'inference' or manifest.get('plan') != plans
+            or manifest.get('bridge_seeding') != bridge_seeding.mode(request['runtime'])
+            or manifest.get('checkpoint') != request['runtime']['checkpoint']
+            or manifest.get('noise_seed') != request['seed']
+            or manifest.get('inference_settings') != inference_settings(request)):
+        raise ValueError('Connected inference completion/settings mismatch; rerun inference before reconstruction')
+    legs = manifest.get('legs', [])
+    if len(legs) != len(plans) or any(
+            leg.get('leg_index') != plan['leg_index'] or
+            leg.get('status') != ('complete' if plan['target_indices'] else 'skipped')
+            for leg, plan in zip(legs, plans)):
+        raise ValueError('Connected inference contains unfinished legs')
+    anchors = {a['frame_index'] for a in trajectory['anchors']}
+    prediction = root / 'inference/splatfix/frames/batch_0000/pred'
+    expected = {f'{i:05d}.png' for i in range(len(trajectory['frames'])) if i not in anchors}
+    checksums = manifest.get('prediction_sha256', {})
+    if set(checksums) != expected or {p.name for p in prediction.glob('*.png')} != expected:
+        raise ValueError('Connected inference prediction coverage mismatch')
+    if any(digest(prediction / name) != checksum for name, checksum in checksums.items()):
+        raise ValueError('Connected inference predictions changed after completion')
+    if manifest.get('reference_sha256') != [digest(path) for path in request['references']]:
+        raise ValueError('Connected inference endpoint references changed after completion')
+    # Bind conditioning to the exact calibrated trajectory, including cameras.
+    if manifest.get('trajectory_sha256') != trajectory_digest(trajectory):
+        raise ValueError('Connected inference trajectory metadata changed after completion')
+    return manifest
+
+
+def trajectory_digest(trajectory):
+    import hashlib
+    return hashlib.sha256(json.dumps(trajectory, sort_keys=True, allow_nan=False).encode()).hexdigest()
+
+
 def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, cameras,
         normal_sampler, plans=None, plus=False):
     """Generate both outer legs, then publish only the dynamic middle third.
@@ -159,9 +228,11 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
     original_hashes = {i: digest(path) for i, path in anchors.items()}
     manifest_path = root / f'{phase}-connected.json'
     selected_seeding = bridge_seeding.mode(request['runtime'])
-    manifest = {'bridge_seeding': selected_seeding, 'schema_version': 1, 'complete': False, 'phase': phase, 'legs': [],
+    manifest = {'bridge_seeding': selected_seeding, 'schema_version': 2,
+                'noise_seed': request['seed'], 'trajectory_sha256': trajectory_digest(trajectory),
+                'inference_settings': inference_settings(request), 'complete': False, 'phase': phase, 'legs': [],
                 'checkpoint': request['runtime']['checkpoint'], 'num_inference_steps': 4,
-                'frames_per_block': 7, 'overlap_policy': 'diagnostic only; no quality acceptance threshold',
+                'frames_per_block': 7, 'bridge_cache_frames': 7, 'overlap_policy': 'diagnostic only; no quality acceptance threshold',
                 'reference_policy': 'unchanged endpoint references plus generated outer RGBs, at most 12',
                 'plan': plans}
     write_json(manifest_path, manifest)
@@ -211,17 +282,43 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
         # Compute padded camera groups from the repeated final *RGB pose*, not
         # by repeating an average of the last few real cameras. process_item
         # pads RGB/opacity itself and trims those synthetic outputs afterward.
-        camera_indices = indices + [indices[-1]] * (BLOCK_FRAMES - len(indices)) if bridge else indices
+        camera_indices = indices + [indices[-1]] * (BLOCK_FRAMES - len(indices))
         item.update(compute_camera_rays(cameras, camera_indices, reference_ids,
                     scale=request['camera_scale'], image_shape=renders.shape[-2:], skip_vae_check=True))
         torch.manual_seed(noise_seed)
+        if not bridge and request['runtime'].get('image_cache_insertion', False):
+            pipe.starter_inference_audit = None
         pipe.clear_inference_caches()
         try:
             context = (bridge_seeding.preserved_bridge(pipe, normal_sampler,
                        real_frame_count=len(indices), overlap_slots=[indices.index(i) for i in bridge_plan['overlap_indices']])
                        if bridge and selected_seeding == 'seed_preserve' else nullcontext(None))
-            with context as audit:
-                process_item(pipe, item, sampler_args, destination, 0, device, 4)
+            # A retry must not mistake a previous PNG for an output from this
+            # invocation, even when process_item returns without writing it.
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix=f'.{destination.name}-call-', dir=destination.parent) as temporary:
+                call_output = Path(temporary) / destination.name
+                with context as audit:
+                    process_item(pipe, item, sampler_args, call_output, 0, device, 4)
+                generated = call_output / 'splatfix/frames/batch_0000/pred'
+                expected = {f'{i:05d}.png' for i, keep in zip(indices, valid) if keep}
+                if {p.name for p in generated.glob('*.png')} != expected:
+                    kind = 'bridge' if bridge else 'outer call'
+                    raise RuntimeError(f'Connected {kind} did not produce exactly {len(expected)} real target images')
+                for path in generated.glob('*.png'):
+                    with Image.open(path) as image:
+                        image.load()
+                        if image.size != (cameras['w'], cameras['h']):
+                            raise ValueError('Connected output dimensions differ from the calibrated cameras')
+                if bridge and destination.exists():
+                    shutil.rmtree(destination)
+                # Only freshly verified files can enter the canonical/archive
+                # folders. Move on the same filesystem instead of copying PNGs.
+                for path in call_output.rglob('*'):
+                    if path.is_file():
+                        target = destination / path.relative_to(call_output)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        path.replace(target)
             return audit
         finally:
             pipe.clear_inference_caches()
@@ -234,15 +331,20 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
             print(f'CONNECTED_OUTER: {phase} leg {leg}, {len(plan["trajectory_indices"])} poses', flush=True)
             for direction, indices in enumerate(plan['outer_generation_indices']):
                 seed = indices[0]
-                seeding = request['runtime'].get('initial_image_seeding', True) or request['runtime'].get('image_cache_insertion', False)
-                generate(indices, anchor_ids, list(anchors.values()), output,
+                # Missing/None retains the existing endpoint-seeded half policy.
+                seeding = (request['runtime'].get('initial_image_seeding') is not False
+                           or request['runtime'].get('image_cache_insertion', False))
+                generation = indices if seeding else indices[1:]
+                generate(generation, anchor_ids, list(anchors.values()), output,
                          seed=seed if seeding else None, noise_seed=request['seed'] + leg * 3 + direction)
                 if request['runtime'].get('image_cache_insertion', False):
-                    if not (pipe.starter_inference_audit or {}).get('encoded_starter_preserved'):
+                    if not (getattr(pipe, 'starter_inference_audit', None) or {}).get('encoded_starter_preserved'):
                         raise RuntimeError('Connected outer-leg starter preservation was not verified')
                 seeding_audits.append({'output': phase, 'enabled': seeding, 'seed_global_index': seed,
                                       'cache_preservation': request['runtime'].get('image_cache_insertion', False),
-                                      'generation_global_indices': indices,
+                                      'generation_global_indices': generation,
+                                      'preservation_audit': (pipe.starter_inference_audit
+                                          if request['runtime'].get('image_cache_insertion', False) else None),
                                       'export_global_indices': indices[1:]})
             if not plan['target_indices']:
                 manifest['legs'].append({**plan, 'status': 'skipped'})
@@ -270,7 +372,11 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
                 seed_metadata.update(layout)
                 seed_metadata['constrained_rgb_frame_indices'] = [plan['target_indices'][i]
                     for i in layout['constrained_rgb_local_indices']]
-            with bridge_seeding.temporary_method(pipe, 'generate_samples_from_batch', normal_sampler):
+                if layout['all_real_latent_groups_preserved']:
+                    print(f'CONNECTED_PRESERVE_LIMIT: {phase} leg {leg}: overlap groups cover the entire '
+                          'real window; seed_preserve fixes its encoded middle. Use seed for free generation.', flush=True)
+            with bridge_seeding.temporary_method(pipe, 'generate_samples_from_batch', normal_sampler), \
+                    bridge_seeding.single_block_cache(pipe):
                 audit = generate(plan['target_indices'], reference_ids, reference_paths, bridge_output,
                                  noise_seed=request['seed'] + leg * 3 + 2, bridge_plan=plan)
                 if audit:
@@ -279,12 +385,6 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
             expected = {f'{i:05d}.png' for i in plan['target_indices']}
             if {p.name for p in bridge.glob('*.png')} != expected:
                 raise RuntimeError(f'Connected bridge did not produce exactly {len(expected)} real target images')
-            # Validate all outputs before changing the canonical inference set.
-            for path in bridge.glob('*.png'):
-                with Image.open(path) as image:
-                    image.load()
-                    if image.size != (cameras['w'], cameras['h']):
-                        raise ValueError('Connected bridge output dimensions differ from the calibrated cameras')
             overlaps = []
             for i in plan['overlap_indices']:
                 comparison = archive / f'overlap-{i:05d}.png'
@@ -295,11 +395,7 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
                            for side in ('left', 'right')}
             retained = {i: digest(outer / f'{i:05d}.png') for indices in plan['outer_generation_indices']
                         for i in indices[1:] if i not in plan['keep_indices']}
-            for i in plan['keep_indices']:
-                target = prediction / f'{i:05d}.png'
-                temporary = target.with_suffix('.tmp')
-                shutil.copyfile(bridge / target.name, temporary)
-                temporary.replace(target)
+            publish_middle(bridge, prediction, plan['keep_indices'])
             if any(digest(prediction / f'{i:05d}.png') != checksum for i, checksum in retained.items()):
                 raise RuntimeError('Connected generation modified a preserved outer image')
             manifest['legs'].append({**plan, 'status': 'complete', 'references': reference_records,
@@ -313,6 +409,8 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
     expected = {f'{i:05d}.png' for i in range(len(trajectory['frames'])) if i not in anchors}
     if {p.name for p in prediction.glob('*.png')} != expected:
         raise RuntimeError('Connected generation did not cover every target camera exactly once')
+    manifest['prediction_sha256'] = {name: digest(prediction / name) for name in sorted(expected)}
+    manifest['reference_sha256'] = [digest(path) for path in request['references']]
     manifest['complete'] = True
     write_json(manifest_path, manifest)
     write_json(root / f'{phase}-seeding.json', {'series': seeding_audits})

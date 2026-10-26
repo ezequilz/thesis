@@ -89,6 +89,10 @@ def execute_remote(executor, run_id, options, root, stop, update):
         cp.require_viser_images()
     if cp is not None and (not cp.complete or (options['mode'] == 'edited' and any(not v.get('repaired_rgb') for v in cp.repair_views))):
         raise ValueError('Checkpoint is not ready for the requested reconstruction mode')
+    if cp is not None and options.get('correct_generated_pose') and not (cp.root / 'repeat-repair.json').is_file():
+        # Revalidate after queue wait, before reserving remote work or uploading inputs.
+        from ..pose_correction import corrected_checkpoint
+        corrected_checkpoint(cp)
     if cp is not None and options.get('prompt_source') == 'worldexplorer':
         from ..worldexplorer.source import checkpoint_prompt
         if not checkpoint_prompt(cp):
@@ -97,15 +101,12 @@ def execute_remote(executor, run_id, options, root, stop, update):
         raise ValueError('Original + repaired captioning requires edited input images')
     cfg = lrz.load_lrz_config()
     saved = executor.store.get_run(run_id).state.details
-    # Reattachment only needs DSS/SSH, even if the original allocation expired.
-    if not saved.get('remote_dir'):
-        if options.get('repeat_from'):
-            marker = lrz.read_remote_setup_marker(cfg)
-            if not marker.get('ok') or str(marker.get('job_id')) != str(cfg['job_id']):
-                update(phase='gpu_setup', message='Preparing the new GPU allocation for repeat repair')
-                lrz.setup_lrz_gpu({**cfg, 'artifixer_required': True, 'artifixer_model': options['model']},
-                                  qwen_required=False)
-        LrzSceneRunTransport(executor.cfg, run_id, root).validate()
+    def capture_stop():
+        deadline = executor.store.get_run(run_id).state.details.get('effective_deadline')
+        if deadline and time.time() >= float(deadline):
+            executor.store.request_stop(run_id)
+            return True
+        return stop()
     remote_dir = saved.get('remote_dir') or str(cfg['workspace']).rstrip('/') + '/splatfix-jobs/' + run_id
     container_dir = '/workspace/splatfix-jobs/' + run_id
     endpoint = f"{cfg['user']}@{cfg['host']}"
@@ -121,8 +122,6 @@ def execute_remote(executor, run_id, options, root, stop, update):
     if resuming:
         resuming = bool(ssh('test ! -d ' + shlex.quote(remote_dir + '/launched') + ' || printf launched').strip())
     if not resuming:
-        update(message='Staging checkpoint and source on the configured LRZ allocation', phase='staging')
-        lrz.sync_code_to_dss(cfg)
         from .repair import DEFAULT_RUNTIME
         runtime = {**DEFAULT_RUNTIME, **dict(executor.cfg.get('splatfix', {}).get('runtime', {}))}
         runtime['resolution_profile'] = options['resolution_profile']
@@ -153,10 +152,31 @@ def execute_remote(executor, run_id, options, root, stop, update):
         runtime['connected_bridge_seeding'] = options.get('connected_bridge_seeding', 'off') if not benchmark else 'off'
         runtime['initial_image_seeding'] = options.get('initial_image_seeding') if not benchmark else None
         runtime['image_cache_insertion'] = options.get('image_cache_insertion', False) if not benchmark else False
+        runtime['correct_generated_pose'] = options.get('correct_generated_pose', False) if not benchmark else False
         if cp is not None and (cp.root / 'repeat-repair.json').is_file():
             # Recorded effective runtime wins over current dashboard/server defaults.
             repeat = json.loads((cp.root / 'repeat-repair.json').read_text())
             runtime = dict(repeat['runtime'])
+        preflight = None
+        if cp is not None:
+            from .preflight import prepare_source_captures
+            preflight = prepare_source_captures(cp, runtime, root, should_stop=capture_stop,
+                progress=update, url=executor.cfg.get('renderer', {}).get('viser_url') or None)
+        if capture_stop():
+            raise InterruptedError('Cancelled before GPU staging')
+        # No source/code upload or allocation setup before the Viser preflight.
+        # Reattachment only needs DSS/SSH, even if the allocation has expired.
+        if not saved.get('remote_dir'):
+            if options.get('repeat_from'):
+                marker = lrz.read_remote_setup_marker(cfg)
+                if not marker.get('ok') or str(marker.get('job_id')) != str(cfg['job_id']):
+                    update(phase='gpu_setup', message='Preparing the new GPU allocation for repeat repair')
+                    lrz.setup_lrz_gpu({**cfg, 'artifixer_required': True, 'artifixer_model': options['model']},
+                                      qwen_required=False)
+            LrzSceneRunTransport(executor.cfg, run_id, root).validate()
+        update(message='Source captures ready; staging checkpoint and source on LRZ' if preflight else
+               'Staging checkpoint and source on the configured LRZ allocation', phase='staging')
+        lrz.sync_code_to_dss(cfg)
         if benchmark:
             from ..jobs import registered_benchmark
             source, _ = registered_benchmark(Path(executor.cfg.output.dir) / 'benchmarks', options['source'])
@@ -182,8 +202,14 @@ def execute_remote(executor, run_id, options, root, stop, update):
                        'benchmark_runs': options.get('benchmark_runs', 1)}
         else:
             ssh('mkdir -p ' + shlex.quote(remote_dir + '/checkpoint') + ' ' + shlex.quote(remote_dir + '/source'))
-            sync(str(cp.root) + '/', endpoint + ':' + remote_dir + '/checkpoint/',
-                 exclude=('worldexplorer-source/',))
+            from ..persistence import checkpoint_cache_lock
+            with checkpoint_cache_lock(cp.root):
+                if preflight:
+                    from .staging_cache import digest
+                    if digest(cp.root / 'checkpoint.json') != preflight['checkpoint_sha256']:
+                        raise ValueError('Checkpoint changed after Viser preflight; start a new run with the updated views')
+                sync(str(cp.root) + '/', endpoint + ':' + remote_dir + '/checkpoint/',
+                     exclude=('worldexplorer-source/',))
             source = Path(cp.manifest['scene_path'])
             from ...scene.catalog import openable_scene_path
             source = openable_scene_path(source)
@@ -235,12 +261,6 @@ def execute_remote(executor, run_id, options, root, stop, update):
     last = None
     started = time.monotonic()
     from ..viser_capture import CaptureMirror
-    def capture_stop():
-        deadline = executor.store.get_run(run_id).state.details.get('effective_deadline')
-        if deadline and time.time() >= float(deadline):
-            executor.store.request_stop(run_id)
-            return True
-        return stop()
     capture_pipeline = options.get('artifixer_pipeline')
     if cp is not None and (cp.root / 'repeat-repair.json').is_file():
         capture_pipeline = json.loads((cp.root / 'repeat-repair.json').read_text())['runtime'].get('artifixer_pipeline')
@@ -280,7 +300,6 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 last = state
                 update(phase=state.get('phase', 'reconstruction'), message=state.get('message') or state.get('phase', 'Running'))
             if state.get('status') in ('completed', 'error', 'stopped'):
-                update(remote_finished=True)
                 break
             exited = ssh('if [ -f ' + shlex.quote(remote_dir + '/launcher-exit') + ' ]; then cat ' + shlex.quote(remote_dir + '/launcher-exit') + '; fi')
             if exited.strip():
@@ -295,10 +314,12 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 if state != last and state:
                     last = state
                     update(phase=state.get('phase', 'reconstruction'), message=state.get('message') or state.get('phase', 'Running'))
-                update(remote_finished=True)
                 if state.get('status') in ('completed', 'error', 'stopped'):
                     break
-                raise RuntimeError('GPU launcher exited before stage completion (code ' + exited.strip() + '); inspect the GPU stage log')
+                state = {'status': 'error', 'phase': 'finished',
+                         'message': 'GPU launcher exited before stage completion (code ' + exited.strip() + '); inspect the GPU stage log'}
+                atomic_json(root / 'worker-status.json', state)
+                break
             if time.monotonic() - started > 24 * 3600:
                 raise TimeoutError('GPU stage exceeded 24 hours; inspect remote stage.log')
             wait_for_remote_poll(stop)
@@ -312,46 +333,26 @@ def execute_remote(executor, run_id, options, root, stop, update):
     finally:
         if handoff_service is not None:
             handoff_service.close()
-        preview_mirror.finish()
-        # Pull partial results/logs as well; checkpoint trajectories are reusable by both arms.
-        try:
+        if state.get('status') in ('completed', 'error', 'stopped') and primary_error is None:
+            from ..persistence import wait_for_exit
+            wait_for_exit(lrz, cfg, remote_dir)
+            update(remote_finished=True)
             # Dense benchmark depth is a regenerable rendering diagnostic,
             # not inference input or a reconstruction deliverable. Keep it
             # on LRZ rather than duplicating gigabytes on the desktop.
-            update(phase='downloading_results', message='Downloading reconstruction results and images from LRZ')
             excludes = ['--exclude=/results/*/prepared/**/depth/'] if benchmark else []
             atomic_json(root / 'artifact-download-policy.json', {
                 'remote_dir': remote_dir, 'excluded_patterns': excludes,
                 'retained': 'RGB renders, opacity, model checkpoints, PLY, evaluation/provenance and logs',
                 'excluded_artifacts_remain_on_remote': True})
-            if state.get('status') in ('completed', 'error', 'stopped') and primary_error is None:
-                from ..persistence import persist_remote_run
-                persist_remote_run(lrz, cfg, root, run_id, remote_dir,
+            from ..downloads import enqueue
+            enqueue(cfg, root, run_id, remote_dir, state,
                     excludes=('source/', 'benchmark-input/',
-                              *(['/results/*/prepared/**/depth/'] if benchmark else [])))
-            else:
-                # An interrupted connection can leave the worker active. Pull
-                # what is available, but never authorize remote deletion.
-                lrz._mux_run(['rsync', '-az', '--exclude=source/', '--exclude=benchmark-input/', *excludes, '-e', lrz.rsync_ssh_cmd(cfg),
-                              endpoint + ':' + remote_dir + '/', str(root / 'gpu') + '/'])
-        except lrz.RemoteCommandError as exc:
-            # Keep the initial SSH error as well as the rsync tail; the UI
-            # summary intentionally truncates diagnostics and can hide it.
-            diagnostic = root / 'artifact-transfer.log'
-            temporary = diagnostic.with_suffix('.log.tmp')
-            temporary.write_text(f'Artifact transfer exited with code {exc.returncode}\n'
-                                 f'\nSTDERR\n{exc.stderr}\nSTDOUT\n{exc.stdout}')
-            os.replace(temporary, diagnostic)
-            update(artifact_transfer_error=str(exc))
-            if primary_error is None:
-                if state.get('status') == 'error':
-                    raise RuntimeError(state.get('message') or 'GPU reconstruction failed') from exc
-                if state.get('status') == 'stopped':
-                    raise InterruptedError('GPU reconstruction cancelled; artifact download also failed') from exc
-                raise
-        else:
-            if cp is not None and primary_error is None:
-                persist_checkpoint_caches(root / 'gpu' / 'checkpoint', cp.root)
+                              *(['/results/*/prepared/**/depth/'] if benchmark else [])),
+                    checkpoint=cp.root if cp is not None else None,
+                    diagnostics_only=(not benchmark and state.get('status') == 'error'
+                        and state.get('failed_phase') in
+                        ('validation', 'anchor_geometry', 'trajectory', 'scale', 'orbit', 'caption')))
     if state['status'] == 'stopped' or stop():
         raise InterruptedError('GPU reconstruction cancelled')
     if state['status'] != 'completed':

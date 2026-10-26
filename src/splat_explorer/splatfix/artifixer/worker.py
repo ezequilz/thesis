@@ -15,7 +15,11 @@ def execute(root):
     if request.get('stage') != 'benchmark':
         request.setdefault('runtime', {}).setdefault('artifixer_pipeline', 'legacy_gsplat')
         request['runtime'].setdefault('initial_image_seeding', None)  # Preserve historical requests.
+    last_phase = 'validation'
     def publish(**body):
+        nonlocal last_phase
+        if body.get('status') == 'running':
+            last_phase = body.get('phase', last_phase)
         atomic_json(root / 'worker-status.json', body)
     def stop():
         deadline = request.get('stop_at_epoch')
@@ -89,7 +93,8 @@ def execute(root):
         else:
             publish(status='stopped', phase='finished', message=str(exc))
     except Exception as exc:
-        publish(status='error', phase='finished', message=f'{type(exc).__name__}: {exc}')
+        publish(status='error', phase='finished', failed_phase=last_phase,
+                message=f'{type(exc).__name__}: {exc}')
     finally:
         if previous_handoff is None:
             os.environ.pop('SPLATFIX_HANDOFF_MAILBOX', None)

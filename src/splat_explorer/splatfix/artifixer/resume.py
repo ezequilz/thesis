@@ -14,6 +14,8 @@ def validate_resume(store, options):
     if not isinstance(prior_id, str) or RUN_ID_PATTERN.fullmatch(prior_id) is None:
         raise ValueError('resume_from must be an existing job id')
     prior = store.get_run(prior_id)
+    from ..downloads import require_finished
+    require_finished(prior.path)
     original = prior.config.splatfix
     if prior.config.pipeline != 'splatfix' or original.get('stage') != 'benchmark':
         raise ValueError('Resume requires a previous benchmark job')
@@ -61,6 +63,13 @@ def resolve_remote_preparation(store, options, cfg, ssh):
 
 
 def _resolve_remote_result(prior, cfg, ssh, *, comparison=False):
+    import fcntl
+    with (Path(prior.path) / '.remote-reuse.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _resolve_remote_result_locked(prior, cfg, ssh, comparison=comparison)
+
+
+def _resolve_remote_result_locked(prior, cfg, ssh, *, comparison=False):
     expected = str(PurePosixPath(str(cfg['workspace'])) / 'splatfix-jobs' / prior.run_id)
     if str(PurePosixPath(prior.state.details['remote_dir'])) != expected:
         raise ValueError('Previous benchmark is outside the currently configured remote workspace')
@@ -79,7 +88,7 @@ def _resolve_remote_result(prior, cfg, ssh, *, comparison=False):
         ssh('mkdir -p ' + shlex.quote(expected))
         lrz._mux_run(['rsync', '-azc', '-e', lrz.rsync_ssh_cmd(cfg),
                       str(local) + '/', f"{cfg['user']}@{cfg['host']}:{expected}/"])
-        receipt['remote_cleanup'] = 'pending'
+        receipt['remote_cleanup'] = 'retained_for_reuse'
         atomic_json(receipt_path, receipt)
     raw = ssh(shlex.join(['python3', '-c', _DISCOVER_RESULT, expected] + (['preparation'] if comparison else [])))
     relative = json.loads(raw).get('relative')
@@ -95,6 +104,9 @@ def _resolve_remote_result(prior, cfg, ssh, *, comparison=False):
 
 def resume_available(run):
     """UI readiness, including manifests saved before resume_supported existed."""
+    from ..downloads import active
+    if active(run.path):
+        return False
     if run.config.pipeline != 'splatfix' or run.config.splatfix.get('stage') != 'benchmark' or run.state.status.value != 'error':
         return False
     from ..jobs import read_json
@@ -119,6 +131,8 @@ def validate_preparation(store, options):
     if not isinstance(prior_id, str) or RUN_ID_PATTERN.fullmatch(prior_id) is None:
         raise ValueError('preparation_from must be an existing job id')
     prior = store.get_run(prior_id)
+    from ..downloads import require_finished
+    require_finished(prior.path)
     original = prior.config.splatfix
     if prior.config.pipeline != 'splatfix' or original.get('stage') != 'benchmark':
         raise ValueError('Shared preparation requires a previous benchmark job')
@@ -132,6 +146,9 @@ def validate_preparation(store, options):
 
 
 def preparation_available(run):
+    from ..downloads import active
+    if active(run.path):
+        return False
     if (run.config.pipeline != 'splatfix' or run.config.splatfix.get('stage') != 'benchmark'
             or run.state.status.value not in ('completed', 'error')):
         return False

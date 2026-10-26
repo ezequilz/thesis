@@ -38,6 +38,20 @@ class SplatfixStudio(SceneRunStudio):
                          for v in cp.views]
                 for view in views:
                     from ..splatfix.oraclegs.captures import capture_77
+                    from ..splatfix.pose_correction import correction_status
+                    view['pose_correction_status'] = correction_status(cp, view)
+                    record = view.get('pose_correction') or {}
+                    if record.get('artifacts'):
+                        candidate = cp.root / record['artifacts'] / 'candidate.png'
+                        if candidate.is_file():
+                            view['pose_candidate_url'] = self.file_url(candidate)
+                    if view['pose_correction_status'] == 'accepted':
+                        view['pose_corrected_url'] = view.get('pose_candidate_url')
+                    elif view['pose_correction_status'] == 'rejected':
+                        original = cp.root / record.get('artifacts', '') / 'original.png'
+                        view['pose_corrected_url'] = self.file_url(original) if original.is_file() else view['original_url']
+                    else:
+                        view['pose_corrected_url'] = None
                     wide = capture_77(view)
                     view['fov77_original_url'] = self.file_url(cp.image_path(wide)) if wide.get('original_rgb') else None
                     view['fov77_repaired_url'] = self.file_url(cp.image_path(wide, True)) if wide.get('repaired_rgb') else None
@@ -99,6 +113,11 @@ class SplatfixStudio(SceneRunStudio):
             raise ValueError('Unknown image set')
         source, token = crop_source(cp, view)
         if 'box' in body:
+            if any(run.config.splatfix.get('stage') == 'pose_correction'
+                   and run.config.splatfix.get('checkpoint') == str(root)
+                   and run.state.status.value in ('starting', 'running', 'stopping')
+                   for run in self.store.list_runs()):
+                raise ValueError('Wait for pose correction to finish before changing a crop')
             save_crop(cp, view, body['box'], body.get('source_token'))
             return {'ok': True, 'checkpoint': next(c for c in self.checkpoints() if c['id'] == str(root))}
         with Image.open(source) as raw:
@@ -146,7 +165,8 @@ class SplatfixStudio(SceneRunStudio):
             raise ValueError('Choose an existing splatfix checkpoint')
         cp = Checkpoint.load(root)
         for run in self.store.list_runs():
-            if run.config.pipeline != 'splatfix' or run.state.status.value in ('completed', 'error', 'stopped'):
+            from ..splatfix.downloads import active as download_active
+            if run.config.pipeline != 'splatfix' or (run.state.status.value in ('completed', 'error', 'stopped') and not download_active(run.path)):
                 continue
             refs = [run.config.splatfix.get('checkpoint'), run.state.details.get('checkpoint')]
             if (any(ref and Path(ref).resolve() == root for ref in refs)
@@ -209,6 +229,8 @@ class SplatfixStudio(SceneRunStudio):
             if run.config.pipeline != 'splatfix':
                 continue
             row = run.to_dict()
+            from ..splatfix.downloads import status as download_status
+            row['download'] = download_status(run.path)
             row['queue_position'] = positions.get(run.run_id)
             row['queue_move_up'] = run.run_id in movable and movable.index(run.run_id) > 0
             row['queue_move_down'] = run.run_id in movable and movable.index(run.run_id) < len(movable) - 1
@@ -282,6 +304,7 @@ class SplatfixStudio(SceneRunStudio):
                 'manager': {'active': manager.get('status') == 'running' and alive, 'updated_at': manager.get('updated_at')},
                 'compute': {'configured': repair_lrz.lrz_configured(), 'label': 'Configured LRZ allocation'},
                 'capture_viewer_port': self.cfg.get('viewer', {}).get('port', 8080),
+                'image_repair_modes': ['sequential', 'shared_six', 'shared_six_native'],
                 'resolution_profiles': [{'id': key, 'label': PROFILE_LABELS[key], 'width': size[0], 'height': size[1]} for key, size in PROFILES.items()],
                 'defaults': {'reconstruction_method': DEFAULT_METHOD, 'resolution_profile': self.cfg.get('splatfix', {}).get('resolution_profile', '720p'), 'views': 6, 'frames': 25, 'span_fraction': .04,
                              'width': self.defaults()['width'], 'height': self.defaults()['height']}}
@@ -375,8 +398,14 @@ class SplatfixStudio(SceneRunStudio):
             if checkpoint not in checkpoints:
                 raise ValueError('Choose an existing splatfix checkpoint')
             cp = checkpoints[checkpoint]
+            if options['stage'] == 'edit' and options.get('repair_mode') == 'auto':
+                options['repair_mode'] = ('shared_six_native' if len(cp['views']) == 6
+                    and cp['metadata'].get('repair_policy') != 'endpoints' else 'sequential')
             if not cp['complete']:
                 raise ValueError('Finish selecting all views before starting this stage')
+            if (options['stage'] == 'edit' and options.get('repair_mode') in ('shared_six', 'shared_six_native')
+                    and (len(cp['views']) != 6 or cp['metadata'].get('repair_policy') == 'endpoints')):
+                raise ValueError('Shared Thinking repair requires exactly six views with all-view repair enabled')
             endpoint_run = options['stage'] == 'repair' and (cp['metadata'].get('repair_policy') == 'endpoints'
                             or options.get('image_trajectory') == 'endpoints')
             if endpoint_run:
@@ -396,6 +425,14 @@ class SplatfixStudio(SceneRunStudio):
             if seva_set:
                 from ..splatfix.oraclegs.captures import select_checkpoint
                 select_checkpoint(Checkpoint.load(checkpoint), 'seva', edited=options.get('mode') == 'edited')
+            if options['stage'] == 'pose_correction':
+                if cp['rgb_renderer'] != 'viser' or cp['required_edited'] != cp['repair_target_views']:
+                    raise ValueError('Complete original-FOV Viser image repairs in Step 3 before pose correction')
+                for existing in self.store.list_runs():
+                    opts = existing.config.splatfix
+                    if (opts.get('checkpoint') == checkpoint and opts.get('stage') == 'pose_correction'
+                            and existing.state.status.value in ('queued', 'waiting_gpu', 'starting', 'running', 'stopping')):
+                        raise ValueError('Pose correction is already queued or active for this checkpoint')
             if options['stage'] == 'seva_capture':
                 if options.get('view_id') is not None and options['view_id'] not in {v['id'] for v in cp['views']}:
                     raise ValueError('Unknown saved view')
@@ -417,6 +454,10 @@ class SplatfixStudio(SceneRunStudio):
             if options['stage'] == 'repair' and options['mode'] == 'edited' and not seva_set and (any(not v.get('repaired_rgb') for v in [cp['views'][0], cp['views'][-1]])
                          if endpoint_run else cp['required_edited'] != cp['repair_target_views']):
                 raise ValueError('Repair all checkpoint images before GPT-image improved reconstruction')
+            if options.get('correct_generated_pose'):
+                from ..splatfix.pose_correction import corrected_checkpoint
+                from ..splatfix.artifixer.checkpoint_policy import checkpoint_for_run
+                corrected_checkpoint(checkpoint_for_run(Checkpoint.load(checkpoint), options.get('image_trajectory', 'checkpoint')))
             options['checkpoint'] = checkpoint
             # The saved camera/RGB source determines provenance, irrespective
             # of the scene currently selected for a future view-finding run.

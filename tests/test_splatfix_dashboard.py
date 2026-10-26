@@ -26,6 +26,50 @@ def studio(tmp_path):
     return result
 
 
+def test_next_gpu_run_starts_while_previous_download_is_blocked(studio, monkeypatch):
+    import threading
+    from splat_explorer.splatfix import downloads, persistence
+    from splat_explorer.splatfix.executor import SplatfixExecutor
+    source = benchmark_input(studio)
+    jobs = [studio.create({'stage': 'benchmark', 'source': str(source)}) for _ in range(2)]
+    started = []
+    def remote(self, run_id, options, root, stop, update):
+        started.append(run_id)
+        update(remote_finished=True)
+        downloads.enqueue({'workspace': '/dss', 'host': 'h', 'user': 'u'}, root, run_id,
+                          '/dss/splatfix-jobs/' + run_id, {'status': 'completed'})
+        return {'results': str(root / 'gpu/results')}
+    monkeypatch.setattr(SplatfixExecutor, '_remote', remote)
+    manager = SceneRunManager(studio.cfg, store=studio.store, executor_factory=SplatfixExecutor)
+    monkeypatch.setattr(manager, '_gpu_ready', lambda **kw: {'ready': True})
+    assert manager.run_once()
+    entered, release = threading.Event(), threading.Event()
+    def transfer(*args, **kwargs):
+        entered.set()
+        assert release.wait(10)
+    monkeypatch.setattr(persistence, 'persist_remote_run', transfer)
+    monkeypatch.setattr(persistence, 'cleanup_persisted', lambda *a: None)
+    first = studio.store.run_path(jobs[0]['run_id'])
+    thread = threading.Thread(target=downloads.transfer, args=(first, SimpleNamespace()))
+    thread.start()
+    try:
+        assert entered.wait(5)
+        assert downloads.status(first)['status'] == 'downloading'
+        assert manager.run_once()
+        assert started == [job['run_id'] for job in jobs]
+        assert studio.store.get_run(jobs[0]['run_id']).state.status.value == 'completed'
+        assert downloads.status(first)['status'] == 'downloading'
+        row = next(row for row in studio.jobs() if row['run_id'] == jobs[0]['run_id'])
+        assert row['state']['status'] == 'completed'
+        assert row['download']['status'] == 'downloading'
+        with pytest.raises(ValueError, match='still downloading'):
+            studio.results.delete_run(jobs[0]['run_id'])
+    finally:
+        release.set()
+        thread.join(5)
+    assert downloads.status(first)['status'] == 'completed'
+
+
 def checkpoint(studio, count=1, complete=True):
     cp = Checkpoint.create(studio.checkpoint_root, '/fake/scene.ply', target_views=count,
                            metadata={'renderer': {'backend': 'viser'}})
@@ -238,6 +282,10 @@ def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypat
     assert request['mode'] == 'baseline'
     assert request['checkpoint'].endswith('/checkpoint')
     assert request['runtime']['scene_path'].endswith('/source/source.ply')
+    from splat_explorer.splatfix import downloads
+    download_root = studio.store.run_path(job['run_id'])
+    assert downloads.status(download_root)['status'] == 'queued'
+    downloads.transfer(download_root, lrz)
     assert any('--exclude=source/' in call for call in transfers)
     assert not any('--exclude=/results/*/prepared/**/depth/' in call for call in transfers)
 
@@ -376,6 +424,8 @@ def test_benchmark_remote_stages_dataset_and_matched_model(studio, monkeypatch):
     assert request['runtime']['checkpoint'].endswith('artifixer-14b.pt')
     assert '14B' in request['runtime']['model_id']
     assert any(str(source) + '/' in call for call in transfers)
+    from splat_explorer.splatfix import downloads
+    downloads.transfer(studio.store.run_path(job['run_id']), lrz)
     assert any('--exclude=benchmark-input/' in call for call in transfers)
     assert any('--exclude=/results/*/prepared/**/depth/' in call for call in transfers)
     assert result['source'] == str(source)
@@ -645,7 +695,7 @@ def test_independent_repair_schedules_preserve_same_cameras_and_input_modes(stud
     before = (cp.root / 'checkpoint.json').read_bytes()
     future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
     baseline = studio.create({'stage': 'repair', 'checkpoint': str(cp.root), 'mode': 'baseline', 'scheduled_at': future})
-    improved = studio.create({'stage': 'repair', 'checkpoint': str(cp.root), 'mode': 'edited', 'scheduled_at': future})
+    improved = studio.create({'stage': 'repair', 'checkpoint': str(cp.root), 'mode': 'edited', 'correct_generated_pose': False, 'scheduled_at': future})
     assert baseline['run_id'] != improved['run_id']
     assert baseline['config']['splatfix']['mode'] == 'baseline'
     assert improved['config']['splatfix']['mode'] == 'edited'
@@ -761,12 +811,16 @@ def test_completed_remote_transfer_failure_retains_diagnostics_and_artifacts(stu
         if '--exclude=benchmark-input/' in argv:
             raise lrz.RemoteCommandError(argv, subprocess.CompletedProcess(argv, 255, 'partial transfer', diagnostic))
     monkeypatch.setattr(lrz, '_mux_run', transfer)
-    assert SplatfixExecutor(studio.cfg, studio.store).execute(job['run_id']) == {}
+    result = SplatfixExecutor(studio.cfg, studio.store).execute(job['run_id'])
+    assert bool(result) == (worker_status == 'completed')
+    from splat_explorer.splatfix import downloads
+    downloads.transfer(root, lrz)
     run = studio.store.get_run(job['run_id'])
-    assert run.state.status.value == ('stopped' if worker_status == 'stopped' else 'error')
+    assert run.state.status.value == worker_status
     if worker_status == 'error':
         assert run.state.message == 'Missing frame: trajectory/renders/00344.png'
-    assert 'command failed (255)' in run.state.details['artifact_transfer_error']
+    assert 'command failed (255)' in downloads.status(root)['error']
+    assert downloads.status(root)['status'] == 'retrying'
     assert json.loads((root / 'worker-status.json').read_text())['status'] == worker_status
     assert run.state.details['remote_finished'] is True
     assert diagnostic in (root / 'artifact-transfer.log').read_text()
@@ -860,6 +914,10 @@ def test_executor_rereads_worker_status_after_launcher_exit(studio, monkeypatch,
     assert len(snapshots) == 2
     assert state.status.value == expected
     assert state.details['remote_finished'] is True
+    assert transfers == []
+    from splat_explorer.splatfix import downloads
+    assert downloads.status(root)['status'] == 'queued'
+    downloads.transfer(root, lrz)
     assert len(transfers) == 1
     assert '--exclude=source/' in transfers[0]
     assert transfers[0][-1] == str(root / 'gpu') + '/'
@@ -1036,3 +1094,64 @@ def test_queue_moves_respect_schedule_and_recovery(studio):
         studio.store.move_queued_run(first, 'down')
     with pytest.raises(ValueError, match='Direction'):
         studio.store.move_queued_run(later, 'invalid')
+
+
+def test_shared_six_edit_queue_validates_count_and_persists_mode(studio):
+    short = checkpoint(studio, count=2)
+    with pytest.raises(ValueError, match='exactly six'):
+        studio.create({'stage': 'edit', 'checkpoint': str(short.root), 'repair_mode': 'shared_six'})
+    cp = checkpoint(studio, count=6)
+    job = studio.create({'stage': 'edit', 'checkpoint': str(cp.root), 'repair_mode': 'shared_six'})
+    assert studio.store.get_run(job['run_id']).config.splatfix['repair_mode'] == 'shared_six'
+
+
+def test_shared_thinking_is_default_for_six_views_only(studio):
+    six = checkpoint(studio, count=6)
+    options = studio.create({'stage': 'edit', 'checkpoint': str(six.root)})['config']['splatfix']
+    assert options['repair_mode'] == 'shared_six_native'
+    one = checkpoint(studio, count=1)
+    options = studio.create({'stage': 'edit', 'checkpoint': str(one.root)})['config']['splatfix']
+    assert options['repair_mode'] == 'sequential'
+    options = studio.create({'stage': 'edit', 'checkpoint': str(six.root), 'repair_mode': 'sequential'})['config']['splatfix']
+    assert options['repair_mode'] == 'sequential'
+
+
+def test_pose_correction_queue_requires_repairs_and_is_local(studio):
+    from splat_explorer.splatfix.jobs import requires_gpu
+    cp = checkpoint(studio, count=2)
+    with pytest.raises(ValueError, match='repairs'):
+        studio.create({'stage': 'pose_correction', 'checkpoint': str(cp.root)})
+    for view in cp.views:
+        view['repaired_rgb'] = view['original_rgb']
+    cp.save()
+    job = studio.create({'stage': 'pose_correction', 'checkpoint': str(cp.root)})
+    assert not requires_gpu(job['config'])
+    with pytest.raises(ValueError, match='already queued'):
+        studio.create({'stage': 'pose_correction', 'checkpoint': str(cp.root)})
+    with pytest.raises(ValueError, match='missing'):
+        studio.create({'stage': 'repair', 'checkpoint': str(cp.root), 'correct_generated_pose': True})
+    regular = studio.create({'stage': 'repair', 'checkpoint': str(cp.root), 'correct_generated_pose': False})
+    assert regular['config']['splatfix']['correct_generated_pose'] is False
+
+
+def test_corrected_pose_default_and_selector_artifacts(studio):
+    from splat_explorer.splatfix.pose_correction import inputs
+    cp = checkpoint(studio, count=2)
+    for view, status in zip(cp.views, ('accepted', 'rejected')):
+        view['repaired_rgb'] = view['original_rgb']
+        directory = cp.root/'pose-corrections'/'test'/view['id']
+        directory.mkdir(parents=True)
+        for name in ('candidate.png', 'original.png'):
+            Image.new('RGB', (16, 16)).save(directory/name)
+        view['pose_correction'] = {'version': 1, 'status': status, 'camera': view['camera'],
+            'inputs': inputs(cp, view), 'artifacts': str(directory.relative_to(cp.root))}
+    cp.save()
+    job = studio.create({'stage': 'repair', 'checkpoint': str(cp.root)})
+    assert job['config']['splatfix']['correct_generated_pose'] is True
+    row = next(c for c in studio.checkpoints() if c['id'] == str(cp.root))
+    assert 'candidate.png' in row['views'][0]['pose_corrected_url']
+    assert 'original.png' in row['views'][1]['pose_corrected_url']
+    Image.new('RGB', (16, 16), 'red').save(cp.image_path(cp.views[0], repaired=True))
+    row = next(c for c in studio.checkpoints() if c['id'] == str(cp.root))
+    assert row['views'][0]['pose_correction_status'] == 'stale'
+    assert row['views'][0]['pose_corrected_url'] is None

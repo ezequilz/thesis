@@ -99,6 +99,12 @@ class InferencePreviewMirror:
         self.thread.start()
 
     def _download(self, relative):
+        from ..persistence import artifact_lock
+        self.root.mkdir(parents=True, exist_ok=True)
+        with artifact_lock(self.root):
+            self._download_locked(relative)
+
+    def _download_locked(self, relative):
         self.root.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(prefix='.inference-preview-transfer-', dir=self.root))
         try:

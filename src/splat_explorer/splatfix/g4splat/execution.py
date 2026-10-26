@@ -129,13 +129,14 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 state = {'status': 'error', 'message': 'G4Splat launcher exited without terminal worker status: ' + exited.strip()}
             break
         wait_for_remote_poll(stop)
-    # Connection/transfer failures keep the remote identity unresolved, allowing
-    # reattachment and transfer retry before the shared lease is released.
-    from ..persistence import persist_remote_run
-    persist_remote_run(lrz, cfg, root, run_id, remote)
+    from ..persistence import wait_for_exit
+    from ..downloads import enqueue
+    wait_for_exit(lrz, cfg, remote)
+    atomic_json(root / 'worker-status.json', state)
     update(remote_finished=True)
+    enqueue(cfg, root, run_id, remote, state)
     if state['status'] == 'stopped' or stop():
-        raise InterruptedError('G4Splat stopped; available artifacts downloaded')
+        raise InterruptedError('G4Splat stopped; artifacts queued for background download')
     if state['status'] != 'completed':
         raise RuntimeError(state.get('message', 'G4Splat failed'))
     return {'reconstruction_method': 'g4splat', 'results': str(root / 'gpu/results'),

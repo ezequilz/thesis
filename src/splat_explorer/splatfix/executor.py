@@ -120,16 +120,24 @@ class SplatfixExecutor:
             cp = Checkpoint.load(options['checkpoint'])
             if not cp.complete:
                 raise ValueError('View selection must finish before GPT-image editing')
-            if options['stage'] == 'seva_capture':
+            if options['stage'] == 'pose_correction':
+                argv += ['correct-poses', str(cp.root)]
+            elif options['stage'] == 'seva_capture':
                 argv += ['seva-capture', str(cp.root), '--capture-set', options.get('capture_set', 'seva')]
                 if options.get('view_id') is not None:
                     argv += ['--view-id', options['view_id']]
             else:
                 argv += ['edit', str(cp.root), '--image-set', options.get('image_set', 'saved'),
-                         '--endpoint-repair-context', options.get('endpoint_repair_context', 'initial_repair')]
+                         '--endpoint-repair-context', options.get('endpoint_repair_context', 'initial_repair'),
+                         '--repair-mode', options.get('repair_mode', 'sequential'),
+                         '--repair-request-id', run.run_id]
         def progress():
             paths = list((root / 'checkpoints').glob('*/checkpoint.json')) if options['stage'] == 'select' else [Path(options['checkpoint']) / 'checkpoint.json']
             if paths:
+                if options['stage'] == 'pose_correction':
+                    status = read_json(paths[0].parent / 'pose-corrections/status.json', {})
+                    update(checkpoint=str(paths[0].parent), message=status.get('message', 'Starting pose correction'))
+                    return
                 manifest = read_json(paths[0], {})
                 views = manifest.get('views', [])
                 selected = len(views)
@@ -143,16 +151,18 @@ class SplatfixExecutor:
                 previous = getattr(progress, 'counts', None)
                 if previous != (selected, edited, captured):
                     progress.counts = selected, edited, captured
+                    message = (f'{captured}/{selected} {capture_label} captures saved'
+                               if options['stage'] == 'seva_capture' else
+                               'Repairing all six views together with shared Thinking context; previous repairs remain available'
+                               if options.get('repair_mode') in ('shared_six', 'shared_six_native') else
+                               f'{selected} views saved · {edited} images repaired')
                     update(checkpoint=str(paths[0].parent), selected_views=selected, edited_views=edited,
-                           target_views=manifest.get('target_views'), message=(f'{captured}/{selected} {capture_label} captures saved' if options['stage'] == 'seva_capture' else f'{selected} views saved · {edited} images repaired'))
+                           target_views=manifest.get('target_views'), message=message)
         run_process(argv, root / 'stage.log', stop, progress)
         progress()
         return {'checkpoint': self.store.get_run(run.run_id).state.details.get('checkpoint')}
 
     def _remote(self, run_id, options, root, stop, update):
         from .methods import get_method
-        from .. import repair_lrz as lrz
-        from .persistence import retry_cleanup
-        retry_cleanup(lrz, lrz.load_lrz_config(), Path(root).parent)
         return get_method(options.get('reconstruction_method'), stage=options['stage']).execute_remote(
             self, run_id, options, root, stop, update)

@@ -5,7 +5,7 @@ overlaps therefore touches shared latent groups, determined from the real window
 The standard RGB/opacity encoding is reused. No reverse-leg latents or caches
 are reused; the optional preservation adapter wraps the normal sampler.
 """
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 
 MODES = ('off', 'seed', 'seed_preserve')
@@ -26,7 +26,8 @@ def seed_layout(real_frame_count, overlap_slots):
     constrained = [i for i in range(real_frame_count) if latent_for(i) in groups]
     return {'seed_latent_indices': groups, 'seed_rgb_local_indices': sorted(set(overlap_slots)),
             'constrained_rgb_local_indices': constrained,
-            'all_real_latent_groups_preserved': len(constrained) == real_frame_count}
+            'all_real_latent_groups_preserved': len(constrained) == real_frame_count,
+            'free_middle_latent_indices': sorted({latent_for(i) for i in range(real_frame_count)} - set(groups))}
 
 
 def mode(options, *, default='off'):
@@ -130,6 +131,25 @@ def temporary_method(obj, name, replacement):
             setattr(obj, name, previous)
         else:
             delattr(obj, name)
+
+
+@contextmanager
+def single_block_cache(pipe):
+    """Allocate just the current bridge's seven frames, retaining all its keys.
+
+    The authors' ordinary streaming window is 21 frames. With fresh caches and
+    one block it stores identical attention context in a larger allocation.
+    Restore the streaming policy before any subsequent outer-leg call.
+    """
+    with ExitStack() as stack:
+        stack.enter_context(temporary_method(pipe, 'local_attn_size', 7))
+        for block in getattr(pipe.transformer, 'blocks', []):
+            processor = block.attn1.processor
+            if hasattr(processor, 'local_attn_size'):
+                if getattr(processor, 'sink_size', 0) > 7:
+                    raise ValueError('Bridge attention sinks cannot exceed its seven-frame block')
+                stack.enter_context(temporary_method(processor, 'local_attn_size', 7))
+        yield
 
 
 def preserve_samples(pipe, normal_sampler, audit, condition, rendered_opacity,

@@ -127,7 +127,7 @@ def test_restore_archived_benchmark_before_remote_resume(tmp_path, monkeypatch):
     assert events[0].startswith('mkdir -p ')
     assert events[1][-2:] == [str(tmp_path / 'gpu') + '/', 'u@h:' + remote + '/']
     assert 'benchmark-run.json' in events[2]
-    assert json.loads((tmp_path / p.RECEIPT).read_text())['remote_cleanup'] == 'pending'
+    assert json.loads((tmp_path / p.RECEIPT).read_text())['remote_cleanup'] == 'retained_for_reuse'
 
 
 def test_running_launcher_does_not_download_or_delete(tmp_path):

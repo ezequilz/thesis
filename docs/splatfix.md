@@ -5,7 +5,9 @@ GPU reconstruction. It is independent of the old artifact-hunting loop.
 Step 4 selects a reconstruction method. ArtiFixer and G4Splat are registered as independent sibling backends.
 See [G4Splat setup and output semantics](g4splat.md).
 
-Step 3 defaults to **Supply initial repair as context** for all checkpoint types.
+Step 3 defaults to shared native Thinking for six-view all-view checkpoints.
+For other counts, endpoint checkpoints, or explicitly selected sequential mode,
+**Supply initial repair as context** is the default sequential context.
 The first image is repaired from its original RGB. Each subsequent request sends
 its original RGB first and the first repaired PNG second, with the same prompt.
 For normal checkpoints, **Prior repair as context** instead supplies the immediately
@@ -15,6 +17,50 @@ selected capture set. The option is saved in queued jobs as
 `endpoint_repair_context` (`initial_repair`, `prior_repair`, or `rgb_only`) and is
 also available through `edit --endpoint-repair-context`. Retries reuse saved
 repairs; completed repairs remain skipped.
+
+### Six-view shared Thinking repair (default for six views)
+
+Step 3 offers **All six together · native Thinking** and **All six together · strict selected model** for complete, all-view
+checkpoints with exactly six images in the selected capture set. Native Thinking is the default for six-view checkpoints. Strict selected-model
+mode remains an explicit comparison because the relay cannot confirm Sunburst
+on its native Responses image tool. Existing queued jobs retain their saved behavior.
+Use `edit --repair-mode shared_six_native` for the verified native route, or
+`edit --repair-mode shared_six` to require the configured image model, from the CLI.
+
+The new path sends all six original RGBs to one `gpt-6-astra` Responses request
+with `reasoning.effort=high`. Native mode explicitly selects `gpt-image-2-codex`;
+strict mode requests the configured image model (normally `gpt-image-2.5-sunburst`). Each output must identify its target camera with a unique
+`TARGET_VIEW=000`-style prefix. Output order is never used to assign cameras.
+This is shared reasoning and reference context, not verified joint diffusion or
+cross-attention between outputs. It does not use Images API `n=6`.
+
+A text-only preflight checks the model reported by the relay before generating
+images. Both preflight and the final response must report the selected image
+model; substitution or missing model provenance fails explicitly. The live
+2026-10-25 test produced all six outputs in 342 seconds, but reported
+`gpt-image-2-codex` with automatic quality instead of requested Sunburst/high.
+After disclosure and approval to test the native model, those outputs were imported
+into the separate **Six-view shared Thinking · native experiment** checkpoint. The
+original checkpoint and its repairs remain unchanged; the comparison retains its
+cached Viser RGB/geometry using independent APFS copy-on-write files. Testing other reasoning-model routes reported the same image
+model. Raising the relay's `n` limit cannot change this upstream model selection. Neither model
+is claimed superior without comparing camera fidelity and reconstruction consistency.
+
+Successful runs regenerate all six views, including already repaired views.
+The entire set is decoded and checked for unique labels, duplicate pixels and
+aspect-ratio drift before one atomic checkpoint update. No generated image is
+cropped to fit a camera. Old repair files and the pre-edit checkpoint manifest
+remain under the checkpoint's history. Stale manual-crop pointers are removed
+only when the new set is published. This also supports separate 77° and SEVA
+capture sets without replacing original-FOV repairs.
+
+Raw responses and status live under `image-repairs/shared-<request-id>/`.
+Queued jobs pass their stable run ID so an interrupted local publication can
+reuse a saved response without another image request. A failed request with no
+saved response requires an explicit new run; SDK automatic retries are disabled.
+Generated quality and size are recorded as reported by the provider, separately
+from the requested quality. CliRelay rejects `max_tool_calls`, so the six-image
+limit is requested in the prompt and enforced on the returned set.
 
 ### Manual repair framing
 
@@ -282,6 +328,22 @@ source. Different interpolation recipes retain separate trajectory signatures.
 Checksums reject damaged caches. Captures of the newly reconstructed ArtiFixer3D+
 scene still run per reconstruction; source/checkpoint uploads to LRZ also remain.
 Existing checkpoints populate this cache on their next run.
+
+For Viser-based ArtiFixer runs, a local `viser_preflight` now checks the source
+RGB cache first and captures missing calibrated anchor views **before any LRZ
+code/checkpoint upload or GPU setup**. It uses the selected resolution and
+accepted pose corrections, verifies cached trajectory checksums in place, and
+persists captures for retries. Failure or cancellation stops before staging.
+The worker reuses these exact anchor RGBs when it renders CUDA opacity/depth;
+it does not ask the browser to capture the anchors again. Exact repeat orbits
+are already known, so their missing intermediate RGBs are captured early too.
+Reattachment to an already launched job skips preflight. Native 3DGUT and
+photographic benchmarks do not need it.
+
+A new authored orbit still needs the GPU's MoGe metric alignment to define its
+intermediate poses. Missing RGBs at those new poses are captured afterward;
+valid cached trajectories continue to avoid that capture. ArtiFixer3D+ renders
+the newly reconstructed splat and necessarily remains a later capture phase.
 
 Photographic benchmark inputs use a separate bounds-based policy: fit within
 the profile without upscaling, uniformly scale, then symmetrically crop fewer
@@ -749,6 +811,22 @@ evaluation/provenance records. Dense depth maps under the prepared benchmark
 tree remain on LRZ; they are regenerable diagnostics and are not used by
 inference or evaluation. `artifact-download-policy.json` records this policy.
 Saved-view repair downloads keep their anchor depth because scale replay needs it.
+
+ArtiFixer (including benchmarks), G4Splat and OracleGS release the compute queue
+after the remote launcher exits. A separate local download worker transfers
+artifacts while the next GPU run starts. The dashboard shows the compute outcome
+and background download status separately; transfer errors retry automatically
+without changing a successful or failed compute outcome. Requests and transfer
+status are saved in `artifact-download-request.json` and
+`artifact-download-status.json`, and the manager recovers the worker after a
+restart. Remote artifacts are deleted only after verified transfer and cache
+publication. Downloads do not require a live GPU allocation.
+
+Saved-view ArtiFixer errors before generation (validation, anchor geometry,
+trajectory, scale, orbit or caption) download logs and metadata only. Their bulk
+inputs remain on LRZ. Later failures and other methods retain full partial
+outputs. Reusing, reducing, archiving or deleting a run's artifacts waits for its
+download to finish; independent runs and restarts can start immediately.
 
 
 ### Source-render fidelity correction (2026-10-06)
@@ -1496,7 +1574,23 @@ The matching `*-connected/leg-NNN/` folders retain outer predictions, bridge
 outputs for the real window, and comparison PNGs (preserved | generated | absolute difference).
 Run details expose both boundary comparisons and metadata. These diagnostics
 measure agreement; there is no calibrated quality gate or automatic retry.
-Incomplete or invalid outputs fail before publishing any bridge images.
+Each generation call writes to a fresh temporary directory and validates its exact
+output set and image dimensions, so stale files from a prior attempt cannot fill
+missing outputs. The entire middle is staged before publication; copy failures
+leave it unchanged. An interruption during the final renames leaves the pass
+incomplete and prevents reconstruction. Version-2 completion metadata binds
+prediction/reference checksums, camera/trajectory metadata and inference settings.
+Fitting and inference-preview publication require this completed record, before
+loading reconstruction models or creating fitting output folders. Older connected
+outputs without this completion record require inference to be rerun.
+
+Short outer legs use the same calibrated padding policy as the bridge. An explicit
+outer-leg seeding Off excludes the starter pose, matching ordinary inference;
+missing/None retains historical endpoint seeding. Each outer cache-preservation
+call resets and records its own audit so a previous success cannot mask a missing
+one. Bridge self-attention caches are scoped to seven latent frames instead of the
+21-frame streaming default, retaining all keys while cutting that allocation by
+two thirds; the original window is restored before subsequent outer calls.
 
 The dashboard's **Bridge image seeding** setting is independent of outer-leg
 **Image cache insertion**. `connected_bridge_seeding` has three modes:
@@ -1516,8 +1610,9 @@ The dashboard's **Bridge image seeding** setting is independent of outer-leg
   renders participate in the same encoded groups. It does not guarantee identical
   decoded overlap pixels. Metadata records the constrained groups and verifies
   latent/KV preservation at every layer and step. On very short windows, the
-  seed groups can cover all real frames: this also fixes the encoded middle,
-  which is explicitly flagged in metadata and run details. Padding-only groups
+  seed groups cover all real frames for spans of 3–19 poses: this also fixes the encoded middle,
+  which is explicitly flagged in logs, metadata and run details. Use ordinary
+  `seed` mode for free middle generation on those spans. Padding-only groups
   are not added to the set of preserved real seed groups.
 - `off`: the original unseeded joint bridge, retaining both sides as references.
 
@@ -1529,3 +1624,55 @@ with `--connected-bridge-seeding seed|seed_preserve|off`.
 Choosing `--handoff-generation on` or `middle` disables the default bridge unless
 you explicitly request both, which is rejected. The dashboard keeps the same
 mutual exclusion. Turning both off restores ordinary double-split generation.
+
+### Shared Thinking default and experimental pose correction
+
+Step 3 defaults to **Shared Thinking for six views** (`repair_mode=auto`): six
+all-view captures use `shared_six_native`, the verified native shared-context
+experiment. Other counts and endpoint-only checkpoints use sequential repair.
+Explicit sequential and strict selected-model modes remain available. The CLI
+`edit` command uses the same automatic selection. Existing queued jobs with no
+mode keep their historical sequential behavior.
+
+After repairing the original-FOV images, **Step 2 → Correct generated pose**
+runs a local, optional registration pass using the connected Viser. Install its
+optional dependency with `pip install -e '.[pose-correction]'`. The optimizer:
+
+- Matches SIFT features and forward/backward-consistent structural optical flow.
+- Reuses checksum-verified CUDA gsplat camera-z depth at the exact saved cameras.
+  Without that cache it uses Viser's existing CPU depth-only renderer at reduced
+  resolution; RGB always comes from Viser. ArtiFixer's renderer settings do not change.
+- Fits fixed-intrinsics 6-DoF camera motion with RANSAC and bounded robust least
+  squares (maximum 8° rotation and 12% of median visible depth in translation).
+- Requires spatial coverage, improvement on withheld correspondences, and a fresh
+  Viser render that improves several image regions without displacing regions
+  that already align. Ambiguous/nonrigid changes retain the original camera.
+
+Corrections and before/target/candidate renders are archived in
+`pose-corrections/<attempt>/<view>/`. The checkpoint stores separate
+`pose_correction` records, including rejected fits and diagnostics. A failed or
+cancelled pass never publishes a partial camera set. The source cameras and RGBs
+remain unchanged. Step 2 reports accepted counts; view metadata explains each fit.
+
+**Step 4 → Correct generated pose · experimental** is **on by default** for new
+edited ArtiFixer jobs. It can be disabled for comparisons; baseline and historical
+jobs keep their original behavior. When
+on, ArtiFixer uses accepted poses before preparing anchor renders and author
+trajectories. Pose-dependent caches receive new keys; Viser RGB, CUDA geometry,
+seeding, bridge inference, and reconstruction all follow the corrected cameras.
+The target crop used during fitting is retained when calibrating the run's image
+resolution. Original poses are recorded in run provenance. Turning the setting
+off uses the original calibration. Changed repair bytes, manual crops, source
+fingerprints, original cameras, or scene-load settings invalidate corrections and
+require another pass. Exact reconstruction repeats retain their recorded poses.
+
+CLI equivalents: `splatfix correct-poses CHECKPOINT`, then optionally
+`splatfix repair CHECKPOINT --output OUTPUT --correct-generated-pose`.
+The checkpoint selector and image debugger include **Corrected RGB** beside RGB
+and GPT. This shows accepted candidate renders and the original pose for rejected
+fits; missing/stale corrections are labelled and never shown as current corrections.
+Corrected RGB selects Original FOV and does not expose cropping controls.
+
+The experiment currently aligns the original-FOV repair set, not the separate
+SEVA/77° capture sets. A camera fit is a conservative alignment proposal, not an
+estimate that the generated image or the old splat is geometrically correct.

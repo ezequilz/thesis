@@ -76,7 +76,9 @@ def edit_views(cfg, args):
     from .image_repair import repair_images
     checkpoint = Checkpoint.load(args.checkpoint)
     repair_images(checkpoint, cfg=cfg, image_set=args.image_set,
-                  endpoint_repair_context=getattr(args, 'endpoint_repair_context', 'initial_repair'))
+                  endpoint_repair_context=getattr(args, 'endpoint_repair_context', 'initial_repair'),
+                  repair_mode=getattr(args, 'repair_mode', 'auto'),
+                  repair_request_id=getattr(args, 'repair_request_id', None))
     return checkpoint.root
 
 
@@ -84,6 +86,12 @@ def capture_seva_views(cfg, args):
     from .oraclegs.captures import capture_checkpoint
     return capture_checkpoint(args.checkpoint, view_id=args.view_id, capture_set=args.capture_set,
         url=cfg.get('renderer', {}).get('viser_url'),
+        on_progress=lambda **event: print(event['message'], flush=True)).root
+
+
+def correct_generated_poses(cfg, args):
+    from .pose_correction import correct_poses
+    return correct_poses(args.checkpoint, url=cfg.get('renderer', {}).get('viser_url'),
         on_progress=lambda **event: print(event['message'], flush=True)).root
 
 
@@ -97,6 +105,8 @@ def repair_splat(cfg, args):
     from .methods import get_method
     run_repair = get_method(getattr(args, 'reconstruction_method', None)).run_repair
     method = getattr(args, "reconstruction_method", "artifixer")
+    if getattr(args, 'correct_generated_pose', False) and method != 'artifixer':
+        raise ValueError('Pose correction is available only for ArtiFixer reconstruction')
     runtime = dict(cfg.get("splatfix", {}).get(method + "_runtime" if method in ("g4splat", "oraclegs") else "runtime", {}))
     runtime["resolution_profile"] = cfg.get("splatfix", {}).get("resolution_profile", "720p")
     if getattr(args, 'endpoint_reference_mode', None) is not None:
@@ -109,6 +119,10 @@ def repair_splat(cfg, args):
     if getattr(args, 'image_cache_insertion', None) is not None:
         runtime['image_cache_insertion'] = args.image_cache_insertion
     if method == 'artifixer':
+        if getattr(args, 'correct_generated_pose', None) is not None:
+            runtime['correct_generated_pose'] = args.correct_generated_pose
+        elif args.mode == 'edited':
+            runtime.setdefault('correct_generated_pose', True)
         if getattr(args, 'connected_bridge_seeding', None) is not None:
             runtime['connected_bridge_seeding'] = args.connected_bridge_seeding
         if getattr(args, 'connected_trajectory_generation', None) is not None:
@@ -171,6 +185,9 @@ def _add_stages(parser):
     edit = stages.add_parser("edit", help="Create missing GPT-image repairs in an existing checkpoint")
     edit.add_argument("checkpoint", type=Path)
     edit.add_argument("--image-set", choices=("saved", "seva", "77"), default="saved")
+    edit.add_argument('--repair-mode', choices=('auto', 'sequential', 'shared_six', 'shared_six_native'), default='auto',
+                      help='Repair missing views sequentially, or replace all six with one shared Thinking request')
+    edit.add_argument('--repair-request-id', help='Stable request ID for recovering saved shared responses')
     edit.add_argument("--endpoint-repair-context", choices=("initial_repair", "prior_repair", "rgb_only"),
                       default="initial_repair", help="Choose first repair, preceding repair, or RGB-only context")
     edit.set_defaults(func=edit_views)
@@ -179,6 +196,9 @@ def _add_stages(parser):
     capture.add_argument("--view-id")
     capture.add_argument("--capture-set", choices=("saved", "seva", "77"), default="seva")
     capture.set_defaults(func=capture_seva_views)
+    correction = stages.add_parser("correct-poses", help="Fit optional generated-view cameras against Viser")
+    correction.add_argument("checkpoint", type=Path)
+    correction.set_defaults(func=correct_generated_poses)
     repair = stages.add_parser("repair", help="Run the selected reconstruction method locally on a GPU from saved views")
     from .methods import METHODS, DEFAULT_METHOD
     repair.add_argument("--oracle-capture-source", choices=("seva", "saved"), default="seva")
@@ -199,6 +219,7 @@ def _add_stages(parser):
     repair.add_argument("--g4splat-repo", type=Path)
     repair.add_argument("--g4splat-python", type=Path)
     repair.add_argument("--reconstruction-method", choices=tuple(METHODS), default=DEFAULT_METHOD)
+    repair.add_argument("--correct-generated-pose", action=argparse.BooleanOptionalAction, default=None, help="Use saved, validated pose corrections (ArtiFixer only)")
     repair.add_argument("checkpoint", type=Path)
     repair.add_argument("--scene", type=Path, help="Relocated source asset on the GPU host (same content)")
     repair.add_argument("--output", required=True, type=Path, help="Parent directory for isolated reconstruction runs")

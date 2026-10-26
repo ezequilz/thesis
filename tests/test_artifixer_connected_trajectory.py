@@ -2,6 +2,7 @@
 import contextlib
 import json
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import numpy as np
@@ -189,12 +190,14 @@ def inference_fixture(tmp_path, monkeypatch, request):
             assert item['rgb_neighbors'][:, 0, 0, 0].tolist() == pytest.approx([
                 (100 + i if i in (0, count - 1) else 10 if i < state['plan']['keep_indices'][0] else 20) / 255 for i in refs])
         else:
-            assert indices in state['plan']['outer_generation_indices']
-            assert not item['valid_frames_mask'][0]
-            assert np.all(item['opacity'][0] == 1)
+            seeded = (state['request']['runtime'].get('initial_image_seeding') is not False
+                      or state['request']['runtime'].get('image_cache_insertion', False))
+            assert indices in [side if seeded else side[1:] for side in state['plan']['outer_generation_indices']]
+            assert bool(item['valid_frames_mask'][0]) is (not seeded)
+            assert np.all(item['opacity'][0] == (1 if seeded else .25))
         for i, valid in zip(indices, item['valid_frames_mask']):
             if valid and not (is_bridge and state['missing_frame'] == i):
-                color = 200 if is_bridge else 10 if indices[0] == 0 else 20
+                color = 200 if is_bridge else 10 if indices[0] < count // 2 else 20
                 Image.new('RGB', (8, 8), (color, i, 0)).save(dest / f'{i:05d}.png')
         pipe.starter_inference_audit = {'encoded_starter_preserved': True}
     module('model_eval')
@@ -379,7 +382,7 @@ def test_short_bridges_keep_real_ownership_and_matching_padded_cameras(inference
     leg, = manifest['legs']
     assert [r['frame_index'] for r in leg['overlaps']] == plan['overlap_indices']
     assert [r['side'] for r in leg['overlaps']] == ['left'] * len(plan['overlap_sides']['left']) + ['right'] * len(plan['overlap_sides']['right'])
-    bridge_dir = f['calls'][-1][2] / 'splatfix/frames/batch_0000/pred'
+    bridge_dir = f['root'] / 'inference-connected/leg-000/bridge/splatfix/frames/batch_0000/pred'
     assert sorted(int(p.stem) for p in bridge_dir.glob('*.png')) == real
     assert [connected.digest(path) for path in f['request']['references']] == anchors_before
 
@@ -431,3 +434,107 @@ def test_stronger_mode_is_scoped_to_bridge_and_records_dynamic_seed_layout(infer
     assert seed['seed_kv_preserved']
     assert set(seed['constrained_rgb_frame_indices']) <= set(plan['target_indices'])
     assert seed['seed_latent_indices'] == sorted({(i + 3) // 4 for i in slots})
+
+
+@pytest.mark.parametrize('inference_fixture', [3, 12, 30, 48], indirect=True)
+def test_short_outer_cameras_match_final_rgb_padding(inference_fixture):
+    f = inference_fixture
+    official_worker.inference(f['root'], f['request'], f['trajectory'])
+    for (indices, _, _, _), (camera_ids, _, _, _) in zip(f['calls'], f['rays']):
+        assert camera_ids == indices + [indices[-1]] * (25 - len(indices))
+
+
+@pytest.mark.parametrize('value', [None, False, True])
+def test_outer_seeding_off_and_historical_none_keep_existing_semantics(inference_fixture, value):
+    f = inference_fixture
+    f['request']['runtime']['initial_image_seeding'] = value
+    official_worker.inference(f['root'], f['request'], f['trajectory'])
+    first = f['plan']['outer_generation_indices'][0]
+    assert f['calls'][0][0] == (first[1:] if value is False else first)
+    audit = json.loads((f['root'] / 'inference-seeding.json').read_text())
+    assert audit['series'][0]['enabled'] is (value is not False)
+
+
+def test_stale_outer_preservation_audit_cannot_pass_next_leg(inference_fixture, monkeypatch):
+    f = inference_fixture
+    f['request']['runtime']['image_cache_insertion'] = True
+    process = sys.modules['model_eval.run_inference'].process_item
+    def missing_audit(pipe, *args):
+        previous = getattr(pipe, 'starter_inference_audit', None)
+        process(pipe, *args)
+        if len(f['calls']) == 2:
+            pipe.starter_inference_audit = previous
+    monkeypatch.setattr(sys.modules['model_eval.run_inference'], 'process_item', missing_audit)
+    with pytest.raises(RuntimeError, match='starter preservation'):
+        official_worker.inference(f['root'], f['request'], f['trajectory'])
+    assert len(f['calls']) == 2  # No bridge on an unverified outer generation.
+
+
+@pytest.mark.parametrize('inference_fixture', [30], indirect=True)
+def test_copy_failure_cannot_publish_half_a_bridge(inference_fixture, monkeypatch):
+    f = inference_fixture
+    copy = connected.shutil.copyfile
+    def fail_copy(source, dest, *args, **kwargs):
+        if str(Path(dest).parent.name).startswith('.connected-publish-') and Path(dest).name == '00011.png':
+            raise OSError('simulated full disk')
+        return copy(source, dest, *args, **kwargs)
+    monkeypatch.setattr(connected.shutil, 'copyfile', fail_copy)
+    with pytest.raises(OSError, match='full disk'):
+        official_worker.inference(f['root'], f['request'], f['trajectory'])
+    root = f['root'] / 'inference/splatfix/frames/batch_0000/pred'
+    assert Image.open(root / '00010.png').getpixel((0, 0))[0] == 10
+    assert Image.open(root / '00011.png').getpixel((0, 0))[0] == 10
+    with pytest.raises(ValueError, match='completion'):
+        official_worker.distill(f['root'], f['request'], f['trajectory'])
+
+
+@pytest.mark.parametrize('inference_fixture', [30], indirect=True)
+def test_interrupted_publish_with_full_frame_count_cannot_be_reconstructed(inference_fixture, monkeypatch):
+    f = inference_fixture
+    replace = Path.replace
+    def interrupt(source, target):
+        if source.parent.name.startswith('.connected-publish-') and source.name == '00011.png':
+            raise InterruptedError('simulated interruption')
+        return replace(source, target)
+    monkeypatch.setattr(Path, 'replace', interrupt)
+    with pytest.raises(InterruptedError):
+        official_worker.inference(f['root'], f['request'], f['trajectory'])
+    root = f['root'] / 'inference/splatfix/frames/batch_0000/pred'
+    assert len(list(root.glob('*.png'))) == 28
+    assert Image.open(root / '00010.png').getpixel((0, 0))[0] == 200
+    with pytest.raises(ValueError, match='completion'):
+        official_worker.reconstruction_supervision(f['root'], f['request'], f['trajectory'])
+
+
+@pytest.mark.parametrize('change', ['missing_manifest', 'unfinished_leg', 'missing_frame', 'extra_frame',
+                                   'changed_frame', 'reference', 'camera', 'scale', 'mode', 'seed', 'outer_seeding'])
+def test_completed_bridge_is_bound_to_actual_outputs_and_settings(inference_fixture, change):
+    f = inference_fixture
+    official_worker.inference(f['root'], f['request'], f['trajectory'])
+    connected.validate_completed(f['root'], f['request'], f['trajectory'])
+    path = f['root'] / 'inference-connected.json'
+    prediction = f['root'] / 'inference/splatfix/frames/batch_0000/pred'
+    if change == 'missing_manifest': path.unlink()
+    elif change == 'unfinished_leg':
+        manifest = json.loads(path.read_text()); manifest['legs'][0]['status'] = 'pending'
+        path.write_text(json.dumps(manifest))
+    elif change == 'missing_frame': (prediction / '00031.png').unlink()
+    elif change == 'extra_frame': Image.new('RGB', (8, 8)).save(prediction / '00099.png')
+    elif change == 'changed_frame': Image.new('RGB', (8, 8)).save(prediction / '00031.png')
+    elif change == 'reference': Image.new('RGB', (8, 8)).save(f['request']['references'][0])
+    elif change == 'camera': f['trajectory']['transforms']['frames'][31]['transform_matrix'][0][3] += 1
+    elif change == 'scale': f['request']['camera_scale'] *= 2
+    elif change == 'mode': f['request']['runtime']['connected_bridge_seeding'] = 'seed_preserve'
+    elif change == 'seed': f['request']['seed'] += 1
+    elif change == 'outer_seeding': f['request']['runtime']['initial_image_seeding'] = False
+    with pytest.raises(ValueError, match='Connected inference'):
+        official_worker.reconstruction_supervision(f['root'], f['request'], f['trajectory'])
+
+
+def test_retry_cannot_fill_a_missing_new_output_from_old_bridge(inference_fixture):
+    f = inference_fixture
+    official_worker.inference(f['root'], f['request'], f['trajectory'])
+    f['missing_frame'] = 31
+    with pytest.raises(RuntimeError, match='exactly 25 real'):
+        official_worker.inference(f['root'], f['request'], f['trajectory'])
+    assert not json.loads((f['root'] / 'inference-connected.json').read_text())['complete']

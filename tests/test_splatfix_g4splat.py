@@ -162,7 +162,7 @@ def test_official_entrypoint_retains_commands_and_skips_only_evaluation(tmp_path
     assert (output.parent / 'g4splat-viewer.ply').is_file()
 
 
-def test_remote_reattach_downloads_before_releasing_lease(tmp_path, monkeypatch):
+def test_remote_reattach_queues_download_and_releases_lease(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from splat_explorer.splatfix.g4splat.execution import execute_remote
     from splat_explorer import repair_lrz as lrz
@@ -182,12 +182,16 @@ def test_remote_reattach_downloads_before_releasing_lease(tmp_path, monkeypatch)
     store = SimpleNamespace(get_run=lambda _: SimpleNamespace(state=SimpleNamespace(details=details)))
     def update(**fields):
         if fields.get('remote_finished'):
-            assert transfers
+            assert not transfers
         updates.append(fields)
     result = execute_remote(SimpleNamespace(store=store, cfg={}), 'run',
                             {'mode': 'baseline', 'checkpoint': 'saved'}, tmp_path, lambda: False, update)
     assert result['reconstruction_method'] == 'g4splat'
     assert updates[-1]['remote_finished']
+    from splat_explorer.splatfix import downloads
+    assert downloads.status(tmp_path)['status'] == 'queued'
+    downloads.transfer(tmp_path, lrz)
+    assert len(transfers) == 1
 
 
 def test_auto_setup_runs_before_preflight_and_training(tmp_path, monkeypatch):

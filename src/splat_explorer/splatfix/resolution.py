@@ -151,7 +151,8 @@ def prepare_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE):
 
 def prepare_repair_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE, *,
                               scene_path=None, should_stop=lambda: False, reuse_artifixer_inputs=False,
-                              artifixer_runtime=None, preserve_repaired_images=False):
+                              artifixer_runtime=None, preserve_repaired_images=False,
+                              restore_cached_geometry=True, capture_rgb_fn=None):
     """Prepare exact-size step-4 cameras and recapture their source RGBs.
 
     Work in a run-local derivative. GPT references start from the original
@@ -203,9 +204,18 @@ def prepare_repair_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE, *,
                 shutil.copy2(original, root / manual_relative)
                 view['manual_resized_rgb'] = manual_relative
                 view.pop('full_repaired_rgb', None)
+            pose_target = None
+            if not preserve_repaired_images and manifest.get('metadata', {}).get('generated_pose_correction', {}).get('enabled'):
+                from .pose_correction import target_path
+                saved_camera = camera_from_record(old)
+                with Image.open(target_path(checkpoint, old)) as raw:
+                    pose_target = ImageOps.fit(raw.convert('RGB'), (saved_camera.width, saved_camera.height),
+                                               Image.Resampling.LANCZOS)
             with Image.open(original) as image:
+                if pose_target is not None:
+                    image = pose_target
                 view['repaired_rgb'] = f"views/{view['id']}/repaired.png"
-                if preserve_repaired_images and not manual and not response and image.size == (width, height):
+                if preserve_repaired_images and pose_target is None and not manual and not response and image.size == (width, height):
                     # Repeat snapshots can contain the exact calibrated input.
                     # Preserve its bytes/hash instead of re-encoding the PNG.
                     shutil.copy2(original, root / view['repaired_rgb'])
@@ -215,7 +225,7 @@ def prepare_repair_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE, *,
                     image.save(root / view['repaired_rgb'])
             view.setdefault('image_repair', {})['reconstruction_resize'] = {
                 'source': manual or response or old['repaired_rgb'],
-                'source_kind': 'manual_crop' if manual else 'full_response' if response else 'legacy_repaired_rgb',
+                'source_kind': 'pose_correction_calibrated_target' if pose_target is not None else 'manual_crop' if manual else 'full_response' if response else 'legacy_repaired_rgb',
                 'method': 'cover_center_crop', 'target_size': [width, height]}
     metadata = manifest.setdefault('metadata', {})
     from .artifixer.pipeline_profile import rgb_backend
@@ -225,12 +235,13 @@ def prepare_repair_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE, *,
             from .artifixer.native_renderer import capture_native
             capture_native(source, cameras, destinations, artifixer_runtime, should_stop)
         else:
-            capture_rgb(source, cameras, destinations, up_axis=metadata.get('up_axis', '-y'),
+            (capture_rgb_fn or capture_rgb)(source, cameras, destinations, up_axis=metadata.get('up_axis', '-y'),
                         lod_level=metadata.get('scene_load', {}).get('lod_level', 0), should_stop=should_stop)
     if reuse_artifixer_inputs:
         from .artifixer.staging_cache import capture_inputs, restore_geometry
         cache = capture_inputs(checkpoint, cameras, destinations, capture, profile=profile, renderer=backend)
-        restore_geometry(cache, root)
+        if restore_cached_geometry:
+            restore_geometry(cache, root)
         metadata['artifixer_input_cache'] = str(cache)
     else:
         capture()

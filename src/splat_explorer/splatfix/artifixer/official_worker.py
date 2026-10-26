@@ -1141,6 +1141,12 @@ def load_handoff_references(root, request, trajectory):
 
 
 def reconstruction_supervision(root, request, trajectory):
+    if request.get('runtime', {}).get('connected_trajectory_generation', False):
+        if __package__:
+            from .connected_trajectory import validate_completed
+        else:
+            from connected_trajectory import validate_completed
+        validate_completed(root, request, trajectory)
     if not request.get('runtime', {}).get('handoff_generation', False):
         return unique_supervision(trajectory, request['references'])
     state = load_handoff_references(root, request, trajectory)
@@ -1206,6 +1212,7 @@ def distill(root, request, trajectory):
         actual = digest.hexdigest()
         if actual != request.get('source_ply_sha256'):
             raise ValueError('Source initialization PLY changed since preparation')
+    transforms, supervision = reconstruction_supervision(root, request, trajectory)
     import numpy as np
     import torch
     from data_processing import artifixer3d as official
@@ -1221,7 +1228,6 @@ def distill(root, request, trajectory):
     render_transforms = opengl_transforms(trajectory)
     render_transforms_path = root / 'render_transforms_opengl.json'
     render_transforms_path.write_text(json.dumps(render_transforms, indent=2))
-    transforms, supervision = reconstruction_supervision(root, request, trajectory)
     append_worldexplorer_supervision(request, transforms, supervision)
     (root / 'supervision.json').write_text(json.dumps(supervision, indent=2))
     cameras, images = [], []

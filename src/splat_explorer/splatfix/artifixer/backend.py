@@ -68,6 +68,12 @@ def validate_options(raw):
         seeding = raw.get('initial_image_seeding', True)
         if type(seeding) is not bool:
             raise ValueError('initial_image_seeding must be a boolean')
+        correction = raw.get('correct_generated_pose', raw.get('mode', 'edited') == 'edited')
+        if type(correction) is not bool:
+            raise ValueError('correct_generated_pose must be a boolean')
+        if correction and raw.get('mode', 'edited') != 'edited':
+            raise ValueError('Pose correction requires GPT-image improved reconstruction')
+        result['correct_generated_pose'] = correction
         result['initial_image_seeding'] = seeding or insertion
         from .official_worker import validate_reconstruction_options
         result.update(validate_reconstruction_options(raw))

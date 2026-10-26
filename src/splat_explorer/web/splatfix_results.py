@@ -87,6 +87,8 @@ class ResultCatalog:
             row = self.detail(key)
             if row is None:
                 raise ValueError('Result not found')
+            from ..splatfix.downloads import require_finished
+            require_finished(self.studio.root / row['run_id'])
             snapshots = Path(self.cfg.output.dir) / 'oraclegs-reuse'
             snapshots.mkdir(exist_ok=True, parents=True)
             destination = Path(tempfile.mkdtemp(prefix='artifixer-', dir=snapshots))
@@ -115,6 +117,8 @@ class ResultCatalog:
             row = self.detail(key)
             if row is None:
                 raise ValueError('Result not found')
+            from ..splatfix.downloads import require_finished
+            require_finished(self.studio.root / row['run_id'])
             self.studio.checkpoint_root.mkdir(parents=True, exist_ok=True)
             destination = Path(tempfile.mkdtemp(prefix='repeat-', dir=self.studio.checkpoint_root))
             try:
@@ -212,6 +216,8 @@ class ResultCatalog:
         """Permanently remove only the validated inactive run directory."""
         with self._run_storage_lock:
             run = self.studio.store.get_run(run_id)
+            from ..splatfix.downloads import require_finished
+            require_finished(run.path)
             if run.state.status.value not in ('completed', 'error', 'stopped', 'gpu_expired'):
                 raise ValueError('Only inactive runs can be deleted')
             shutil.rmtree(run.path)
@@ -242,6 +248,8 @@ class ResultCatalog:
         """Move a whole inactive run into local history for manual backup."""
         with self._run_storage_lock:
             run = self.studio.store.get_run(run_id)
+            from ..splatfix.downloads import require_finished
+            require_finished(run.path)
             if run.state.status.value not in ('completed', 'error', 'stopped', 'gpu_expired'):
                 raise ValueError('Only inactive runs can be moved to history')
             history = Path(self.cfg.output.dir) / 'run_history'
@@ -261,6 +269,8 @@ class ResultCatalog:
             raise ValueError('preserve_reconstruction must be a boolean')
         with self._run_storage_lock:
             run = self.studio.store.get_run(run_id)
+            from ..splatfix.downloads import require_finished
+            require_finished(run.path)
             if run.state.status.value not in ('completed', 'error', 'stopped', 'gpu_expired'):
                 raise ValueError('Only inactive runs can be reduced')
             from .run_reduction import reduce_oraclegs, reduce_artifixer
@@ -343,6 +353,8 @@ class ResultCatalog:
     def save_inference_videos(self, run_id):
         with self._run_storage_lock:
             run = self.studio.store.get_run(run_id)
+            from ..splatfix.downloads import require_finished
+            require_finished(run.path)
             if run.state.status.value not in ('completed', 'error', 'stopped', 'gpu_expired'):
                 raise ValueError('Wait for the run to finish before saving inference videos')
             rows = [row for row in self.entries(private=True) if row['run_id'] == run_id]
@@ -534,11 +546,13 @@ class ResultCatalog:
         benchmark = read_json(manifest.parent / 'benchmark-run.json', {}) if manifest else {}
         repair_pass = (result.get('repeat_repair') or benchmark.get('repeat_repair') or {}).get('repair_pass', 1)
         status = record.get('state', {}).get('status')
+        from ..splatfix.downloads import status as download_status
         if manifest and manifest.name == 'result.json':
             status = 'completed'
         return {'repair_pass': repair_pass, 'job_status': record.get('state', {}).get('status'), 'id': key, 'run_id': record['run_id'], 'scene': config.get('scene_id', ''),
                 'can_stop': not record.get('state', {}).get('details', {}).get('remote_finished') and config.get('pipeline') == 'splatfix' and record.get('state', {}).get('status') in ('queued', 'waiting_gpu', 'starting', 'running'),
                 'message': record.get('state', {}).get('message'),
+                'download': download_status(self.studio.root / record['run_id']),
                 'custom_name': record.get('custom_name', ''),
                 'color': record.get('color', ''),
                 'has_notes': record.get('has_notes', False),
@@ -554,7 +568,7 @@ class ResultCatalog:
                 'backed_up': backup_path is not None,
                 'reduced': (self.studio.root / record['run_id'] / 'reduction.json').is_file(),
                 'can_reduce': (options.get('reconstruction_method') in ('oraclegs', 'artifixer') or result.get('reconstruction_method') in ('oraclegs', 'artifixer') or (manifest is not None and not options.get('reconstruction_method') and not result.get('reconstruction_method'))) and not (self.studio.root / record['run_id'] / 'reduction.json').exists(),
-                'can_archive': record.get('state', {}).get('status') in ('completed', 'error', 'stopped', 'gpu_expired'),
+                'can_archive': record.get('state', {}).get('status') in ('completed', 'error', 'stopped', 'gpu_expired') and not download_status(self.studio.root / record['run_id']).get('status') in ('queued', 'downloading', 'retrying'),
                 'mode': options.get('mode') or config.get('repair_type', ''),
                 'model': result.get('model_variant') or options.get('model'),
                 'trajectory': result.get('trajectory_mode'), 'frames': result.get('frame_count'),

@@ -10,8 +10,10 @@ def validate_job(raw):
     if not isinstance(raw, dict):
         raise ValueError('splatfix job must be an object')
     stage = raw.get('stage')
-    if stage not in ('select', 'edit', 'seva_capture', 'repair', 'benchmark'):
-        raise ValueError('stage must be select, edit, seva_capture, repair or benchmark')
+    if raw.get('correct_generated_pose') and (stage != 'repair' or raw.get('reconstruction_method', 'artifixer') != 'artifixer'):
+        raise ValueError('Pose correction is available only for ArtiFixer reconstruction')
+    if stage not in ('select', 'edit', 'seva_capture', 'pose_correction', 'repair', 'benchmark'):
+        raise ValueError('stage must be select, edit, seva_capture, pose_correction, repair or benchmark')
     from .resolution import profile_size
     profile = raw.get('resolution_profile', '720p')
     profile_size(profile)
@@ -89,6 +91,10 @@ def validate_job(raw):
             raise ValueError('view_id must be a saved three-digit view id')
         result['view_id'] = view_id
     if stage == 'edit':
+        repair_mode = raw.get('repair_mode', 'auto')
+        if repair_mode not in ('auto', 'sequential', 'shared_six', 'shared_six_native'):
+            raise ValueError('repair_mode must be auto, sequential, shared_six or shared_six_native')
+        result['repair_mode'] = repair_mode
         image_set = raw.get('image_set', 'saved')
         if image_set not in ('saved', 'seva', '77'):
             raise ValueError('image_set must be saved, seva or 77')

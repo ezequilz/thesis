@@ -226,3 +226,27 @@ def test_preserved_groups_follow_real_overlaps_not_padding(cpu_pipe, real, overl
     assert torch.equal(result[:, :, groups], values[0][:, :, groups])
     assert audit['seed_latent_indices'] == groups
     assert audit['all_real_latent_groups_preserved'] is (real <= 8)
+
+
+@pytest.mark.parametrize('fail', [False, True])
+def test_joint_cache_window_is_bounded_and_restored(cpu_pipe, fail):
+    _, pipe = cpu_pipe
+    for block in pipe.transformer.blocks:
+        block.attn1.processor.local_attn_size = 21
+        block.attn1.processor.sink_size = 3
+    try:
+        with bridge.single_block_cache(pipe):
+            assert pipe.local_attn_size == 7
+            assert all(block.attn1.processor.local_attn_size == 7 for block in pipe.transformer.blocks)
+            if fail:
+                raise RuntimeError('sampling failed')
+    except RuntimeError:
+        assert fail
+    assert pipe.local_attn_size == 21
+    assert all(block.attn1.processor.local_attn_size == 21 for block in pipe.transformer.blocks)
+
+
+def test_preservation_has_no_free_middle_below_the_twenty_pose_boundary():
+    # N=19 has a 6-frame middle + four overlaps; N=20 has seven + four.
+    assert bridge.seed_layout(10, [0, 1, 8, 9])['free_middle_latent_indices'] == []
+    assert bridge.seed_layout(11, [0, 1, 9, 10])['free_middle_latent_indices'] == [2]

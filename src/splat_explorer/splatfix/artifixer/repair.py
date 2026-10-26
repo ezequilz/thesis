@@ -94,6 +94,8 @@ def digest_file(path):
 
 def validate_runtime(runtime=None):
     cfg = {**DEFAULT_RUNTIME, **(runtime or {})}
+    if type(cfg.get('correct_generated_pose', False)) is not bool:
+        raise ValueError('correct_generated_pose must be a boolean')
     from .connected_trajectory import configure
     cfg['connected_trajectory_generation'] = configure(runtime or {})
     from .bridge_seeding import mode as bridge_seeding_mode
@@ -342,6 +344,11 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
     signature = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
     cache = cp.root / 'trajectories'
     completed = sorted(cache.glob(signature[:16] + '_*/trajectory.json'))
+    if not completed:
+        from .staging_cache import compatible_trajectory
+        compatible = compatible_trajectory(cache, recipe)
+        if compatible is not None:
+            completed = [compatible]
     if completed:
         root = completed[0].parent
         manifest = json.loads(completed[0].read_text())
@@ -384,10 +391,13 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
             records.append({'rgb': str(rgb_path.relative_to(cp.root)), 'opacity': str(alpha_path.relative_to(cp.root))})
         write_seed_points(root / 'points3D.bin', scene)
         if backend == 'viser':
-            capture_rgb(source_path, cameras, [cp.root / frame['rgb'] for frame in records],
-                        up_axis=cp.manifest.get('metadata', {}).get('up_axis', '-y'),
-                        lod_level=cp.manifest.get('metadata', {}).get('scene_load', {}).get('lod_level', 0),
-                        should_stop=should_stop)
+            from .staging_cache import capture_prepared_rgb
+            def capture(requested, destinations):
+                capture_rgb(source_path, requested, destinations,
+                            up_axis=cp.manifest.get('metadata', {}).get('up_axis', '-y'),
+                            lod_level=cp.manifest.get('metadata', {}).get('scene_load', {}).get('lod_level', 0),
+                            should_stop=should_stop)
+            capture_prepared_rgb(cp, cameras, [cp.root / frame['rgb'] for frame in records], capture)
         manifest = {'schema_version': 3, 'depth_convention': 'expected_camera_z',
                     'camera_convention': 'opencv_c2w', 'signature': signature, 'recipe': recipe,
                     'transforms': {'camera_model': 'OPENCV', **transforms(cameras)},
@@ -547,11 +557,17 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
     cfg = {**cfg, 'split_mode': split_mode}
     if cfg.get('endpoint_reference_mode', 'both') not in ('both', 'initial'):
         raise ValueError('endpoint_reference_mode must be both or initial')
+    if cfg.get('correct_generated_pose', False):
+        if mode != 'edited':
+            raise ValueError('Pose correction requires GPT-image improved reconstruction')
+        if not repeat:
+            from ..pose_correction import corrected_checkpoint
+            cp = corrected_checkpoint(cp)
     from ..resolution import prepare_repair_checkpoint
     root = Path(output_dir).resolve() / f'{mode}_{uuid.uuid4().hex[:12]}'
     root.mkdir(parents=True, exist_ok=False)
     cp = prepare_repair_checkpoint(cp, root / 'checkpoint', cfg['resolution_profile'],
-                                   scene_path=cfg.get('scene_path'), should_stop=should_stop, reuse_artifixer_inputs=not bool(repeat),
+                                   scene_path=cfg.get('scene_path'), should_stop=should_stop, reuse_artifixer_inputs=True,
                                    artifixer_runtime=cfg, preserve_repaired_images=bool(repeat))
     references = [str(cp.image_path(view, repaired=mode == 'edited')) for view in cp.repair_views]
     if repeat and repeat.get('expected_reference_sha256'):
