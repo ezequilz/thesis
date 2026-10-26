@@ -11,10 +11,13 @@ from .staging_cache import digest
 def identity(checkpoint, runtime):
     from .repair import UPSTREAM_REVISION
     from .official_worker import SCALE_SAMPLING
+    from .author_trajectory import validate_trajectory_order
     metadata = checkpoint.manifest.get('metadata', {})
     split = 'no-split' if checkpoint.endpoint_only else ('single-split' if runtime.get('handoff_generation')
                                                       else runtime.get('split_mode', 'double-split'))
-    return {'version': 1, 'upstream_revision': UPSTREAM_REVISION,
+    return {'version': 2, 'upstream_revision': UPSTREAM_REVISION,
+            'trajectory_order': ('picked' if checkpoint.endpoint_only else
+                                 validate_trajectory_order(runtime.get('trajectory_order', 'picked'))),
             'trajectory_version': 7, 'metric_sampling': SCALE_SAMPLING,
             'source': checkpoint.manifest.get('source_fingerprint', checkpoint.manifest['scene_path']),
             'scene_load': metadata.get('scene_load', {}), 'up_axis': metadata.get('up_axis', '-y'),
@@ -45,6 +48,10 @@ def validate(plan, checkpoint, runtime):
         pose = camera_from_record(anchor).c2w
         if not any(np.array_equal(pose, other) for other in poses):
             raise ValueError('Source trajectory plan omitted an anchor')
+    if not checkpoint.endpoint_only and plan['identity']['trajectory_order'] == 'picked':
+        from .author_trajectory import picked_reference_indices
+        picked_reference_indices(poses, [camera_from_record(a).c2w for a in plan['identity']['anchors']],
+                                 plan['orbit']['provenance'])
     return plan
 
 

@@ -9,6 +9,13 @@ import math
 
 
 SPLIT_MODES = ('single-split', 'double-split', 'no-split')
+TRAJECTORY_ORDERS = ('picked', 'authors')
+
+
+def validate_trajectory_order(value):
+    if value not in TRAJECTORY_ORDERS:
+        raise ValueError('trajectory_order must be picked or authors')
+    return value
 
 
 def validate_split_mode(value):
@@ -298,6 +305,108 @@ def build_author_orbit(reference_poses, intrinsics, metric_scale, *, target_pose
     }
 
 
+def build_picked_path(poses, intrinsics, metric_scale, *, spacing=.1, renderer=None,
+                      split_mode='double-split', loop=False):
+    """Join saved waypoints in pick order with unchanged authors' pair interpolation.
+
+    Only adjacent endpoint occurrences are shared. Revisiting an interpolated
+    camera on another leg must not collapse the path or move a named waypoint.
+    Reference indices explicitly identify the intended waypoint occurrences.
+    """
+    import numpy as np
+    validate_split_mode(split_mode)
+    if not isinstance(loop, bool):
+        raise ValueError('loop must be a bool')
+    if len(poses) < 2:
+        raise ValueError('Picked-order trajectories require at least two distinct saved poses')
+    if len({tuple(np.asarray(p).ravel()) for p in poses}) != len(poses):
+        raise ValueError('Picked-order saved anchor poses must be distinct')
+    full, references, legs, spacing_records = [], [0], [], []
+    pairs = list(zip(range(len(poses) - 1), range(1, len(poses))))
+    if loop:
+        pairs.append((len(poses) - 1, 0))
+    for leg_index, (left, right) in enumerate(pairs):
+        result = build_author_orbit([poses[left], poses[right]], intrinsics, metric_scale,
+                                   spacing=spacing, renderer=renderer, split_mode='single-split')
+        frames = result['full_trajectory']['frames']
+        if np.array_equal(frames[-1]['transform_matrix'], poses[left]):
+            frames = frames[::-1]
+        if (not np.array_equal(frames[0]['transform_matrix'], poses[left])
+                or not np.array_equal(frames[-1]['transform_matrix'], poses[right])):
+            raise ValueError('Authors interpolation omitted a picked waypoint')
+        start = len(full) - 1 if full else 0
+        full.extend(dict(frame) for frame in (frames[1:] if full else frames))
+        end = len(full) - 1
+        # The loop's final endpoint is the first reference, not a second GT slot.
+        closing = loop and right == 0
+        if closing:
+            full.pop()
+        else:
+            references.append(end)
+        legs.append((start, 0 if closing else end, list(range(start + 1, end))))
+        p = result['provenance']
+        spacing_records.append({'leg_index': leg_index, 'effective_spacing': p['effective_spacing'],
+                                'spacing_fallback_reason': p['spacing_fallback_reason'],
+                                'attempted_normalized_distances': p['attempted_normalized_distances']})
+    for i, frame in enumerate(full):
+        frame['file_path'] = f'orbit_full/{i:05d}.png'
+    anchor_set = set(references)
+    targets = [i for i in range(len(full)) if i not in anchor_set]
+    target_ids = {i: j for j, i in enumerate(targets)}
+    segments = []
+    for leg, (left, right, indices) in enumerate(legs):
+        middle = (len(indices) + 1) // 2
+        halves = ([(left, indices[:middle], 'forward'), (right, indices[middle:][::-1], 'reverse')]
+                  if split_mode == 'double-split' else [(left, indices, 'forward')])
+        for seed, group, direction in halves:
+            if group:
+                segments.append({'leg_index': leg, 'direction': direction, 'open_tail': False,
+                                 'full_frame_indices': group, 'target_indices': [target_ids[i] for i in group],
+                                 ('seed_full_frame_index' if split_mode == 'double-split' else 'cache_seed_full_frame_index'): seed})
+    if split_mode == 'no-split':
+        segments = [{'full_frame_indices': targets, 'target_indices': list(range(len(targets))),
+                     'cache_seed_full_frame_index': 0}]
+    camera = {k: v for k, v in result['full_trajectory'].items() if k != 'frames'}
+    if __package__:
+        from .trajectory_diagnostics import summarize_trajectory
+    else:
+        from trajectory_diagnostics import summarize_trajectory
+    reference_up = np.asarray(poses)[:, :3, 1].mean(axis=0)
+    up = reference_up if np.linalg.norm(reference_up) >= 1e-8 else None
+    return {'full_trajectory': {**camera, 'frames': full},
+            'trajectory': {**camera, 'frames': [{'transform_matrix': full[i]['transform_matrix']} for i in targets]},
+            'provenance': {
+                'implementation': 'threedgrut.render.Renderer.interpolate_orbit_poses',
+                'trajectory_order': 'picked', 'ordering_version': 1,
+                'camera_convention': 'opengl_c2w', 'interpolation_camera_convention': 'opencv_c2w',
+                'metric_scale': float(metric_scale), 'spacing': float(spacing), 'requested_spacing': float(spacing),
+                'effective_spacing': min(row['effective_spacing'] for row in spacing_records),
+                'leg_spacing': spacing_records, 'loop': loop, 'starts_at_first_reference': True,
+                'reference_frame_indices': references, 'unique_input_nodes': len(poses),
+                'author_frame_count': len(full), 'target_frame_count': len(targets),
+                'split_mode': split_mode, 'series_policy': f'picked_order_{split_mode}_v1',
+                'frames': [{'target_index': j, 'full_frame_index': i, 'requested_target_indices': []}
+                           for j, i in enumerate(targets)], 'segments': segments,
+                'motion_diagnostics': {
+                    'full_path': summarize_trajectory([f['transform_matrix'] for f in full], up=up),
+                    'generated_targets': summarize_trajectory([full[i]['transform_matrix'] for i in targets], up=up),
+                    'scope': 'Geometry only; no visibility, image quality, or safe-path guarantee.'}}}
+
+
+def picked_reference_indices(poses, references, provenance):
+    """Validate named waypoint occurrences, independent of incidental crossings."""
+    import numpy as np
+    indices = provenance.get('reference_frame_indices', [])
+    if (provenance.get('trajectory_order') != 'picked' or provenance.get('ordering_version') != 1
+            or len(indices) != len(references)
+            or any(type(i) is not int or not 0 <= i < len(poses) for i in indices)
+            or indices != sorted(set(indices)) or not indices or indices[0] != 0
+            or (not provenance.get('loop') and indices[-1] != len(poses) - 1)
+            or any(not np.array_equal(poses[i], reference) for i, reference in zip(indices, references))):
+        raise ValueError('Picked-order trajectory must visit every saved waypoint in selection order')
+    return list(indices)
+
+
 def build_endpoint_path(poses, intrinsics, metric_scale, *, spacing=.1, renderer=None):
     """Interpolate consecutive saved cameras with the authors' helper, in saved order.
 
@@ -350,6 +459,9 @@ def main(argv=None):
     parser.add_argument('--metric-scale', type=float, required=True)
     parser.add_argument('--interp-distance', type=float, default=0.1)
     parser.add_argument('--split-mode', choices=SPLIT_MODES, default='double-split')
+    # This entry point also serves unchanged benchmark and historical callers.
+    # New checkpoint repair requests explicitly pass their default picked order.
+    parser.add_argument('--trajectory-order', choices=TRAJECTORY_ORDERS, default='authors')
     parser.add_argument('--loop', action='store_true')
     parser.add_argument('--endpoint-path', action='store_true')
     parser.add_argument('--output', type=Path, required=True)
@@ -392,9 +504,16 @@ def main(argv=None):
     targets = [np.asarray(frames[index]['transform_matrix']) @ conversion for index in target_indices]
     sys.path.insert(0, str(args.repo / 'thirdparty' / '3DGRUT-ArtiFixer'))
     sys.path.insert(0, str(args.repo))
-    result = (build_endpoint_path(references, intrinsics, args.metric_scale, spacing=args.interp_distance)
-              if args.endpoint_path else build_author_orbit(references, intrinsics, args.metric_scale, target_poses=targets,
-                                loop=args.loop, spacing=args.interp_distance, split_mode=args.split_mode))
+    if args.endpoint_path:
+        result = build_endpoint_path(references, intrinsics, args.metric_scale, spacing=args.interp_distance)
+    elif args.trajectory_order == 'picked':
+        if targets:
+            raise ValueError('Picked-order paths accept saved references only, not benchmark target cameras')
+        result = build_picked_path(references, intrinsics, args.metric_scale, loop=args.loop,
+                                   spacing=args.interp_distance, split_mode=args.split_mode)
+    else:
+        result = build_author_orbit(references, intrinsics, args.metric_scale, target_poses=targets,
+                                   loop=args.loop, spacing=args.interp_distance, split_mode=args.split_mode)
     name_to_index = {}
     for mapping in result['provenance']['frames']:
         requested = mapping['requested_target_indices']

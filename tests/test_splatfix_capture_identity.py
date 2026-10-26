@@ -48,6 +48,13 @@ def test_cross_platform_lean_replay_preserves_captured_cameras_and_plan(source, 
     full = prepare_repair_checkpoint(cp, root / 'full', runtime['resolution_profile'],
         artifixer_runtime=runtime, reuse_artifixer_inputs=True)
     source_plan.validate(gpu_plan, full, runtime)
+    from dataclasses import replace
+    from splat_explorer.splatfix.checkpoint import camera_from_record
+    anchor = camera_from_record(full.views[0])
+    cameras = [replace(anchor, position=pose[:3, 3], rotation=pose[:3, :3])
+               for pose in np.asarray(gpu_plan['orbit']['poses'])]
+    staging_cache.capture_prepared_rgb(full, cameras, [root / f'final-{i}.png' for i in range(len(cameras))],
+                                      lambda *a: pytest.fail('No late trajectory capture allowed'))
 
 
 def test_explicit_binding_wins_over_another_equivalent_capture(source, monkeypatch):

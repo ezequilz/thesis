@@ -358,6 +358,13 @@ resumes the existing barrier without launching a second GPU job. Native 3DGUT
 and photographic benchmarks retain their existing path. ArtiFixer3D+ captures
 the newly reconstructed splat and necessarily remains a later capture phase.
 
+Each staged run binds to the anchor capture set selected during preflight and
+replays its saved camera records. Cache lookup tolerates at most eight float64
+ULPs of FOV conversion roundoff between desktop and LRZ NumPy/libm, only when
+the rendered intrinsics, poses and every other recipe field match exactly.
+Image checksums remain mandatory. Repeats clear the parent's capture-completion
+flag and cache binding because their source splat is different.
+
 Photographic benchmark inputs use a separate bounds-based policy: fit within
 the profile without upscaling, uniformly scale, then symmetrically crop fewer
 than 16 output pixels per dimension for alignment. Intrinsics and COLMAP image
@@ -436,26 +443,46 @@ allows normal model metadata access; the remaining worker phases retain their
 configured offline policy. These local caption and encoding calls do not send
 images to an external VLM/GPT service.
 
-Selected cameras define camera legs through the authors' unchanged
-`Renderer.interpolate_orbit_poses`: PCA orbit ordering, linear camera positions,
-SLERP rotations, and the authors' default spacing `0.1 / metric_scale`, with
-`loop=False`. Original anchor depth is prepared first for scale measurement;
-the resulting path is then rendered and cached for both arms. At least two
-distinct saved poses with shared intrinsics are required. Every anchor appears
-exactly once in the full path. For reference-only inputs, the first anchor is
-the start context and the remaining cameras are waypoints (two-camera inputs
-use the authors' direct ordering). This input adaptation is recorded.
+Checkpoint repair defaults to **Picked-pose order** (`trajectory_order: picked`,
+CLI `--trajectory-order picked`). Each consecutive selected pair is interpolated
+through the unchanged `Renderer.interpolate_orbit_poses`, with linear camera
+positions, SLERP rotations, and the authors' spacing `0.1 / metric_scale`.
+Pair outputs are oriented back to the selected direction and joined at their
+shared endpoint. The default is an open path, `loop=False`. Original anchor
+depth and opacity still determine the MoGe metric scale before trajectory
+sampling and capture. At least two distinct saved poses with shared intrinsics
+are required. Named waypoint indices retain selection order even when a leg
+passes through a later saved pose or revisits an earlier camera. Only shared
+adjacent endpoints are consolidated; later trajectory occurrences stay intact.
+
+The dashboard's **Checkpoint trajectory order** setting also offers **Authors
+orbit order · fallback** (`trajectory_order: authors`, CLI `--trajectory-order
+authors`). This retains the original global PCA/orbit-angle ordering: the first
+reference starts the route for three or more cameras, while two-camera inputs
+use the authors' direct ordering. Published benchmarks retain this original
+policy. Endpoint-only paths continue to use their own saved-order path. Exact
+repeat runs retain their recorded route and policy; historical requests with no
+order setting use the authors' fallback.
+
+Version-2 source-plan identities include the effective ordering policy. Picked
+paths also record `trajectory_order`, `ordering_version`, explicit reference
+indices, per-leg spacing, and segmentation in orbit provenance. Both exact and
+roundoff-compatible trajectory-cache matching include that provenance. New
+picked-order runs cannot reuse an old sorted source plan. Original anchor RGB
+and geometry caches remain reusable; the existing lean geometry → trajectory
+Viser capture → full staging sequence prepares a newly required route.
 If the default spacing produces only anchors and no generated viewpoints,
 the adapter retries the same authors' interpolator with smaller spacing.
 The requested and effective spacing, and the reason for the adjustment, are
-recorded in trajectory provenance.
+recorded in trajectory provenance. Picked paths record each pair's adjustment
+in `leg_spacing`; the top-level effective spacing is the smallest used.
 
 Both diffusion passes support `split_mode` in the runtime/job settings and
 `--split-mode` on `splatfix repair` and the trajectory adapter. The dashboard's
 **Trajectory splitting** selector exposes both modes:
 
 - **single-split** preserves the previous behavior: one forward series per
-  adjacent pair in the authors' ordered input waypoints.
+  adjacent pair in the selected route order.
 - **double-split** is the default: each reference-to-reference leg's generated
   positions are divided into two halves. The first half runs forward from the
   first reference; the second runs in reverse from the next reference toward
@@ -495,13 +522,13 @@ waypoints remain targets inside those spans. A non-looping path's open tail
 beyond its last reference is one forward series from that reference. Its
 geometry is preserved rather than inventing a reference at the final test view.
 
-The adapter obtains camera ordering from the authors' helper without
+In authors-order fallback and benchmarks, the adapter obtains camera ordering from the authors' helper without
 interpolation and does not re-sort individual pairs. The full camera catalogue
 and global PNG indices stay fixed for reconstruction and evaluation, even when
 inference order runs backward. Provenance records mode, directions, target
 indices and seed cameras; these also distinguish trajectory caches. Historical
 repeat-benchmark jobs retain their recorded inference mode. Geometry and the
-authors' PCA ordering are unchanged, so this change does not flatten a
+authors' PCA ordering are unchanged in that fallback, so it does not flatten a
 zigzagging camera path.
 
 There is no fixed intermediate-frame-count option in this helper. For each leg,
@@ -1577,9 +1604,12 @@ with identical inputs and seed, comparing this option on and off.
 
 `connected_trajectory_generation: true` uses the current causal ArtiFixer checkpoint.
 Handoff generation defaults to off. Each span between consecutive saved references
-is validated against the original double-split camera ownership and supports at
-most **64 poses including endpoints**. Longer spans fail before model allocation;
-disable this option to use an existing fallback. Single-split, no-split,
+is validated against the original double-split camera ownership. Spans with at
+most **64 poses including endpoints** receive a connected bridge. Longer spans
+automatically use normal double-split generation: both complete inward halves,
+with the existing endpoint seeding and optional cache preservation, and no bridge.
+The trajectory, camera spacing, cached RGBs, and shorter spans remain unchanged.
+Single-split, no-split,
 endpoint-only, and handoff modes retain their separate paths. Explicitly enabling
 incompatible settings is rejected. Historical saved requests and exact repeats
 do not silently acquire connected generation.
@@ -1631,14 +1661,21 @@ uses the final real camera rather than a repeated average of earlier cameras.
 The block remains seven latent frames with four sampling steps and fresh caches.
 Only real overlap outputs enter diagnostics; only the calculated middle is spliced
 into the final images. Padding can affect short-window quality but adds no poses.
-Each outer call uses at most 25 poses; short calls also use upstream padding.
+Each outer call of a bridged span uses at most 25 poses; short calls also use upstream padding.
+Fallback halves retain all their poses and the normal autoregressive blocks and
+caches within each call. Their padding follows upstream block sizing (25, 53, 81,
+... RGB frames), with matching repeated final-pose camera conditioning. Padding
+never enters supervision. For example, a 73-pose span generates 36 interior
+images from the left endpoint and 35 from the right, meeting at the midpoint.
 This runs independently before ArtiFixer3D fitting and again on the plus renders.
 All original references remain fitting supervision; generated bridge references
 never become ground truth.
 
 `inference-connected.json` and `plus-connected.json` record plans, completion,
 reference checksums, seeds, kept indices, padding counts, and real overlap
-MAE/RMSE/PSNR on RGB [0,1].
+MAE/RMSE/PSNR on RGB [0,1]. Long spans record `generation_mode: double-split`
+and a `fallback_reason`; they are complete only after both full halves succeed.
+Run details show this reason in place of bridge overlap diagnostics.
 Identical overlaps have `identical: true` and null PSNR rather than JSON infinity.
 The matching `*-connected/leg-NNN/` folders retain outer predictions, bridge
 outputs for the real window, and comparison PNGs (preserved | generated | absolute difference).

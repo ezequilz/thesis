@@ -16,6 +16,7 @@ def execute(root):
         request.setdefault('runtime', {}).setdefault('artifixer_pipeline', 'legacy_gsplat')
         request['runtime'].setdefault('initial_image_seeding', None)  # Preserve historical requests.
         request['runtime'].setdefault('generated_context_references', False)
+        request['runtime'].setdefault('trajectory_order', 'authors')
     last_phase = 'validation'
     def publish(**body):
         nonlocal last_phase

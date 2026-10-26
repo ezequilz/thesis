@@ -27,11 +27,13 @@ def test_planning_uses_original_depth_opacity_scale_and_orbit_only(tmp_path, mon
     first, last = [camera_from_record(view).c2w for view in cp.views]
     middle = first.copy(); middle[0, 3] += .5
     orbit = {'poses': [first.tolist(), middle.tolist(), last.tolist()],
-             'provenance': {'segments': [{'full_frame_indices': [1]}]}}
+             'provenance': {'trajectory_order': 'picked', 'ordering_version': 1,
+                            'reference_frame_indices': [0, 2], 'segments': [{'full_frame_indices': [1]}]}}
     def run(command, **kw):
         if '--full-output' in command:
             phases.append('orbit')
             assert command[command.index('--metric-scale') + 1] == '2.5'
+            assert command[command.index('--trajectory-order') + 1] == 'picked'
             atomic_json(Path(command[command.index('--full-output') + 1]), {'frames': [
                 {'transform_matrix': (np.asarray(p) @ np.diag([1., -1., -1., 1.])).tolist()} for p in orbit['poses']]})
             atomic_json(Path(command[command.index('--provenance') + 1]), orbit['provenance'])

@@ -119,6 +119,8 @@ def repair_splat(cfg, args):
     if getattr(args, 'image_cache_insertion', None) is not None:
         runtime['image_cache_insertion'] = args.image_cache_insertion
     if method == 'artifixer':
+        if getattr(args, 'trajectory_order', None) is not None:
+            runtime['trajectory_order'] = args.trajectory_order
         if getattr(args, 'generated_context_references', None) is not None:
             runtime['generated_context_references'] = args.generated_context_references
         if getattr(args, 'correct_generated_pose', None) is not None:
@@ -229,6 +231,8 @@ def _add_stages(parser):
                         help="Use checkpoint policy or endpoint-only forward/reverse inference on two or more saved poses")
     repair.add_argument("--endpoint-reference-mode", choices=("both", "initial"))
     repair.add_argument("--mode", choices=("edited", "baseline"), default="edited")
+    repair.add_argument('--trajectory-order', choices=('picked', 'authors'),
+                        help='Checkpoint route: picked-pose order (default) or authors orbit ordering')
     repair.add_argument('--split-mode', choices=('single-split', 'double-split', 'no-split'), default='double-split',
                         help='Generate one continuous path (no-split), whole legs, or inward halves (default); normal runs retain all references')
     repair.add_argument('--handoff-generation', choices=('on', 'off', 'middle'), default=None,

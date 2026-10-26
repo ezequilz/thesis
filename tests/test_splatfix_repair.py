@@ -983,6 +983,7 @@ def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypa
         if '--full-output' in command:
             events.append('orbit')
             assert command[command.index('--split-mode') + 1] == 'double-split'
+            assert command[command.index('--trajectory-order') + 1] == 'picked'
             assert float(command[command.index('--metric-scale') + 1]) == 2.5
             source = json.loads(Path(command[command.index('--transforms') + 1]).read_text())
             poses = np.array([frame['transform_matrix'] for frame in source['frames']])
@@ -990,7 +991,7 @@ def test_author_orbit_scale_precedes_one_shared_temporal_path(tmp_path, monkeypa
             middle[:3, 3] = (poses[0, :3, 3] + poses[1, :3, 3]) / 2
             full = [pose @ np.diag([1., -1., -1., 1.]) for pose in [poses[0], middle, poses[1]]]
             Path(command[command.index('--full-output') + 1]).write_text(json.dumps({'frames': [{'transform_matrix': pose.tolist()} for pose in full]}))
-            Path(command[command.index('--provenance') + 1]).write_text(json.dumps({'implementation': 'authors fixture', 'source_transforms': str(source), 'segments': [{'target_indices': [0], 'full_frame_indices': [1], 'seed_full_frame_index': 0}]}))
+            Path(command[command.index('--provenance') + 1]).write_text(json.dumps({'implementation': 'authors fixture', 'trajectory_order': 'picked', 'ordering_version': 1, 'reference_frame_indices': [0, 2], 'source_transforms': str(source), 'segments': [{'target_indices': [0], 'full_frame_indices': [1], 'seed_full_frame_index': 0}]}))
             return
         phase = command[-1]
         events.append(phase)

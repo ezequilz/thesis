@@ -89,14 +89,57 @@ def test_multiple_spans_use_global_ids_and_unsorted_anchor_slots():
         connected.plan_legs(trajectory)
 
 
-def test_unsupported_lengths_and_ownership_fail_closed():
-    with pytest.raises(ValueError, match='maximum is 64'):
-        connected.plan_legs(trajectory_for(65))
-    trajectory = trajectory_for(64)
+@pytest.mark.parametrize('count', [65, 73, 108, 109, 202, 1000])
+def test_long_spans_use_complete_double_split_halves(count):
+    trajectory = trajectory_for(count)
+    plan, = connected.plan_legs(trajectory)
+    assert plan['generation_mode'] == 'double-split'
+    assert f'{count} poses' in plan['fallback_reason']
+    assert not any(plan[key] for key in ('target_indices', 'keep_indices', 'overlap_indices', 'reference_indices'))
+    assert plan['outer_generation_indices'] == [
+        [segment['seed_index'], *segment['indices']] for segment in trajectory['segments']]
+    assert sorted(i for side in plan['outer_generation_indices'] for i in side[1:]) == list(range(1, count - 1))
+
+
+def test_failed_runs_202_pose_layout_falls_back_only_for_73_pose_span():
+    anchor_slots = [0, 65, 159, 87, 201, 22]
+    ordered = sorted(anchor_slots)
+    trajectory = {'frames': [{}] * 202, 'anchors': [{'frame_index': i} for i in anchor_slots],
+                  'segments': [segment for left, right in zip(ordered, ordered[1:])
+                               for segment in trajectory_for(right - left + 1, offset=left)['segments']]}
+    plans = connected.plan_legs(trajectory)
+    assert [len(p['trajectory_indices']) for p in plans] == [23, 44, 23, 73, 43]
+    assert [p['leg_index'] for p in plans if p.get('generation_mode') == 'double-split'] == [3]
+    assert plans[3]['outer_generation_indices'] == [list(range(87, 124)), list(range(159, 123, -1))]
+    final = [i for p in plans for side in p['outer_generation_indices'] for i in side[1:] if i not in p['keep_indices']]
+    final += [i for p in plans for i in p['keep_indices']]
+    assert sorted(final) == [i for i in range(202) if i not in anchor_slots]
+
+
+def test_long_loop_fallback_keeps_wrapped_order_and_seed_endpoints():
+    trajectory = trajectory_for(11, offset=5)
+    trajectory['frames'] = [{}] * 84
+    trajectory['recipe'] = {'orbit': {'provenance': {'loop': True}}}
+    ordered = [*range(15, 84), *range(6)]
+    interior = ordered[1:-1]
+    middle = (len(interior) + 1) // 2
+    trajectory['segments'] += [
+        {'seed_index': 15, 'indices': interior[:middle]},
+        {'seed_index': 5, 'indices': interior[middle:][::-1]}]
+    short, long = connected.plan_legs(trajectory)
+    assert short['target_indices']
+    assert long['trajectory_indices'] == ordered
+    assert long['generation_mode'] == 'double-split'
+    assert long['outer_generation_indices'] == [[15, *interior[:middle]], [5, *interior[middle:][::-1]]]
+
+
+@pytest.mark.parametrize('count', [64, 73])
+def test_invalid_ownership_still_fails_closed(count):
+    trajectory = trajectory_for(count)
     trajectory['segments'][1]['indices'].pop()
     with pytest.raises(ValueError, match='double-split'):
         connected.plan_legs(trajectory)
-    trajectory = trajectory_for(64)
+    trajectory = trajectory_for(count)
     trajectory['frames'].append({})
     with pytest.raises(ValueError, match='open tails'):
         connected.plan_legs(trajectory)
@@ -197,12 +240,19 @@ def inference_fixture(tmp_path, monkeypatch, request):
             assert bool(item['valid_frames_mask'][0]) is (not seeded)
             assert np.all(item['opacity'][0] == (1 if seeded else .25))
         for i, valid in zip(indices, item['valid_frames_mask']):
-            if valid and not (is_bridge and state['missing_frame'] == i):
+            if valid and state['missing_frame'] != i:
                 color = 200 if is_bridge else 10 if indices[0] < count // 2 else 20
                 Image.new('RGB', (8, 8), (color, i, 0)).save(dest / f'{i:05d}.png')
         pipe.starter_inference_audit = {'encoded_starter_preserved': True}
     module('model_eval')
-    module('model_eval.run_inference', process_item=process,
+    # Model contract: one initial RGB + four per further latent, seven latents
+    # per block. Real upstream helpers are also exercised in the CPU replay.
+    def frame_padding(n, block, scale=4):
+        latents = 1 + (n - 1 + scale - 1) // scale
+        padded_latents = (latents + block - 1) // block * block
+        return 1 + (padded_latents - 1) * scale - n
+    module('model_eval.run_inference', process_item=process, compute_frame_padding=frame_padding,
+           compute_context_parallel_padding=lambda n, size, scale=4: (-(1 + (n - 1) // scale) % size) * scale,
            build_parser=lambda: SimpleNamespace(parse_args=lambda _: args), get_eval_pipe=lambda *a: pipe)
     module('model_eval.checkpoint_loading', load_transformer_checkpoint=lambda *a: None)
     module('model_training')
@@ -236,6 +286,95 @@ def inference_fixture(tmp_path, monkeypatch, request):
                  normal_sampler=normal_sampler, starter_sampler=starter_sampler, calls=calls, rays=rays,
                  events=events, seeds=seeds, missing_frame=None)
     return state
+
+
+@pytest.mark.parametrize('inference_fixture', [65, 73, 108, 109], indirect=True)
+@pytest.mark.parametrize('seeding,insertion', [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize('bridge_mode', ['off', 'seed', 'seed_preserve'])
+def test_long_fallback_keeps_full_halves_and_outer_seeding(inference_fixture, monkeypatch, seeding, insertion, bridge_mode):
+    f = inference_fixture
+    f['request']['runtime'].update(initial_image_seeding=seeding, image_cache_insertion=insertion,
+        connected_bridge_seeding=bridge_mode, generated_context_references=True)
+    def unexpected_bridge(*args, **kwargs):
+        pytest.fail('A long span must not enter the bridge sampler or preservation context')
+    monkeypatch.setattr(connected.bridge_seeding, 'single_block_cache', unexpected_bridge)
+    monkeypatch.setattr(connected.bridge_seeding, 'preserved_bridge', unexpected_bridge)
+    before = [connected.digest(path) for path in f['request']['references']]
+    official_worker.inference(f['root'], f['request'], f['trajectory'])
+    assert len(f['calls']) == 2
+    assert f['events'] == ['clear', 'generate', 'clear'] * 2
+    for call, rays, side in zip(f['calls'], f['rays'], f['plan']['outer_generation_indices']):
+        indices, item, _, sampler = call
+        assert indices == (side if seeding or insertion else side[1:])
+        assert sampler is (f['starter_sampler'] if insertion else f['normal_sampler'])
+        assert [i for i, valid in zip(indices, item['valid_frames_mask']) if valid] == side[1:]
+        padded_count = next(n for n in (25, 53, 81) if n >= len(indices))
+        assert rays[0] == indices + [indices[-1]] * (padded_count - len(indices))
+    prediction = f['root'] / 'inference/splatfix/frames/batch_0000/pred'
+    assert sorted(int(p.stem) for p in prediction.glob('*.png')) == list(range(1, f['count'] - 1))
+    for side, color in zip(f['plan']['outer_generation_indices'], [10, 20]):
+        assert all(Image.open(prediction / f'{i:05d}.png').getpixel((0, 0)) == (color, i, 0) for i in side[1:])
+    manifest = connected.validate_completed(f['root'], f['request'], f['trajectory'])
+    leg, = manifest['legs']
+    assert leg['status'] == 'complete' and leg['generation_mode'] == 'double-split'
+    assert not leg.get('overlaps') and not leg.get('seeding')
+    assert not (f['root'] / 'inference-connected/leg-000/bridge').exists()
+    assert [connected.digest(path) for path in f['request']['references']] == before
+    context = json.loads((f['root'] / 'inference-context.json').read_text())
+    assert context['complete'] and len(context['sequences']) == 2
+    assert context['sequences'][1]['required_reference_indices'] == f['plan']['outer_generation_indices'][0][-2:]
+
+
+@pytest.mark.parametrize('inference_fixture', [73], indirect=True)
+def test_long_fallback_rejects_a_missing_frame_even_with_old_outputs(inference_fixture):
+    f = inference_fixture
+    official_worker.inference(f['root'], f['request'], f['trajectory'])
+    f['missing_frame'] = 30  # Beyond the old 25-frame outer-call limit.
+    with pytest.raises(RuntimeError, match='outer call did not produce exactly 36 real'):
+        official_worker.inference(f['root'], f['request'], f['trajectory'])
+    with pytest.raises(ValueError, match='completion/settings mismatch'):
+        connected.validate_completed(f['root'], f['request'], f['trajectory'])
+
+
+@pytest.mark.parametrize('inference_fixture', [120], indirect=True)
+@pytest.mark.parametrize('join', [47, 72])
+def test_mixed_spans_bridge_short_and_fallback_long_with_full_coverage(inference_fixture, monkeypatch, join):
+    f = inference_fixture
+    first, second = trajectory_for(join + 1), trajectory_for(120 - join, offset=join)
+    trajectory = f['trajectory']
+    trajectory.update(anchors=[{'frame_index': i} for i in [119, 0, join]],
+                      segments=first['segments'] + second['segments'])
+    reference = f['root'] / f'ref-{join}.png'
+    Image.new('RGB', (8, 8), (100 + join, 0, 0)).save(reference)
+    f['request']['references'].append(str(reference))
+    f['request']['runtime'].update(generated_context_references=True, connected_bridge_seeding='seed')
+    calls = []
+    def process(pipe, item, args, output, *rest):
+        assert f['events'][-1] == 'clear'
+        f['events'].append('generate')
+        indices = item['frame_indices'].tolist()
+        calls.append(indices)
+        folder = output / 'splatfix/frames/batch_0000/pred'
+        folder.mkdir(parents=True)
+        for i, valid in zip(indices, item['valid_frames_mask']):
+            if valid:
+                Image.new('RGB', (8, 8), (200 if output.name == 'bridge' else 10, i, 0)).save(folder / f'{i:05d}.png')
+    monkeypatch.setattr(sys.modules['model_eval.run_inference'], 'process_item', process)
+    official_worker.inference(f['root'], f['request'], trajectory)
+    manifest = connected.validate_completed(f['root'], f['request'], trajectory)
+    assert len(calls) == 5
+    assert len(manifest['prediction_sha256']) == 117
+    assert all(leg['status'] == 'complete' for leg in manifest['legs'])
+    fallback, = [leg for leg in manifest['legs'] if leg.get('generation_mode') == 'double-split']
+    bridge, = [leg for leg in manifest['legs'] if leg['target_indices']]
+    assert len(fallback['trajectory_indices']) == 73
+    assert bridge['target_indices'] in calls
+    assert all(side in calls for side in fallback['outer_generation_indices'])
+    prediction = f['root'] / 'inference/splatfix/frames/batch_0000/pred'
+    for path in prediction.glob('*.png'):
+        assert Image.open(path).getpixel((0, 0))[0] == (200 if int(path.stem) in bridge['keep_indices'] else 10)
+    context = json.loads((f['root'] / 'inference-context.json').read_text())
+    assert context['complete'] and len(context['sequences']) == 5
 
 
 @pytest.mark.parametrize('inference_fixture', [3, 5, 12, 64], indirect=True)
@@ -429,6 +568,20 @@ def test_diagnostics_expose_both_sides_and_reject_external_images(tmp_path):
     assert leg['overlaps'][0]['url'] == '/safe/overlap.png'
 
 
+def test_diagnostics_identify_completed_double_split_fallback(tmp_path):
+    from splat_explorer.web.connected_details import connected_details
+    plan, = connected.plan_legs(trajectory_for(73))
+    (tmp_path / 'inference-connected.json').write_text(json.dumps({
+        'complete': True, 'legs': [{**plan, 'status': 'complete'}]}))
+    result = connected_details(SimpleNamespace(file_url=lambda p: '/safe/' + p.name), tmp_path / 'inference-preview.json')
+    leg, = result['passes'][0]['legs']
+    assert leg['status'] == 'complete'
+    assert leg['generation_mode'] == 'double-split' and leg['fallback_reason'] == plan['fallback_reason']
+    assert leg['bridge_count'] == leg['real_window_count'] == 0
+    assert leg['overlaps'] == []
+
+
+@pytest.mark.parametrize('inference_fixture', [64, 73], indirect=True)
 @pytest.mark.parametrize('bridge_mode', ['off', 'seed'])
 @pytest.mark.parametrize('generated_context', [False, True])
 def test_plus_uses_its_own_renders_and_generated_references(inference_fixture, monkeypatch, bridge_mode, generated_context):
@@ -440,7 +593,7 @@ def test_plus_uses_its_own_renders_and_generated_references(inference_fixture, m
     root = f['root']
     for folder in ('renders', 'opacity'):
         (root / folder).mkdir()
-        for i in range(64):
+        for i in range(f['count']):
             color = (1, i, 0) if folder == 'renders' else (64, 64, 64)
             Image.new('RGB', (8, 8), color).save(root / folder / f'{i:05d}.png')
     (root / 'distillation.json').write_text(json.dumps({'render_dir': str(root)}))

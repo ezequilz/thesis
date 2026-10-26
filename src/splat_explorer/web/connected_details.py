@@ -16,7 +16,8 @@ def connected_details(studio, manifest):
         entry = {'phase': phase, 'complete': data.get('complete', False),
                  'metadata_url': studio.file_url(path), 'legs': []}
         for leg in data.get('legs', []):
-            item = {key: leg.get(key) for key in ('leg_index', 'status', 'skip_reason', 'boundary_mae', 'seeding')}
+            item = {key: leg.get(key) for key in ('leg_index', 'status', 'skip_reason',
+                    'generation_mode', 'fallback_reason', 'boundary_mae', 'seeding')}
             item.update(real_window_count=len(leg.get('target_indices', [])),
                         bridge_count=len(leg.get('keep_indices', [])), padding_count=leg.get('padding_count', 0))
             item['overlaps'] = []

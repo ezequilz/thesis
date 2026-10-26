@@ -41,6 +41,7 @@ DEFAULT_RUNTIME = {
     'connected_trajectory_generation': True,
     'connected_bridge_seeding': 'seed',
     'generated_context_references': True,
+    'trajectory_order': 'picked',
     'repo': '/workspace/third_party/ArtiFixer',
     'python': '/workspace/artifixer-venv/bin/python',
     'checkpoint': '/workspace/models/artifixer/artifixer-1.3b.pt',
@@ -95,6 +96,8 @@ def digest_file(path):
 
 def validate_runtime(runtime=None):
     cfg = {**DEFAULT_RUNTIME, **(runtime or {})}
+    from .author_trajectory import validate_trajectory_order
+    cfg['trajectory_order'] = validate_trajectory_order(cfg['trajectory_order'])
     if type(cfg.get('correct_generated_pose', False)) is not bool:
         raise ValueError('correct_generated_pose must be a boolean')
     from .connected_trajectory import configure
@@ -310,12 +313,17 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
         if poses.ndim != 3 or poses.shape[1:] != (4, 4) or not np.isfinite(poses).all():
             raise ValueError('Invalid authored camera orbit')
         cameras = [replace(anchors[0], position=pose[:3, 3], rotation=pose[:3, :3]) for pose in poses]
-        anchor_indices = []
-        for camera in anchors:
-            matches = [i for i, pose in enumerate(poses) if np.array_equal(pose, camera.c2w)]
-            if not matches or (not cp.endpoint_only and len(matches) != 1):
-                raise ValueError('Authored orbit must contain every saved anchor exactly once')
-            anchor_indices.append(matches[0])
+        if not cp.endpoint_only and (orbit['provenance'].get('trajectory_order') == 'picked'
+                                     or (runtime or {}).get('trajectory_order') == 'picked'):
+            from .author_trajectory import picked_reference_indices
+            anchor_indices = picked_reference_indices(poses, [c.c2w for c in anchors], orbit['provenance'])
+        else:
+            anchor_indices = []
+            for camera in anchors:
+                matches = [i for i, pose in enumerate(poses) if np.array_equal(pose, camera.c2w)]
+                if not matches or (not cp.endpoint_only and len(matches) != 1):
+                    raise ValueError('Authored orbit must contain every saved anchor exactly once')
+                anchor_indices.append(matches[0])
     if cp.endpoint_only:
         if orbit and (not np.array_equal(poses[0], anchors[0].c2w)
                       or not np.array_equal(poses[-1], anchors[-1].c2w)):
@@ -543,13 +551,15 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
     from .pipeline_profile import rgb_backend, geometry_backend, apply_pipeline
     effective_runtime = {**(runtime or {}), 'split_mode': split_mode}
     if cp.endpoint_only:
-        effective_runtime.update(image_trajectory='endpoints', connected_trajectory_generation=False)
+        effective_runtime.update(image_trajectory='endpoints', connected_trajectory_generation=False,
+                                 trajectory_order='picked')
     if trajectory_mode != 'authors_orbit':
         if effective_runtime.get('connected_trajectory_generation'):
             raise ValueError('Connected trajectory generation requires authors-orbit trajectories')
         effective_runtime['connected_trajectory_generation'] = False
     if repeat:
         # Historical repeats must not silently acquire a new inference algorithm.
+        effective_runtime['trajectory_order'] = repeat['runtime'].get('trajectory_order', 'authors')
         effective_runtime['connected_trajectory_generation'] = repeat['runtime'].get('connected_trajectory_generation', False)
         effective_runtime['connected_bridge_seeding'] = repeat['runtime'].get('connected_bridge_seeding', 'off')
         effective_runtime['generated_context_references'] = repeat['runtime'].get('generated_context_references', False)
@@ -688,6 +698,7 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                 command = [cfg['python'], str(Path(__file__).with_name('author_trajectory.py')),
                     *(['--endpoint-path'] if cp.endpoint_only else []),
                     '--split-mode', split_mode,
+                    '--trajectory-order', cfg['trajectory_order'],
                     '--repo', cfg['repo'], '--transforms', str(root / 'anchor-transforms.json'),
                     '--selected-indices', str(root / 'anchor-indices.json'),
                     '--metric-scale', str(request['camera_scale'] / .01),

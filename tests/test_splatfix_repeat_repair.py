@@ -27,7 +27,7 @@ def fixture(tmp_path):
     atomic_json(cp.root / 'trajectory.json', {'recipe': {'orbit': orbit}})
     atomic_json(result / 'request.json', {'checkpoint_root': str(cp.root),
         'trajectory': str(cp.root / 'trajectory.json'), 'trajectory_mode': 'authors_orbit',
-        'runtime': {**repair.DEFAULT_RUNTIME, 'initial_image_seeding': False, 'connected_trajectory_generation': False},
+        'runtime': {**repair.DEFAULT_RUNTIME, 'trajectory_order': 'authors', 'initial_image_seeding': False, 'connected_trajectory_generation': False},
         'seed': 123, 'camera_scale': .027, 'mode': 'baseline'})
     row = {'id': 'result-id', 'run_id': 'prior', 'kind': 'ArtiFixer3D',
            '_manifest': result / 'result.json', '_paths': {'repaired': result / 'output.ply'}, 'repair_pass': 2}
@@ -106,6 +106,20 @@ def test_repeat_preserves_generated_context_policy(tmp_path, setting):
     root = tmp_path / 'repeat'; root.mkdir()
     info = snapshot_repeat(studio, row, root)
     assert info['runtime']['generated_context_references'] is (setting is True)
+
+
+@pytest.mark.parametrize('setting', [None, 'picked', 'authors'])
+def test_repeat_preserves_order_and_historical_author_default(tmp_path, setting):
+    _, row, studio, _ = fixture(tmp_path)
+    path = row['_manifest'].parent / 'request.json'
+    request = json.loads(path.read_text())
+    request['runtime'].pop('trajectory_order', None)
+    if setting is not None:
+        request['runtime']['trajectory_order'] = setting
+    atomic_json(path, request)
+    root = tmp_path / 'repeat'; root.mkdir()
+    info = snapshot_repeat(studio, row, root)
+    assert info['runtime']['trajectory_order'] == (setting or 'authors')
 
 
 @pytest.mark.parametrize('rebuild', [False, True])

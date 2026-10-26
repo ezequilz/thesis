@@ -182,7 +182,8 @@ def make_plan(cp, runtime, output, count=205):
     for t in np.linspace(0, 1, count):
         pose = left.copy(); pose[:3, 3] = left[:3, 3] * (1-t) + right[:3, 3] * t
         poses.append(pose.tolist())
-    return build(prepared, runtime, {'poses': poses, 'provenance': {'segments': [
+    return build(prepared, runtime, {'poses': poses, 'provenance': {
+        'trajectory_order': 'picked', 'ordering_version': 1, 'reference_frame_indices': [0, count-1], 'segments': [
         {'full_frame_indices': list(range(1, count-1))}]}},
         {'camera_scale': .025, 'camera_scale_provenance': 'official MoGe fixture'})
 
@@ -210,6 +211,34 @@ def test_all_205_source_frames_precede_full_staging_and_replay_needs_no_viewer(s
     monkeypatch.setattr(preflight, 'CaptureSession', lambda *a, **kw: pytest.fail('Future run must reuse all RGBs'))
     again = preflight.prepare_source_captures(cp, runtime, root)
     assert again['source_plan'] and again['captured_frames'] == 0 and again['trajectory_frames'] == 205
+
+
+def test_order_policy_separates_source_plans_without_recapturing_anchors(source, monkeypatch):
+    cp, root, runtime, captures, _ = source
+    from splat_explorer.splatfix.artifixer import source_plan
+    preflight.prepare_source_captures(cp, runtime, root)
+    plan = make_plan(cp, runtime, root / 'prepared', count=5)
+    first = preflight.prepare_source_captures(cp, runtime, root, source_plan=plan)
+    before = len(captures)
+    assert first['source_plan']
+    monkeypatch.setattr(preflight, 'CaptureSession', lambda *a, **kw: pytest.fail('Reuse the exact cached RGBs'))
+    authors = {**runtime, 'trajectory_order': 'authors'}
+    fallback = preflight.prepare_source_captures(cp, authors, root)
+    assert fallback['source_plan'] is None and fallback['trajectory_frames'] == 0
+    assert len(captures) == before
+    prepared = prepare_repair_checkpoint(cp, root / 'validate', runtime['resolution_profile'],
+        artifixer_runtime=runtime, reuse_artifixer_inputs=True)
+    assert source_plan.signature(source_plan.identity(prepared, runtime)) != source_plan.signature(source_plan.identity(prepared, authors))
+    with pytest.raises(ValueError, match='geometry settings'):
+        source_plan.validate(plan, prepared, authors)
+    # An old source plan cannot masquerade as a new picked-order plan, even
+    # when a two-camera path happens to have identical endpoint positions.
+    old = copy.deepcopy(plan)
+    old['identity'].pop('trajectory_order'); old['identity']['version'] = 1
+    old['sha256'] = source_plan.signature({k: v for k, v in old.items() if k != 'sha256'})
+    with pytest.raises(ValueError, match='geometry settings'):
+        source_plan.validate(old, prepared, runtime)
+    assert preflight.prepare_source_captures(cp, runtime, root)['source_plan'] == first['source_plan']
 
 
 def test_lean_checkpoint_omits_large_trajectory_cache_and_unselected_images(source):

@@ -404,6 +404,7 @@ class SplatfixStudio(SceneRunStudio):
                 if options['reconstruction_method'] != 'artifixer' or options['mode'] != 'edited':
                     raise ValueError('Endpoint checkpoints require GPT-repaired ArtiFixer runs')
                 options['split_mode'] = 'no-split'
+                options['trajectory_order'] = 'picked'
                 options['connected_trajectory_generation'] = False
             if options['stage'] == 'edit' and options.get('image_set') == '77':
                 from ..splatfix.oraclegs.captures import capture_77

@@ -49,8 +49,9 @@ def configure(options, *, default=True):
 def plan_legs(trajectory):
     """Keep inward halves; bridge a centered middle third plus real overlaps.
 
-    Spans include both endpoint cameras. Upstream pads each logical window to
-    one 25-RGB block; padding never becomes trajectory ownership.
+    Spans include both endpoint cameras. Spans above MAX_POSES use complete
+    double-split halves without a bridge. Shorter bridge windows fit one 25-RGB
+    block; padding never becomes trajectory ownership.
     """
     count = len(trajectory['frames'])
     anchors = sorted(a['frame_index'] for a in trajectory['anchors'])
@@ -66,17 +67,20 @@ def plan_legs(trajectory):
     expected, plans = [], []
     for leg, ordered in enumerate(spans):
         n = len(ordered)
-        if n > MAX_POSES:
-            raise ValueError(f'Connected trajectory {leg} has {n} poses; maximum is {MAX_POSES}. '
-                             'Use shorter trajectories or disable connected trajectory generation.')
+        fallback = n > MAX_POSES
         interior = ordered[1:-1]
         midpoint = (len(interior) + 1) // 2
         halves = [(ordered[0], interior[:midpoint]), (ordered[-1], interior[midpoint:][::-1])]
         expected.extend((seed, targets) for seed, targets in halves if targets)
-        outer = [[seed, *targets[:BLOCK_FRAMES - 1]] for seed, targets in halves if targets]
+        outer = [[seed, *(targets if fallback else targets[:BLOCK_FRAMES - 1])]
+                 for seed, targets in halves if targets]
         plan = {'leg_index': leg, 'trajectory_indices': ordered, 'outer_generation_indices': outer,
                 'target_indices': [], 'keep_indices': [], 'overlap_indices': [], 'reference_indices': []}
-        if n >= 3:
+        if fallback:
+            plan.update(generation_mode='double-split', fallback_reason=(
+                f'{n} poses exceeds the {MAX_POSES}-pose bridge limit; '
+                'generate both complete inward halves with normal double-split'))
+        elif n >= 3:
             bridge_count = max(1, min(n - 2, (n + 1) // 3))
             start = (n - bridge_count) // 2
             stop = start + bridge_count
@@ -177,7 +181,7 @@ def validate_completed(root, request, trajectory):
     legs = manifest.get('legs', [])
     if len(legs) != len(plans) or any(
             leg.get('leg_index') != plan['leg_index'] or
-            leg.get('status') != ('complete' if plan['target_indices'] else 'skipped')
+            leg.get('status') != ('complete' if plan['outer_generation_indices'] else 'skipped')
             for leg, plan in zip(legs, plans)):
         raise ValueError('Connected inference contains unfinished legs')
     anchors = {a['frame_index'] for a in trajectory['anchors']}
@@ -203,15 +207,17 @@ def trajectory_digest(trajectory):
 
 def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, cameras,
         normal_sampler, plans=None, plus=False):
-    """Generate both outer legs, then publish only the dynamic middle third.
+    """Generate inward legs, bridging only spans within the connected limit.
 
-    Each block gets fresh temporal, prompt and reference caches. Seeding is a
-    bridge-specific option, independent of the outer-leg starter mechanism.
+    Each independent call gets fresh temporal, prompt and reference caches.
+    Long fallback halves keep normal autoregressive caches across their blocks.
+    Bridge seeding is independent of the outer-leg starter mechanism.
     """
     import numpy as np
     import torch
     from PIL import Image
-    from model_eval.run_inference import process_item
+    from model_eval.run_inference import (process_item, compute_frame_padding,
+                                          compute_context_parallel_padding)
     from model_training.data.utils import compute_camera_rays
 
     plans = plan_legs(trajectory) if plans is None else plans
@@ -289,7 +295,12 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
         # Compute padded camera groups from the repeated final *RGB pose*, not
         # by repeating an average of the last few real cameras. process_item
         # pads RGB/opacity itself and trims those synthetic outputs afterward.
-        camera_indices = indices + [indices[-1]] * (BLOCK_FRAMES - len(indices))
+        # Use the same upstream sizing as process_item, including multi-block
+        # fallback halves (25, 53, 81, ... RGB frames for seven-latent blocks).
+        padding = compute_frame_padding(len(indices), pipe.frames_per_block, 4)
+        padding += compute_context_parallel_padding(
+            len(indices) + padding, getattr(pipe.transformer, '_cp_world_size', 1), 4)
+        camera_indices = indices + [indices[-1]] * padding
         item.update(compute_camera_rays(cameras, camera_indices, reference_ids,
                     scale=request['camera_scale'], image_shape=renders.shape[-2:], skip_vae_check=True))
         torch.manual_seed(noise_seed)
@@ -336,6 +347,8 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
             archive = root / f'{phase}-connected' / f'leg-{leg:03d}'
             archive.mkdir(parents=True, exist_ok=True)
             print(f'CONNECTED_OUTER: {phase} leg {leg}, {len(plan["trajectory_indices"])} poses', flush=True)
+            if plan.get('fallback_reason'):
+                print(f'CONNECTED_FALLBACK: {phase} leg {leg}: {plan["fallback_reason"]}', flush=True)
             previous_tail = []
             for direction, indices in enumerate(plan['outer_generation_indices']):
                 seed = indices[0]
@@ -360,7 +373,8 @@ def run(root, request, trajectory, *, pipe, args, device, encoded_prompt, camera
                                           if request['runtime'].get('image_cache_insertion', False) else None),
                                       'export_global_indices': indices[1:]})
             if not plan['target_indices']:
-                manifest['legs'].append({**plan, 'status': 'skipped'})
+                manifest['legs'].append({**plan, 'status': (
+                    'complete' if plan['outer_generation_indices'] else 'skipped')})
                 write_json(manifest_path, manifest)
                 continue
             # Snapshot outer predictions before replacing any interior images.

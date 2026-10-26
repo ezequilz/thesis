@@ -180,6 +180,7 @@ def snapshot_repeat(studio, row, destination):
     runtime.setdefault('connected_trajectory_generation', False)
     runtime.setdefault('connected_bridge_seeding', 'off')
     runtime.setdefault('generated_context_references', False)
+    runtime.setdefault('trajectory_order', 'authors')
     for key in ('scene_path', 'source_points3d', 'worldexplorer_source', 'repeat_from',
                 'source_rgb_prepared', 'source_anchor_capture_signature'):
         runtime.pop(key, None)
@@ -202,6 +203,6 @@ def validate_rebuilt_provenance(expected, actual):
     """Do not silently run a different orbit when replaying historical inputs."""
     for key in ('implementation', 'split_mode', 'repair_policy', 'series_policy',
                 'reference_frame_indices', 'frames', 'segments', 'metric_scale',
-                'requested_spacing', 'effective_spacing', 'loop'):
+                'requested_spacing', 'effective_spacing', 'loop', 'trajectory_order', 'ordering_version', 'leg_spacing'):
         if key in (expected or {}) and actual.get(key) != expected[key]:
             raise ValueError(f'Rebuilt orbit differs from the saved run: {key}')

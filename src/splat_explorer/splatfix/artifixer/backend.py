@@ -27,6 +27,8 @@ def validate_options(raw):
             raise ValueError('benchmark_runs must be a positive integer')
         result['benchmark_runs'] = runs
     if raw['stage'] == 'repair':
+        from .author_trajectory import validate_trajectory_order
+        result['trajectory_order'] = validate_trajectory_order(raw.get('trajectory_order', 'picked'))
         from .handoff import enabled, context_mode, backward_enabled, handoff_type
         result['handoff_generation'] = enabled(raw)
         result['handoff_type'] = handoff_type(raw)
@@ -48,6 +50,7 @@ def validate_options(raw):
         result['image_trajectory'] = validate_image_trajectory(raw.get('image_trajectory', 'checkpoint'))
         if result['image_trajectory'] == 'endpoints':
             result['split_mode'] = 'no-split'
+            result['trajectory_order'] = 'picked'
         from .connected_trajectory import configure
         result['connected_trajectory_generation'] = configure({**raw, **result})
         from .bridge_seeding import mode as bridge_seeding_mode
@@ -90,7 +93,7 @@ def readiness(checkpoint):
     reason = ('Finish selecting all views before reconstruction' if not checkpoint.complete
               else 'Authors smooth orbit requires at least two distinct saved camera poses' if distinct < 2
               else 'Saved anchor poses must be distinct for authors smooth orbit' if distinct != len(checkpoint.views)
-              else 'Saved cameras are ready for authors smooth orbit')
+              else 'Saved cameras are ready for trajectory generation')
     return {'ready': ready, 'reason': reason}
 
 

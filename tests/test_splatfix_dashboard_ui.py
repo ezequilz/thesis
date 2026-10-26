@@ -54,6 +54,16 @@ Promise.resolve(vm.runInContext(`(async()=>{
   $('connected-bridge-seeding').value='seed';
 
   assert.equal(payload('repair').split_mode,'double-split');
+  assert.equal(payload('repair').trajectory_order,'picked');
+  $('trajectory-order').value='authors';
+  assert.equal(payload('repair').trajectory_order,'authors');
+  assert.equal(payload('benchmark').trajectory_order,undefined);
+  updateEndpointControls(true);
+  assert.equal($('trajectory-order').disabled,true);
+  assert.equal(payload('repair').trajectory_order,'picked');
+  updateEndpointControls(false);
+  assert.equal(payload('repair').trajectory_order,'authors');
+  $('trajectory-order').value='picked';
   $('connected-trajectory-generation').value='off';
   assert.equal(payload('repair').connected_trajectory_generation,false);
   updateConnectedControls();

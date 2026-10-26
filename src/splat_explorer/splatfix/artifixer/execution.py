@@ -140,6 +140,9 @@ def execute_remote(executor, run_id, options, root, stop, update):
         runtime['resolution_profile'] = options['resolution_profile']
         runtime['regularization_profile'] = options.get('regularization_profile', 'artifixer')
         runtime['split_mode'] = 'no-split' if cp is not None and cp.endpoint_only else options.get('split_mode', 'double-split')
+        # New validated jobs explicitly carry picked order. Missing fields in
+        # historical jobs retain the authors' orbit policy.
+        runtime['trajectory_order'] = 'authors' if benchmark else options.get('trajectory_order', 'authors')
         runtime['image_trajectory'] = options.get('image_trajectory', 'checkpoint')
         runtime['endpoint_reference_mode'] = options.get('endpoint_reference_mode', 'both')
         if not benchmark:
@@ -171,6 +174,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
             # Recorded effective runtime wins over current dashboard/server defaults.
             repeat = json.loads((cp.root / 'repeat-repair.json').read_text())
             runtime = dict(repeat['runtime'])
+            runtime.setdefault('trajectory_order', 'authors')
         # Capture completion belongs to this run/source, not to a repeated
         # reconstruction's inherited model settings.
         for key in ('source_rgb_prepared', 'source_anchor_capture_signature'):
