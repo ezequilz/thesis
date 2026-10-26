@@ -241,7 +241,15 @@ def prepare_repair_checkpoint(checkpoint, output, profile=DEFAULT_PROFILE, *,
                         lod_level=metadata.get('scene_load', {}).get('lod_level', 0), should_stop=should_stop)
     if reuse_artifixer_inputs:
         from .artifixer.staging_cache import capture_inputs, restore_geometry
-        cache = capture_inputs(checkpoint, cameras, destinations, capture, profile=profile, renderer=backend)
+        cache = capture_inputs(checkpoint, cameras, destinations, capture, profile=profile, renderer=backend,
+            cache_signature=(artifixer_runtime or {}).get('source_anchor_capture_signature'))
+        # Replay the camera records that actually produced these pixels. This
+        # keeps plan identity and all later trajectory cache keys identical on
+        # the desktop and GPU, even if their FOV arithmetic differs by an ULP.
+        import json
+        saved_cameras = json.loads((cache / 'captures.json').read_text())['recipe']['cameras']
+        for view, camera in zip(manifest['views'], saved_cameras):
+            view['camera'] = copy.deepcopy(camera)
         if restore_cached_geometry:
             restore_geometry(cache, root)
         metadata['artifixer_input_cache'] = str(cache)

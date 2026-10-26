@@ -2,6 +2,8 @@
 import errno
 import hashlib
 import json
+import math
+import re
 import shutil
 import tempfile
 
@@ -59,7 +61,34 @@ def compatible_trajectory(cache, recipe):
     return None
 
 
-def capture_inputs(checkpoint, cameras, destinations, capture, *, profile, renderer='viser'):
+def compatible_capture_recipe(saved, requested):
+    """Allow only FOV evaluation roundoff with identical calibrated rays/poses.
+
+    NumPy/libm on macOS and Linux can differ by a few float64 ULPs when
+    converting focal length back to FOV. The renderer's float32 intrinsics,
+    positions, rotations and every other recipe field must still match exactly.
+    Keep the saved camera record authoritative after a compatible cache hit.
+    """
+    if {k: v for k, v in saved.items() if k != 'cameras'} != {
+            k: v for k, v in requested.items() if k != 'cameras'}:
+        return False
+    previous, current = saved.get('cameras', []), requested.get('cameras', [])
+    if not previous or len(previous) != len(current):
+        return False
+    for old, new in zip(previous, current):
+        if {k: v for k, v in old.items() if k != 'fov_deg'} != {
+                k: v for k, v in new.items() if k != 'fov_deg'}:
+            return False
+        a, b = old.get('fov_deg'), new.get('fov_deg')
+        if (not isinstance(a, (int, float)) or not isinstance(b, (int, float))
+                or not math.isfinite(a) or not math.isfinite(b)
+                or abs(a - b) > 8 * max(math.ulp(a), math.ulp(b))):
+            return False
+    return True
+
+
+def capture_inputs(checkpoint, cameras, destinations, capture, *, profile, renderer='viser',
+                   cache_signature=None):
     if len(cameras) != len(destinations) or not cameras:
         raise ValueError('Capture cameras and destinations must match and be nonempty')
     metadata = checkpoint.manifest.get('metadata', {})
@@ -72,11 +101,27 @@ def capture_inputs(checkpoint, cameras, destinations, capture, *, profile, rende
         from .repair import UPSTREAM_REVISION
         recipe['upstream_revision'] = UPSTREAM_REVISION
     signature = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
+    if cache_signature is not None:
+        if not isinstance(cache_signature, str) or not re.fullmatch('[0-9a-f]{64}', cache_signature):
+            raise ValueError('Invalid prepared source anchor capture signature')
+        signature = cache_signature
     root = checkpoint.root / 'artifixer-inputs' / signature
     marker = root / 'captures.json'
+    if cache_signature is not None and not marker.is_file():
+        raise ValueError(f'Prepared source anchor capture cache is missing: {signature}')
+    if not marker.is_file():
+        # Backward-compatible lookup also recovers already-staged runs which
+        # predate the explicit cache binding in worker requests.
+        for candidate in sorted(root.parent.glob('*/captures.json')):
+            saved = json.loads(candidate.read_text())
+            if compatible_capture_recipe(saved.get('recipe', {}), recipe):
+                root, marker = candidate.parent, candidate
+                break
     if marker.is_file():
         saved = json.loads(marker.read_text())
-        if saved['recipe'] != recipe or len(saved['sha256']) != len(destinations):
+        stored_signature = hashlib.sha256(json.dumps(saved['recipe'], sort_keys=True).encode()).hexdigest()
+        if (root.name != stored_signature or not compatible_capture_recipe(saved['recipe'], recipe)
+                or len(saved['sha256']) != len(destinations)):
             raise ValueError('Invalid saved ArtiFixer capture recipe')
         for index, (destination, expected) in enumerate(zip(destinations, saved['sha256'])):
             source = root / f'{index:05d}.png'
@@ -105,7 +150,8 @@ def capture_inputs(checkpoint, cameras, destinations, capture, *, profile, rende
                 if not marker.is_file():
                     raise ValueError('Incomplete saved ArtiFixer capture cache') from exc
                 # Another repair published the same immutable camera recipe.
-                return capture_inputs(checkpoint, cameras, destinations, capture, profile=profile, renderer=renderer)
+                return capture_inputs(checkpoint, cameras, destinations, capture, profile=profile,
+                                      renderer=renderer, cache_signature=cache_signature)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)

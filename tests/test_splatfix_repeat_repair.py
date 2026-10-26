@@ -82,6 +82,18 @@ def test_repeat_does_not_inherit_new_connected_default(tmp_path, setting, seedin
     assert info['runtime']['connected_bridge_seeding'] == (seeding or 'off')
 
 
+def test_repeat_does_not_inherit_completion_or_cache_binding_for_parent_splat(tmp_path):
+    _, row, studio, _ = fixture(tmp_path)
+    request_path = row['_manifest'].parent / 'request.json'
+    request = json.loads(request_path.read_text())
+    request['runtime'].update(source_rgb_prepared=True, source_anchor_capture_signature='a' * 64)
+    atomic_json(request_path, request)
+    root = tmp_path / 'repeat'; root.mkdir()
+    info = snapshot_repeat(studio, row, root)
+    assert 'source_rgb_prepared' not in info['runtime']
+    assert 'source_anchor_capture_signature' not in info['runtime']
+
+
 @pytest.mark.parametrize('setting', [None, False, True])
 def test_repeat_preserves_generated_context_policy(tmp_path, setting):
     _, row, studio, _ = fixture(tmp_path)

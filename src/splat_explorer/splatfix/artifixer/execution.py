@@ -171,6 +171,10 @@ def execute_remote(executor, run_id, options, root, stop, update):
             # Recorded effective runtime wins over current dashboard/server defaults.
             repeat = json.loads((cp.root / 'repeat-repair.json').read_text())
             runtime = dict(repeat['runtime'])
+        # Capture completion belongs to this run/source, not to a repeated
+        # reconstruction's inherited model settings.
+        for key in ('source_rgb_prepared', 'source_anchor_capture_signature'):
+            runtime.pop(key, None)
         preflight = None
         if cp is not None:
             from .preflight import prepare_source_captures
@@ -254,6 +258,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
                        'runtime': runtime, **{k: options[k] for k in ('mode', 'frames', 'span_fraction')}}
             if preflight:
                 runtime['source_rgb_prepared'] = True
+                runtime['source_anchor_capture_signature'] = Path(preflight['input_cache']).name
                 request['source_checkpoint_sha256'] = preflight['checkpoint_sha256']
                 request['prepare_source_first'] = lean
                 if preflight.get('source_plan'):

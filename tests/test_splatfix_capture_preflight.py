@@ -304,3 +304,5 @@ def test_executor_stages_lean_plans_captures_all_then_stages_full(source, monkey
     assert stages == ['lean', 'plan', 'full', 'released']
     request = json.loads((root / 'worker-request.json').read_text())
     assert request['prepare_source_first'] and request['runtime']['source_rgb_prepared']
+    assert request['runtime']['source_anchor_capture_signature'] == Path(
+        json.loads((root / 'source-capture-preflight.json').read_text())['input_cache']).name
