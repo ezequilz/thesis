@@ -141,6 +141,10 @@ def repair_splat(cfg, args):
         for key in ('reconstruction_images', 'reconstruction_initialization', 'prompt_source', 'artifixer_pipeline'):
             if getattr(args, key, None) is not None:
                 runtime[key] = getattr(args, key)
+    if method == 'artifixer':
+        for key in ('inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution'):
+            if getattr(args, key, None) is not None:
+                runtime[key] = getattr(args, key)
     for key in ("repo", "python", "checkpoint", "model_id", "hf_home", "source_points3d"):
         value = getattr(args, "artifixer_" + key, None)
         if value is not None:
@@ -263,6 +267,10 @@ def _add_stages(parser):
                         help="Explicit manual camera multiplier; default measures scale with cached official MoGe alignment")
     for key in ("repo", "python", "checkpoint", "model_id", "hf_home", "source_points3d"):
         repair.add_argument("--artifixer-" + key.replace("_", "-"), dest="artifixer_" + key)
+    repair.add_argument('--inference-model', choices=('1.3b', '14b', '14b-teacher'), default=None)
+    repair.add_argument('--teacher-resolution', choices=('480p', 'native'), default=None)
+    repair.add_argument('--teacher-max-frames', type=int, default=None)
+    repair.add_argument('--teacher-steps', type=int, default=None)
     repair.set_defaults(func=repair_splat)
     inspect = stages.add_parser("inspect", help="Print checkpoint metadata without network calls")
     inspect.add_argument("checkpoint", type=Path)

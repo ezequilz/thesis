@@ -5,6 +5,10 @@ GPU reconstruction. It is independent of the old artifact-hunting loop.
 Step 4 selects a reconstruction method. ArtiFixer and G4Splat are registered as independent sibling backends.
 See [G4Splat setup and output semantics](g4splat.md).
 
+ArtiFixer Step 4 also offers an experimental **14B bidirectional teacher** with
+independent inference resolution, clip length and diffusion-step controls.
+See [teacher setup, memory limits and sampling differences](artifixer-14b-loading.md).
+
 Step 3 defaults to shared native Thinking for six-view all-view checkpoints.
 For other counts, endpoint checkpoints, or explicitly selected sequential mode,
 **Supply initial repair as context** is the default sequential context.

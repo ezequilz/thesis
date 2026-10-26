@@ -96,12 +96,15 @@ def digest_file(path):
 
 def validate_runtime(runtime=None):
     cfg = {**DEFAULT_RUNTIME, **(runtime or {})}
+    from .inference_policy import model_runtime
+    cfg = model_runtime(cfg)
     from .author_trajectory import validate_trajectory_order
     cfg['trajectory_order'] = validate_trajectory_order(cfg['trajectory_order'])
     if type(cfg.get('correct_generated_pose', False)) is not bool:
         raise ValueError('correct_generated_pose must be a boolean')
     from .connected_trajectory import configure
-    cfg['connected_trajectory_generation'] = configure(runtime or {})
+    cfg['connected_trajectory_generation'] = configure(
+        cfg if cfg['inference_model'] == '14b-teacher' else runtime or {})
     from .bridge_seeding import mode as bridge_seeding_mode
     cfg['connected_bridge_seeding'] = bridge_seeding_mode(cfg)
     from .generated_context import enabled as context_enabled

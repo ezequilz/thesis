@@ -1,7 +1,7 @@
 """GPU adapter with exact ArtiFixer defaults and optional MCMC regularization.
 
 Executed in a clean pinned ArtiFixer environment, independently of splatfix's
-Python environment. This file intentionally imports no scene_runs_ext patches.
+Python environment. Samplers remain upstream; model loading is shared with setup.
 """
 from __future__ import annotations
 import argparse
@@ -811,6 +811,20 @@ def inference(root, request, trajectory, plus=False):
     encoded_prompt, _ = load_encoded_prompt([Path(request['caption_path'])])
     cfg = request['runtime']
     if __package__:
+        from .inference_policy import model_runtime
+    else:
+        from inference_policy import model_runtime
+    cfg = model_runtime(cfg)
+    request = {**request, 'runtime': cfg}
+    if cfg['inference_model'] == '14b-teacher':
+        if __package__:
+            from .teacher_inference import run as run_teacher
+        else:
+            from teacher_inference import run as run_teacher
+        run_teacher(root, request, trajectory, plus=plus)
+        finish_inference(root, request, cfg, root / ('plus' if plus else 'inference'), plus=plus)
+        return
+    if __package__:
         from . import connected_trajectory, generated_context
     else:
         import connected_trajectory
@@ -851,8 +865,15 @@ def inference(root, request, trajectory, plus=False):
     ])  # Insertion off retains the authors' inference defaults.
     torch.manual_seed(request['seed'])
     device = torch.device('cuda:0')
-    pipe = get_eval_pipe(args, device)
-    load_transformer_checkpoint(pipe.transformer, args)
+    if cfg['inference_model'] == '14b':
+        if __package__:
+            from .teacher_inference import load_pipe
+        else:
+            from teacher_inference import load_pipe
+        pipe = load_pipe(args, device)
+    else:
+        pipe = get_eval_pipe(args, device)
+        load_transformer_checkpoint(pipe.transformer, args)
     pipe.transformer.eval().requires_grad_(False)
     normal_sampler = pipe.generate_samples_from_batch if connected else None
     if insertion:
@@ -1032,9 +1053,19 @@ def inference(root, request, trajectory, plus=False):
                                  device=device, encoded_prompt=encoded_prompt, cameras=cameras, plus=plus, memory=memory)
     if memory is not None:
         memory.finish()
+    finish_inference(root, request, cfg, output, plus=plus, handoff=handoff,
+                     connected=connected, insertion=insertion, seeding_audits=seeding_audits)
+
+
+def finish_inference(root, request, cfg, output, *, plus, handoff=False,
+                     connected=False, insertion=False, seeding_audits=()):
     if plus:
         result = json.loads((root / 'distillation.json').read_text())
-        result.update(repair_policy=request.get('repair_policy', 'all'),
+        result.update(inference_model=cfg['inference_model'],
+                      inference_settings={key: cfg[key] for key in ('teacher_resolution', 'teacher_max_frames', 'teacher_steps') if key in cfg},
+                      inference_memory=str(root / 'plus-memory.jsonl') if cfg['inference_model'] == '14b-teacher' else None,
+                      teacher_diagnostics=str(root / 'plus-teacher.json') if cfg['inference_model'] == '14b-teacher' else None,
+                      repair_policy=request.get('repair_policy', 'all'),
                       artifixer_pipeline=request.get('artifixer_pipeline', 'legacy_gsplat'),
                       endpoint_reference_mode=cfg.get('endpoint_reference_mode', 'both'),
                       reverse_inference_frames=(str(root / 'inference-back-to-front/splatfix/frames/batch_0000/pred')

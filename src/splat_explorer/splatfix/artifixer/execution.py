@@ -137,6 +137,9 @@ def execute_remote(executor, run_id, options, root, stop, update):
     if not resuming:
         from .repair import DEFAULT_RUNTIME
         runtime = {**DEFAULT_RUNTIME, **dict(executor.cfg.get('splatfix', {}).get('runtime', {}))}
+        for key in ('inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution'):
+            if key in options:
+                runtime[key] = options[key]
         runtime['resolution_profile'] = options['resolution_profile']
         runtime['regularization_profile'] = options.get('regularization_profile', 'artifixer')
         runtime['split_mode'] = 'no-split' if cp is not None and cp.endpoint_only else options.get('split_mode', 'double-split')
@@ -175,6 +178,9 @@ def execute_remote(executor, run_id, options, root, stop, update):
             repeat = json.loads((cp.root / 'repeat-repair.json').read_text())
             runtime = dict(repeat['runtime'])
             runtime.setdefault('trajectory_order', 'authors')
+        from .inference_policy import model_runtime as inference_runtime
+        if not benchmark:
+            runtime = inference_runtime(runtime)
         # Capture completion belongs to this run/source, not to a repeated
         # reconstruction's inherited model settings.
         for key in ('source_rgb_prepared', 'source_anchor_capture_signature'):

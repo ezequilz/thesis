@@ -31,6 +31,23 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('select').scene_id,'unrelated-current-scene');
   assert.equal(payload('repair').checkpoint,'/saved/cp');
   assert.equal(payload('repair').mode,'edited');
+  $('artifixer-inference-model').value='14b-teacher';
+  $('teacher-resolution').value='480p';$('teacher-max-frames').value='17';$('teacher-steps').value='50';
+  $('handoff-generation').value='on';$('split-mode').value='double-split';
+  renderTeacherControls();
+  assert.equal($('artifixer-teacher-controls').hidden,false);
+  assert.equal($('connected-trajectory-generation').disabled,true);
+  const teacher=payload('repair');
+  assert.equal(teacher.inference_model,'14b-teacher');
+  assert.equal(teacher.teacher_steps,50);
+  assert.equal(teacher.teacher_max_frames,17);
+  assert.equal(teacher.teacher_resolution,'480p');
+  assert.equal(teacher.split_mode,'double-split');
+  for(const key of ['connected_trajectory_generation','handoff_generation','image_cache_insertion','initial_image_seeding','generated_context_references'])assert.equal(teacher[key],false);
+  $('artifixer-inference-model').value='1.3b';$('handoff-generation').value='off';
+  renderTeacherControls();
+  assert.equal($('artifixer-teacher-controls').hidden,true);
+
   assert.equal(payload('edit').repair_mode,'auto');
   assert.equal(payload('repair').correct_generated_pose,false);
   $('correct-generated-pose').checked=true;
