@@ -1063,7 +1063,7 @@ def finish_inference(root, request, cfg, output, *, plus, handoff=False,
     if plus:
         result = json.loads((root / 'distillation.json').read_text())
         result.update(inference_model=cfg['inference_model'],
-                      inference_settings={key: cfg[key] for key in ('teacher_resolution', 'teacher_max_frames', 'teacher_steps', 'teacher_clip_layout', 'teacher_endpoint_extension', 'teacher_opacity_scale', 'teacher_warmup_supervision', 'initial_image_seeding', 'image_cache_insertion') if key in cfg},
+                      inference_settings={key: cfg[key] for key in ('teacher_resolution', 'teacher_max_frames', 'teacher_steps', 'teacher_clip_layout', 'teacher_endpoint_extension', 'teacher_opacity_scale', 'teacher_reference_opacity', 'teacher_warmup_supervision', 'initial_image_seeding', 'image_cache_insertion') if key in cfg},
                       teacher_reference_preservation=cfg['inference_model'] == '14b-teacher' and cfg.get('image_cache_insertion', False),
                       inference_memory=str(root / 'plus-memory.jsonl') if cfg['inference_model'] == '14b-teacher' else None,
                       teacher_diagnostics=str(root / 'plus-teacher.json') if cfg['inference_model'] == '14b-teacher' else None,

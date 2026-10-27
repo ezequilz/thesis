@@ -142,7 +142,7 @@ def repair_splat(cfg, args):
             if getattr(args, key, None) is not None:
                 runtime[key] = getattr(args, key)
     if method == 'artifixer':
-        for key in ('teacher_inference', 'inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution', 'teacher_clip_layout', 'teacher_endpoint_extension', 'teacher_opacity_scale', 'teacher_warmup_supervision'):
+        for key in ('teacher_inference', 'inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution', 'teacher_clip_layout', 'teacher_endpoint_extension', 'teacher_opacity_scale', 'teacher_reference_opacity', 'teacher_warmup_supervision'):
             if getattr(args, key, None) is not None:
                 runtime[key] = getattr(args, key)
         from .artifixer.inference_policy import new_job_options
@@ -280,7 +280,9 @@ def _add_stages(parser):
     repair.add_argument('--teacher-endpoint-extension', type=int, choices=(0, 4, 8), default=None,
                         help='Experimental collision-truncated warm-up views; unlocks the reference (default off)')
     repair.add_argument('--teacher-opacity-scale', type=float, default=None,
-                        help='Experimental rendered-opacity multiplier in [0,1]; repaired reference stays opaque (default 1)')
+                        help='Interpolated and warm-up rendered-opacity multiplier in [0,1] (default 1)')
+    repair.add_argument('--teacher-reference-opacity', type=float, default=None,
+                        help='Seeded repaired reference opacity in [0,1]; requires seed once below 1 (default 1)')
     repair.add_argument('--teacher-warmup-supervision', action=argparse.BooleanOptionalAction, default=None,
                         help='Include generated safe warm-up views in reconstruction (default on)')
     repair.add_argument('--teacher-steps', type=int, default=None)

@@ -300,7 +300,7 @@ fewer than four safe views means no warm-up at that endpoint.
 The inference order is farthest safe extension → nearer extension → repaired
 endpoint → wanted views. There is no jump from a leading reference into the
 extension. Extension mode explicitly unlocks the repaired reference: it is
-inserted at its actual camera with opacity 1, but its latent is allowed to
+inserted at its actual camera with the selected reference opacity (default 1), but its latent is allowed to
 denoise. Interior windows that do not reach a reference use reference attention
 without inserting a distant endpoint into the video. All input views count
 against the 25-frame total budget. Used warm-up views are exported once as generated supervision and included in
@@ -308,10 +308,23 @@ reconstruction at their calibrated cameras. Unused rendered context and collisio
 rejected views stay excluded. Source captures label extension context in review. All original wanted cameras and repaired-reference
 supervision are retained.
 
-**Rendered opacity strength** is a multiplier in [0,1], default 1. It affects
-only teacher RGB/opacity conditioning, in both inference passes. It changes
-neither stored depth nor camera geometry, and the repaired reference is restored
-to opacity 1 after scaling. Lower values increase the noise component in the
+Teacher review orders generated images by their recorded position in the model
+input, with clip number, input position and warm-up labels. Global camera IDs
+remain stable for reconstruction; sorting them numerically would put appended
+extension cameras after the ordinary targets and falsely show a teleport. The
+worker validates the extension/reference/target join before loading the model
+and records each planned path in `inference-teacher.json`. Ordering validation
+does not guarantee sharp output or remove the teacher's temporal VAE artifacts.
+
+**Interpolated-view opacity multiplier** is a multiplier in [0,1], default 1.
+It affects the rendered opacity supplied to the teacher in both inference passes,
+including interpolated and warm-up views. For example, 0.5 maps opacity 0.8 to
+0.4 before inference. RGB pixels, stored depth and camera geometry are unchanged.
+The repaired reference uses its separate
+**Repaired-reference opacity** value after scaling (default 1, absolute rather
+than multiplied). Values below 1 require an unlocked reference: Seed once or
+endpoint extension. Preserving a fixed reference latent requires opacity 1.
+Lower values increase the noise component in the
 initial latent and reduce supplied opacity conditioning. They are not a precise
 spatial mask for invalid geometry, and can increase hallucination or drift.
 
@@ -321,9 +334,11 @@ four place the interior reference at the end of a temporal group, preventing its
 full opacity from being pooled into the next group's wanted frames. This is a
 conditioning hypothesis, not proof of improved sharpness.
 
-Suggested controlled comparison: same source, camera IDs, resolution and random
-seed; 50 steps at opacity 1 (control), 50 steps at opacity .75 with extensions
-off, then 50 steps at opacity 1 with 8-frame extensions and an unlocked reference.
+Compare the same source, camera IDs, resolution and random seed. The current
+opacity experiment uses 50 steps, interpolated opacity ×0.5, reference opacity
+0.8 and the same 8-frame extensions with an unlocked reference. The prior run
+is the opacity-1 control; this changes both opacity controls, so it cannot
+isolate their individual effect.
 Only then compare 75 steps at otherwise identical settings. Compare the same
 wanted cameras near each endpoint, not different clip/gallery positions.
 More denoising steps do not by themselves remove strong blurry-render conditioning.

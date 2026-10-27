@@ -167,6 +167,13 @@ def run(root, request, trajectory, *, plus=False, max_clips=None):
                              anchors, seeding=cfg['initial_image_seeding'], layout=cfg['teacher_clip_layout'],
                              extensions=trajectory.get('teacher_extensions', []) if cfg['teacher_endpoint_extension'] else (),
                              include_warmup=cfg['teacher_warmup_supervision']))
+    if cfg['teacher_endpoint_extension']:
+        if __package__:
+            from .teacher_extensions import validate_clip_path
+        else:
+            from teacher_extensions import validate_clip_path
+        for job in jobs:
+            job['path_validation'] = validate_clip_path(job, trajectory)
     expected_frames = {i for job in jobs if job['output'] == phase for i in job['indices']}
     render_dir = Path(json.loads((root / 'distillation.json').read_text())['render_dir']) if plus else None
 
@@ -216,9 +223,15 @@ def run(root, request, trajectory, *, plus=False, max_clips=None):
             'teacher_clip_layout': cfg['teacher_clip_layout'],
             'teacher_endpoint_extension': cfg['teacher_endpoint_extension'],
             'teacher_opacity_scale': cfg['teacher_opacity_scale'],
+            'teacher_reference_opacity': cfg['teacher_reference_opacity'],
             'teacher_warmup_supervision': cfg['teacher_warmup_supervision'],
             'endpoint_extensions': trajectory.get('teacher_extensions', []),
-            'expected_frame_count': len(expected_frames), 'planned_clip_count': len(jobs), 'clips': records, **extra}
+            'opacity_conditioning': {'interpolated_view_multiplier': cfg['teacher_opacity_scale'],
+                                     'includes_warmup': True, 'seeded_reference_opacity': cfg['teacher_reference_opacity'],
+                                     'application': 'per-pixel rendered opacity before model input; RGB unchanged'},
+            'expected_frame_count': len(expected_frames), 'planned_clip_count': len(jobs),
+            'clip_plan': [{**job.get('path_validation', {}), 'output': job['output'],
+                           'frame_indices': job['indices']} for job in jobs], 'clips': records, **extra}
         # Readers poll while the GPU works; publish complete JSON atomically.
         temporary = manifest.with_suffix('.json.tmp')
         temporary.write_text(json.dumps(data, indent=2))
@@ -261,12 +274,18 @@ def run(root, request, trajectory, *, plus=False, max_clips=None):
                     reference_slot = neighbors.index(seed_index)
                     reference_path = Path(request['references'][reference_order[reference_slot]])
                     renders[seed_position] = references[reference_slot]
-                    opacity[seed_position] = 1
+                    opacity[seed_position] = cfg['teacher_reference_opacity']
                     valid[seed_position] = False
                     seeding_audit.update(reference_path=str(reference_path),
                                          reference_input_position=seed_position,
                                          extension_frame_indices=extension,
                                          reference_sha256=caption_digest(reference_path))
+                target_opacity = opacity[[i != seed_index for i in input_indices]]
+                opacity_audit = {'interpolated_view_multiplier': cfg['teacher_opacity_scale'],
+                                 'target_min': float(target_opacity.min()),
+                                 'target_max': float(target_opacity.max()),
+                                 'target_mean': float(target_opacity.mean()),
+                                 'seeded_reference_opacity': float(opacity[seed_position].min()) if seed_index is not None else None}
                 item = {'scene_id': 'splatfix', 'rgb_rendered': renders,
                         'rgb_neighbors': references, 'opacity': opacity, 'encoded_prompt': encoded_prompt,
                         'frame_indices': torch.tensor(input_indices),
@@ -274,6 +293,9 @@ def run(root, request, trajectory, *, plus=False, max_clips=None):
                         'target_h': native_size[1], 'target_w': native_size[0]}
                 item.update(compute_camera_rays(cameras, input_indices, neighbors, scale=request['camera_scale'],
                             image_shape=size[::-1], skip_vae_check=True))
+                record('clip_inputs_ready', input_frame_indices=input_indices,
+                       reference_input_position=input_indices.index(seed_index) if seed_index is not None else None,
+                       opacity_conditioning=opacity_audit)
                 stage = 'clip_inference'
                 torch.cuda.reset_peak_memory_stats(device)
                 preservation = preserve_starting_latent(pipe) if cfg['image_cache_insertion'] else nullcontext({})
@@ -291,6 +313,7 @@ def run(root, request, trajectory, *, plus=False, max_clips=None):
                             raise RuntimeError('Teacher output dimensions disagree with saved cameras')
                 torch.cuda.synchronize(device)
                 row = record('clip_complete', frame_indices=indices, output=directory, seeding=seeding_audit,
+                             opacity_conditioning=opacity_audit,
                              input_frame_indices=input_indices,
                              context_frame_indices=job.get('context_frame_indices', []),
                              warmup_frame_indices=job.get('warmup_frame_indices', []),

@@ -1762,3 +1762,26 @@ def test_card_preview_resolves_only_first_verified_input(tmp_path, monkeypatch):
     assert allowed == {2, 10}
     assert [frame['index'] for frame in gallery['frames']] == [2]
     assert urls == ['2.png']
+
+
+def test_teacher_gallery_uses_model_input_order_not_camera_storage_ids(tmp_path):
+    studio, run, root = setup(tmp_path)
+    outputs = [*range(266, 258, -1), *range(1, 17)]
+    for phase in ('inference', 'plus'):
+        pred = root / phase / 'splatfix/frames/batch_0000/pred'
+        pred.mkdir(parents=True)
+        # Files and even the output ownership list may be numerically sorted.
+        for i in [0, *sorted(outputs), 999]: (pred / f'{i:05d}.png').write_bytes(b'image')
+        (root / f'{phase}-teacher.json').write_text(json.dumps({
+            'inference_model': '14b-teacher', 'clips': [{'output': phase,
+                'input_frame_indices': [*range(266,258,-1), 0, *range(1,17)],
+                'frame_indices': sorted(outputs), 'warmup_frame_indices': list(range(259,267))}]}))
+    detail = studio.results.run_detail(run.name)
+    frames = detail['gallery']['frames']
+    assert [f['index'] for f in frames] == outputs
+    assert frames[0]['warmup'] and frames[0]['input_position'] == 1
+    assert frames[8]['input_position'] == 10 and not frames[8]['warmup']
+    assert 'Model input order' in detail['gallery']['order_note']
+    assert [f['index'] for f in detail['plus_gallery']['frames']] == outputs
+    card, _ = studio.results._reconstruction_gallery(root / 'result.json', {}, limit=1)
+    assert card['frames'][0]['index'] == 266

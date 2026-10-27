@@ -1,4 +1,4 @@
-"""Experimental context must stay continuous, collision bounded, and out of fitting."""
+"""Experimental warm-ups stay continuous, collision bounded, and fit once."""
 from copy import deepcopy
 from types import SimpleNamespace
 import numpy as np
@@ -69,11 +69,15 @@ def test_extension_unlocks_reference_without_affecting_normal_defaults():
     experiment=new_job_options({'teacher_endpoint_extension':8,'teacher_opacity_scale':.75})
     assert experiment['initial_image_seeding'] and not experiment['image_cache_insertion']
     assert experiment['teacher_opacity_scale']==.75
+    assert normal['teacher_reference_opacity'] == 1
+    assert new_job_options({'teacher_endpoint_extension':8, 'teacher_reference_opacity':.8})['teacher_reference_opacity'] == .8
     for change in [{'teacher_endpoint_extension':True},{'teacher_endpoint_extension':6},
                    {'teacher_endpoint_extension':8,'teacher_max_frames':9},
                    {'teacher_endpoint_extension':8,'teacher_clip_layout':'segment'},
                    {'teacher_opacity_scale':-1},{'teacher_opacity_scale':1.1},
-                   {'teacher_opacity_scale':float('nan')},{'teacher_opacity_scale':True}]:
+                   {'teacher_opacity_scale':float('nan')},{'teacher_opacity_scale':True},
+                   {'teacher_reference_opacity': -.1}, {'teacher_reference_opacity': float('nan')},
+                   {'teacher_reference_opacity': True}, {'teacher_reference_opacity': .8}]:
         with pytest.raises(ValueError):new_job_options(change)
 
 
@@ -113,3 +117,37 @@ def test_warmup_export_has_one_owner_and_enters_reconstruction(tmp_path):
     assert supervision['warmup_supervision_indices']==[5,6,7,8]
     assert supervision['excluded_extension_indices']==[9]
     assert supervision['original_to_distillation'][9] is None
+
+
+def test_path_gate_rejects_wrong_side_reversal_and_reference_teleport():
+    from splat_explorer.splatfix.artifixer.teacher_extensions import validate_clip_path
+    class Clear:
+        def intersects(self, *args): return False
+    orbit = extend_orbit({'poses': [pose(i) for i in range(33)], 'provenance': {}}, [0, 32], 8, Clear())
+    trajectory = {'teacher_extensions': extension_manifest(orbit), 'transforms': {
+        'frames': [{'transform_matrix': p} for p in render_poses(orbit)]}}
+    clips = list(planned_clips([({'indices': list(range(1, 32))}, [0, 1], 'inference')],
+                              25, [0, 32], seeding=True, layout='full-leg',
+                              extensions=trajectory['teacher_extensions'], include_warmup=True))
+    for clip in clips:
+        audit = validate_clip_path(clip, trajectory)
+        assert audit['validated'] and audit['translation_step_max'] == 1
+        assert audit['reference_input_position'] == 8
+    first = clips[0]
+    assert first['indices'][:8] == list(range(40, 32, -1))
+    bad = deepcopy(first); bad['extension_frame_indices'].reverse()
+    with pytest.raises(ValueError, match='opposite side'): validate_clip_path(bad, trajectory)
+    bad = deepcopy(first); bad['input_indices'] = list(range(2, 18))
+    with pytest.raises(ValueError, match='adjacent'): validate_clip_path(bad, trajectory)
+    bad = deepcopy(trajectory)
+    bad['transforms']['frames'][33]['transform_matrix'] = pose(1)
+    with pytest.raises(ValueError, match='tangent'): validate_clip_path(first, bad)
+
+
+def test_path_gate_allows_interior_windows_without_distant_reference():
+    from splat_explorer.splatfix.artifixer.teacher_extensions import validate_clip_path
+    job = {'seed_index': None, 'extension_frame_indices': [], 'input_indices': list(range(24, 48))}
+    trajectory = {'transforms': {'frames': [{'transform_matrix': pose(i)} for i in range(70)]}}
+    assert validate_clip_path(job, trajectory)['reference_input_position'] is None
+    job['input_indices'][16] = 60
+    with pytest.raises(ValueError, match='continuous'): validate_clip_path(job, trajectory)

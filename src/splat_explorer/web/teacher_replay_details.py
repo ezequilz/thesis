@@ -125,7 +125,9 @@ def run_detail(catalog, row):
         except (ValueError, KeyError, TypeError):
             return root / '__missing__'
         return root / 'inputs' / relative
-    frames = [item for i in sorted(completed_frames(root))
+    from .teacher_frame_order import frame_order
+    ordered = frame_order(read_json(root / 'results/inference-teacher.json', {}))
+    frames = [{**item, **ordered.get(i, {})} for i in sorted(completed_frames(root), key=lambda i: ordered.get(i, {}).get('sequence_order', i))
               if (item := asset(root / PREDICTIONS / f'{i:05d}.png', i))]
     references = [item for i, raw in enumerate(request.get('references', []))
                   if (item := asset(relocate(raw), i))]

@@ -161,7 +161,8 @@ def test_cli_accepts_teacher_inference_only_controls():
 
 @pytest.mark.parametrize('layout,seeding,extension', [('segment',False,0),('segment',True,0),
     ('full-leg',False,0),('full-leg',True,0),('full-leg',True,4)])
-def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monkeypatch, layout, seeding, extension):
+@pytest.mark.parametrize('opacity_scale', [.75, .5])
+def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monkeypatch, layout, seeding, extension, opacity_scale):
     import argparse
     import json
     import sys
@@ -178,10 +179,11 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
     checkpoint = tmp_path / 'artifixer-s1-14b.pt'
     checkpoint.touch()
     limit = 9 if extension else 5
+    reference_opacity = .8 if extension else 1.
     frame_count = 20 if extension else 12
     for index in range(frame_count):
         Image.new('RGB', (160, 96), (index, 10, 30)).save(tmp_path / f'{index}.png')
-        np.save(tmp_path / f'{index}.npy', np.full((96, 160), .5, dtype=np.float32))
+        np.save(tmp_path / f'{index}.npy', np.broadcast_to(np.linspace(0, 1, 160, dtype=np.float32), (96, 160)))
     frames = [{'rgb': f'{i}.png', 'opacity': f'{i}.npy'} for i in range(frame_count)]
     transforms = {'w': 160, 'h': 96, 'fl_x': 100., 'fl_y': 100., 'cx': 80., 'cy': 48.,
                   'frames': [{'transform_matrix': np.eye(4).tolist()} for _ in frames]}
@@ -190,7 +192,8 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
     request = {'runtime': {'checkpoint': str(checkpoint), 'model_id': MODELS['14b'][1],
                           'inference_model': '14b-teacher', 'teacher_max_frames': limit,
                           'teacher_clip_layout': layout, 'initial_image_seeding': seeding,
-                          'teacher_endpoint_extension':extension, 'teacher_opacity_scale':.75},
+                          'teacher_endpoint_extension':extension, 'teacher_opacity_scale':opacity_scale,
+                          'teacher_reference_opacity':reference_opacity},
                'checkpoint_root': str(tmp_path), 'references': [str(tmp_path / '0.png'), str(tmp_path / '10.png')],
                'camera_scale': 1., 'caption_path': 'unused', 'caption_sha256': 'unused', 'seed': 42}
     if extension:
@@ -217,10 +220,11 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
         for position,index in enumerate(item['frame_indices'].tolist()):
             if index in (0,10):
                 assert not item['valid_frames_mask'][position]
-                assert torch.all(item['opacity'][position] == 1)
+                assert torch.all(item['opacity'][position] == reference_opacity)
                 assert position in (0,4)
             else:
-                assert torch.all(item['opacity'][position] == .375)
+                assert torch.allclose(item['opacity'][position], torch.from_numpy(np.load(tmp_path / f'{index}.npy')) * opacity_scale)
+                assert torch.allclose(item['rgb_rendered'][position, 0], torch.full((96,160), index / 255))
         folder = output / 'splatfix/frames/batch_0000/pred'
         folder.mkdir(parents=True, exist_ok=True)
         for index in exported:
@@ -247,6 +251,10 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
     report = json.loads((tmp_path / 'output/inference-teacher.json').read_text())
     assert report['complete'] and len(report['clips']) == (4 if layout == 'full-leg' else 3)
     assert report['teacher_clip_layout'] == layout
+    assert report['opacity_conditioning']['interpolated_view_multiplier'] == opacity_scale
+    assert all(row['opacity_conditioning']['target_min'] == 0 and row['opacity_conditioning']['target_max'] == opacity_scale for row in report['clips'])
+    assert all(row['opacity_conditioning']['seeded_reference_opacity'] is None or
+               row['opacity_conditioning']['seeded_reference_opacity'] == pytest.approx(reference_opacity) for row in report['clips'])
     assert all(len(row['input_frame_indices']) == row['input_frame_count'] <= limit for row in report['clips'])
     if extension:
         assert report['clips'][0]['seeding']['reference_input_position']==4

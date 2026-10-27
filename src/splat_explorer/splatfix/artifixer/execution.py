@@ -137,7 +137,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
     if not resuming:
         from .repair import DEFAULT_RUNTIME
         runtime = {**DEFAULT_RUNTIME, **dict(executor.cfg.get('splatfix', {}).get('runtime', {}))}
-        for key in ('teacher_inference', 'inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution', 'teacher_clip_layout', 'teacher_endpoint_extension', 'teacher_opacity_scale', 'teacher_warmup_supervision'):
+        for key in ('teacher_inference', 'inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution', 'teacher_clip_layout', 'teacher_endpoint_extension', 'teacher_opacity_scale', 'teacher_reference_opacity', 'teacher_warmup_supervision'):
             if key in options:
                 runtime[key] = options[key]
         runtime['resolution_profile'] = options['resolution_profile']

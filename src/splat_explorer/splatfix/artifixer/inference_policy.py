@@ -43,6 +43,7 @@ def inference_options(raw):
             raise ValueError('teacher_clip_layout must be segment or full-leg')
         extension = raw.get('teacher_endpoint_extension', 0)
         opacity = raw.get('teacher_opacity_scale', 1.0)
+        reference_opacity = raw.get('teacher_reference_opacity', 1.0)
         warmup_supervision = raw.get('teacher_warmup_supervision', True)
         if type(warmup_supervision) is not bool:
             raise ValueError('teacher_warmup_supervision must be a boolean')
@@ -50,12 +51,16 @@ def inference_options(raw):
             raise ValueError('teacher_endpoint_extension must be 0, 4 or 8')
         if type(opacity) not in (int, float) or not math.isfinite(opacity) or not 0 <= opacity <= 1:
             raise ValueError('teacher_opacity_scale must be between 0 and 1')
+        if type(reference_opacity) not in (int, float) or not math.isfinite(reference_opacity) or not 0 <= reference_opacity <= 1:
+            raise ValueError('teacher_reference_opacity must be between 0 and 1')
         if extension and (layout != 'full-leg' or extension >= frames - 1):
             raise ValueError('Endpoint extension requires full-leg clips and room for target views')
         if extension:
             # A natural warm-up path places the repaired reference inside the
             # video. Its temporal latent cannot be locked as an isolated frame.
             seeding, preserve = True, False
+        if preserve and reference_opacity != 1:
+            raise ValueError('Preserving the reference latent requires reference opacity 1; choose seed once to adjust it')
         if type(frames) is not int or not 5 <= frames <= 81 or (frames - 1) % 4:
             raise ValueError('teacher_max_frames must be 1 + 4*n, between 5 and 81')
         if type(steps) is not int or not 1 <= steps <= 100:
@@ -65,6 +70,7 @@ def inference_options(raw):
         result.update(teacher_max_frames=frames, teacher_steps=steps, teacher_resolution=resolution,
                       teacher_clip_layout=layout,
                       teacher_endpoint_extension=extension, teacher_opacity_scale=float(opacity),
+                      teacher_reference_opacity=float(reference_opacity),
                       teacher_warmup_supervision=warmup_supervision,
                       initial_image_seeding=seeding or preserve, image_cache_insertion=preserve,
                       **{key: False for key in TEACHER_DISABLED})

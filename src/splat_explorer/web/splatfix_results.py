@@ -617,6 +617,8 @@ class ResultCatalog:
             gallery['reference_count'] = sum(bool(g.get('reference')) for g in groups)
             gallery['verified_inputs'] = True
         teacher = read_json(root / 'inference-teacher.json', {})
+        from .teacher_frame_order import frame_order
+        ordered = frame_order(teacher)
         if teacher.get('inference_model') == '14b-teacher':
             allowed = {i for clip in teacher.get('clips', []) if clip.get('output') == 'inference'
                        for i in clip['frame_indices']}
@@ -644,14 +646,16 @@ class ResultCatalog:
         if prediction and prediction.is_dir():
             frames = [p for p in prediction.glob('*.png') if p.stem.isdigit()]
             safe_root = root.resolve()
-            for frame in sorted(frames, key=lambda p: int(p.stem)):
+            for frame in sorted(frames, key=lambda p: (ordered.get(int(p.stem), {}).get('sequence_order', len(ordered)), int(p.stem))):
                 index = int(frame.stem)
                 if (allowed is None or index in allowed) and frame.resolve().is_relative_to(safe_root):
                     gallery['frames'].append({'index': index, 'name': frame.name,
-                                              'url': self.studio.file_url(frame)})
+                                              'url': self.studio.file_url(frame), **ordered.get(index, {})})
                     if limit is not None and len(gallery['frames']) >= limit:
                         break
         gallery['count'] = len(gallery['frames'])
+        if ordered:
+            gallery['order_note'] = 'Model input order within each clip. Warm-up views come before their repaired endpoint. Reference and context-only inputs are not generated outputs; separate clips can change direction.'
         gallery['expected_count'] = teacher.get('expected_frame_count') or preview.get('expected_frame_count') or (len(allowed) if allowed is not None else None)
         return gallery, allowed
 
@@ -801,12 +805,16 @@ class ResultCatalog:
         if plus is None:
             plus = self.studio.result_artifact(manifest, 'plus/splatfix/frames/batch_0000/pred')
         if plus and plus.is_dir():
+            from .teacher_frame_order import frame_order
+            plus_teacher = read_json(root / 'plus-teacher.json', {})
+            ordered = frame_order(plus_teacher, 'plus')
             images = [p for p in plus.iterdir() if p.suffix.lower() in ('.png', '.jpg', '.jpeg')
                       and p.stem.isdigit() and p.is_file() and p.stat().st_size > 0
+                      and (plus_teacher.get('inference_model') != '14b-teacher' or int(p.stem) in ordered)
                       and p.resolve().is_relative_to(root.resolve())]
             row['plus_gallery']['frames'] = [
-                {'index': int(p.stem), 'name': p.name, 'url': self.studio.file_url(p)}
-                for p in sorted(images, key=lambda p: (int(p.stem), p.name))]
+                {'index': int(p.stem), 'name': p.name, 'url': self.studio.file_url(p), **ordered.get(int(p.stem), {})}
+                for p in sorted(images, key=lambda p: (ordered.get(int(p.stem), {}).get('sequence_order', len(ordered)), int(p.stem), p.name))]
         from ..splatfix.oraclegs.artifixer_inputs import source_assets
         try:
             source_assets(self.studio, source_row)
