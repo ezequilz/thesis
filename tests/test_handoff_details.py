@@ -57,7 +57,7 @@ vm.runInContext(`
 const row={status:'running',kind:'ArtiFixer3D',inference_ready:true,handoff_debug:{enabled:true,items:[{id:'test',phase:'inference',frame_index:31,status:'waiting for repair',images:{before:{url:'/before.png',label:'Downloaded boundary'}}}]}};
 assert.equal(needsGalleryPolling(row),true);
 assert.equal(needsGalleryPolling({...row,status:'completed'}),false);
-assert.equal(needsGalleryPolling({...row,handoff_debug:{enabled:false}}),false);
+assert.equal(needsGalleryPolling({...row,handoff_debug:{enabled:false}}),true); // Reconstruction continues after inference.
 showHandoffs(row);assert.match($('handoffDebug').innerHTML,/before.png/);assert.match($('handoffDebug').innerHTML,/waiting for repair/);
 row.handoff_debug.items[0].images.repaired={url:'/repaired.png',label:'Repaired handoff'};
 showHandoffs(row);assert.match($('handoffDebug').innerHTML,/repaired.png/);

@@ -71,6 +71,24 @@ def test_preflight_uses_corrected_cameras_without_mutating_checkpoint(source, mo
     assert cp.views[0]['camera']['position'][1] == 0
 
 
+def test_captures_without_browser_settling_are_not_reused(source):
+    cp, root, runtime, captures, _ = source
+    first = preflight.prepare_source_captures(cp, runtime, root)
+    cache = Path(first['input_cache'])
+    manifest = json.loads((cache / 'captures.json').read_text())
+    manifest['recipe'].pop('capture_policy')
+    import hashlib
+    legacy_signature = hashlib.sha256(json.dumps(manifest['recipe'], sort_keys=True).encode()).hexdigest()
+    atomic_json(cache / 'captures.json', manifest)
+    legacy_cache = cache.with_name(legacy_signature)
+    cache.rename(legacy_cache)
+    before = len(captures)
+    second = preflight.prepare_source_captures(cp, runtime, root)
+    assert len(captures) == before + 2
+    assert Path(second['input_cache']) != legacy_cache
+    assert (legacy_cache / 'captures.json').is_file()  # Historical inputs remain intact.
+
+
 def test_exact_repeat_captures_intermediate_views_before_staging_and_reuses(source, monkeypatch):
     cp, root, runtime, captures, _ = source
     first, last = [camera_from_record(v).c2w for v in cp.views]

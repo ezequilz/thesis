@@ -72,7 +72,7 @@ def chart_data(run_dir, metrics=None):
         transforms = trajectory['transforms']
         transforms = {**transforms, 'camera_convention': trajectory.get('camera_convention', 'opencv_c2w')}
         selected = [a['frame_index'] for a in trajectory['anchors']]
-        segments = [[i for i in range(s['start'], s['start'] + s['count'])
+        segments = [[i for i in (s['indices'] if 'indices' in s else range(s['start'], s['start'] + s['count']))
                      if request.get('inference_target_policy') != 'exclude_saved_anchor_indices' or i not in selected]
                     for s in trajectory['segments']]
         segments = [s for s in segments if s]

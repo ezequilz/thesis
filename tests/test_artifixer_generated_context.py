@@ -149,6 +149,6 @@ def test_cli_can_override_config_in_both_directions(tmp_path, monkeypatch):
     parser = argparse.ArgumentParser()
     add_parser(parser.add_subparsers())
     for flag, value in [('--generated-context-references', True), ('--no-generated-context-references', False)]:
-        args = parser.parse_args(['splatfix', 'repair', str(tmp_path), '--output', str(tmp_path), flag])
+        args = parser.parse_args(['splatfix', 'repair', '--no-teacher-inference', str(tmp_path), '--output', str(tmp_path), flag])
         repair_splat(Config({'splatfix': {'runtime': {'generated_context_references': not value}}}), args)
         assert received[-1]['generated_context_references'] is value

@@ -16,9 +16,14 @@ import shutil
 import time
 import uuid
 
+import numpy as np
 from PIL import Image
 
 from .checkpoint import atomic_json, camera_from_record, camera_to_record
+
+# Include this in immutable RGB cache identities. Server-side scene readiness
+# alone does not establish that the browser has uploaded/sorted its splats.
+CAPTURE_POLICY = 'browser_scene_settled_v1'
 
 
 class CaptureSession:
@@ -30,6 +35,7 @@ class CaptureSession:
         from ..scene.catalog import SceneSpec, publish_live_scene
         self.renderer = ViserCaptureRenderer(None, url=url, any_client=True)
         self.should_stop = should_stop
+        self._settled = False
         self.ident = 'splatfix-capture-' + uuid.uuid4().hex
         self.generation = int(time.time() * 1000)
         publish_live_scene(SceneSpec(self.ident, 'Splatfix RGB capture', Path(scene_path),
@@ -56,6 +62,29 @@ class CaptureSession:
                 and scene.get('generation') == self.generation)
 
     def render(self, camera):
+        if getattr(self, '_settled', False):
+            return self._render_checked(camera)
+        # Discard the first render after loading, even if it has valid dimensions.
+        # Then require three agreeing renders of the SAME calibrated camera.
+        # This is a scene-load barrier, not a comparison between moving cameras.
+        self._render_checked(camera)
+        deadline = time.monotonic() + 30
+        previous, stable = None, 0
+        while time.monotonic() < deadline:
+            self.check_stop()
+            time.sleep(.25)
+            rgb = self._render_checked(camera)
+            if previous is not None:
+                delta = np.abs(rgb.astype(np.int16) - previous.astype(np.int16))
+                agrees = float(delta.mean()) <= .5 and float(np.percentile(delta, 99)) <= 2
+                stable = stable + 1 if agrees else 0
+                if stable >= 2:
+                    self._settled = True
+                    return rgb
+            previous = rgb
+        raise RuntimeError('Viser source scene did not settle; no RGB capture was saved')
+
+    def _render_checked(self, camera):
         self.check_stop()
         if not self.ready():
             raise RuntimeError('Viser source scene changed during Splatfix capture')

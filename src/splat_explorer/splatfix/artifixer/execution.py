@@ -137,7 +137,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
     if not resuming:
         from .repair import DEFAULT_RUNTIME
         runtime = {**DEFAULT_RUNTIME, **dict(executor.cfg.get('splatfix', {}).get('runtime', {}))}
-        for key in ('inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution'):
+        for key in ('teacher_inference', 'inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution', 'teacher_clip_layout'):
             if key in options:
                 runtime[key] = options[key]
         runtime['resolution_profile'] = options['resolution_profile']
@@ -323,9 +323,13 @@ def execute_remote(executor, run_id, options, root, stop, update):
         handoff_service = HandoffService(root / 'handoff', cfg=executor.cfg,
             remote=remote_dir + '/handoff', endpoint=endpoint, ssh=ssh, sync=sync)
     state = {}
+    from .progress import ProgressObserver, large_model
+    observer = ProgressObserver(root, container_dir, remote_dir) if large_model(options) else None
     primary_error = None
     try:
         while True:
+            if observer is not None:
+                observer.wait(capture_stop)
             deadline = executor.store.get_run(run_id).state.details.get('effective_deadline')
             if deadline and time.time() >= float(deadline) and not stop():
                 executor.store.request_stop(run_id)
@@ -333,15 +337,22 @@ def execute_remote(executor, run_id, options, root, stop, update):
                        stop_reason='gpu_deadline')
             if stop():
                 ssh('touch ' + shlex.quote(remote_dir + '/STOP'))
-            elif capture_mirror is not None:
+            elif capture_mirror is not None and observer is None:
                 capture_mirror.poll()
             if not stop() and handoff_service is not None:
                 handoff_service.poll()
-            raw = ssh('if [ -f ' + shlex.quote(remote_dir + '/worker-status.json') + ' ]; then cat ' + shlex.quote(remote_dir + '/worker-status.json') + '; fi')
-            state = json.loads(raw) if raw.strip() else {}
+            if observer is not None:
+                packet = observer.poll(ssh)
+                state = packet.get('state', {})
+                if not stop() and packet.get('capture_pending') and capture_mirror is not None:
+                    capture_mirror.poll()
+            else:
+                raw = ssh('if [ -f ' + shlex.quote(remote_dir + '/worker-status.json') + ' ]; then cat ' + shlex.quote(remote_dir + '/worker-status.json') + '; fi')
+                state = json.loads(raw) if raw.strip() else {}
             if state:
                 atomic_json(root / 'worker-status.json', state)
-            log_mirror.poll(state)
+            if observer is None:
+                log_mirror.poll(state)
             preview_mirror.poll(state)
             if state != last and state:
                 last = state
@@ -350,16 +361,18 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 source_staging.poll(state)
             if state.get('status') in ('completed', 'error', 'stopped'):
                 break
-            exited = ssh('if [ -f ' + shlex.quote(remote_dir + '/launcher-exit') + ' ]; then cat ' + shlex.quote(remote_dir + '/launcher-exit') + '; fi')
+            exited = packet.get('exit', '') if observer is not None else ssh('if [ -f ' + shlex.quote(remote_dir + '/launcher-exit') + ' ]; then cat ' + shlex.quote(remote_dir + '/launcher-exit') + '; fi')
             if exited.strip():
                 # The worker can publish its terminal status between the
                 # first status read and this exit-sentinel read. Its final
                 # status is authoritative; exit code zero alone is not.
-                raw = ssh('if [ -f ' + shlex.quote(remote_dir + '/worker-status.json') + ' ]; then cat ' + shlex.quote(remote_dir + '/worker-status.json') + '; fi')
-                state = json.loads(raw) if raw.strip() else {}
+                if observer is None:
+                    raw = ssh('if [ -f ' + shlex.quote(remote_dir + '/worker-status.json') + ' ]; then cat ' + shlex.quote(remote_dir + '/worker-status.json') + '; fi')
+                    state = json.loads(raw) if raw.strip() else {}
                 if state:
                     atomic_json(root / 'worker-status.json', state)
-                log_mirror.poll(state)
+                if observer is None:
+                    log_mirror.poll(state)
                 if state != last and state:
                     last = state
                     update(phase=state.get('phase', 'reconstruction'), message=state.get('message') or state.get('phase', 'Running'))
@@ -371,7 +384,8 @@ def execute_remote(executor, run_id, options, root, stop, update):
                 break
             if time.monotonic() - started > 24 * 3600:
                 raise TimeoutError('GPU stage exceeded 24 hours; inspect remote stage.log')
-            wait_for_remote_poll(stop)
+            if observer is None:
+                wait_for_remote_poll(stop)
     except BaseException as exc:
         primary_error = exc
         try:

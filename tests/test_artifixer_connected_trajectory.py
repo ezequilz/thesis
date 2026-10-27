@@ -147,7 +147,7 @@ def test_invalid_ownership_still_fails_closed(count):
 
 def test_options_default_and_explicit_fallbacks():
     from splat_explorer.splatfix.artifixer.backend import validate_options
-    base = {'stage': 'repair'}
+    base = {'stage': 'repair', 'teacher_inference': False}
     default = validate_options(base)
     assert default['connected_trajectory_generation'] and not default['handoff_generation']
     assert default['split_mode'] == 'double-split'
@@ -181,7 +181,7 @@ def test_cli_fallbacks_override_config_default(tmp_path, monkeypatch, flags, exp
     monkeypatch.setattr(repair, 'run_repair', run)
     parser = argparse.ArgumentParser()
     add_parser(parser.add_subparsers())
-    args = parser.parse_args(['splatfix', 'repair', str(tmp_path / 'cp'), '--output', str(tmp_path / 'out'), *flags])
+    args = parser.parse_args(['splatfix', 'repair', '--no-teacher-inference', str(tmp_path / 'cp'), '--output', str(tmp_path / 'out'), *flags])
     repair_splat(Config({'splatfix': {'runtime': {'connected_trajectory_generation': True}}}), args)
     assert received['runtime']['connected_trajectory_generation'] is expected
 

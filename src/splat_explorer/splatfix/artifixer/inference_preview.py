@@ -50,9 +50,17 @@ def publish_preview(root, predictions, indices, reference_count, **metadata):
     root, predictions = Path(root), Path(predictions)
     request = root / 'request.json'
     if request.is_file():
-        trajectory = json.loads(request.read_text()).get('trajectory')
+        saved_request = json.loads(request.read_text())
+        metadata.setdefault('inference_model', saved_request.get('runtime', {}).get('inference_model'))
+        trajectory = saved_request.get('trajectory')
         if trajectory and Path(trajectory).is_file():
             shutil.copyfile(trajectory, root / 'preview-trajectory.json')
+    teacher = root / 'inference-teacher.json'
+    if teacher.is_file():
+        diagnostics = json.loads(teacher.read_text())
+        metadata.setdefault('inference_complete', diagnostics['complete'])
+        metadata.setdefault('expected_frame_count', diagnostics.get('expected_frame_count'))
+        metadata.setdefault('completed_clips', len(diagnostics['clips']))
     atomic_json(root / 'inference-preview.json', {
         **metadata, 'inference_ready': True,
         'prediction_frames': str(predictions.relative_to(root)),
@@ -76,7 +84,9 @@ class InferencePreviewMirror:
             return
         # Completed passes must become visible while subsequent passes run.
         candidates = list(state.get('completed_results') or [])
-        candidates.append(state.get('inference_preview') or state.get('input_preview'))
+        # Teacher jobs advertise their eventual prediction manifest at startup.
+        # Publish available inputs first, even while the first clip is pending.
+        candidates.extend([state.get('input_preview'), state.get('inference_preview')])
         relative = None
         for raw in candidates:
             if not raw:
@@ -89,7 +99,15 @@ class InferencePreviewMirror:
                     continue
             except (ValueError, TypeError):
                 continue
-            if not (self.root / 'gpu' / str(candidate)).is_file():
+            local = self.root / 'gpu' / str(candidate)
+            # Progressive teacher previews must refresh after every clip.
+            progressive = False
+            if local.is_file() and path.name == 'inference-preview.json':
+                try:
+                    progressive = json.loads(local.read_text()).get('inference_complete') is False
+                except (OSError, ValueError):
+                    progressive = True
+            if not local.is_file() or progressive:
                 relative = candidate
                 break
         if relative is None:
@@ -127,6 +145,8 @@ class InferencePreviewMirror:
                 '--include=/inference-connected.json', '--include=/plus-connected.json',
                 '--include=/inference-connected/***', '--include=/plus-connected/***',
                 '--include=/inference-context.json', '--include=/plus-context.json',
+                '--include=/inference-teacher.json', '--include=/plus-teacher.json',
+                '--include=/inference-memory.jsonl', '--include=/plus-memory.jsonl',
                 '--include=/inference-context/***', '--include=/plus-context/***',
                 *(['--include=/artifixer3d.ply', '--include=/plus/***'] if relative.name == 'result.json' else []),
                 '--include=/published-test-metrics.json', '--include=/evaluation-status.json',

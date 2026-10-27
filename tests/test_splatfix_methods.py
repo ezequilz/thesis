@@ -19,13 +19,13 @@ def test_unknown_method_rejected_before_queueing(method):
 
 
 def test_legacy_defaults_and_import_identity():
-    job = validate_job({'stage': 'repair', 'checkpoint': 'saved'})
+    job = validate_job({'stage': 'repair', 'checkpoint': 'saved', 'teacher_inference': False})
     assert job['reconstruction_method'] == 'artifixer'
     assert methods.get_method() is methods.get_method('artifixer')
     assert importlib.import_module('splat_explorer.splatfix.repair') is importlib.import_module(
         'splat_explorer.splatfix.artifixer.repair')
     assert job['split_mode'] == 'double-split'
-    assert job['regularization_profile'] == 'base_mcmc_0_2'
+    assert job['regularization_profile'] == 'base_mcmc'
     assert job['connected_trajectory_generation'] is True
     assert job['handoff_generation'] is False
 
@@ -74,19 +74,20 @@ def test_worker_dispatch_preserves_legacy_requests(tmp_path, monkeypatch, select
 @pytest.mark.parametrize('value', [False, True])
 def test_image_cache_insertion_setting(value):
     from splat_explorer.splatfix.artifixer.backend import validate_options
-    assert validate_options({'stage': 'repair'})['image_cache_insertion'] is False
-    assert validate_options({'stage': 'repair', 'image_cache_insertion': value})['image_cache_insertion'] is value
+    assert validate_options({'stage': 'repair'})['image_cache_insertion'] is True
+    assert validate_options({'stage': 'repair', 'teacher_inference': False})['image_cache_insertion'] is False
+    assert validate_options({'stage': 'repair', 'teacher_inference': False, 'image_cache_insertion': value})['image_cache_insertion'] is value
 
 
 @pytest.mark.parametrize('value', ['false', 'on', 1, None])
 def test_image_cache_insertion_rejects_non_boolean(value):
     from splat_explorer.splatfix.artifixer.backend import validate_options
     with pytest.raises(ValueError, match='image_cache_insertion'):
-        validate_options({'stage': 'repair', 'image_cache_insertion': value})
+        validate_options({'stage': 'repair', 'teacher_inference': False, 'image_cache_insertion': value})
 
 
 @pytest.mark.parametrize('images', ['all', 'distilled'])
-@pytest.mark.parametrize('initialization', ['full_splat', 'point_cloud'])
+@pytest.mark.parametrize('initialization', ['full_splat', 'point_cloud', 'point_cloud_geometry_only'])
 def test_artifixer_reconstruction_choices(images, initialization):
     job = validate_job({'stage': 'repair', 'checkpoint': 'saved',
                         'artifixer_pipeline': 'legacy_gsplat',

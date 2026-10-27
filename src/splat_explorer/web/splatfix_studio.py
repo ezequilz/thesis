@@ -202,6 +202,9 @@ class SplatfixStudio(SceneRunStudio):
 
     def allowed_file(self, raw):
         path = Path(raw).resolve()
+        from .teacher_replay_details import allowed_file
+        if allowed_file(self.cfg.output.dir, path):
+            return path
         roots = (self.root.resolve(), self.checkpoint_root.resolve(), self.benchmark_root.resolve())
         if path.is_relative_to(self.benchmark_root.resolve()) and path.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.json'):
             raise ValueError('Benchmark artifacts are limited to images and JSON provenance')
@@ -231,6 +234,9 @@ class SplatfixStudio(SceneRunStudio):
             if run.config.pipeline != 'splatfix':
                 continue
             row = run.to_dict()
+            from ..splatfix.artifixer.progress import large_model
+            if large_model(row['config'].get('splatfix', {})):
+                row['progress'] = read_json(Path(run.path) / 'progress.json', {})
             from ..splatfix.downloads import status as download_status
             row['download'] = download_status(run.path)
             row['queue_position'] = positions.get(run.run_id)

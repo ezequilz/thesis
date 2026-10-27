@@ -49,6 +49,8 @@ def execute(root):
                     marker = Path(event['output_dir']) / f'{name}-preview.json'
                     if marker.is_file():
                         preview[f'{name}_preview'] = str(marker)
+                if event.get('phase') == 'infer' and request.get('runtime', {}).get('inference_model') == '14b-teacher':
+                    preview['inference_preview'] = str(Path(event['output_dir']) / 'inference-preview.json')
             publish(status='running', completed_results=completed_results, **preview, **event)
         from .run_evaluation import finalize_run_evaluation
         if request.get('stage') == 'benchmark':

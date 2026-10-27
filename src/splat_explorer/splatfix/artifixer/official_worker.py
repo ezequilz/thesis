@@ -57,8 +57,8 @@ def validate_reconstruction_options(raw):
     initialization = raw.get('reconstruction_initialization', 'point_cloud')
     if images not in ('all', 'distilled'):
         raise ValueError('reconstruction_images must be all or distilled')
-    if initialization not in ('full_splat', 'point_cloud'):
-        raise ValueError('reconstruction_initialization must be full_splat or point_cloud')
+    if initialization not in ('full_splat', 'point_cloud', 'point_cloud_geometry_only'):
+        raise ValueError('reconstruction_initialization must be full_splat, point_cloud or point_cloud_geometry_only')
     prompt_source = raw.get('prompt_source', 'worldexplorer')
     if prompt_source not in ('original_anchors', 'original_and_repaired', 'worldexplorer'):
         raise ValueError('Unknown ArtiFixer prompt_source')
@@ -821,8 +821,9 @@ def inference(root, request, trajectory, plus=False):
             from .teacher_inference import run as run_teacher
         else:
             from teacher_inference import run as run_teacher
-        run_teacher(root, request, trajectory, plus=plus)
-        finish_inference(root, request, cfg, root / ('plus' if plus else 'inference'), plus=plus)
+        clips = run_teacher(root, request, trajectory, plus=plus)
+        finish_inference(root, request, cfg, root / ('plus' if plus else 'inference'), plus=plus,
+                         seeding_audits=[clip['seeding'] for clip in clips])
         return
     if __package__:
         from . import connected_trajectory, generated_context
@@ -1062,7 +1063,8 @@ def finish_inference(root, request, cfg, output, *, plus, handoff=False,
     if plus:
         result = json.loads((root / 'distillation.json').read_text())
         result.update(inference_model=cfg['inference_model'],
-                      inference_settings={key: cfg[key] for key in ('teacher_resolution', 'teacher_max_frames', 'teacher_steps') if key in cfg},
+                      inference_settings={key: cfg[key] for key in ('teacher_resolution', 'teacher_max_frames', 'teacher_steps', 'teacher_clip_layout', 'initial_image_seeding', 'image_cache_insertion') if key in cfg},
+                      teacher_reference_preservation=cfg['inference_model'] == '14b-teacher' and cfg.get('image_cache_insertion', False),
                       inference_memory=str(root / 'plus-memory.jsonl') if cfg['inference_model'] == '14b-teacher' else None,
                       teacher_diagnostics=str(root / 'plus-teacher.json') if cfg['inference_model'] == '14b-teacher' else None,
                       repair_policy=request.get('repair_policy', 'all'),
@@ -1257,6 +1259,10 @@ def append_worldexplorer_supervision(request, transforms, supervision):
 
 
 def distill(root, request, trajectory):
+    initialization_policy = request.get('reconstruction_initialization',
+        request.get('runtime', {}).get('reconstruction_initialization'))
+    if initialization_policy == 'point_cloud_geometry_only' and request.get('source_ply'):
+        raise ValueError('Positions-only reconstruction cannot import full Gaussian PLY parameters')
     if request.get('source_ply'):
         import hashlib
         digest = hashlib.sha256()
@@ -1306,7 +1312,12 @@ def distill(root, request, trajectory):
         images.append((index + 1, qvec, tvec, index + 1, name))
     official.write_colmap_cameras(sparse / 'cameras.bin', cameras)
     official.write_colmap_images(sparse / 'images.bin', images)
-    shutil.copyfile(request['source_points3d'], sparse / 'points3D.bin')
+    if __package__:
+        from .point_initialization import stage_points
+    else:
+        from point_initialization import stage_points
+    initialization = stage_points(request['source_points3d'], sparse / 'points3D.bin',
+        positions_only=supervision['reconstruction_initialization'] == 'point_cloud_geometry_only')
     transforms_path = root / 'transforms_opengl.json'
     transforms_path.write_text(json.dumps(transforms, indent=2))
     scene = official.PreparedScene(
@@ -1318,8 +1329,14 @@ def distill(root, request, trajectory):
     # Authors entry point, with the selected loss policy shared by both arms.
     # No resume checkpoint, custom fitter, SH truncation, or compositing.
     profile = request.get('runtime', {}).get('regularization_profile', 'artifixer')
+    if __package__:
+        from .training_progress import report_training_progress
+    else:
+        from training_progress import report_training_progress
     with shared_distillation_cameras(official), reconstruction_settings(profile, source_ply=request.get('source_ply'),
-                                                                         **reconstruction_overrides(request.get('runtime', {}))):
+                                                                         **reconstruction_overrides(request.get('runtime', {}))), report_training_progress(
+            root / 'reconstruction-progress.json', ARTIFIXER3D_STEPS,
+            enabled=request.get('runtime', {}).get('inference_model') in ('14b', '14b-teacher')):
         checkpoint, reused = official.train_artifixer3d(
             scene, paths, artifixer_frames_dir=predictions,
             base_checkpoint=None, config_name=ARTIFIXER3D_CONFIG,
@@ -1344,6 +1361,7 @@ def distill(root, request, trajectory):
         'render_dir': str(render_dir), 'supervision_manifest': str(root / 'supervision.json'),
         'reconstruction_images': supervision['reconstruction_images'],
         'reconstruction_initialization': supervision['reconstruction_initialization'],
+        'point_cloud_initialization': initialization,
         'worldexplorer_original_count': supervision['worldexplorer_original_count'],
         'original_frame_count': len(render_transforms['frames']),
         'distillation_frame_count': len(transforms['frames'])}, indent=2))

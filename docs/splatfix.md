@@ -5,8 +5,24 @@ GPU reconstruction. It is independent of the old artifact-hunting loop.
 Step 4 selects a reconstruction method. ArtiFixer and G4Splat are registered as independent sibling backends.
 See [G4Splat setup and output semantics](g4splat.md).
 
-ArtiFixer Step 4 also offers an experimental **14B bidirectional teacher** with
-independent inference resolution, clip length and diffusion-step controls.
+ArtiFixer Step 4 defaults to **Use 14B teacher inference**, enabled for new jobs.
+It uses native run resolution, 24 generated/context views plus one repaired
+reference per independent clip and 50
+diffusion steps, then continues into the existing reconstruction and plus pass.
+The teacher starting-image default seeds and preserves each clip’s repaired
+reference latent after every denoising step. The saved 25-frame input budget
+includes that starter. Clips use whole captured legs rather than legacy
+half-leg boundaries; short tails borrow overlapping context without duplicate
+exports. Whole legs shorter than 24 views remain shorter. Seed-only and reference-only comparisons remain selectable; the
+bidirectional teacher does not use the distilled model’s persistent KV cache.
+For fitting after inference, **Original PLY positions only** retains point
+coordinates but replaces source colors with neutral gray and initializes sizes,
+rotations and opacity afresh (`reconstruction_initialization: point_cloud_geometry_only`).
+The existing point-cloud-with-color and full-PLY modes remain available.
+Turn the setting off to select the legacy 1.3B or 14B distilled model; historical
+jobs and their saved generation policies retain their previous behavior.
+Teacher clips become reviewable as they finish. Results also includes isolated
+full-trajectory teacher replays, with references, source captures and live progress.
 See [teacher setup, memory limits and sampling differences](artifixer-14b-loading.md).
 
 Step 3 defaults to shared native Thinking for six-view all-view checkpoints.
@@ -315,6 +331,12 @@ Step 4 creates an isolated checkpoint at the exact selected profile size, even
 when the saved selection used a smaller resolution. Original RGBs are recaptured
 through the selected renderer at the saved poses with a uniformly scaled, center-cropped camera
 frustum. Subsequent trajectory captures use these same dimensions and intrinsics.
+Viser scene loading now has a browser-render settling barrier: discard the first
+render, then require three agreeing renders at the first requested camera before
+saving any RGB. A scene change, cancellation or settling timeout fails the batch.
+The `browser_scene_settled_v1` capture policy participates in RGB and trajectory
+cache identities, so new runs recapture older inputs instead of inheriting a
+loading-frame glitch. Historical run artifacts remain unchanged.
 Edited references are generated from the saved full GPT response using uniform
 scaling and center cropping, without padding or stretching. Legacy checkpoints
 without a saved response use their repaired PNG as a fallback. Source checkpoints
@@ -1520,7 +1542,7 @@ New ArtiFixer jobs default to **MCMC regularization — on** and **LPIPS downsca
 
 **Handoff generation** now defaults to **Off**. Boundary and middle handoffs remain opt-in fallbacks. New double-split checkpoint runs use **Connected trajectory generation** instead; historical runtime settings and exact repeats retain their saved algorithm.
 
-New jobs default to **MCMC regularization — on · 0.2 ×** (`base_mcmc_0_2`). This multiplies the inherited opacity and scale penalty weights by 0.2 (normally 0.01 → 0.002 each) for both reference and generated views. RGB/SSIM and LPIPS weights are unchanged. Full MCMC (`base_mcmc`) and Off (`artifixer`) remain available; explicit saved selections and native authors pipeline constraints are preserved.
+New jobs default to **MCMC regularization — on · 1.0 ×** (`base_mcmc`), retaining the inherited opacity and scale penalties (normally 0.01 each) for reference and generated views. Generated-view LPIPS remains at full 1.0× weight. The prior 0.2× option (`base_mcmc_0_2`, normally 0.002 per penalty) and Off (`artifixer`) remain available; saved selections and native authors pipeline constraints are preserved.
 
 
 ### Middle-of-leg handoff
@@ -1557,9 +1579,9 @@ are retained in `inference-middle/`, and repair inputs/results use the existing
 `handoffs/inference/` archive. OracleGS rejects incomplete or inconsistent metadata.
 
 
-### Connected trajectory generation (Step 4 default)
+### Connected trajectory generation (legacy distilled workflow)
 
-Step 4's **Generated context references** control defaults to **On** for new runs.
+With teacher inference off, Step 4's **Generated context references** control defaults to **On** for new legacy runs. Teacher inference disables this causal adapter.
 Use `generated_context_references: true` or CLI `--generated-context-references`;
 `--no-generated-context-references` restores the legacy policy. Off preserves
 the existing reference sets, model calls, cache resets, seeds and bridge behavior

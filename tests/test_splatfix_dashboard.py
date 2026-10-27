@@ -224,7 +224,11 @@ def test_local_selection_dispatches_separate_cli_without_image_edits(studio, mon
 @pytest.mark.parametrize('images', ['all', 'distilled'])
 @pytest.mark.parametrize('initialization', ['full_splat', 'point_cloud'])
 @pytest.mark.parametrize('pipeline', ['authors_3dgut', 'authors_3dgut_viser_rgb', 'legacy_gsplat'])
-def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypatch, tmp_path, images, initialization, pipeline):
+@pytest.mark.parametrize('inference_model', ['1.3b', '14b-teacher'])
+def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypatch, tmp_path, images, initialization, pipeline, inference_model):
+    # Load this module before mocking preflight, so its imported function does
+    # not retain the test double for subsequent capture integration tests.
+    from splat_explorer.splatfix.artifixer import source_staging
     from splat_explorer import repair_lrz as lrz
     from splat_explorer.scene_runs.lrz_transport import LrzSceneRunTransport
     from splat_explorer.splatfix.executor import SplatfixExecutor
@@ -236,12 +240,14 @@ def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypat
     # Planning/capture ordering has separate integration coverage. This test
     # isolates detached-job reattachment and historical reconstruction options.
     monkeypatch.setattr('splat_explorer.splatfix.artifixer.preflight.prepare_source_captures', lambda *a, **kw: None)
+    monkeypatch.setattr('splat_explorer.splatfix.artifixer.progress.ProgressObserver.wait', lambda *a: None)
     staged = []
     def stage(source, destination):
         staged.append(source)
         return str(destination)
     monkeypatch.setattr('splat_explorer.splatfix.worldexplorer.source.stage_source', stage)
     job = studio.create({'stage': 'repair', 'mode': 'baseline', 'prompt_source': 'original_anchors', 'checkpoint': str(cp.root),
+                         'inference_model': inference_model,
                          'artifixer_pipeline': pipeline, 'reconstruction_images': images, 'reconstruction_initialization': initialization})
     commands, transfers, launches = [], [], []
     connection_fails = [True]
@@ -264,7 +270,8 @@ def test_lrz_reconnect_does_not_launch_a_second_reconstruction(studio, monkeypat
             if connection_fails[0]:
                 connection_fails[0] = False
                 raise OSError('temporary SSH interruption')
-            return SimpleNamespace(returncode=0, stdout=json.dumps({'status': 'completed', 'phase': 'finished'}), stderr='')
+            state = {'status': 'completed', 'phase': 'finished'}
+            return SimpleNamespace(returncode=0, stdout=json.dumps({'state': state} if 'def snapshot(root, container)' in command else state), stderr='')
         return SimpleNamespace(returncode=0, stdout='launched' if 'printf launched' in command else '', stderr='')
     monkeypatch.setattr(lrz, '_ssh_run', ssh)
     worker = SplatfixExecutor(studio.cfg, studio.store)
@@ -341,7 +348,7 @@ def test_registered_benchmark_queues_without_checkpoint(studio):
     source = benchmark_input(studio)
     job = studio.create({'stage': 'benchmark', 'source': str(source)})
     options = job['config']['splatfix']
-    assert options == {'stage': 'benchmark', 'source': str(source), 'mode': 'baseline', 'model': '1.3b', 'resolution_profile': '720p', 'regularization_profile': 'base_mcmc_0_2', 'split_mode': 'double-split', 'reconstruction_method': 'artifixer', 'benchmark_runs': 1}
+    assert options == {'stage': 'benchmark', 'source': str(source), 'mode': 'baseline', 'model': '1.3b', 'resolution_profile': '720p', 'regularization_profile': 'base_mcmc', 'split_mode': 'double-split', 'reconstruction_method': 'artifixer', 'benchmark_runs': 1}
     assert studio.benchmarks()[0]['ready']
     assert 'not confirmed' in studio.benchmarks()[0]['provenance_note']
     from splat_explorer.splatfix.jobs import requires_gpu

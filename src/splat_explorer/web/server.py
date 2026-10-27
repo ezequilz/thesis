@@ -841,6 +841,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(200, (STATIC_DIR / "run_color.js").read_bytes(), "text/javascript; charset=utf-8")
         elif path == "/artifixer_model.js":
             self._send(200, (STATIC_DIR / "artifixer_model.js").read_bytes(), "text/javascript; charset=utf-8")
+        elif path == "/splatfix_progress.js":
+            self._send(200, (STATIC_DIR / "splatfix_progress.js").read_bytes(), "text/javascript; charset=utf-8")
         elif path in ("/scene-runs", "/scene-runs.html"):
             self._send(200, (STATIC_DIR / "scene_runs.html").read_bytes(), "text/html; charset=utf-8")
         elif self._serve_scene_run_viser_page(path):
@@ -1333,6 +1335,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             studio = self.app.splatfix
             if self.command == "GET" and path == "/api/splatfix":
                 self._send_json(studio.snapshot())
+            elif self.command == "POST" and path == "/api/splatfix/activity":
+                from ..splatfix.artifixer.progress import mark_active
+                mark_active(studio.root)
+                self._send_json({'ok': True})
             elif path == "/api/splatfix/custom/session":
                 if self.command == "GET":
                     session = parse_qs(urlsplit(self.path).query).get("session", [""])[0]
@@ -1528,7 +1534,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, KeyError, FileNotFoundError) as exc:
             self._send_json({"ok": False, "error": str(exc)}, 400)
         finally:
-            if self.command == "POST" and path not in ("/api/splatfix/results/viser", "/api/splatfix/custom/session"):
+            if self.command == "POST" and path not in ("/api/splatfix/results/viser", "/api/splatfix/custom/session", "/api/splatfix/activity"):
                 self.app.splatfix.results.invalidate_catalog()
 
     def _serve_scene_runs_post(self, path: str, body: dict) -> None:

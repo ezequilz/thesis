@@ -31,29 +31,40 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('select').scene_id,'unrelated-current-scene');
   assert.equal(payload('repair').checkpoint,'/saved/cp');
   assert.equal(payload('repair').mode,'edited');
-  $('artifixer-inference-model').value='14b-teacher';
-  $('teacher-resolution').value='480p';$('teacher-max-frames').value='17';$('teacher-steps').value='50';
+  $('teacher-inference').checked=true;$('artifixer-inference-model').value='1.3b';
+  $('teacher-resolution').value='480p';$('teacher-max-frames').value='24';$('teacher-steps').value='50';
   $('handoff-generation').value='on';$('split-mode').value='double-split';
   renderTeacherControls();
   assert.equal($('artifixer-teacher-controls').hidden,false);
+  assert.equal($('artifixer-legacy-model-control').hidden,true);
+  assert.equal($('artifixer-legacy-generation').hidden,true);
   assert.equal($('connected-trajectory-generation').disabled,true);
   const teacher=payload('repair');
   assert.equal(teacher.inference_model,'14b-teacher');
   assert.equal(teacher.teacher_steps,50);
-  assert.equal(teacher.teacher_max_frames,17);
+  assert.equal(teacher.teacher_max_frames,25);
+  assert.equal(teacher.teacher_clip_layout,'full-leg');
   assert.equal(teacher.teacher_resolution,'480p');
   assert.equal(teacher.split_mode,'double-split');
-  for(const key of ['connected_trajectory_generation','handoff_generation','image_cache_insertion','initial_image_seeding','generated_context_references'])assert.equal(teacher[key],false);
-  $('artifixer-inference-model').value='1.3b';$('handoff-generation').value='off';
+  for(const key of ['connected_trajectory_generation','handoff_generation','generated_context_references'])assert.equal(teacher[key],false);
+  assert.equal(teacher.initial_image_seeding,true);assert.equal(teacher.image_cache_insertion,true);
+  $('teacher-seeding').value='seed';assert.equal(payload('repair').initial_image_seeding,true);assert.equal(payload('repair').image_cache_insertion,false);
+  $('teacher-seeding').value='off';assert.equal(payload('repair').initial_image_seeding,false);assert.equal(payload('repair').image_cache_insertion,false);
+  $('teacher-seeding').value='preserve';
+  $('teacher-inference').checked=false;$('artifixer-inference-model').value='1.3b';$('handoff-generation').value='off';
   renderTeacherControls();
   assert.equal($('artifixer-teacher-controls').hidden,true);
+  assert.equal($('artifixer-legacy-model-control').hidden,false);
+  assert.equal($('artifixer-legacy-generation').hidden,false);
+  $('artifixer-inference-model').value='14b';renderTeacherControls();assert.equal($('artifixer-legacy-generation').hidden,true);
+  $('artifixer-inference-model').value='1.3b';renderTeacherControls();assert.equal($('artifixer-legacy-generation').hidden,false);
 
   assert.equal(payload('edit').repair_mode,'auto');
   assert.equal(payload('repair').correct_generated_pose,false);
   $('correct-generated-pose').checked=true;
   assert.equal(payload('repair').correct_generated_pose,true);
   $('correct-generated-pose').checked=false;
-  assert.equal(payload('repair').regularization_profile,'base_mcmc_0_2');
+  assert.equal(payload('repair').regularization_profile,'base_mcmc');
   assert.equal(payload('repair').generated_lpips_downscale,false);
   assert.equal(payload('repair').handoff_generation,false);
   assert.equal(payload('repair').connected_trajectory_generation,true);
@@ -453,7 +464,7 @@ let calls=0,timer=null,lastDelay=null;
 let result={run_id:'run',status:'running',kind:'ArtiFixer3D',metrics:{},gallery:{frames:[]}};
 const document={getElementById:get,querySelectorAll:()=>[],hidden:false,addEventListener(){}};
 const context=vm.createContext({document,window:{addEventListener(){}},location:{search:'?id=run'},URLSearchParams,
- ResizeObserver:class{observe(){}},
+ SplatfixProgress:{html:()=>'',large:()=>false},ResizeObserver:class{observe(){}},
  fetch:async url=>{if(url.includes('section='))return{ok:true,json:async()=>({})};calls++;return{ok:true,json:async()=>result}},
  setTimeout:(fn,ms)=>{if(ms===0)return 0;assert.ok([3000,5000,30000].includes(ms));lastDelay=ms;timer=fn;return 1},clearTimeout:()=>{timer=null}});
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
@@ -466,6 +477,10 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
  result={...result,inference_ready:true};timer();await flush();
  assert.equal(calls,2);assert.equal(typeof timer,'function');
  assert.match(get('refreshStatus').textContent,/Checking run status/);
+ // Teacher-only replays also poll as clips arrive.
+ result={...result,kind:'ArtiFixer inference',external_inference:true,inference_only:true};
+ assert.equal(vm.runInContext("needsGalleryPolling({kind:'ArtiFixer inference',external_inference:true,status:'running'})",context),true);
+ result={...result,kind:'ArtiFixer3D',external_inference:false,inference_only:false};
  // Manual refresh still retrieves the eventual reconstruction.
  await get('refresh').onclick();assert.equal(calls,3);assert.equal(typeof timer,'function');
  // Cancellation stays live even when the gallery is already complete.
@@ -513,6 +528,7 @@ def test_dashboard_new_defaults():
         select = re.search(r'<select id="'+element+r'"[^>]*>(.*?)</select>', html).group(1)
         assert re.search(r'<option value="([^"]+)"', select).group(1) == expected
     assert re.search(r'id="oracle-preset-scale"[^>]*value="0.25"', html)
+    assert re.search(r'id="teacher-inference"[^>]*checked', html)
 
 
 def test_gaussian_limit_click_edit_and_validation():

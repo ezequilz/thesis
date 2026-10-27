@@ -83,7 +83,9 @@ def test_repair_command_passes_only_saved_run_and_runtime(monkeypatch, tmp_path)
                              "--artifixer-repo", "/gpu/official"])
     repair_splat(Config({"splatfix": {"runtime": {"python": "/gpu/python"}}}), args)
     assert received["mode"] == "baseline"
-    assert received["runtime"] == {"repo": "/gpu/official", "python": "/gpu/python", "resolution_profile": "720p", "split_mode": "double-split"}
+    assert {k: received["runtime"][k] for k in ("repo", "python", "resolution_profile", "split_mode")} == {"repo": "/gpu/official", "python": "/gpu/python", "resolution_profile": "720p", "split_mode": "double-split"}
+    assert received["runtime"]["teacher_inference"] is True
+    assert received["runtime"]["inference_model"] == "14b-teacher"
     assert received["checkpoint"] == tmp_path / "saved"
 
 
@@ -98,7 +100,7 @@ def test_repair_cache_insertion_cli_overrides_config(monkeypatch, tmp_path, flag
     monkeypatch.setattr(repair, 'run_repair', run)
     parser = argparse.ArgumentParser()
     add_parser(parser.add_subparsers())
-    args = parser.parse_args(['splatfix', 'repair', str(tmp_path / 'saved'), '--output', str(tmp_path / 'out'), *([flag] if flag else [])])
+    args = parser.parse_args(['splatfix', 'repair', '--no-teacher-inference', str(tmp_path / 'saved'), '--output', str(tmp_path / 'out'), *([flag] if flag else [])])
     repair_splat(Config({'splatfix': {'runtime': {'image_cache_insertion': True}}}), args)
     assert received['runtime']['image_cache_insertion'] is expected
 

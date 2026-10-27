@@ -509,6 +509,8 @@ class ResultCatalog:
         from .worldexplorer_details import entries as worldexplorer_entries
         if not detail_key or detail_key.startswith('we_'):
             rows.extend(worldexplorer_entries(self, key=detail_key))
+        from .teacher_replay_details import entries as teacher_replay_entries
+        rows.extend(teacher_replay_entries(self, key=detail_key or review_key))
         visibility = self.visibility_records()
         for row in rows:
             row['hidden'] = visibility.get(row['run_id'], {}).get('hidden', False)
@@ -574,7 +576,7 @@ class ResultCatalog:
                 'can_reduce': (options.get('reconstruction_method') in ('oraclegs', 'artifixer') or result.get('reconstruction_method') in ('oraclegs', 'artifixer') or (manifest is not None and not options.get('reconstruction_method') and not result.get('reconstruction_method'))) and not (self.studio.root / record['run_id'] / 'reduction.json').exists(),
                 'can_archive': record.get('state', {}).get('status') in ('completed', 'error', 'stopped', 'gpu_expired') and not download_status(self.studio.root / record['run_id']).get('status') in ('queued', 'downloading', 'retrying'),
                 'mode': options.get('mode') or config.get('repair_type', ''),
-                'model': result.get('model_variant') or options.get('model'),
+                'model': result.get('inference_model') or options.get('inference_model') or result.get('model_variant') or options.get('model'),
                 'trajectory': result.get('trajectory_mode'), 'frames': result.get('frame_count'),
                 'kind': 'OracleGS' if options.get('reconstruction_method') == 'oraclegs' or result.get('reconstruction_method') == 'oraclegs' else 'G4Splat · viewer approximation' if options.get('reconstruction_method') == 'g4splat' else 'ArtiFixer3D' if manifest or options.get('stage') in ('repair', 'benchmark') else 'Scene repair',
                 'result_name': manifest.parent.name if manifest else record['run_id'],
@@ -614,6 +616,11 @@ class ResultCatalog:
             allowed = {int(g['source_index']) for g in groups if not g.get('reference')}
             gallery['reference_count'] = sum(bool(g.get('reference')) for g in groups)
             gallery['verified_inputs'] = True
+        teacher = read_json(root / 'inference-teacher.json', {})
+        if teacher.get('inference_model') == '14b-teacher':
+            allowed = {i for clip in teacher.get('clips', []) if clip.get('output') == 'inference'
+                       for i in clip['frame_indices']}
+            gallery.update(stage='ArtiFixer 14B teacher · generated frames', verified_inputs=True)
         if allowed is None:
             split = local(result.get('inference_split') or 'prepared/bicycle/split.json')
             scenes = read_json(split, {}).get('test', {}) if split else {}
@@ -645,7 +652,7 @@ class ResultCatalog:
                     if limit is not None and len(gallery['frames']) >= limit:
                         break
         gallery['count'] = len(gallery['frames'])
-        gallery['expected_count'] = len(allowed) if allowed is not None else None
+        gallery['expected_count'] = teacher.get('expected_frame_count') or preview.get('expected_frame_count') or (len(allowed) if allowed is not None else None)
         return gallery, allowed
 
     def run_detail(self, key, *, deferred=False):
@@ -656,11 +663,17 @@ class ResultCatalog:
         if row['kind'] == 'WorldExplorer':
             from .worldexplorer_details import run_detail
             return run_detail(self, row, deferred=deferred)
+        if row.get('external_inference'):
+            from .teacher_replay_details import run_detail
+            return run_detail(self, row)
         row['comments'] = self.read_comments(row['run_id'])
         settings_path = self.studio.root / row['run_id'] / 'settings.json'
         row['settings_snapshot'] = read_json(settings_path, None)
         row['settings_url'] = self.studio.file_url(settings_path) if settings_path.is_file() else None
         run_root = (self.studio.root / row['run_id']).resolve()
+        from ..splatfix.artifixer.progress import large_model
+        if large_model(row.get('config', {}).get('splatfix', {})):
+            row['progress'] = read_json(run_root / 'progress.json', {})
         from .handoff_details import handoff_details
         row['handoff_debug'] = handoff_details(self.studio, run_root)
         manifest = row.get('_manifest')
@@ -675,7 +688,10 @@ class ResultCatalog:
             json_paths += [manifest.parent / name for name in (
                 'orbit-provenance.json', 'inference-directions.json',
                 'inference-connected.json', 'plus-connected.json',
-                'inference-context.json', 'plus-context.json')]
+                'inference-context.json', 'plus-context.json',
+                'inference-teacher.json', 'plus-teacher.json')]
+            from .teacher_replay_details import teacher_summary
+            row['teacher_summary'] = teacher_summary(read_json(manifest.parent / 'inference-teacher.json', {}))
         row['json_artifacts'] = []
         for path in json_paths:
             if not path.is_file() or not path.resolve().is_relative_to(run_root):
@@ -1061,7 +1077,7 @@ class ResultCatalog:
             if row['id'] == key or row['run_id'] == key:
                 return row
             manifest = row['_manifest']
-            if manifest:
+            if manifest and manifest.resolve().is_relative_to(self.studio.root.resolve()):
                 legacy = manifest.with_name('partial-result.json').resolve().relative_to(self.studio.root.resolve())
                 if hashlib.sha256(str(legacy).encode()).hexdigest()[:20] == key:
                     return row

@@ -10,7 +10,7 @@ from splat_explorer.splatfix.jobs import validate_job
 
 def test_job_regularization_selection():
     for stage, extra in [('repair', {'checkpoint': 'saved', 'artifixer_pipeline': 'legacy_gsplat'}), ('benchmark', {'source': 'dataset'})]:
-        assert validate_job({'stage': stage, **extra})['regularization_profile'] == 'base_mcmc_0_2'
+        assert validate_job({'stage': stage, **extra})['regularization_profile'] == 'base_mcmc'
         assert validate_job({'stage': stage, **extra, 'regularization_profile': 'base_mcmc'})['regularization_profile'] == 'base_mcmc'
         with pytest.raises(ValueError, match='regularization_profile'):
             validate_job({'stage': stage, **extra, 'regularization_profile': 'typo'})

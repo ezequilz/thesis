@@ -209,7 +209,8 @@ def prepare_trajectory(checkpoint, *, frames=25, span_fraction=.04,
         raise ValueError('frames must be 1 + 4*n and at least 9')
     if not np.isfinite(span_fraction) or not 0 < span_fraction <= .15:
         raise ValueError('span_fraction must be in (0, .15]')
-    signature = hashlib.sha256(json.dumps({'trajectory_version': 5, 'anchor_rgb_policy': 'viser', 'views': [{k: v for k, v in view.items() if k in ('id', 'camera', 'original_rgb')} for view in cp.views],
+    from ..viser_capture import CAPTURE_POLICY
+    signature = hashlib.sha256(json.dumps({'trajectory_version': 5, 'capture_policy': CAPTURE_POLICY, 'anchor_rgb_policy': 'viser', 'views': [{k: v for k, v in view.items() if k in ('id', 'camera', 'original_rgb')} for view in cp.views],
         'source': cp.manifest.get('source_fingerprint', cp.manifest['scene_path']), 'scene_load': cp.manifest.get('metadata', {}).get('scene_load', {}),
         'rgb': [digest_file(cp.image_path(view)) for view in cp.views], 'frames': frames, 'span_fraction': span_fraction}, sort_keys=True).encode()).hexdigest()
     cache = cp.root / 'trajectories'
@@ -274,7 +275,7 @@ def prepare_trajectory(checkpoint, *, frames=25, span_fraction=.04,
                 up_axis=cp.manifest.get('metadata', {}).get('up_axis', '-y'),
                 lod_level=cp.manifest.get('metadata', {}).get('scene_load', {}).get('lod_level', 0),
                 should_stop=should_stop)
-    manifest = {'schema_version': 2, 'recipe': {'anchor_rgb_policy': 'viser'}, 'depth_convention': 'expected_camera_z', 'camera_convention': 'opencv_c2w', 'signature': signature, 'transforms': {'camera_model': 'OPENCV', **transforms(all_cameras)},
+    manifest = {'schema_version': 2, 'recipe': {'anchor_rgb_policy': 'viser', 'capture_policy': CAPTURE_POLICY}, 'depth_convention': 'expected_camera_z', 'camera_convention': 'opencv_c2w', 'signature': signature, 'transforms': {'camera_model': 'OPENCV', **transforms(all_cameras)},
                 'segments': segments, 'anchors': anchors, 'frames': records,
                 'points3d': str((root / 'points3D.bin').relative_to(cp.root)),
                 'source_scene': source_path}
@@ -355,6 +356,9 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
     if geometry == '3dgut':
         recipe.update(anchor_rgb_policy=backend, upstream_revision=UPSTREAM_REVISION,
                       opacity_policy='native_3dgut_png8', appearance='full_source_ply_sh')
+    if backend == 'viser':
+        from ..viser_capture import CAPTURE_POLICY
+        recipe['capture_policy'] = CAPTURE_POLICY
     signature = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
     cache = cp.root / 'trajectories'
     completed = sorted(cache.glob(signature[:16] + '_*/trajectory.json'))

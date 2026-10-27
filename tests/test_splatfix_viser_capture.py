@@ -125,3 +125,48 @@ def test_scene_change_during_capture_is_rejected(monkeypatch):
     session.renderer = SimpleNamespace(render=lambda pose: np.zeros((16, 32, 3), np.uint8))
     with pytest.raises(RuntimeError, match='scene changed'):
         session.render(camera())
+
+
+def test_loading_frames_are_discarded_before_first_saved_capture(monkeypatch):
+    session = object.__new__(capture.CaptureSession)
+    session.should_stop = lambda: False
+    monkeypatch.setattr(session, 'ready', lambda: True)
+    monkeypatch.setattr(capture.time, 'sleep', lambda _: None)
+    # A stable but still loading image must not pass after only one agreement.
+    values = iter([255, 0, 0, 123, 123, 123, 77])
+    session.renderer = SimpleNamespace(render=lambda pose: np.full((16, 32, 3), next(values), np.uint8))
+    assert np.all(session.render(camera()) == 123)
+    # The barrier belongs to scene loading, so subsequent trajectory poses are
+    # captured normally rather than compared with the previous camera's image.
+    assert np.all(session.render(camera()) == 77)
+
+
+def test_unsettled_scene_fails_without_saving_capture(tmp_path, monkeypatch):
+    session = object.__new__(capture.CaptureSession)
+    session.should_stop = lambda: False
+    monkeypatch.setattr(session, 'ready', lambda: True)
+    monkeypatch.setattr(capture.time, 'sleep', lambda _: None)
+    times = iter([0, 1, 2, 3, 31])
+    monkeypatch.setattr(capture.time, 'monotonic', lambda: next(times))
+    values = iter([255, 0, 123, 0])
+    session.renderer = SimpleNamespace(render=lambda pose: np.full((16, 32, 3), next(values), np.uint8))
+    monkeypatch.setattr(capture, 'CaptureSession', lambda *a, **kw: session)
+    monkeypatch.delenv('SPLATFIX_VISER_MAILBOX', raising=False)
+    output = tmp_path / 'capture.png'
+    with pytest.raises(RuntimeError, match='did not settle'):
+        capture.capture_rgb(tmp_path / 'scene.ply', [camera()], [output])
+    assert not output.exists()
+
+
+def test_cancellation_during_browser_settling(monkeypatch):
+    session = object.__new__(capture.CaptureSession)
+    stopped = False
+    session.should_stop = lambda: stopped
+    monkeypatch.setattr(session, 'ready', lambda: True)
+    def stop(_):
+        nonlocal stopped
+        stopped = True
+    monkeypatch.setattr(capture.time, 'sleep', stop)
+    session.renderer = SimpleNamespace(render=lambda pose: np.zeros((16, 32, 3), np.uint8))
+    with pytest.raises(InterruptedError):
+        session.render(camera())

@@ -199,7 +199,9 @@ def test_inputs_transfer_before_inference_and_remain_with_predictions(tmp_path):
         command[-2] = str(remote) + '/'
         subprocess.run(command, check=True, capture_output=True)
     worker = InferencePreviewMirror(local, '/workspace/job', '/dss/job', 'host', 'ssh', transfer)
-    state = {'input_preview': '/workspace/job/results/run/input-preview.json'}
+    # Teacher startup already advertises predictions, but has not written them.
+    state = {'input_preview': '/workspace/job/results/run/input-preview.json',
+             'inference_preview': '/workspace/job/results/run/inference-preview.json'}
     worker.poll(state)
     worker.finish()
     saved = local / 'gpu/results/run'
@@ -235,3 +237,26 @@ def test_completed_pass_downloads_before_next_preview(tmp_path):
     mirror.finish()
     assert (local / 'gpu/results/pass1/result.json').is_file()
     assert (local / 'gpu/results/pass1/artifixer3d.ply').is_file()
+
+
+def test_teacher_preview_refreshes_until_final_clip(tmp_path):
+    remote = tmp_path / 'remote/results/run'
+    pred = preview(remote)
+    publish_preview(remote, pred, [0], 1, inference_complete=False, expected_frame_count=2)
+    local = tmp_path / 'local'
+    calls = []
+    def transfer(argv):
+        calls.append(argv)
+        shutil.copytree(remote, Path(argv[-1]), dirs_exist_ok=True)
+    mirror = InferencePreviewMirror(local, '/workspace/job', '/dss/job', 'host', 'ssh', transfer)
+    state = {'inference_preview': '/workspace/job/results/run/inference-preview.json'}
+    mirror.poll(state); mirror.finish()
+    saved = local / 'gpu/results/run/inference-preview.json'
+    assert json.loads(saved.read_text())['reconstruction_inputs'] == [0]
+    publish_preview(remote, pred, [0, 2], 1, inference_complete=True, expected_frame_count=2)
+    mirror.retry_after = 0
+    mirror.poll(state); mirror.finish()
+    assert json.loads(saved.read_text())['reconstruction_inputs'] == [0, 2]
+    mirror.retry_after = 0
+    mirror.poll(state); mirror.finish()
+    assert len(calls) == 2

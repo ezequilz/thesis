@@ -3,12 +3,15 @@ import math
 
 
 def validate_options(raw):
-    raw = {'regularization_profile': 'base_mcmc_0_2',
+    raw = {'regularization_profile': 'base_mcmc',
            **({'generated_lpips_downscale': False} if raw['stage'] == 'repair' else {}), **raw}
     from .pipeline_profile import apply_pipeline
     if raw['stage'] == 'repair':
-        from .inference_policy import inference_options
-        raw = {**raw, **inference_options(raw)}
+        from .inference_policy import new_job_options, TEACHER_DISABLED
+        for key in TEACHER_DISABLED:
+            if key in raw and type(raw[key]) is not bool:
+                raise ValueError(f'{key} must be a boolean')
+        raw = {**raw, **new_job_options(raw)}
         from .official_worker import validate_regularization, validate_reconstruction_options
         validate_regularization(raw.get('regularization_profile', 'artifixer'))
         validate_reconstruction_options(raw)
@@ -29,7 +32,7 @@ def validate_options(raw):
             raise ValueError('benchmark_runs must be a positive integer')
         result['benchmark_runs'] = runs
     if raw['stage'] == 'repair':
-        result.update(inference_options(raw))
+        result.update(new_job_options(raw))
         from .author_trajectory import validate_trajectory_order
         result['trajectory_order'] = validate_trajectory_order(raw.get('trajectory_order', 'picked'))
         from .handoff import enabled, context_mode, backward_enabled, handoff_type

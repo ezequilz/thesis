@@ -142,9 +142,11 @@ def repair_splat(cfg, args):
             if getattr(args, key, None) is not None:
                 runtime[key] = getattr(args, key)
     if method == 'artifixer':
-        for key in ('inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution'):
+        for key in ('teacher_inference', 'inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution', 'teacher_clip_layout'):
             if getattr(args, key, None) is not None:
                 runtime[key] = getattr(args, key)
+        from .artifixer.inference_policy import new_job_options
+        runtime.update(new_job_options(runtime))
     for key in ("repo", "python", "checkpoint", "model_id", "hf_home", "source_points3d"):
         value = getattr(args, "artifixer_" + key, None)
         if value is not None:
@@ -252,12 +254,12 @@ def _add_stages(parser):
                         help='Legacy Viser/gsplat (default), authors 3DGUT rendering and fresh reconstruction, or Viser RGB with authors 3DGUT geometry/fitting')
     repair.add_argument('--reconstruction-images', choices=('all', 'distilled'), default=None,
                         help='Saved references and ArtiFixer targets only (default: distilled), or all images including WorldExplorer originals')
-    repair.add_argument('--reconstruction-initialization', choices=('full_splat', 'point_cloud'), default=None,
-                        help='Initialize fresh Gaussians from point positions/colors (default: point_cloud), or import the original PLY')
+    repair.add_argument('--reconstruction-initialization', choices=('full_splat', 'point_cloud', 'point_cloud_geometry_only'), default=None,
+                        help='Fresh positions/colors (point_cloud), positions only with neutral colors (point_cloud_geometry_only), or original PLY (full_splat)')
     repair.add_argument('--initial-image-seeding', action=argparse.BooleanOptionalAction, default=None,
                         help='Seed each series with its starting reference (default: on)')
     repair.add_argument('--image-cache-insertion', action=argparse.BooleanOptionalAction, default=None,
-                        help='Insert the clean endpoint latent into KV memory before generation (default: off)')
+                        help='Preserve the starting reference: teacher restores it each step (default: on); distilled uses KV memory (default: off)')
     repair.add_argument("--frames", type=positive_int, default=25,
                         help="Legacy compatibility only; authored orbit spacing determines frame count")
     repair.add_argument("--span-fraction", type=float, default=.04,
@@ -268,8 +270,13 @@ def _add_stages(parser):
     for key in ("repo", "python", "checkpoint", "model_id", "hf_home", "source_points3d"):
         repair.add_argument("--artifixer-" + key.replace("_", "-"), dest="artifixer_" + key)
     repair.add_argument('--inference-model', choices=('1.3b', '14b', '14b-teacher'), default=None)
+    repair.add_argument('--teacher-inference', action=argparse.BooleanOptionalAction, default=None,
+                        help='Use bounded 14B teacher inference (default); disable for legacy distilled models')
     repair.add_argument('--teacher-resolution', choices=('480p', 'native'), default=None)
-    repair.add_argument('--teacher-max-frames', type=int, default=None)
+    repair.add_argument('--teacher-max-frames', type=int, default=None,
+                        help='Total input budget including starter/padding: 1+4*n (default 25 = 24 views + reference)')
+    repair.add_argument('--teacher-clip-layout', choices=('full-leg', 'segment'), default=None,
+                        help='Fill clips across complete captured legs (default), or retain legacy half-leg boundaries')
     repair.add_argument('--teacher-steps', type=int, default=None)
     repair.set_defaults(func=repair_splat)
     inspect = stages.add_parser("inspect", help="Print checkpoint metadata without network calls")

@@ -55,7 +55,8 @@ def test_remote_paths_remapped_and_external_symlinks_rejected(tmp_path):
         chart_data(root)
 
 
-def test_saved_cv_segments_do_not_count_cuts_as_motion(tmp_path):
+@pytest.mark.parametrize('explicit_indices', [False, True])
+def test_saved_cv_segments_do_not_count_cuts_as_motion(tmp_path, explicit_indices):
     root=fixture(tmp_path/'result')
     poses=json.loads((root/'poses.json').read_text())
     # CV camera Y is down; invert it to yield the same inferred world up.
@@ -64,10 +65,12 @@ def test_saved_cv_segments_do_not_count_cuts_as_motion(tmp_path):
     atomic_json(root/'result.json',{})
     atomic_json(root/'request.json',{'trajectory':'trajectory.json',
                                    'inference_target_policy':'exclude_saved_anchor_indices'})
+    segments = ([{'indices':[0,1,2]}, {'indices':[4,3]}] if explicit_indices else
+                [{'start':0,'count':3},{'start':3,'count':2}])
     atomic_json(root/'trajectory.json',{'camera_convention':'opencv_c2w','transforms':poses,
-                'anchors':[{'frame_index':1}], 'segments':[{'start':0,'count':3},{'start':3,'count':2}]})
+                'anchors':[{'frame_index':1}], 'segments':segments})
     data=chart_data(root)
-    assert [s['indices'] for s in data['segments']]==[[0,2],[3,4]]
+    assert [s['indices'] for s in data['segments']]==[[0,2],[4,3] if explicit_indices else [3,4]]
     assert data['height_reversals']==0 and data['vertical_travel']==4
 
 

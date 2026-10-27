@@ -69,12 +69,12 @@ def test_repair_sends_noisy_first_image_and_clean_reference(tmp_path, with_conte
 def test_new_jobs_default_to_noise_but_historical_runtime_stays_off():
     from splat_explorer.splatfix.artifixer.backend import validate_options
     from splat_explorer.splatfix.artifixer.handoff_noise import noise_options
-    options = validate_options({'stage':'repair', 'mode':'edited', 'handoff_generation':True})
+    options = validate_options({'stage':'repair', 'teacher_inference': False, 'mode':'edited', 'handoff_generation':True})
     assert options['handoff_add_noise'] is True
     assert options['handoff_noise_strength'] == 35
     assert options['handoff_noise_mode'] == 'repaired_pixel_sprinkle'
     assert noise_options({})['handoff_noise_mode'] == 'gaussian'
-    assert validate_options({'stage':'repair', 'mode':'edited', 'handoff_generation':True,
+    assert validate_options({'stage':'repair', 'teacher_inference': False, 'mode':'edited', 'handoff_generation':True,
                              'handoff_noise_mode':'gaussian'})['handoff_noise_mode'] == 'gaussian'
     assert options['handoff_noise_vignette'] is True
     assert noise_options({})['handoff_noise_vignette'] is False
@@ -239,10 +239,10 @@ def test_very_large_ellipse_extends_vertically_and_is_new_job_default():
     assert very_large.max() == 95
     np.testing.assert_allclose(very_large, very_large[::-1,::-1])
     assert vignette_profile('very_large')['axis_scale_y'] == 1.15
-    options = validate_options({'stage':'repair', 'handoff_generation':True})
+    options = validate_options({'stage':'repair', 'teacher_inference': False, 'handoff_generation':True})
     assert options['handoff_vignette_size'] == 'very_large'
     assert options['handoff_vignette_edge_strength'] == 95
-    assert validate_options({'stage':'repair', 'handoff_vignette_size':'smaller'})['handoff_vignette_size'] == 'smaller'
+    assert validate_options({'stage':'repair', 'teacher_inference': False, 'handoff_vignette_size':'smaller'})['handoff_vignette_size'] == 'smaller'
 
 
 @pytest.mark.parametrize('mode', ['off','gaussian','repaired_pixel_sprinkle'])
@@ -290,7 +290,7 @@ def test_blur_defaults_and_validation():
     from splat_explorer.splatfix.artifixer.handoff_noise import noise_options
     from splat_explorer.splatfix.artifixer.backend import validate_options
     assert noise_options({})['handoff_blur_radius'] == 0
-    assert validate_options({'stage':'repair','handoff_generation':True})['handoff_blur_radius'] == .5
+    assert validate_options({'stage':'repair', 'teacher_inference': False,'handoff_generation':True})['handoff_blur_radius'] == .5
     for bad in (-1,11,True,'1',None,float('nan')):
         with pytest.raises(ValueError,match='handoff_blur_radius'):
             noise_options({'handoff_blur_radius':bad})

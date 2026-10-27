@@ -100,6 +100,9 @@ def capture_inputs(checkpoint, cameras, destinations, capture, *, profile, rende
     if renderer == '3dgut':
         from .repair import UPSTREAM_REVISION
         recipe['upstream_revision'] = UPSTREAM_REVISION
+    elif renderer == 'viser':
+        from ..viser_capture import CAPTURE_POLICY
+        recipe['capture_policy'] = CAPTURE_POLICY
     signature = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
     if cache_signature is not None:
         if not isinstance(cache_signature, str) or not re.fullmatch('[0-9a-f]{64}', cache_signature):

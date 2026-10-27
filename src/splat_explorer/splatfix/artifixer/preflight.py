@@ -12,7 +12,7 @@ from PIL import Image
 from ..checkpoint import atomic_json, camera_from_record
 from ..persistence import checkpoint_cache_lock
 from ..resolution import prepare_repair_checkpoint
-from ..viser_capture import CaptureSession
+from ..viser_capture import CAPTURE_POLICY, CaptureSession
 from .pipeline_profile import rgb_backend
 from .staging_cache import capture_prepared_rgb, digest
 
@@ -134,7 +134,8 @@ def cached_orbit_rgb(cache, checkpoint, poses):
     for path in sorted((cache / 'trajectories').glob('*/trajectory.json')):
         data = json.loads(path.read_text())
         recipe = data.get('recipe', {})
-        if (recipe.get('anchor_rgb_policy') != 'viser' or recipe.get('source') != source
+        if (recipe.get('anchor_rgb_policy') != 'viser' or recipe.get('capture_policy') != CAPTURE_POLICY
+                or recipe.get('source') != source
                 or recipe.get('views') != views or recipe.get('rgb') != hashes
                 or recipe.get('scene_load', {}) != checkpoint.manifest.get('metadata', {}).get('scene_load', {})):
             continue
