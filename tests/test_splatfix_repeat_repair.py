@@ -179,10 +179,16 @@ def test_repeat_button_precedes_oracle_action():
     assert '/api/splatfix/results/repeat-artifixer' in html
 
 
-def test_queue_inherits_settings_and_cleans_failed_snapshot(tmp_path, monkeypatch):
+@pytest.mark.parametrize('teacher', [False, True])
+def test_queue_inherits_settings_and_cleans_failed_snapshot(tmp_path, monkeypatch, teacher):
     from test_splatfix_results import setup
     from splat_explorer.web.splatfix_results import ResultCatalog
     cp, row, source_studio, _ = fixture(tmp_path)
+    if teacher:
+        request_path = row['_manifest'].parent / 'request.json'
+        request = json.loads(request_path.read_text())
+        request['runtime'].update(inference_model='14b-teacher', teacher_inference=True)
+        atomic_json(request_path, request)
     studio, run_root, _ = setup(tmp_path / 'catalog')
     config = studio.store.get_run(run_root.name).to_dict()['config']
     config['splatfix'] = dict(stage='repair', checkpoint=str(cp.root), mode='baseline',
@@ -197,6 +203,11 @@ def test_queue_inherits_settings_and_cleans_failed_snapshot(tmp_path, monkeypatc
     assert queued['state']['status'] == 'queued'
     assert options['frames'] == 29 and options['regularization_profile'] == 'base_mcmc'
     assert options['initial_image_seeding'] is False
+    assert options['teacher_inference'] is teacher
+    assert options['inference_model'] == ('14b-teacher' if teacher else '1.3b')
+    if teacher:
+        assert options['teacher_clip_layout'] == 'segment' and options['teacher_endpoint_extension'] == 0
+        assert options['teacher_max_frames'] == 37 and not options['image_cache_insertion']
     assert Path(options['checkpoint']) != cp.root
     settings = json.loads((studio.root / queued['run_id'] / 'settings.json').read_text())
     assert settings['submitted']['repeat_repair']['seed'] == 123

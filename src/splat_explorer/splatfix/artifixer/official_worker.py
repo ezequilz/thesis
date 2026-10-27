@@ -651,6 +651,13 @@ def install_image_cache_insertion(pipe):
 def inference_jobs(request, trajectory, *, plus=False):
     """Explicit output ownership keeps reverse predictions out of reconstruction."""
     anchors = [a['frame_index'] for a in trajectory['anchors']]
+    if (request.get('runtime', {}).get('inference_model') == '14b-teacher'
+            and request.get('runtime', {}).get('teacher_clip_layout') == 'forward'):
+        # One picked path, including every reference at its true camera. The
+        # teacher planner bounds it at references, never at reversed half-legs.
+        count = trajectory.get('base_frame_count', len(trajectory['frames']))
+        return [({'indices': list(range(count))}, list(range(len(anchors))),
+                 'plus' if plus else 'inference')]
     if request.get('repair_policy') != 'endpoints':
         segments = trajectory['segments']
         if (request.get('trajectory_mode') == 'authors_orbit'
@@ -874,9 +881,15 @@ def inference(root, request, trajectory, plus=False):
     if cfg['inference_model'] == '14b':
         if __package__:
             from .teacher_inference import load_pipe
+            from .student_memory import install as install_student_memory
         else:
             from teacher_inference import load_pipe
+            from student_memory import install as install_student_memory
+        # Same causal sampler as 1.3B. Only weight construction, reference VAE
+        # batch size and lossless cache residency differ for the 80 GiB A100.
+        args.max_neighbors_per_encode = 1
         pipe = load_pipe(args, device)
+        install_student_memory(pipe, root / ('plus-memory.jsonl' if plus else 'inference-memory.jsonl'))
     else:
         pipe = get_eval_pipe(args, device)
         load_transformer_checkpoint(pipe.transformer, args)
@@ -1066,38 +1079,48 @@ def inference(root, request, trajectory, plus=False):
 def finish_inference(root, request, cfg, output, *, plus, handoff=False,
                      connected=False, insertion=False, seeding_audits=()):
     if plus:
-        result = json.loads((root / 'distillation.json').read_text())
-        result.update(inference_model=cfg['inference_model'],
-                      inference_settings={key: cfg[key] for key in ('teacher_resolution', 'teacher_max_frames', 'teacher_steps', 'teacher_clip_layout', 'teacher_endpoint_extension', 'teacher_opacity_scale', 'teacher_reference_opacity', 'teacher_warmup_supervision', 'initial_image_seeding', 'image_cache_insertion') if key in cfg},
-                      teacher_reference_preservation=cfg['inference_model'] == '14b-teacher' and cfg.get('image_cache_insertion', False),
-                      inference_memory=str(root / 'plus-memory.jsonl') if cfg['inference_model'] == '14b-teacher' else None,
-                      teacher_diagnostics=str(root / 'plus-teacher.json') if cfg['inference_model'] == '14b-teacher' else None,
-                      repair_policy=request.get('repair_policy', 'all'),
-                      artifixer_pipeline=request.get('artifixer_pipeline', 'legacy_gsplat'),
-                      endpoint_reference_mode=cfg.get('endpoint_reference_mode', 'both'),
-                      reverse_inference_frames=(str(root / 'inference-back-to-front/splatfix/frames/batch_0000/pred')
-                                                if request.get('repair_policy') == 'endpoints' else None),
-                      reconstruction_method='artifixer', plus_frames=str(output / 'splatfix/frames/batch_0000/pred'),
-                      rgb_renderer=request.get('anchor_rgb_policy'),
-                      plus_rgb_renderer=request.get('plus_rgb_renderer'),
-                      mode=request['mode'], upstream_revision=request['upstream_revision'],
-                      handoff_generation=handoff,
-                      connected_trajectory_generation=connected,
-                      connected_trajectory_diagnostics=(str(root / 'plus-connected.json') if connected else None),
-                      image_cache_insertion=insertion,
-                      initial_image_seeding=any(s['enabled'] for s in seeding_audits),
-                      inference_target_policy=request.get('inference_target_policy', 'all_segment_frames'),
-                      camera_scale=request['camera_scale'],
-                      camera_scale_provenance=request.get('camera_scale_provenance'),
-                      scale_estimate=request.get('scale_estimate'),
-                      caption_path=request['caption_path'], caption_sha256=request['caption_sha256'],
-                      initialization=request['initialization'], input_adaptation=request['input_adaptation'],
-                      reconstruction='fresh ArtiFixer3D; 30000 steps; sparse MCMC LPIPS; regularization recorded in reconstruction_recipe',
-                      reconstruction_recipe=reconstruction_recipe(request.get('runtime', {}).get('regularization_profile', 'artifixer'),
-                                                                source_ply=bool(request.get('source_ply')),
-                                                                **reconstruction_overrides(request.get('runtime', {}))),
-                      ply_stage='ArtiFixer3D; the + pass produces images, not another splat', merged=False)
-        (root / 'result.json').write_text(json.dumps(result, indent=2))
+        write_repair_result(root, request, cfg, plus_output=output, handoff=handoff,
+                            connected=connected, insertion=insertion,
+                            seeding=any(s['enabled'] for s in seeding_audits))
+
+
+def write_repair_result(root, request, cfg, *, plus_output=None, handoff=False,
+                        connected=False, insertion=False, seeding=False):
+    """Publish the reconstructed PLY, with an optional final image-only pass."""
+    result = json.loads((root / 'distillation.json').read_text())
+    result.update(inference_model=cfg['inference_model'],
+                  inference_settings={key: cfg[key] for key in ('teacher_resolution', 'teacher_max_frames', 'teacher_steps', 'teacher_clip_layout', 'teacher_endpoint_extension', 'teacher_extend_short_clips', 'teacher_opacity_scale', 'teacher_reference_opacity', 'teacher_reference_rgb_replacement', 'teacher_warmup_supervision', 'initial_image_seeding', 'image_cache_insertion') if key in cfg},
+                  teacher_reference_preservation=cfg['inference_model'] == '14b-teacher' and cfg.get('image_cache_insertion', False),
+                  inference_memory=str(root / ('plus-memory.jsonl' if plus_output else 'inference-memory.jsonl')) if cfg['inference_model'] in ('14b', '14b-teacher') else None,
+                  teacher_diagnostics=str(root / ('plus-teacher.json' if plus_output else 'inference-teacher.json')) if cfg['inference_model'] == '14b-teacher' else None,
+                  repair_policy=request.get('repair_policy', 'all'),
+                  artifixer_pipeline=request.get('artifixer_pipeline', 'legacy_gsplat'),
+                  endpoint_reference_mode=cfg.get('endpoint_reference_mode', 'both'),
+                  reverse_inference_frames=(str(root / 'inference-back-to-front/splatfix/frames/batch_0000/pred')
+                                            if request.get('repair_policy') == 'endpoints' else None),
+                  reconstruction_method='artifixer', plus_frames=str(plus_output / 'splatfix/frames/batch_0000/pred') if plus_output else None,
+                  artifixer_plus_pass=plus_output is not None,
+                  plus_pass_status='completed' if plus_output is not None else 'skipped',
+                  rgb_renderer=request.get('anchor_rgb_policy'),
+                  plus_rgb_renderer=request.get('plus_rgb_renderer'),
+                  mode=request['mode'], upstream_revision=request['upstream_revision'],
+                  handoff_generation=handoff,
+                  connected_trajectory_generation=connected,
+                  connected_trajectory_diagnostics=(str(root / ('plus-connected.json' if plus_output else 'inference-connected.json')) if connected else None),
+                  image_cache_insertion=insertion,
+                  initial_image_seeding=seeding,
+                  inference_target_policy=request.get('inference_target_policy', 'all_segment_frames'),
+                  camera_scale=request['camera_scale'],
+                  camera_scale_provenance=request.get('camera_scale_provenance'),
+                  scale_estimate=request.get('scale_estimate'),
+                  caption_path=request['caption_path'], caption_sha256=request['caption_sha256'],
+                  initialization=request['initialization'], input_adaptation=request['input_adaptation'],
+                  reconstruction='fresh ArtiFixer3D; 30000 steps; sparse MCMC LPIPS; regularization recorded in reconstruction_recipe',
+                  reconstruction_recipe=reconstruction_recipe(request.get('runtime', {}).get('regularization_profile', 'artifixer'),
+                                                            source_ply=bool(request.get('source_ply')),
+                                                            **reconstruction_overrides(request.get('runtime', {}))),
+                  ply_stage='ArtiFixer3D reconstruction', merged=False)
+    (root / 'result.json').write_text(json.dumps(result, indent=2))
 
 
 def unique_supervision(trajectory, references, *, excluded_indices=()):
@@ -1212,14 +1235,14 @@ def reconstruction_supervision(root, request, trajectory):
         excluded = set(trajectory.get('context_only_indices', ()))
         runtime = request.get('runtime', {})
         warmup = set()
-        if runtime.get('teacher_endpoint_extension') and runtime.get('teacher_warmup_supervision', True):
+        if (runtime.get('teacher_endpoint_extension') or runtime.get('teacher_extend_short_clips')) and runtime.get('teacher_warmup_supervision', True):
             manifest = json.loads((Path(root) / 'inference-teacher.json').read_text())
             warmup = {i for clip in manifest['clips'] if clip.get('output') == 'inference'
                       for i in clip.get('warmup_frame_indices', [])}
             if not warmup <= excluded:
                 raise ValueError('Warm-up supervision contains non-extension camera indices')
         transforms, supervision = unique_supervision(trajectory, request['references'], excluded_indices=excluded - warmup)
-        if runtime.get('teacher_endpoint_extension'):
+        if (runtime.get('teacher_endpoint_extension') or runtime.get('teacher_extend_short_clips')):
             supervision['warmup_supervision_indices'] = sorted(warmup)
             supervision['excluded_extension_indices'] = sorted(excluded - warmup)
         return transforms, supervision
@@ -1361,11 +1384,13 @@ def distill(root, request, trajectory):
             steps=ARTIFIXER3D_STEPS, use_wandb=False, replace=False)
     gc.collect()
     torch.cuda.empty_cache()
-    render_dir = official.render_artifixer3d(
-        scene, paths, checkpoint=checkpoint, checkpoint_reused=reused,
-        replace=False, render_trajectory_path=render_transforms_path)
-    gc.collect()
-    torch.cuda.empty_cache()
+    render_dir = None
+    if request.get('runtime', {}).get('artifixer_plus_pass', True):
+        render_dir = official.render_artifixer3d(
+            scene, paths, checkpoint=checkpoint, checkpoint_reused=reused,
+            replace=False, render_trajectory_path=render_transforms_path)
+        gc.collect()
+        torch.cuda.empty_cache()
     renderer = Renderer.from_checkpoint(checkpoint_path=checkpoint,
         out_dir=str(root / 'export'), path=str(paths.distillation_input_dir),
         save_gt=False, computes_extra_metrics=False)
@@ -1376,7 +1401,8 @@ def distill(root, request, trajectory):
         'reconstruction_recipe': reconstruction_recipe(profile, source_ply=bool(request.get('source_ply')),
                                                       **reconstruction_overrides(request.get('runtime', {}))),
         'source_ply_sha256': request.get('source_ply_sha256'),
-        'render_dir': str(render_dir), 'supervision_manifest': str(root / 'supervision.json'),
+        'render_dir': str(render_dir) if render_dir is not None else None,
+        'supervision_manifest': str(root / 'supervision.json'),
         'reconstruction_images': supervision['reconstruction_images'],
         'reconstruction_initialization': supervision['reconstruction_initialization'],
         'point_cloud_initialization': initialization,

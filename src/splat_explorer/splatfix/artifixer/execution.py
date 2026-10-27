@@ -137,7 +137,7 @@ def execute_remote(executor, run_id, options, root, stop, update):
     if not resuming:
         from .repair import DEFAULT_RUNTIME
         runtime = {**DEFAULT_RUNTIME, **dict(executor.cfg.get('splatfix', {}).get('runtime', {}))}
-        for key in ('teacher_inference', 'inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution', 'teacher_clip_layout', 'teacher_endpoint_extension', 'teacher_opacity_scale', 'teacher_reference_opacity', 'teacher_warmup_supervision'):
+        for key in ('artifixer_plus_pass', 'teacher_inference', 'inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution', 'teacher_clip_layout', 'teacher_endpoint_extension', 'teacher_extend_short_clips', 'teacher_opacity_scale', 'teacher_reference_opacity', 'teacher_reference_rgb_replacement', 'teacher_warmup_supervision'):
             if key in options:
                 runtime[key] = options[key]
         runtime['resolution_profile'] = options['resolution_profile']
@@ -401,21 +401,21 @@ def execute_remote(executor, run_id, options, root, stop, update):
             wait_for_exit(lrz, cfg, remote_dir)
             update(remote_finished=True)
             # Dense benchmark depth is a regenerable rendering diagnostic,
-            # not inference input or a reconstruction deliverable. Keep it
-            # on LRZ rather than duplicating gigabytes on the desktop.
+            # not inference input or a reconstruction deliverable. Omit it
+            # from the archive; job scratch is removed after persistence.
             excludes = ['--exclude=/results/*/prepared/**/depth/'] if benchmark else []
             atomic_json(root / 'artifact-download-policy.json', {
                 'remote_dir': remote_dir, 'excluded_patterns': excludes,
                 'retained': 'RGB renders, opacity, model checkpoints, PLY, evaluation/provenance and logs',
-                'excluded_artifacts_remain_on_remote': True})
+                'excluded_artifacts_remain_on_remote': False})
             from ..downloads import enqueue
             enqueue(cfg, root, run_id, remote_dir, state,
                     excludes=('source/', 'benchmark-input/',
                               *(['/results/*/prepared/**/depth/'] if benchmark else [])),
-                    checkpoint=cp.root if cp is not None else None,
-                    diagnostics_only=(not benchmark and state.get('status') == 'error'
-                        and (state.get('failed_phase', '').startswith('source_') or state.get('failed_phase') in
-                        ('validation', 'anchor_geometry', 'trajectory', 'scale', 'orbit', 'caption', 'awaiting_source_capture'))))
+                    # Failed preparations also belong in the local archive.
+                    # Keeping diagnostics-only remote staging indefinitely fills
+                    # the shared quota and prevents the next model/run loading.
+                    checkpoint=cp.root if cp is not None else None)
     if state['status'] == 'stopped' or stop():
         raise InterruptedError('GPU reconstruction cancelled')
     if state['status'] != 'completed':

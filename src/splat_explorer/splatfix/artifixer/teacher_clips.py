@@ -1,7 +1,7 @@
 """Teacher windows over complete captured legs, independent of causal half splits."""
 
 
-def filled_leg_clips(jobs, maximum, anchors, *, seeding, extensions=()):
+def filled_leg_clips(jobs, maximum, anchors, *, seeding, extensions=(), fill_short=False):
     """Export each target once; use overlapping captured views to fill tail context.
 
     ``maximum`` retains the serialized 1+4*n input-budget convention. The one
@@ -38,6 +38,16 @@ def filled_leg_clips(jobs, maximum, anchors, *, seeding, extensions=()):
             legs[-1].append(index)
         neighbors = [anchors[i] for i in references]
         for leg in legs:
+            if fill_short:
+                if __package__:
+                    from .teacher_short_extensions import short_clip
+                else:
+                    from teacher_short_extensions import short_clip
+                clip = short_clip(leg, references, directory, anchors, maximum,
+                                  extension_lookup, reverse=group['reverse'])
+                if clip is not None:
+                    yield clip
+                    continue
             # Reserve actual safe context only, not the requested count after
             # a collision. All extension frames remain inside the total budget.
             def extra_for(seed):

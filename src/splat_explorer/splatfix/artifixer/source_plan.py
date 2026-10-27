@@ -15,8 +15,11 @@ def identity(checkpoint, runtime):
     metadata = checkpoint.manifest.get('metadata', {})
     split = 'no-split' if checkpoint.endpoint_only else ('single-split' if runtime.get('handoff_generation')
                                                       else runtime.get('split_mode', 'double-split'))
-    return {**({'teacher_endpoint_extension': runtime['teacher_endpoint_extension'], 'teacher_extension_version': 1}
-               if runtime.get('teacher_endpoint_extension') else {}),
+    extension = ({'teacher_extend_short_clips': True, 'teacher_max_frames': runtime['teacher_max_frames'],
+                  'teacher_extension_version': 2} if runtime.get('teacher_extend_short_clips') else
+                 {'teacher_endpoint_extension': runtime['teacher_endpoint_extension'], 'teacher_extension_version': 1}
+                 if runtime.get('teacher_endpoint_extension') else {})
+    return {**extension,
             'version': 2, 'upstream_revision': UPSTREAM_REVISION,
             'trajectory_order': ('picked' if checkpoint.endpoint_only else
                                  validate_trajectory_order(runtime.get('trajectory_order', 'picked'))),
@@ -45,7 +48,10 @@ def validate(plan, checkpoint, runtime):
         raise ValueError('Invalid camera scale in source trajectory plan')
     poses = np.asarray(plan['orbit']['poses'], dtype=np.float64)
     extension = plan['orbit'].get('teacher_extensions', {})
-    if extension.get('requested_frames', 0) != runtime.get('teacher_endpoint_extension', 0):
+    if runtime.get('teacher_extend_short_clips'):
+        if extension.get('mode') != 'fill-short-clips' or extension.get('maximum_frames') != runtime['teacher_max_frames']:
+            raise ValueError('Short-clip extension plan does not match the requested budget')
+    elif extension.get('mode') == 'fill-short-clips' or extension.get('requested_frames', 0) != runtime.get('teacher_endpoint_extension', 0):
         raise ValueError('Endpoint extension plan does not match the requested setting')
     if poses.ndim != 3 or poses.shape[1:] != (4, 4) or not len(poses) or not np.isfinite(poses).all():
         raise ValueError('Invalid source trajectory poses')

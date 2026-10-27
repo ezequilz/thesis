@@ -101,3 +101,15 @@ def test_worker_waits_for_full_staging_or_stops_without_reconstruction(tmp_path,
     state = json.loads((tmp_path / 'worker-status.json').read_text())
     assert state['status'] == ('completed' if outcome == 'ready' else 'stopped' if outcome == 'cancel' else 'error')
     assert len(calls) == (2 if outcome == 'ready' else 1)
+
+
+def test_short_extension_cache_identity_tracks_mode_and_frame_budget(tmp_path):
+    from splat_explorer.splatfix.artifixer.source_plan import identity, signature
+    cp = make_checkpoint(tmp_path)
+    old = {'resolution_profile':'720p','teacher_endpoint_extension':8}
+    fill = {**old,'teacher_extend_short_clips':True,'teacher_max_frames':81}
+    keys = [signature(identity(cp,cfg)) for cfg in [old,fill,{**fill,'teacher_max_frames':49}]]
+    assert len(set(keys)) == 3
+    assert identity(cp,{**old,'teacher_extend_short_clips':False}) == identity(cp,old)
+    # RGB replacement changes inference, not camera generation or its cache.
+    assert identity(cp,{**fill,'teacher_reference_rgb_replacement':False}) == identity(cp,fill)

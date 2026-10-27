@@ -38,7 +38,7 @@ DEFAULT_RUNTIME = {
     'image_cache_insertion': False,
     'initial_image_seeding': True,
     'handoff_generation': False,
-    'connected_trajectory_generation': True,
+    'connected_trajectory_generation': False,
     'connected_bridge_seeding': 'seed',
     'generated_context_references': True,
     'trajectory_order': 'picked',
@@ -581,7 +581,9 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         effective_runtime['connected_bridge_seeding'] = repeat['runtime'].get('connected_bridge_seeding', 'off')
         effective_runtime['generated_context_references'] = repeat['runtime'].get('generated_context_references', False)
     cfg = apply_pipeline(validate_runtime(effective_runtime))
-    if cfg.get('teacher_endpoint_extension') and trajectory_mode != 'authors_orbit':
+    if cfg.get('teacher_clip_layout') == 'forward' and trajectory_mode != 'authors_orbit':
+        raise ValueError('Forward teacher windows require the authored/picked connected trajectory')
+    if (cfg.get('teacher_endpoint_extension') or cfg.get('teacher_extend_short_clips')) and trajectory_mode != 'authors_orbit':
         raise ValueError('Teacher endpoint extension requires the authored/picked trajectory pipeline')
     backend = rgb_backend(cfg)
     if geometry_backend(cfg) == '3dgut' and trajectory_mode == 'legacy_local_loops':
@@ -703,7 +705,8 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         env['SPLATFIX_HANDOFF_MAILBOX'] = str(root / 'handoff-mailbox')
         env['SPLATFIX_HANDOFF_LOCAL'] = '1'
     try:
-        phases = (('scale',) if camera_scale is None else ()) + (('orbit',) if trajectory_mode == 'authors_orbit' and not planned_orbit else ()) + (() if prepare_source_only else ('caption', 'infer', 'distill', 'plus'))
+        generation_phases = ('caption', 'infer', 'distill') + (('plus',) if cfg.get('artifixer_plus_pass', True) else ())
+        phases = (('scale',) if camera_scale is None else ()) + (('orbit',) if trajectory_mode == 'authors_orbit' and not planned_orbit else ()) + (() if prepare_source_only else generation_phases)
         for phase in phases:
             if should_stop():
                 raise InterruptedError('Splatfix repair stopped')
@@ -788,6 +791,13 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
             plan = build(cp, cfg, planned_orbit, request)
             atomic_json(root / 'source-plan.json', plan)
             return {'source_plan': str(root / 'source-plan.json'), 'output_dir': str(root)}
+        if not cfg.get('artifixer_plus_pass', True):
+            from .official_worker import write_repair_result
+            write_repair_result(root, request, cfg,
+                                handoff=cfg.get('handoff_generation', False),
+                                connected=cfg.get('connected_trajectory_generation', False),
+                                insertion=cfg.get('image_cache_insertion', False),
+                                seeding=cfg.get('initial_image_seeding', False))
         result = json.loads((root / 'result.json').read_text())
         if not Path(result['splat_path']).is_file():
             raise RuntimeError('Authors reconstruction did not produce its isolated PLY')

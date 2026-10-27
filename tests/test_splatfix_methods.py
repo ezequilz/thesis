@@ -26,7 +26,7 @@ def test_legacy_defaults_and_import_identity():
         'splat_explorer.splatfix.artifixer.repair')
     assert job['split_mode'] == 'double-split'
     assert job['regularization_profile'] == 'base_mcmc'
-    assert job['connected_trajectory_generation'] is True
+    assert job['connected_trajectory_generation'] is False
     assert job['handoff_generation'] is False
 
 
@@ -74,7 +74,7 @@ def test_worker_dispatch_preserves_legacy_requests(tmp_path, monkeypatch, select
 @pytest.mark.parametrize('value', [False, True])
 def test_image_cache_insertion_setting(value):
     from splat_explorer.splatfix.artifixer.backend import validate_options
-    assert validate_options({'stage': 'repair'})['image_cache_insertion'] is True
+    assert validate_options({'stage': 'repair'})['image_cache_insertion'] is False
     assert validate_options({'stage': 'repair', 'teacher_inference': False})['image_cache_insertion'] is False
     assert validate_options({'stage': 'repair', 'teacher_inference': False, 'image_cache_insertion': value})['image_cache_insertion'] is value
 

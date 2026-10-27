@@ -144,7 +144,7 @@ def repair_splat(cfg, args):
             if getattr(args, key, None) is not None:
                 runtime[key] = getattr(args, key)
     if method == 'artifixer':
-        for key in ('teacher_inference', 'inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution', 'teacher_clip_layout', 'teacher_endpoint_extension', 'teacher_opacity_scale', 'teacher_reference_opacity', 'teacher_warmup_supervision'):
+        for key in ('artifixer_plus_pass', 'teacher_inference', 'inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution', 'teacher_clip_layout', 'teacher_endpoint_extension', 'teacher_extend_short_clips', 'teacher_opacity_scale', 'teacher_reference_opacity', 'teacher_reference_rgb_replacement', 'teacher_warmup_supervision'):
             if getattr(args, key, None) is not None:
                 runtime[key] = getattr(args, key)
         from .artifixer.inference_policy import new_job_options
@@ -246,7 +246,7 @@ def _add_stages(parser):
     repair.add_argument('--handoff-generation', choices=('on', 'off', 'middle'), default=None,
                         help='Repair generated boundaries (on), or fuse inward halves at the midpoint and retain all original repairs (middle)')
     repair.add_argument('--connected-trajectory-generation', action=argparse.BooleanOptionalAction, default=None,
-                        help='Connect the middle third with a fresh padded block (default: on for double-split; max 64 poses per span)')
+                        help='Opt in to connecting the middle third with a fresh padded block (default: off; max 64 poses per span)')
     repair.add_argument('--connected-bridge-seeding', choices=('off', 'seed', 'seed_preserve'), default=None,
                         help='Bridge overlap seeding: seed (default), seed_preserve (fixed latent/KV), or off')
     repair.add_argument('--generated-context-references', action=argparse.BooleanOptionalAction, default=None,
@@ -261,7 +261,7 @@ def _add_stages(parser):
     repair.add_argument('--initial-image-seeding', action=argparse.BooleanOptionalAction, default=None,
                         help='Seed each series with its starting reference (default: on)')
     repair.add_argument('--image-cache-insertion', action=argparse.BooleanOptionalAction, default=None,
-                        help='Preserve the starting reference: teacher restores it each step (default: on); distilled uses KV memory (default: off)')
+                        help='Preserve the starting reference: teacher restores it each step; distilled uses KV memory (default: off)')
     repair.add_argument("--frames", type=positive_int, default=25,
                         help="Legacy compatibility only; authored orbit spacing determines frame count")
     repair.add_argument("--span-fraction", type=float, default=.04,
@@ -271,22 +271,29 @@ def _add_stages(parser):
                         help="Explicit manual camera multiplier; default measures scale with cached official MoGe alignment")
     for key in ("repo", "python", "checkpoint", "model_id", "hf_home", "source_points3d"):
         repair.add_argument("--artifixer-" + key.replace("_", "-"), dest="artifixer_" + key)
-    repair.add_argument('--inference-model', choices=('1.3b', '14b', '14b-teacher'), default=None)
+    repair.add_argument('--inference-model', choices=('1.3b', '14b', '14b-teacher'), default=None,
+                        help='Step 4 generator (default: 14b distilled student)')
     repair.add_argument('--teacher-inference', action=argparse.BooleanOptionalAction, default=None,
-                        help='Use bounded 14B teacher inference (default); disable for legacy distilled models')
+                        help='Use experimental bidirectional 14B teacher instead of the distilled student')
+    repair.add_argument('--artifixer-plus-pass', action=argparse.BooleanOptionalAction, default=None,
+                        help='Run the final ArtiFixer3D+ image pass after exporting the repaired PLY (default off)')
     repair.add_argument('--teacher-resolution', choices=('480p', 'native'), default=None)
     repair.add_argument('--teacher-max-frames', type=int, default=None,
-                        help='Total input budget including starter/padding: 1+4*n (default 25 = 24 views + reference)')
-    repair.add_argument('--teacher-clip-layout', choices=('full-leg', 'segment'), default=None,
-                        help='Fill clips across complete captured legs (default), or retain legacy half-leg boundaries')
+                        help='Total input budget including references, warm-ups and padding: 1+4*n (default 81)')
+    repair.add_argument('--teacher-clip-layout', choices=('forward', 'full-leg', 'segment'), default=None,
+                        help='Forward connected windows between repaired views (default), or legacy whole/half-leg clips')
     repair.add_argument('--teacher-endpoint-extension', type=int, choices=(0, 4, 8), default=None,
-                        help='Experimental collision-truncated warm-up views; unlocks the reference (default off)')
+                        help='Collision-truncated warm-up views per endpoint (default up to 8 in forward mode, otherwise off)')
+    repair.add_argument('--teacher-extend-short-clips', action=argparse.BooleanOptionalAction, default=None,
+                        help='Experimental: extend both ends of short legs toward the clip budget, stopping at collisions (default off)')
     repair.add_argument('--teacher-opacity-scale', type=float, default=None,
                         help='Interpolated and warm-up rendered-opacity multiplier in [0,1] (default 1)')
     repair.add_argument('--teacher-reference-opacity', type=float, default=None,
                         help='Seeded repaired reference opacity in [0,1]; requires seed once below 1 (default 1)')
+    repair.add_argument('--teacher-reference-rgb-replacement', action=argparse.BooleanOptionalAction, default=None,
+                        help='Use the GPT repair instead of rendered RGB at exact reference cameras in the clip (default on)')
     repair.add_argument('--teacher-warmup-supervision', action=argparse.BooleanOptionalAction, default=None,
-                        help='Include generated safe warm-up views in reconstruction (default on)')
+                        help='Include generated safe warm-up views in reconstruction (default off for forward, on for legacy)')
     repair.add_argument('--teacher-steps', type=int, default=None)
     repair.set_defaults(func=repair_splat)
     inspect = stages.add_parser("inspect", help="Print checkpoint metadata without network calls")

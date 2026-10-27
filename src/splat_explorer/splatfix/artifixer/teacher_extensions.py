@@ -51,17 +51,38 @@ def extension_manifest(orbit):
     return groups
 
 
+def clip_input_indices(job):
+    if 'ordered_input_indices' in job:
+        return list(job['ordered_input_indices'])
+    start, end = job.get('seed_index'), job.get('end_reference_index')
+    return [*job.get('extension_frame_indices', []),
+            *([start] if start is not None else []),
+            *job.get('input_indices', job.get('indices', [])),
+            *([end] if end is not None else []),
+            *job.get('trailing_extension_frame_indices', [])]
+
+
 def validate_clip_path(job, trajectory):
     """Validate the actual tensor path, including the extension/reference join.
 
     Camera IDs are storage keys, not temporal positions. Reject a reordered or
     opposite-side extension before loading the expensive model.
     """
+    if 'ordered_input_indices' in job:
+        if __package__:
+            from .teacher_forward import validate_forward_path
+        else:
+            from teacher_forward import validate_forward_path
+        return validate_forward_path(job, trajectory)
     import numpy as np
     seed = job['seed_index']
     extra = job.get('extension_frame_indices', [])
+    trailing = job.get('trailing_extension_frame_indices', [])
+    end = job.get('end_reference_index')
     context = job['input_indices']
-    indices = [*extra, *([seed] if seed is not None else []), *context]
+    if not context:
+        raise ValueError('Teacher clip needs a continuous target path')
+    indices = clip_input_indices(job)
     if len(indices) != len(set(indices)):
         raise ValueError('Teacher clip repeats a camera')
     if len(context) > 1 and not (all(b - a == 1 for a, b in zip(context, context[1:])) or
@@ -69,16 +90,29 @@ def validate_clip_path(job, trajectory):
         raise ValueError('Teacher target cameras are not a continuous ordered path')
     if seed is not None and (not context or abs(context[0] - seed) != 1):
         raise ValueError('Teacher reference is not adjacent to its target window')
+    if end is not None and (not context or abs(end - context[-1]) != 1):
+        raise ValueError('Teacher ending reference is not adjacent to its target window')
+    if seed is not None and end is not None:
+        core = [seed, *context, end]
+        if not (all(b-a == 1 for a,b in zip(core, core[1:])) or
+                all(b-a == -1 for a,b in zip(core, core[1:]))):
+            raise ValueError('Teacher endpoint references reverse the captured leg')
     matrices = trajectory['transforms']['frames']
-    if extra:
+    for boundary, neighbor_index, outside, leading in (
+            (seed, context[0], extra, True), (end, context[-1], trailing, False)):
+        if not outside:
+            continue
         group = next((g for g in trajectory.get('teacher_extensions', [])
-                      if g['seed_frame_index'] == seed and g['interior_frame_index'] == context[0]), None)
-        if group is None or extra != list(reversed(group['frame_indices'][:len(extra)])):
-            raise ValueError('Teacher warm-up must approach its reference from the opposite side')
-        anchor = np.asarray(matrices[seed]['transform_matrix'], dtype=float)
-        neighbor = np.asarray(matrices[context[0]]['transform_matrix'], dtype=float)
+                      if g['seed_frame_index'] == boundary and g['interior_frame_index'] == neighbor_index), None)
+        expected_ids = group['frame_indices'][:len(outside)] if group else []
+        if leading:
+            expected_ids = list(reversed(expected_ids))
+        if group is None or outside != expected_ids:
+            raise ValueError('Teacher extension must continue on the opposite side of its endpoint')
+        anchor = np.asarray(matrices[boundary]['transform_matrix'], dtype=float)
+        neighbor = np.asarray(matrices[neighbor_index]['transform_matrix'], dtype=float)
         delta = anchor[:3, 3] - neighbor[:3, 3]
-        for step, index in enumerate(reversed(extra), 1):
+        for step, index in enumerate(reversed(outside) if leading else outside, 1):
             expected = anchor.copy()
             expected[:3, 3] += step * delta
             if not np.allclose(matrices[index]['transform_matrix'], expected, atol=1e-6, rtol=1e-5):
@@ -89,13 +123,17 @@ def validate_clip_path(job, trajectory):
     steps = np.linalg.norm(np.diff(poses[:, :3, 3], axis=0), axis=1)
     return {'validated': True, 'input_frame_indices': indices,
             'reference_input_position': len(extra) if seed is not None else None,
-            'warmup_count': len(extra), 'translation_step_min': float(steps.min()) if len(steps) else 0.,
+            'end_reference_input_position': indices.index(end) if end is not None else None,
+            'warmup_count': len(extra) + len(trailing),
+            'leading_extension_count': len(extra), 'trailing_extension_count': len(trailing),
+            'translation_step_min': float(steps.min()) if len(steps) else 0.,
             'translation_step_max': float(steps.max()) if len(steps) else 0.}
 
 
 def prepare_extensions(orbit, checkpoint, runtime, *, should_stop=lambda: False):
     count = runtime.get('teacher_endpoint_extension', 0)
-    if not count:
+    fill = runtime.get('teacher_extend_short_clips', False)
+    if not count and not fill:
         return orbit
     import numpy as np
     from ...scene import load_scene
@@ -113,4 +151,8 @@ def prepare_extensions(orbit, checkpoint, runtime, *, should_stop=lambda: False)
     scene = load_scene(runtime.get('scene_path') or checkpoint.manifest['scene_path'],
                        **checkpoint.manifest.get('metadata', {}).get('scene_load', {}))
     collision = OrbitCollision(scene)
+    if fill:
+        from .teacher_short_extensions import extend_short_orbit
+        return extend_short_orbit(orbit, indices, runtime['teacher_max_frames'], collision,
+                                  should_stop=should_stop)
     return extend_orbit(orbit, indices, count, collision, should_stop=should_stop)

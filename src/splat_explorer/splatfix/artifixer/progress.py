@@ -37,7 +37,8 @@ def planned_count(packet, plus=False):
         cfg.get('teacher_max_frames', 37), anchors,
         seeding=bool(cfg.get('initial_image_seeding') or cfg.get('image_cache_insertion')),
         layout=cfg.get('teacher_clip_layout', 'segment'),
-        extensions=trajectory.get('teacher_extensions', []) if cfg.get('teacher_endpoint_extension') else ())))
+        extensions=trajectory.get('teacher_extensions', []) if (cfg.get('teacher_endpoint_extension') or cfg.get('teacher_extend_short_clips')) else (),
+        fill_short=cfg.get('teacher_extend_short_clips', False))))
 
 
 def stage(label, current=0, total=None, *, status='pending', detail='Waiting', **extra):
@@ -58,11 +59,35 @@ def summarize(packet, *, observed_at):
                  'distill' if not packet.get('reconstruction_complete') else 'plus')
     result = {'observed_at': observed_at, 'poll_seconds': ACTIVE_INTERVAL, 'stages': {}}
     for name, label in (('inference', '14B inference'), ('plus', 'Post-reconstruction inference')):
+        if name == 'plus' and packet.get('plan', {}).get('runtime', {}).get('artifixer_plus_pass') is False:
+            result['stages'][name] = stage(label, status='skipped',
+                detail='Disabled · repaired PLY is the final output')
+            continue
         data = packet.get('teachers', {}).get(name, {})
         log = packet.get('logs', {}).get(name, '')
         active = phase == ('infer' if name == 'inference' else 'plus')
-        completed = bool(data.get('complete')) or (name == 'inference' and
+        completed = status == 'completed' or bool(data.get('complete')) or (name == 'inference' and
             (phase in ('distill', 'plus') or packet.get('reconstruction_complete')))
+        if packet.get('plan', {}).get('runtime', {}).get('inference_model') == '14b':
+            # Students do not have teacher clips or a 50-step UniPC schedule.
+            # Report observed causal sampling without inventing a clip total.
+            records = []
+            for line in log.splitlines():
+                if line.startswith('SPLATFIX_STUDENT_MEMORY: '):
+                    try:
+                        records.append(json.loads(line.split(': ', 1)[1]))
+                    except ValueError:
+                        pass
+            latest = records[-1].get('phase') if records else None
+            detail = ('Complete' if completed else 'Stopped' if terminal and active else
+                      'Autoregressive sampling · 4 steps per block' if active and latest == 'cache_allocation' else
+                      'Decoding and exporting frames' if active and latest == 'denoise_complete' else
+                      'Loading and encoding inputs' if active else
+                      'Waiting for reconstruction' if name == 'plus' else 'Waiting for input preparation')
+            result['stages'][name] = stage('14B student inference' if name == 'inference' else label,
+                status='completed' if completed else status if terminal and active else 'active' if active else 'pending',
+                detail=detail)
+            continue
         clips = len(data.get('clips', []))
         total = data.get('planned_clip_count')
         if total is None and (data or active) and packet.get('plan', {}).get('runtime', {}).get('inference_model') == '14b-teacher':

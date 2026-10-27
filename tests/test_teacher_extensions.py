@@ -44,20 +44,22 @@ def test_collision_checks_whole_step_and_stationary_endpoint_adds_nothing():
     assert 'stationary' in result['teacher_extensions']['groups'][0]['reason']
 
 
-def test_extension_windows_are_continuous_with_reference_at_its_real_position():
+@pytest.mark.parametrize('budget', [25, 49, 81])
+def test_extension_windows_are_continuous_with_reference_at_its_real_position(budget):
     class Clear:
         def intersects(self,*args):return False
-    orbit=extend_orbit({'poses':[pose(i) for i in range(67)],'provenance':{}},[0,66],5,Clear())
+    end = 3 * budget - 9
+    orbit=extend_orbit({'poses':[pose(i) for i in range(end + 1)],'provenance':{}},[0,end],5,Clear())
     positions=[p[0][3] for p in render_poses(orbit)]
-    jobs=[({'indices':list(range(1,34)), 'seed_index':0},[0,1],'inference'),
-          ({'indices':list(range(65,33,-1)), 'seed_index':66},[0,1],'inference')]
-    clips=list(planned_clips(jobs,25,[0,66],seeding=True,layout='full-leg',extensions=extension_manifest(orbit)))
-    assert sorted(i for c in clips for i in c['indices'])==list(range(1,66))
+    jobs=[({'indices':list(range(1,end // 2 + 1)), 'seed_index':0},[0,1],'inference'),
+          ({'indices':list(range(end - 1,end // 2,-1)), 'seed_index':end},[0,1],'inference')]
+    clips=list(planned_clips(jobs,budget,[0,end],seeding=True,layout='full-leg',extensions=extension_manifest(orbit)))
+    assert sorted(i for c in clips for i in c['indices'])==list(range(1,end))
     assert any(c['seed_index'] is None for c in clips)  # No distant-reference jump in interior clips.
     assert clips[0]['extension_frame_indices']
     for c in clips:
         inputs=[*c['extension_frame_indices'], *([c['seed_index']] if c['seed_index'] is not None else []), *c['input_indices']]
-        assert len(inputs)<=25
+        assert len(inputs)<=budget
         differences=np.diff([positions[i] for i in inputs])
         assert np.all(differences==1) or np.all(differences==-1)
         assert not set(c['indices']).intersection(c['context_frame_indices'])
@@ -65,19 +67,19 @@ def test_extension_windows_are_continuous_with_reference_at_its_real_position():
 
 def test_extension_unlocks_reference_without_affecting_normal_defaults():
     normal=new_job_options({})
-    assert normal['image_cache_insertion'] and normal['teacher_opacity_scale']==1
+    assert not normal['image_cache_insertion'] and normal['teacher_opacity_scale']==1
     experiment=new_job_options({'teacher_endpoint_extension':8,'teacher_opacity_scale':.75})
     assert experiment['initial_image_seeding'] and not experiment['image_cache_insertion']
     assert experiment['teacher_opacity_scale']==.75
     assert normal['teacher_reference_opacity'] == 1
     assert new_job_options({'teacher_endpoint_extension':8, 'teacher_reference_opacity':.8})['teacher_reference_opacity'] == .8
     for change in [{'teacher_endpoint_extension':True},{'teacher_endpoint_extension':6},
-                   {'teacher_endpoint_extension':8,'teacher_max_frames':9},
+                   {'teacher_endpoint_extension':8,'teacher_max_frames':9,'teacher_clip_layout':'full-leg'},
                    {'teacher_endpoint_extension':8,'teacher_clip_layout':'segment'},
                    {'teacher_opacity_scale':-1},{'teacher_opacity_scale':1.1},
                    {'teacher_opacity_scale':float('nan')},{'teacher_opacity_scale':True},
                    {'teacher_reference_opacity': -.1}, {'teacher_reference_opacity': float('nan')},
-                   {'teacher_reference_opacity': True}, {'teacher_reference_opacity': .8}]:
+                   {'teacher_reference_opacity': True}, {'teacher_reference_opacity': .8, 'image_cache_insertion': True}]:
         with pytest.raises(ValueError):new_job_options(change)
 
 
@@ -119,7 +121,8 @@ def test_warmup_export_has_one_owner_and_enters_reconstruction(tmp_path):
     assert supervision['original_to_distillation'][9] is None
 
 
-def test_path_gate_rejects_wrong_side_reversal_and_reference_teleport():
+@pytest.mark.parametrize('budget', [25, 49, 81])
+def test_path_gate_rejects_wrong_side_reversal_and_reference_teleport(budget):
     from splat_explorer.splatfix.artifixer.teacher_extensions import validate_clip_path
     class Clear:
         def intersects(self, *args): return False
@@ -127,7 +130,7 @@ def test_path_gate_rejects_wrong_side_reversal_and_reference_teleport():
     trajectory = {'teacher_extensions': extension_manifest(orbit), 'transforms': {
         'frames': [{'transform_matrix': p} for p in render_poses(orbit)]}}
     clips = list(planned_clips([({'indices': list(range(1, 32))}, [0, 1], 'inference')],
-                              25, [0, 32], seeding=True, layout='full-leg',
+                              budget, [0, 32], seeding=True, layout='full-leg',
                               extensions=trajectory['teacher_extensions'], include_warmup=True))
     for clip in clips:
         audit = validate_clip_path(clip, trajectory)

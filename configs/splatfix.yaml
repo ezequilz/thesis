@@ -27,17 +27,21 @@ splatfix:
     repo: /workspace/third_party/G4Splat
     python: /workspace/g4splat-env/bin/python
   runtime:
+    inference_model: 14b  # Distilled causal student; teacher remains opt-in
+    artifixer_plus_pass: false  # Finish after exporting the reconstructed PLY
+    trajectory_order: picked
+    split_mode: double-split
     artifixer_pipeline: legacy_gsplat  # Default Viser / gsplat renderer with custom reconstruction controls
     prompt_source: worldexplorer
     reconstruction_initialization: point_cloud  # authors path always uses a fresh fit
     initial_image_seeding: true  # Seed each series, including both endpoint directions
     handoff_generation: false  # Optional fallback with --handoff-generation on or middle
-    connected_trajectory_generation: true  # Bridge the middle third in one padded block per double-split span, max 64 poses
+    connected_trajectory_generation: false  # Baseline: independent inward halves; bridging is opt-in
     connected_bridge_seeding: seed  # off / seed / seed_preserve; independent of outer-leg seeding
     generated_context_references: true  # Prior-sequence boundary and rotation-first camera references (Off restores legacy)
     image_cache_insertion: false  # Optional exact latent/cache preservation
     repo: /workspace/third_party/ArtiFixer
     python: /workspace/artifixer-venv/bin/python
-    checkpoint: /workspace/models/artifixer/artifixer-1.3b.pt
-    model_id: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+    checkpoint: /workspace/models/artifixer/artifixer-14b.pt
+    model_id: Wan-AI/Wan2.1-T2V-14B-Diffusers
     hf_home: /workspace/models/huggingface

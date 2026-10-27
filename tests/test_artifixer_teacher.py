@@ -30,17 +30,21 @@ def test_historical_custom_checkpoint_path_is_preserved():
     assert model_runtime(teacher)['inference_model'] == '14b-teacher'
 
 
-def test_new_jobs_default_to_teacher_but_legacy_opt_out_and_history_survive():
+def test_new_jobs_default_to_student_but_teacher_opt_in_and_history_survive():
     from splat_explorer.splatfix.jobs import validate_job
     raw = {'stage': 'repair', 'checkpoint': '/checkpoint', 'reconstruction_method': 'artifixer'}
-    teacher = validate_job(raw)
+    student = validate_job(raw)
+    assert student['inference_model'] == '14b' and not student['teacher_inference']
+    teacher = validate_job({**raw, 'teacher_inference': True})
     assert teacher['teacher_inference'] and teacher['inference_model'] == '14b-teacher'
-    assert teacher['teacher_max_frames'] == 25 and teacher['teacher_steps'] == 50
-    assert teacher['teacher_clip_layout'] == 'full-leg'
-    assert teacher['initial_image_seeding'] and teacher['image_cache_insertion']
+    assert teacher['teacher_max_frames'] == 81 and teacher['teacher_steps'] == 50
+    assert teacher['teacher_clip_layout'] == 'forward'
+    assert teacher['initial_image_seeding'] and not teacher['image_cache_insertion']
+    assert teacher['teacher_endpoint_extension'] == 8 and not teacher['teacher_warmup_supervision']
+    assert teacher['split_mode'] == 'no-split' and teacher['trajectory_order'] == 'picked'
     assert not inference_options({'inference_model': '14b-teacher'})['image_cache_insertion']
     legacy = validate_job({**raw, 'teacher_inference': False, 'initial_image_seeding': True})
-    assert legacy['inference_model'] == '1.3b' and legacy['initial_image_seeding']
+    assert legacy['inference_model'] == '14b' and legacy['initial_image_seeding']
     explicit = validate_job({**raw, 'inference_model': '14b'})
     assert not explicit['teacher_inference'] and explicit['inference_model'] == '14b'
     historical = model_runtime({'checkpoint': '/cache/artifixer-1.3b.pt', 'model_id': MODELS['1.3b'][1]})
@@ -159,10 +163,12 @@ def test_cli_accepts_teacher_inference_only_controls():
     assert args.teacher_resolution == '480p'
 
 
-@pytest.mark.parametrize('layout,seeding,extension', [('segment',False,0),('segment',True,0),
-    ('full-leg',False,0),('full-leg',True,0),('full-leg',True,4)])
+@pytest.mark.parametrize('layout,seeding,extension,fill', [('segment',False,0,False),('segment',True,0,False),
+    ('full-leg',False,0,False),('full-leg',True,0,False),('full-leg',True,4,False),('full-leg',True,4,True),
+    ('forward',True,0,False),('forward',True,4,False)])
+@pytest.mark.parametrize('replace_reference_rgb', [False, True])
 @pytest.mark.parametrize('opacity_scale,teacher_steps', [(.75, 50), (.5, 150)])
-def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monkeypatch, layout, seeding, extension, opacity_scale, teacher_steps):
+def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monkeypatch, layout, seeding, extension, fill, replace_reference_rgb, opacity_scale, teacher_steps):
     import argparse
     import json
     import sys
@@ -178,12 +184,14 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
         monkeypatch.setitem(sys.modules, name, value)
     checkpoint = tmp_path / 'artifixer-s1-14b.pt'
     checkpoint.touch()
-    limit = 9 if extension else 5
+    limit = 21 if layout == 'forward' and extension else 17 if fill else 9 if extension else 5
     reference_opacity = .8 if extension else 1.
     frame_count = 20 if extension else 12
     for index in range(frame_count):
         Image.new('RGB', (160, 96), (index, 10, 30)).save(tmp_path / f'{index}.png')
         np.save(tmp_path / f'{index}.npy', np.broadcast_to(np.linspace(0, 1, 160, dtype=np.float32), (96, 160)))
+    for index in (0,10):
+        Image.new('RGB',(160,96),(200+index,40,70)).save(tmp_path/f'ref-{index}.png')
     frames = [{'rgb': f'{i}.png', 'opacity': f'{i}.npy'} for i in range(frame_count)]
     transforms = {'w': 160, 'h': 96, 'fl_x': 100., 'fl_y': 100., 'cx': 80., 'cy': 48.,
                   'frames': [{'transform_matrix': np.eye(4).tolist()} for _ in frames]}
@@ -194,8 +202,9 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
                           'teacher_steps': teacher_steps,
                           'teacher_clip_layout': layout, 'initial_image_seeding': seeding,
                           'teacher_endpoint_extension':extension, 'teacher_opacity_scale':opacity_scale,
+                          'teacher_extend_short_clips':fill, 'teacher_reference_rgb_replacement':replace_reference_rgb,
                           'teacher_reference_opacity':reference_opacity},
-               'checkpoint_root': str(tmp_path), 'references': [str(tmp_path / '0.png'), str(tmp_path / '10.png')],
+               'checkpoint_root': str(tmp_path), 'references': [str(tmp_path / 'ref-0.png'), str(tmp_path / 'ref-10.png')],
                'camera_scale': 1., 'caption_path': 'unused', 'caption_sha256': 'unused', 'seed': 42}
     if extension:
         trajectory.update(base_frame_count=12,context_only_indices=list(range(12,20)),teacher_extensions=[
@@ -222,7 +231,10 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
             if index in (0,10):
                 assert not item['valid_frames_mask'][position]
                 assert torch.all(item['opacity'][position] == reference_opacity)
-                assert position in (0,4)
+                if layout != 'forward':
+                    assert position in ((0,4,14) if fill else (0,4))
+                expected_rgb=(200+index if replace_reference_rgb else index)/255
+                assert torch.allclose(item['rgb_rendered'][position,0],torch.full((96,160),expected_rgb))
             else:
                 assert torch.allclose(item['opacity'][position], torch.from_numpy(np.load(tmp_path / f'{index}.npy')) * opacity_scale)
                 assert torch.allclose(item['rgb_rendered'][position, 0], torch.full((96,160), index / 255))
@@ -241,7 +253,7 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
     module('model_training.data')
     module('model_training.data.utils', compute_camera_rays=rays, load_encoded_prompt=lambda *a: (torch.zeros(2), None))
     teacher_inference.run(tmp_path / 'output', request, trajectory)
-    expected = [i for i in range(12) if i not in (0, 10)] + (list(range(12,20)) if extension else [])
+    expected = [i for i in range(12) if i not in (0, 10)] + (list(range(12,18 if fill else 20)) if extension and layout != 'forward' else [])
     assert sorted(observed) == expected
     assert set(camera_indices) <= set(range(frame_count))
     predicted = tmp_path / 'output/inference/splatfix/frames/batch_0000/pred'
@@ -250,7 +262,7 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
     assert parsed[parsed.index('--max_neighbors_per_encode') + 1] == '1'
     assert parsed[parsed.index('--inference_pipeline') + 1] == 'bidirectional'
     report = json.loads((tmp_path / 'output/inference-teacher.json').read_text())
-    assert report['complete'] and len(report['clips']) == (4 if layout == 'full-leg' else 3)
+    assert report['complete'] and len(report['clips']) == ((2 if extension else 4) if layout == 'forward' else 2 if fill else 4 if layout == 'full-leg' else 3)
     assert report['teacher_clip_layout'] == layout
     assert report['opacity_conditioning']['interpolated_view_multiplier'] == opacity_scale
     assert all(row['opacity_conditioning']['target_min'] == 0 and row['opacity_conditioning']['target_max'] == opacity_scale for row in report['clips'])
@@ -260,8 +272,15 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
     if extension:
         assert report['clips'][0]['seeding']['reference_input_position']==4
         assert not report['image_cache_insertion']
-        assert set(range(12,20)) <= set(observed)
+        if layout == 'forward':
+            assert set(range(12,20)).isdisjoint(observed)
+            assert [r['frame_index'] for r in report['clips'][0]['seeding']['inline_references']] == [0, 10]
+        else:
+            assert set(range(12,18 if fill else 20)) <= set(observed)
         assert len(observed)==len(set(observed))
+    if layout == 'forward':
+        assert not report['image_cache_insertion']
+        assert all(row['direction'] == 'forward' for row in report['clip_plan'])
     if layout == 'full-leg' and not extension:
         assert report['clips'][2]['context_frame_indices']
         assert len(report['clips'][2]['input_frame_indices']) == 4 + int(seeding)
@@ -283,6 +302,10 @@ sys.path.extend(json.loads(sys.argv[2]))
 sys.path.insert(0, sys.argv[1])
 import teacher_inference
 assert not teacher_inference.__package__
+jobs = [({'indices': list(range(5))}, [0, 1], 'inference')]
+clip, = teacher_inference.planned_clips(jobs, 5, [0, 4], layout='forward', seeding=True)
+assert clip['ordered_input_indices'] == list(range(5))
+assert clip['inline_reference_indices'] == [0, 4] and clip['indices'] == [1, 2, 3]
 before = list(sys.path)
 root = Path(sys.argv[4])
 teacher_inference.preview_writer()(root, root/'pred', [1, 2], 1,
@@ -320,11 +343,12 @@ def test_full_leg_clips_fill_budget_instead_of_inheriting_double_split():
 
 
 @pytest.mark.parametrize('seeding', [False, True])
-def test_full_leg_windows_do_not_cross_anchors_or_missing_captures(seeding):
+@pytest.mark.parametrize('budget', [25, 49, 81])
+def test_full_leg_windows_do_not_cross_anchors_or_missing_captures(seeding, budget):
     anchors = [0, 5, 40]
     targets = [1, 2, 3, 4, *range(6, 30), *range(32, 40)]
     jobs = [({'indices': targets}, [0, 1, 2], 'inference')]
-    clips = list(planned_clips(jobs, 25, anchors, seeding=seeding, layout='full-leg'))
+    clips = list(planned_clips(jobs, budget, anchors, seeding=seeding, layout='full-leg'))
     assert sorted(i for c in clips for i in c['indices']) == targets
     assert [len(c['input_indices']) for c in clips] == [4, 24, 8]
     for c in clips:
@@ -333,18 +357,19 @@ def test_full_leg_windows_do_not_cross_anchors_or_missing_captures(seeding):
         assert all(abs(a - b) == 1 for a, b in zip(c['input_indices'], c['input_indices'][1:]))
 
 
-def test_full_leg_endpoint_reverse_outputs_and_single_reference_policy():
+@pytest.mark.parametrize('budget', [25, 49, 81])
+def test_full_leg_endpoint_reverse_outputs_and_single_reference_policy(budget):
     from splat_explorer.splatfix.artifixer.official_worker import inference_jobs
     trajectory = {'anchors': [{'frame_index': 0}, {'frame_index': 32}], 'frames': [{}] * 33}
     request = {'repair_policy': 'endpoints', 'runtime': {'endpoint_reference_mode': 'initial'}}
-    clips = list(planned_clips(inference_jobs(request, trajectory), 25, [0, 32],
+    clips = list(planned_clips(inference_jobs(request, trajectory), budget, [0, 32],
                               seeding=True, layout='full-leg'))
     for output, seed, expected in [('inference', 0, list(range(1, 32))),
                                    ('inference-back-to-front', 32, list(range(31, 0, -1)))]:
         selected = [c for c in clips if c['output'] == output]
         assert [i for c in selected for i in c['indices']] == expected
         assert all(c['seed_index'] == seed and len(c['references']) == 1 for c in selected)
-        assert all(len(c['input_indices']) == 24 for c in selected)
+        assert all(len(c['input_indices']) == min(31, budget - 1) for c in selected)
     assert {c['output'] for c in planned_clips(inference_jobs(request, trajectory, plus=True),
         25, [0, 32], seeding=True, layout='full-leg')} == {'plus'}
 

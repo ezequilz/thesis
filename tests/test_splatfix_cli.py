@@ -87,8 +87,12 @@ def test_repair_command_passes_only_saved_run_and_runtime(monkeypatch, tmp_path)
     assert received["runtime"]["generated_rgb_loss_weight"] == .5
     assert received["runtime"]["generated_lpips_downscale"] is False
     assert {k: received["runtime"][k] for k in ("repo", "python", "resolution_profile", "split_mode")} == {"repo": "/gpu/official", "python": "/gpu/python", "resolution_profile": "720p", "split_mode": "double-split"}
-    assert received["runtime"]["teacher_inference"] is True
-    assert received["runtime"]["inference_model"] == "14b-teacher"
+    assert 'teacher_clip_layout' not in received['runtime']
+    from splat_explorer.splatfix.artifixer.repair import DEFAULT_RUNTIME
+    effective = {**DEFAULT_RUNTIME, **received['runtime']}
+    assert effective['initial_image_seeding'] and not effective['image_cache_insertion']
+    assert received["runtime"]["teacher_inference"] is False
+    assert received["runtime"]["inference_model"] == "14b"
     assert received["checkpoint"] == tmp_path / "saved"
 
 

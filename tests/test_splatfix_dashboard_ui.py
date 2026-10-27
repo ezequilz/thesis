@@ -15,7 +15,7 @@ def test_dashboard_stage_payloads_and_frozen_schedule_selection():
 const fs=require('fs'), vm=require('vm'), assert=require('assert/strict');
 const source=fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0];
 const elements=new Map();
-const get=id=>{if(!elements.has(id))elements.set(id,{value:id==='image-repair-mode'?'auto':id==='artifixer-max-gaussians'?'1000000':id==='artifixer-generated-rgb-loss'?'0.5':id==='handoff-add-noise'?'repaired_pixel_sprinkle':'',textContent:'',innerHTML:'',disabled:false,checked:false,valid:true,opened:false,
+const get=id=>{if(!elements.has(id))elements.set(id,{value:id==='image-repair-mode'?'auto':id==='artifixer-max-gaussians'?'1000000':id==='artifixer-generated-rgb-loss'?'0.5':id==='handoff-add-noise'?'repaired_pixel_sprinkle':'',textContent:'',innerHTML:'',disabled:false,checked:id==='teacher-reference-rgb-replacement',valid:true,opened:false,
   selectedOptions:[{textContent:'Other scene'}],classList:{toggle(){}},style:{},addEventListener(){},querySelectorAll(){return[]},
   setCustomValidity(message){this.valid=!message},reportValidity(){return this.valid},showModal(){this.opened=true},close(){this.opened=false}});return elements.get(id)};
 const context=vm.createContext({document:{getElementById:get,querySelectorAll(){return [{id:"future-setting",name:"",type:"select-one",tagName:"SELECT",value:"future",labels:[{textContent:"Future setting"}],selectedOptions:[{value:"future",textContent:"Future option"}],matches(){return false},getClientRects(){return [{}]}}]}},fetch:()=>new Promise(()=>{}),setInterval(){},setTimeout(){},assert});
@@ -31,8 +31,11 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('select').scene_id,'unrelated-current-scene');
   assert.equal(payload('repair').checkpoint,'/saved/cp');
   assert.equal(payload('repair').mode,'edited');
+  assert.equal(payload('repair').artifixer_plus_pass,false);
+  $('artifixer-plus-pass').checked=true;assert.equal(payload('repair').artifixer_plus_pass,true);
+  $('artifixer-plus-pass').checked=false;
   $('teacher-inference').checked=true;$('artifixer-inference-model').value='1.3b';
-  $('teacher-resolution').value='480p';$('teacher-max-frames').value='24';$('teacher-steps').value='150';
+  $('teacher-resolution').value='480p';$('teacher-max-frames').value='81';$('teacher-steps').value='150';
   $('handoff-generation').value='on';$('split-mode').value='double-split';
   renderTeacherControls();
   assert.equal($('artifixer-teacher-controls').hidden,false);
@@ -42,12 +45,19 @@ Promise.resolve(vm.runInContext(`(async()=>{
   const teacher=payload('repair');
   assert.equal(teacher.inference_model,'14b-teacher');
   assert.equal(teacher.teacher_steps,150);assert.equal(teacher.generated_rgb_loss,true);assert.equal(teacher.generated_rgb_loss_weight,.5);
-  assert.equal(teacher.teacher_max_frames,25);
-  assert.equal(teacher.teacher_clip_layout,'full-leg');
+  assert.equal(teacher.teacher_max_frames,81);
+  $('teacher-max-frames').value='25';assert.equal(payload('repair').teacher_max_frames,25);
+  $('teacher-max-frames').value='';assert.equal(payload('repair').teacher_max_frames,81);
+  $('teacher-max-frames').value='81';
+  assert.equal(teacher.teacher_clip_layout,'forward');
+  assert.equal(teacher.teacher_endpoint_extension,8);assert.equal(teacher.teacher_warmup_supervision,false);
+  assert.equal($('teacher-seeding').disabled,true);assert.equal($('teacher-extend-short-clips').disabled,true);
   assert.equal(teacher.teacher_resolution,'480p');
-  assert.equal(teacher.split_mode,'double-split');
+  assert.equal(teacher.split_mode,'no-split');assert.equal(teacher.trajectory_order,'picked');
   for(const key of ['connected_trajectory_generation','handoff_generation','generated_context_references'])assert.equal(teacher[key],false);
-  assert.equal(teacher.initial_image_seeding,true);assert.equal(teacher.image_cache_insertion,true);
+  assert.equal(teacher.initial_image_seeding,true);assert.equal(teacher.image_cache_insertion,false);
+  $('teacher-clip-layout').value='full-leg';$('teacher-endpoint-extension').value='0';renderTeacherControls();
+  $('teacher-seeding').value='preserve';assert.equal(payload('repair').image_cache_insertion,true);
   $('teacher-seeding').value='seed';assert.equal(payload('repair').initial_image_seeding,true);assert.equal(payload('repair').image_cache_insertion,false);
   $('teacher-seeding').value='off';assert.equal(payload('repair').initial_image_seeding,false);assert.equal(payload('repair').image_cache_insertion,false);
   $('teacher-seeding').value='preserve';
@@ -56,13 +66,23 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('repair').teacher_endpoint_extension,8);assert.equal(payload('repair').teacher_opacity_scale,.5);assert.equal(payload('repair').teacher_reference_opacity,.8);
   assert.equal(payload('repair').image_cache_insertion,false);assert.equal(payload('repair').initial_image_seeding,true);
   $('teacher-endpoint-extension').value='0';renderTeacherControls();assert.equal($('teacher-seeding').disabled,false);
+  $('teacher-extend-short-clips').checked=true;renderTeacherControls();
+  assert.equal(payload('repair').teacher_extend_short_clips,true);assert.equal(payload('repair').teacher_reference_rgb_replacement,true);
+  assert.equal($('teacher-endpoint-extension').disabled,true);assert.equal(payload('repair').image_cache_insertion,false);
+  $('teacher-extend-short-clips').checked=false;$('teacher-seeding').value='preserve';$('teacher-reference-rgb-replacement').checked=false;renderTeacherControls();
+  assert.equal($('teacher-seeding').value,'seed');assert.equal(payload('repair').teacher_reference_rgb_replacement,false);
+  $('teacher-reference-rgb-replacement').checked=true;
+  $('teacher-clip-layout').value='segment';$('teacher-endpoint-extension').value='8';renderTeacherControls();
+  assert.equal(payload('repair').teacher_endpoint_extension,0);assert.equal($('teacher-endpoint-extension').disabled,true);
+  assert.equal($('teacher-extend-short-clips').disabled,true);assert.equal($('teacher-seeding').disabled,false);
+  $('teacher-clip-layout').value='full-leg';renderTeacherControls();
   $('teacher-seeding').value='preserve';
   $('teacher-inference').checked=false;$('artifixer-inference-model').value='1.3b';$('handoff-generation').value='off';
   renderTeacherControls();
   assert.equal($('artifixer-teacher-controls').hidden,true);
   assert.equal($('artifixer-legacy-model-control').hidden,false);
   assert.equal($('artifixer-legacy-generation').hidden,false);
-  $('artifixer-inference-model').value='14b';renderTeacherControls();assert.equal($('artifixer-legacy-generation').hidden,true);
+  $('artifixer-inference-model').value='14b';renderTeacherControls();assert.equal($('artifixer-legacy-generation').hidden,false);
   $('artifixer-inference-model').value='1.3b';renderTeacherControls();assert.equal($('artifixer-legacy-generation').hidden,false);
 
   assert.equal(payload('edit').repair_mode,'auto');
@@ -73,7 +93,7 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('repair').regularization_profile,'base_mcmc');
   assert.equal(payload('repair').generated_lpips_downscale,false);
   assert.equal(payload('repair').handoff_generation,false);
-  assert.equal(payload('repair').connected_trajectory_generation,true);
+  assert.equal(payload('repair').connected_trajectory_generation,false);
   assert.equal(payload('repair').connected_bridge_seeding,'seed');
   assert.equal(payload('repair').generated_context_references,true);
   $('generated-context-references').value='on';
@@ -534,7 +554,8 @@ def test_dashboard_new_defaults():
         select = re.search(r'<select id="'+element+r'"[^>]*>(.*?)</select>', html).group(1)
         assert re.search(r'<option value="([^"]+)"', select).group(1) == expected
     assert re.search(r'id="oracle-preset-scale"[^>]*value="0.25"', html)
-    assert re.search(r'id="teacher-inference"[^>]*checked', html)
+    assert not re.search(r'id="teacher-inference"[^>]*checked', html)
+    assert '<option value="14b" selected>' in html
 
 
 def test_gaussian_limit_click_edit_and_validation():

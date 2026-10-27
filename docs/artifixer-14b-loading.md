@@ -59,10 +59,23 @@ bidirectional attention still grow with resolution and clip length.
 
 ### Using the teacher
 
-In `/splatfix`, Step 4 → **Use 14B teacher inference (default)** is enabled
-for new jobs. Defaults are up to 24 generated/context views plus one repaired
-reference per independent clip (25 input frames),
-50 diffusion steps and native run resolution. The optional `480p` inference-only
+The October 26–27 experiment enabled **Use 14B teacher inference** for new
+jobs. It is now opt-in; new jobs default to the 14B distilled student. Teacher defaults are forward windows between consecutive selected repaired
+views, up to 81 total input frames including references and warm-ups,
+50 diffusion steps and native run resolution. A full-size memory preflight on
+October 27 completed one 49-input clip at 1280 × 720 with 46.94 GiB peak reserved
+and 42.57 GiB peak allocated on the A100 80GB. It used one denoising step plus
+VAE decode, eight warm-up views, unchanged rendered opacity and reference opacity
+1.0. This validates that probe’s memory footprint, not full-run image quality or
+completion; the queued production comparison uses 150 steps.
+A subsequent 81-input probe (74 real inputs plus seven masked repetitions of the
+last frame) also completed denoising and decoding: 52.54 GiB peak reserved and
+43.64 GiB peak allocated. Padding was confined to the memory test. The then-current whole-leg
+recipe kept that captured route in five clips with 40, 74, 72, 41 and 47 actual
+inputs. Those measurements describe the earlier layout, not the new forward plan.
+The official default is documented in [NVIDIA’s inference parser](https://github.com/nv-tlabs/ArtiFixer/blob/main/model_eval/run_inference.py#L806-L811).
+
+The optional `480p` inference-only
 limit changes a 1280 × 720 input to 832 × 464 (both dimensions VAE-aligned).
 When this limit is selected, RGB and opacity are resized
 together; all per-frame intrinsics are scaled and poses/distortion retained.
@@ -75,23 +88,42 @@ All selected reference images remain conditioning (subject to the existing
 endpoint reference policy), and the VAE encodes references individually.
 Predictions exclude trusted anchors and preserve global frame IDs.
 
-New jobs use `teacher_clip_layout: full-leg`. The teacher combines the legacy
-inward half-segments into captured legs before taking 24-view windows, preserving
-the picked camera order between anchors. The closest permitted repaired endpoint
-seeds each window. A short final window borrows distinct views from the same leg
-as context; those overlapping views are masked out of exports so every target
-has exactly one reconstruction image. A leg with fewer than 24 available views
-stays shorter. No new cameras are extrapolated, and windows do not cross a saved
-anchor or missing-capture gap. For example, a 31-target leg now exports 24 then 7
-new images; both clips see 24 target/context views plus their repaired starter.
+New jobs use `teacher_clip_layout: forward`, `initial_image_seeding: true`,
+`image_cache_insertion: false`, `teacher_endpoint_extension: 8`, and
+`teacher_warmup_supervision: false`. This follows the connected picked path in
+increasing camera order, with each consecutive pair of repaired references
+normally bounding a clip. All six selected references remain available to
+reference attention. There are no reversed half-legs or distant starter jumps.
 
-The UI counts views excluding the starter; the CLI/API `teacher_max_frames`
-retains its total 1+4*n budget convention (25 for 24 views). With seeding disabled,
-the extra slot is reserved for temporal padding. Historical requests without a
-layout keep `segment` behavior and their original cap. The already running
-`run_20261027_012036` retains its saved 37-frame, segment-based recipe in both
-inference phases; changing defaults does not rewrite an active experiment.
+The input order is leading warm-up → repaired reference → interpolated views →
+repaired reference → trailing extension. Each end gets up to eight safe extension
+views, reduced in groups of four for collision clearance and the total budget.
+For example, 73 captured frames including both references leave room for four
+warm-ups per end. If the captured interval itself needs the full budget, it takes
+priority over extensions. Warm-ups provide context only by default; they do not
+become generated exports or reconstruction supervision in forward mode.
 
+Intervals longer than the cap use overlapping forward windows. Overlap is up to
+eight inputs, with output ownership divided between neighboring windows so every
+wanted camera is exported once. Interior windows do not insert a distant repaired
+camera; all repairs remain available through reference attention. These windows
+have independent temporal attention and do not carry generated state. Their
+seams and image quality still require a GPU comparison.
+
+At each included reference camera, the repaired RGB replaces rendered RGB before
+encoding the complete input sequence with the temporal VAE. This seeds the
+reference at its actual time position without inserting an independently encoded
+single-image latent into a compressed temporal group. No latent is restored after
+a scheduler step. The causal VAE makes temporal order significant, but does not
+prohibit reversed video; forward order removes an unnecessary source of context
+variation. The teacher transformer still uses bidirectional attention.
+
+The dashboard, CLI and API all count **total input frames**, including references,
+warm-ups and padding (`teacher_max_frames`, 1+4*n, maximum 81). Select the legacy
+`full-leg` or `segment` layout to reproduce older policies. Latent preservation is
+an explicit legacy fallback with extensions disabled; forward mode rejects it.
+Historical requests retain their saved layout, cap, seeding and preservation
+settings, including requests that predate the layout field.
 
 Reducing the number of selected references can also reduce conditioning memory,
 at the cost of scene coverage. Encoding references one at a time retains all
@@ -103,28 +135,29 @@ distilled checkpoint's trained causal block/window geometry.
 Independent teacher clips have full bidirectional attention within each clip;
 they do not share temporal state. Clip boundaries can introduce seams. The
 connected-bridge, generated-context and GPT-handoff adapters are disabled.
-The teacher starting-image default seeds each clip with its leg’s repaired
-reference at the exact reference camera, with opacity 1. The first encoded
-latent is restored after every UniPC step, leaving other latents to denoise
-around it. This is an experimental conditioning adapter, not a persistent KV
-cache or the unmodified teacher recipe. The 37-frame cap includes the starter,
-which is never exported as a generated target. Its original RGB remains direct
-reconstruction supervision. The UI also offers seed-only and reference-only
-comparisons. Effective settings, reference checksums and preservation checks are saved. No
-automatic smaller-model or lower-quality fallback occurs in normal Step 4.
+Reference cameras are never exported as generated targets; their original repaired
+RGBs remain direct reconstruction supervision. Effective settings, exact inline
+reference positions, reference checksums and input paths are recorded. The legacy
+preservation adapter restores the first latent after every UniPC step only when
+explicitly enabled; it is not the default or an interior-frame preservation method.
+No automatic smaller-model or lower-quality fallback occurs in normal Step 4.
 Turn **Use 14B teacher inference** off to restore the legacy distilled model
-selector and generation controls, including 1.3B. New API jobs default to
-`teacher_inference: true`; explicit distilled model selections still opt out.
+selector and generation controls, including 1.3B. New API jobs now default to
+`teacher_inference: false, inference_model: 14b`; teacher experiments opt in.
 Historical jobs without this setting retain their saved model and sampling policy.
 The CLI accepts `--no-teacher-inference --inference-model 1.3b` for the legacy path.
-The full reconstruction workflow still follows inference automatically.
+Reconstruction still follows inference automatically. New jobs finish after exporting
+the repaired PLY. The optional **Run final ArtiFixer3D+ image pass** is off by
+default (`artifixer_plus_pass: false`); `--artifixer-plus-pass` enables the
+additional renders and denoising for testing. The + pass produces images only
+and does not improve or replace the reconstructed PLY.
 
 CLI equivalents:
 
 ```bash
 splatfix repair CHECKPOINT --output OUTPUT \
   --inference-model 14b-teacher --teacher-resolution 480p \
-  --teacher-max-frames 25 --teacher-clip-layout full-leg --teacher-steps 50
+  --teacher-max-frames 81 --teacher-clip-layout forward --teacher-steps 50
 ```
 
 Use `--teacher-resolution native` for the original run resolution. To test only
@@ -285,9 +318,10 @@ capture/control operations remain responsive independently of progress polling.
 
 ### Endpoint blur experiments (October 27)
 
-These are optional, off by default, and have not yet been validated for GPU image
-quality. The active 37-frame run keeps its saved settings. New normal runs use
-24 target/context views plus a preserved reference, with whole-leg packing.
+The forward default now uses fixed endpoint extensions with seed-only references.
+The fill-short-clip and opacity experiments remain optional, off by default, and
+have not been validated as a quality improvement. Existing runs keep their saved
+settings. The legacy whole-leg extension behavior below remains available.
 
 **Endpoint extension** accepts 4 or 8 requested views. Preparation extends the
 endpoint's translation tangent, using the adjacent authored camera step and
@@ -303,10 +337,34 @@ extension. Extension mode explicitly unlocks the repaired reference: it is
 inserted at its actual camera with the selected reference opacity (default 1), but its latent is allowed to
 denoise. Interior windows that do not reach a reference use reference attention
 without inserting a distant endpoint into the video. All input views count
-against the 25-frame total budget. Used warm-up views are exported once as generated supervision and included in
-reconstruction at their calibrated cameras. Unused rendered context and collision-
+against the selected total budget (81 frames by default). Legacy whole-leg mode exports used warm-up views once as generated supervision
+at their calibrated cameras; forward mode excludes them by default. Unused rendered context and collision-
 rejected views stay excluded. Source captures label extension context in review. All original wanted cameras and repaired-reference
 supervision are retained.
+
+**Extend both ends of short clips** (`teacher_extend_short_clips`, optional and
+off by default, legacy whole-leg mode only) replaces the fixed warm-up count for short complete legs. It
+checks both outward endpoint translation tangents, including the two sides of
+interior references. Each side stops at its first continuous Gaussian collision.
+The budget includes both reference cameras, wanted views, and safe extensions.
+Remaining space is shared between the two sides, or reassigned to the safe side.
+Leading extensions use groups of four to align the first reference with the VAE;
+any remaining temporal padding is not exported. Paths stay extension → reference
+→ captured leg → reference → extension. Long legs retain bounded windows.
+Both generated extension sets enter fitting once at their exact cameras. The
+plan cache includes the mode and frame budget so a fixed warm-up plan cannot be
+reused accidentally. This experiment may improve endpoint context, but image
+sharpness and reconstruction quality still require review.
+
+**Use GPT-repaired RGB at exact reference poses**
+(`teacher_reference_rgb_replacement`, on by default to retain existing seeded
+behavior) explicitly controls replacement of rendered RGB by the calibrated
+GPT repair. It applies to both inline endpoints of extended short clips, and
+only those exact camera IDs. Both use the separate reference-opacity setting;
+interpolated RGB stays unchanged. These reference frames are masked from generated
+exports, and their original repairs supervise reconstruction. Turning replacement
+off requires reference-latent preservation to be off; the dashboard switches to
+seed-once mode. Two-sided extension always leaves reference latents unlocked.
 
 Teacher review orders generated images by their recorded position in the model
 input, with clip number, input position and warm-up labels. Global camera IDs
@@ -342,3 +400,99 @@ isolate their individual effect.
 Only then compare 75 steps at otherwise identical settings. Compare the same
 wanted cameras near each endpoint, not different clip/gallery positions.
 More denoising steps do not by themselves remove strong blurry-render conditioning.
+
+
+## 14B distilled student in Step 4 (October 27)
+
+New jobs now select `artifixer-14b.pt`, not `artifixer-s1-14b.pt`. The student
+checkpoint was downloaded again and verified against NVIDIA's SHA256
+`c1a6d31fb849211d4c682a28b40980549cd8f807ee309e7bc0141a336ffcd16b`
+(67,644,337,412 bytes). Both the teacher and small student remain cached.
+Old job staging was cleared at the user's explicit request; incomplete remote
+archives were permitted to be discarded for this cleanup. Existing local files
+were retained. Qwen caption weights were already absent; the remaining small
+Qwen directory contained tokenizer/configuration metadata.
+
+Both students use the same `official_worker.inference` path, authors' KV sampler,
+four steps, seven-frame latent blocks, camera/ray construction, source opacity,
+reference ordering and exports. Both expose identical generation controls in
+Step 4. Teacher controls remain opt-in and do not route a student through the
+bidirectional clip planner. `--inference-model 14b` selects the large student;
+`--inference-model 1.3b` selects the small student. Historical requests without a
+selection continue to derive their original model from their checkpoint.
+
+The large student uses the shared strict BF16 empty-parameter loader. Its
+`student_memory.py` adapter changes cache residency only. It reserves activation
+headroom and a single staged layer on GPU, keeps as many complete layer caches
+resident as fit, and places the remainder in host RAM. Each offloaded block
+materializes its temporal/text/reference cache on CUDA, executes the original
+block and attention processors, then copies cache changes back synchronously.
+This preserves the full requested context, attention sinks, rolling eviction,
+reference count, and dtype. Connected bridges retain their existing seven-frame
+cache policy. References are VAE-encoded one at a time. There is no quantization
+or automatic smaller-model/resolution/context fallback.
+
+Cache planning considers free device memory (capped at 80 GiB), estimated temporal,
+reference and text caches, and Linux/Slurm host memory limits. It prefers 12 GiB
+of GPU headroom plus one staged cache layer and 4 GiB of host headroom. For
+reference-heavy calls it can use 10/3 or 8/2 GiB GPU/host headroom, retaining the
+same tensors and full context. Immutable bridge-preservation K/V is budgeted
+separately when that optional adapter is selected. Estimates
+are preflight checks, not guarantees for arbitrary inputs. Telemetry is written
+to `inference-memory.jsonl` (or `plus-memory.jsonl`). CPU/GPU transfers add latency.
+The adapter is single-GPU, inference-only, and tied to the pinned authors' block
+cache interface; it does not patch the clean upstream checkout.
+
+### Native long-window validation
+
+Slurm step `5875153.56` completed successfully on A100-SXM4-80GB (exit 0).
+The production worker generated **92 frames at 1280 × 720**, retaining all six
+repaired references, the saved caption, camera scale and poses, seed 42 and four
+sampling steps per seven-latent-frame block. There were 93 real sequence inputs
+including the starter, padded by upstream to 109 RGB inputs / 28 latent frames.
+The fourth autoregressive block exercised eviction in the full 21-frame cache.
+No smaller resolution, shorter context, lower precision or teacher sampler was used.
+
+Peak allocated CUDA memory was **69.10 GiB**, peak reserved **73.16 GiB**;
+a live `nvidia-smi` sample showed 75,435 MiB total device usage. Slurm reported
+MaxRSS **50,243,676 KiB** (47.92 GiB) within the 62 GiB step / 64 GiB allocation.
+The measured worker duration was **603.65 seconds**, including model load,
+conditioning, sampling, decoding and PNG export (Slurm elapsed 10m10s).
+The planner put 24 of 40 layers' caches in host RAM (estimated 44.73 GiB) and
+kept the other 16 on CUDA. Complete cache size including references/text was
+estimated at 74.55 GiB, before weights and activations.
+
+All expected global frame IDs and output sizes were verified. Results and
+telemetry are in `outputs/artifixer-student-14b/success.json`,
+`inference-memory.jsonl`, and `previews/`. This validates the stated inference
+workload, not a completed reconstruction or a multiview-quality improvement.
+The initial conservative host check rejected clean checkpoint pages counted as
+active file cache; the corrected check treats clean unmapped pages as
+reclaimable while excluding mapped/shared/dirty pages and anonymous tensors.
+
+### Connected generation validation
+
+A second native-resolution probe used the existing connected planner on the
+first real 23-camera interval, including both inward outer legs, RGB-seeded
+middle bridging and generated-context references. It completed all **21 target
+frames** in **396.70 seconds**. Reference counts grew from 2 to 8 to 12 as the
+existing context policy reused generated images. Peak allocated memory was
+**71.36 GiB** and peak reserved **75.50 GiB**. Original references and retained
+outer images passed the existing checksum assertions; every target camera was
+exported exactly once. See `outputs/artifixer-student-14b/connected/success.json`.
+
+### Twelve references with the full temporal cache
+
+A third probe kept all six repaired references plus six actual generated
+context images and the full 21-frame temporal cache. It generated **21 frames
+at 1280 × 720** in **249.61 seconds**, using the same four-step causal sampler.
+Peak allocated CUDA memory was **73.60 GiB**, peak reserved **76.38 GiB**.
+Slurm step `5875153.59` completed with exit 0 and MaxRSS **61,716,592 KiB**
+(58.86 GiB), within the 62 GiB step limit. The planner used 25 CPU cache layers,
+15 GPU cache layers and the 8/2 GiB activation/host headroom option. Full caches
+were estimated at 91.03 GiB, with 56.89 GiB on the host. See
+`outputs/artifixer-student-14b/references-12/success.json`.
+
+All three probes' output images, manifests and telemetry were saved locally.
+These measured workloads fit the current A100 allocation; larger resolutions,
+more references or other workloads sharing memory still require preflight checks.

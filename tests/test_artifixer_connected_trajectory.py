@@ -149,7 +149,8 @@ def test_options_default_and_explicit_fallbacks():
     from splat_explorer.splatfix.artifixer.backend import validate_options
     base = {'stage': 'repair', 'teacher_inference': False}
     default = validate_options(base)
-    assert default['connected_trajectory_generation'] and not default['handoff_generation']
+    assert not default['connected_trajectory_generation'] and not default['handoff_generation']
+    assert validate_options({**base, 'connected_trajectory_generation': True})['connected_trajectory_generation']
     assert default['split_mode'] == 'double-split'
     assert default['connected_bridge_seeding'] == 'seed'
     assert default['artifixer_pipeline'] == 'legacy_gsplat'

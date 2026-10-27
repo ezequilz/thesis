@@ -42,6 +42,14 @@ def test_queue_is_durable_idempotent_and_does_no_network(tmp_path):
         d.require_finished(root)
 
 
+def test_explicit_discard_is_terminal_without_claiming_successful_archive(tmp_path):
+    root = queue(tmp_path)
+    (root / d.STATUS).write_text(json.dumps({'status': 'discarded'}))
+    assert not d.pending(tmp_path)
+    assert not d.active(root)
+    assert not (root / p.RECEIPT).exists()
+
+
 def test_failed_download_retries_without_touching_compute_outcome(tmp_path):
     root = queue(tmp_path)
     (root / 'status.json').write_text('{"status":"error","message":"GPU failure"}')

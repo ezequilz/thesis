@@ -65,23 +65,36 @@ def clip_jobs(jobs, maximum):
             yield indices[offset:offset + maximum], references, directory
 
 
-def planned_clips(jobs, maximum, anchors, *, seeding=False, layout='segment', extensions=(), include_warmup=False):
-    """Reserve one slot for the trusted leg endpoint without exporting it.
+def planned_clips(jobs, maximum, anchors, *, seeding=False, layout='segment', extensions=(), include_warmup=False,
+                  fill_short=False):
+    """Plan forward reference-bounded windows or reproduce a legacy layout.
 
-Each bounded clip starts at that endpoint's real camera, including reverse
-legs. Long legs keep the same repaired anchor for each independent clip.
-"""
+    Legacy layouts reserve a starter slot and may reverse inward from a repair.
+    Forward windows keep every inline reference at its actual path position.
+    """
+    if layout == 'forward':
+        if __package__:
+            from .teacher_forward import forward_clips
+        else:
+            from teacher_forward import forward_clips
+        yield from forward_clips(jobs, maximum, anchors, seeding=seeding,
+                                 extensions=extensions, include_warmup=include_warmup)
+        return
     if layout == 'full-leg':
         if __package__:
             from .teacher_clips import filled_leg_clips
         else:
             from teacher_clips import filled_leg_clips
         exported = set()
-        for job in filled_leg_clips(jobs, maximum, anchors, seeding=seeding, extensions=extensions):
-            warmup = [i for i in job['extension_frame_indices'] if (job['output'], i) not in exported] if include_warmup else []
+        for job in filled_leg_clips(jobs, maximum, anchors, seeding=seeding, extensions=extensions,
+                                   fill_short=fill_short):
+            outside = [*job['extension_frame_indices'], *job.get('trailing_extension_frame_indices', [])]
+            warmup = [i for i in outside if (job['output'], i) not in exported] if include_warmup else []
             exported.update((job['output'], i) for i in warmup)
             job['warmup_frame_indices'] = warmup
-            job['indices'] = [*warmup, *job['indices']]
+            leading = set(job['extension_frame_indices'])
+            job['indices'] = [*[i for i in warmup if i in leading], *job['indices'],
+                              *[i for i in warmup if i not in leading]]
             job['context_frame_indices'] = [i for i in job['context_frame_indices'] if i not in warmup]
             yield job
         return
@@ -132,9 +145,11 @@ def run(root, request, trajectory, *, plus=False, max_clips=None):
     if __package__:
         from .official_worker import inference_jobs, opengl_transforms, validate_caption, caption_digest
         from .teacher_seeding import preserve_starting_latent
+        from .teacher_extensions import clip_input_indices, validate_clip_path
     else:
         from official_worker import inference_jobs, opengl_transforms, validate_caption, caption_digest
         from teacher_seeding import preserve_starting_latent
+        from teacher_extensions import clip_input_indices, validate_clip_path
 
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -163,17 +178,17 @@ def run(root, request, trajectory, *, plus=False, max_clips=None):
     # create_dataset is bypassed by Step 4: enforce the clip bound here ourselves.
     cp = Path(request['checkpoint_root'])
     anchors = [a['frame_index'] for a in trajectory['anchors']]
+    extending = cfg['teacher_endpoint_extension'] or cfg['teacher_extend_short_clips']
     jobs = list(planned_clips(inference_jobs(request, trajectory, plus=plus), cfg['teacher_max_frames'],
                              anchors, seeding=cfg['initial_image_seeding'], layout=cfg['teacher_clip_layout'],
-                             extensions=trajectory.get('teacher_extensions', []) if cfg['teacher_endpoint_extension'] else (),
-                             include_warmup=cfg['teacher_warmup_supervision']))
-    if cfg['teacher_endpoint_extension']:
-        if __package__:
-            from .teacher_extensions import validate_clip_path
-        else:
-            from teacher_extensions import validate_clip_path
+                             extensions=trajectory.get('teacher_extensions', []) if extending else (),
+                             include_warmup=cfg['teacher_warmup_supervision'],
+                             fill_short=cfg['teacher_extend_short_clips']))
+    if extending or cfg['teacher_clip_layout'] == 'forward':
         for job in jobs:
             job['path_validation'] = validate_clip_path(job, trajectory)
+            if len(job['path_validation']['input_frame_indices']) > cfg['teacher_max_frames']:
+                raise ValueError('Teacher path exceeds the configured input budget')
     expected_frames = {i for job in jobs if job['output'] == phase for i in job['indices']}
     render_dir = Path(json.loads((root / 'distillation.json').read_text())['render_dir']) if plus else None
 
@@ -215,15 +230,22 @@ def run(root, request, trajectory, *, plus=False, max_clips=None):
             'output_resampling': 'bilinear' if size != native_size else None,
             'sampling': 'stage-1 bidirectional UniPC; CFG 5; independent bounded clips',
             'references': 'selected anchors according to endpoint-reference policy; sequential VAE encoding',
-            'seeding': ('continuous extension -> repaired endpoint -> targets; reference unlocked; interior clips use reference attention'
-                        if cfg['teacher_endpoint_extension'] else 'trusted reference at its real camera; first encoded latent restored after every UniPC step'
+            'seeding': ('forward picked path; repaired RGB seeds every included reference before temporal VAE encoding; no latent preservation'
+                        if cfg['teacher_clip_layout'] == 'forward' and cfg['initial_image_seeding'] else
+                        'continuous extension -> reference -> captured leg -> reference -> extension; reference latents unlocked'
+                        if cfg['teacher_extend_short_clips'] else
+                        'continuous extension -> repaired endpoint -> targets; reference unlocked; interior clips use reference attention'
+                        if extending else 'trusted reference at its real camera; first encoded latent restored after every UniPC step'
                         if cfg['image_cache_insertion'] else 'trusted reference seeds the first latent; denoising may change it'
                         if cfg['initial_image_seeding'] else 'reference cross-attention only'),
             'persistent_kv_cache': False,
+            'temporal_state_between_clips': 'independent; overlapping inputs only',
             'teacher_clip_layout': cfg['teacher_clip_layout'],
             'teacher_endpoint_extension': cfg['teacher_endpoint_extension'],
+            'teacher_extend_short_clips': cfg['teacher_extend_short_clips'],
             'teacher_opacity_scale': cfg['teacher_opacity_scale'],
             'teacher_reference_opacity': cfg['teacher_reference_opacity'],
+            'teacher_reference_rgb_replacement': cfg['teacher_reference_rgb_replacement'],
             'teacher_warmup_supervision': cfg['teacher_warmup_supervision'],
             'endpoint_extensions': trajectory.get('teacher_extensions', []),
             'opacity_conditioning': {'interpolated_view_multiplier': cfg['teacher_opacity_scale'],
@@ -256,7 +278,7 @@ def run(root, request, trajectory, *, plus=False, max_clips=None):
                 seed_index = job['seed_index']
                 context = job.get('input_indices', indices)
                 extension = job.get('extension_frame_indices', [])
-                input_indices = [*extension, seed_index, *context] if seed_index is not None else context
+                input_indices = clip_input_indices(job)
                 stage = 'clip_loading'
                 start = time.monotonic()
                 neighbors = [anchors[i] for i in reference_order]
@@ -269,23 +291,33 @@ def run(root, request, trajectory, *, plus=False, max_clips=None):
                 valid = torch.tensor([i in owned for i in input_indices], dtype=torch.bool)
                 seeding_audit = {'enabled': seed_index is not None, 'seed_global_index': seed_index,
                                  'preserve_starting_latent': cfg['image_cache_insertion'], 'starter_exported': False}
-                if seed_index is not None:
-                    seed_position = input_indices.index(seed_index)
-                    reference_slot = neighbors.index(seed_index)
+                inline_references = job.get('inline_reference_indices',
+                    [i for i in (seed_index, job.get('end_reference_index')) if i is not None])
+                inline_audit = []
+                for reference_index in inline_references:
+                    reference_position = input_indices.index(reference_index)
+                    reference_slot = neighbors.index(reference_index)
                     reference_path = Path(request['references'][reference_order[reference_slot]])
-                    renders[seed_position] = references[reference_slot]
-                    opacity[seed_position] = cfg['teacher_reference_opacity']
-                    valid[seed_position] = False
-                    seeding_audit.update(reference_path=str(reference_path),
-                                         reference_input_position=seed_position,
+                    if cfg['teacher_reference_rgb_replacement']:
+                        renders[reference_position] = references[reference_slot]
+                    opacity[reference_position] = cfg['teacher_reference_opacity']
+                    valid[reference_position] = False
+                    inline_audit.append({'frame_index': reference_index, 'input_position': reference_position,
+                                         'reference_path': str(reference_path), 'sha256': caption_digest(reference_path),
+                                         'rgb_replaced': cfg['teacher_reference_rgb_replacement']})
+                    if reference_index == seed_index:
+                        seeding_audit.update(reference_path=str(reference_path),
+                                         reference_input_position=reference_position,
                                          extension_frame_indices=extension,
                                          reference_sha256=caption_digest(reference_path))
-                target_opacity = opacity[[i != seed_index for i in input_indices]]
+                seeding_audit['inline_references'] = inline_audit
+                target_opacity = opacity[[i not in inline_references for i in input_indices]]
                 opacity_audit = {'interpolated_view_multiplier': cfg['teacher_opacity_scale'],
                                  'target_min': float(target_opacity.min()),
                                  'target_max': float(target_opacity.max()),
                                  'target_mean': float(target_opacity.mean()),
-                                 'seeded_reference_opacity': float(opacity[seed_position].min()) if seed_index is not None else None}
+                                 'seeded_reference_opacity': float(opacity[input_indices.index(seed_index)].min()) if seed_index is not None else None,
+                                 'inline_reference_opacities': [float(opacity[row['input_position']].min()) for row in inline_audit]}
                 item = {'scene_id': 'splatfix', 'rgb_rendered': renders,
                         'rgb_neighbors': references, 'opacity': opacity, 'encoded_prompt': encoded_prompt,
                         'frame_indices': torch.tensor(input_indices),
@@ -337,8 +369,9 @@ def main():
     parser.add_argument('--max-clips', type=int, default=1)
     parser.add_argument('--segment', type=int, default=None, help='Optionally restrict the probe to one saved segment (may shorten clips)')
     parser.add_argument('--steps', type=int, default=50)
-    parser.add_argument('--max-frames', type=int, default=25)
-    parser.add_argument('--clip-layout', choices=('segment', 'full-leg'), default='full-leg')
+    parser.add_argument('--max-frames', type=int, default=81)
+    parser.add_argument('--clip-layout', choices=('forward', 'segment', 'full-leg'), default=None,
+                        help='Defaults to the saved request layout; forward seeds all included references without preservation')
     parser.add_argument('--resolution', choices=('480p', 'native'), default='native')
     args = parser.parse_args()
     if args.max_clips < 1 or args.output.exists():
@@ -346,10 +379,16 @@ def main():
     request = json.loads(args.request.read_text())
     request['runtime'] = model_runtime({**request['runtime'], 'teacher_inference': True, 'inference_model': '14b-teacher',
         'teacher_steps': args.steps, 'teacher_max_frames': args.max_frames, 'teacher_resolution': args.resolution,
-        'teacher_clip_layout': args.clip_layout})
+        'teacher_clip_layout': args.clip_layout or request['runtime'].get('teacher_clip_layout', 'segment'),
+        **({'initial_image_seeding': True, 'image_cache_insertion': False,
+            'teacher_extend_short_clips': False, 'teacher_reference_rgb_replacement': True,
+            'teacher_warmup_supervision': False}
+           if args.clip_layout == 'forward' else {})})
     sys.path.insert(0, request['runtime']['repo'])
     trajectory = json.loads(Path(request['trajectory']).read_text())
     if args.segment is not None:
+        if request['runtime']['teacher_clip_layout'] == 'forward':
+            parser.error('--segment selects legacy half-legs; use --clip-layout segment, or omit --segment for the forward path')
         if not 0 <= args.segment < len(trajectory['segments']):
             parser.error('segment is outside the saved trajectory')
         trajectory['segments'] = [trajectory['segments'][args.segment]]

@@ -13,7 +13,7 @@ from .jobs import read_json
 
 REQUEST = 'artifact-download-request.json'
 STATUS = 'artifact-download-status.json'
-DONE = {'completed', 'diagnostics_only'}
+DONE = {'completed', 'diagnostics_only', 'discarded'}
 
 
 def status(root):

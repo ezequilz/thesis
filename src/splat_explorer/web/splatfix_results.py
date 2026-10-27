@@ -128,6 +128,11 @@ class ResultCatalog:
                 config = deepcopy(row['config'])
                 options = config['splatfix']
                 options.update(stage='repair', reconstruction_method='artifixer', checkpoint=str(destination.resolve()))
+                # Repeats inherit the effective saved sampler, including old
+                # requests that predate teacher/layout fields in queue options.
+                from ..splatfix.artifixer.inference_policy import inference_options, model_runtime
+                saved_inference = inference_options(model_runtime(repeat['runtime']))
+                options.update(saved_inference, teacher_inference=saved_inference['inference_model'] == '14b-teacher')
                 options.pop('scheduled_at', None)
                 parent_settings = read_json(self.studio.root / row['run_id'] / 'settings.json', {})
                 run = self.studio.store.create_run(config, settings_snapshot={

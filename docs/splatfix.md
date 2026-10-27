@@ -5,26 +5,62 @@ GPU reconstruction. It is independent of the old artifact-hunting loop.
 Step 4 selects a reconstruction method. ArtiFixer and G4Splat are registered as independent sibling backends.
 See [G4Splat setup and output semantics](g4splat.md).
 
-ArtiFixer Step 4 defaults to **Use 14B teacher inference**, enabled for new jobs.
-It uses native run resolution, 24 generated/context views plus one repaired
-reference per independent clip and 50
-diffusion steps, then continues into the existing reconstruction and plus pass.
-The teacher starting-image default seeds and preserves each clip’s repaired
-reference latent after every denoising step. The saved 25-frame input budget
-includes that starter. Clips use whole captured legs rather than legacy
-half-leg boundaries; short tails borrow overlapping context without duplicate
-exports. Whole legs shorter than 24 views remain shorter. Seed-only and reference-only comparisons remain selectable; the
-bidirectional teacher does not use the distilled model’s persistent KV cache.
+ArtiFixer Step 4 defaults to the **14B distilled student**, using the same
+causal autoregressive sampler and generation controls as the 1.3B student:
+four steps per seven-latent-frame block, the same trajectory planning, references,
+seeding, connected bridges, handoff and generated-context policies. The 1.3B
+student remains selectable. Saved requests retain their original model selection.
+
+The baseline for new runs is **720p, checkpoint picked-view order, ordinary
+double-split generation**. Each inward half starts from its repaired endpoint.
+Connected middle bridging and GPT handoffs are off; initial image seeding and
+generated-context references stay on, with cache preservation off. Reconstruction
+uses the legacy Viser / gsplat pipeline, repaired references plus generated views,
+fresh point-cloud initialization, base MCMC regularization, generated RGB loss
+at 0.5×, full-weight generated LPIPS, and a one-million-Gaussian cap. Saved pose
+corrections remain enabled. These defaults match `run_20261027_174543`; model,
+generation and fitting controls remain adjustable per run.
+
+The large student loads `artifixer-14b.pt` with its matching Wan 14B configuration
+in BF16 using empty-parameter construction and strict checkpoint loading. To fit
+an A100 80 GiB, selected layers' complete temporal, text and reference K/V caches
+reside in host RAM between forwards. Blocking transfers preserve tensor values,
+cache eviction, the full 21-frame temporal window, and reference count. Reference
+VAE encoding uses one image at a time. No quantization, reduced resolution,
+shorter attention window, or teacher sampling is substituted automatically.
+`inference-memory.jsonl` records cache placement and CUDA peaks. Host memory is
+also bounded by the Slurm cgroup; insufficient combined memory fails explicitly.
+Transfers cost latency. See [loading and GPU validation](artifixer-14b-loading.md).
+
+**Use 14B teacher inference (experimental)** remains available but is off by
+default. Its separate bidirectional path uses native run resolution, up to 81
+total inputs per clip and 50 diffusion steps. The forward layout, endpoint
+warm-ups, reference RGB replacement and optional legacy preservation apply only
+to this teacher. They do not alter either student's generation settings.
+
+**Run final ArtiFixer3D+ image pass** is off by default for new ArtiFixer jobs
+(`artifixer_plus_pass: false`, CLI `--no-artifixer-plus-pass`). The run finishes
+after exporting `artifixer3d.ply`, without re-rendering the reconstructed camera
+path or running inference again. Enable the checkbox or `--artifixer-plus-pass`
+for testing the additional image output. This pass does not alter the PLY.
+The result records the pass as skipped and the progress panel shows it disabled;
+older saved jobs and explicit repeats retain their original pass policy.
+
 For fitting after inference, **Original PLY positions only** retains point
 coordinates but replaces source colors with neutral gray and initializes sizes,
 rotations and opacity afresh (`reconstruction_initialization: point_cloud_geometry_only`).
 The existing point-cloud-with-color and full-PLY modes remain available.
-Turn the setting off to select the legacy 1.3B or 14B distilled model; historical
-jobs and their saved generation policies retain their previous behavior.
-Optional teacher experiments add collision-truncated endpoint context (4 or 8
-views, reference unlocked) and rendered-opacity scaling (default 1). Context
-views share the clip budget; used generated warm-up views also supervise fitting. These controls do
+The distilled model selector exposes both 1.3B and 14B; historical jobs and
+their saved generation policies retain their previous behavior.
+Teacher controls expose collision-truncated endpoint context (off, 4 or 8 views)
+and rendered-opacity scaling (default 1). Legacy whole-leg warm-up views can also
+supervise fitting; new forward windows exclude them by default. These controls do
 not change stored depth maps.
+An additional optional legacy whole-leg setting extends both ends of short legs toward the 81-frame
+budget, including interior-reference legs, stopping each side at its first collision.
+Both endpoint cameras stay in sequence, and safe generated extensions supervise
+fitting. The explicit reference-RGB toggle replaces rendered RGB at both exact
+reference cameras with their GPT repairs; it is enabled for seeded behavior.
 Teacher clips become reviewable as they finish. Results also includes isolated
 full-trajectory teacher replays, with references, source captures and live progress.
 See [teacher setup, memory limits and sampling differences](artifixer-14b-loading.md).
@@ -879,8 +915,8 @@ jobs are not preparation sources.
 
 Benchmark downloads retain RGB renders, opacity, checkpoints, PLYs, logs and
 evaluation/provenance records. Dense depth maps under the prepared benchmark
-tree remain on LRZ; they are regenerable diagnostics and are not used by
-inference or evaluation. `artifact-download-policy.json` records this policy.
+tree are omitted from the archive and removed with remote staging after
+persistence; they are regenerable diagnostics, unused by inference or evaluation. `artifact-download-policy.json` records this policy.
 Saved-view repair downloads keep their anchor depth because scale replay needs it.
 
 ArtiFixer (including benchmarks), G4Splat and OracleGS release the compute queue
@@ -893,11 +929,13 @@ status are saved in `artifact-download-request.json` and
 restart. Remote artifacts are deleted only after verified transfer and cache
 publication. Downloads do not require a live GPU allocation.
 
-Saved-view ArtiFixer errors before generation (validation, anchor geometry,
-trajectory, scale, orbit or caption) download logs and metadata only. Their bulk
-inputs remain on LRZ. Later failures and other methods retain full partial
-outputs. Reusing, reducing, archiving or deleting a run's artifacts waits for its
-download to finish; independent runs and restarts can start immediately.
+New saved-view ArtiFixer jobs also archive partial artifacts after preparation
+failures, then remove their remote staging after verified persistence. Model
+weights and reusable environments remain remote; historical diagnostics-only
+requests retain their recorded policy. An explicit user-authorized discard is
+recorded as `discarded`, never as a successful archive, and is removed from the
+retry queue. Reusing, reducing, archiving or deleting a run's artifacts normally
+waits for its download to finish; independent runs and restarts can start immediately.
 
 
 ### Source-render fidelity correction (2026-10-06)
@@ -1633,6 +1671,7 @@ retain the logs and selected RGB snapshots. Additional reference encoding
 and attention cost GPU memory/time; image quality still needs a paired GPU run
 with identical inputs and seed, comparing this option on and off.
 
+Connected bridging is opt-in (`connected_trajectory_generation: false` by default).
 `connected_trajectory_generation: true` uses the current causal ArtiFixer checkpoint.
 Handoff generation defaults to off. Each span between consecutive saved references
 is validated against the original double-split camera ownership. Spans with at
@@ -1759,7 +1798,7 @@ only the dynamic middle (21–41 in the 64-pose example). Existing saved request
 
 CLI: `--connected-trajectory-generation` / `--no-connected-trajectory-generation`,
 with `--connected-bridge-seeding seed|seed_preserve|off`.
-Choosing `--handoff-generation on` or `middle` disables the default bridge unless
+Choosing `--handoff-generation on` or `middle` disables configured bridging unless
 you explicitly request both, which is rejected. The dashboard keeps the same
 mutual exclusion. Turning both off restores ordinary double-split generation.
 

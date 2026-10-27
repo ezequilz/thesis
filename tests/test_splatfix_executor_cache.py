@@ -99,7 +99,10 @@ def test_remote_caption_returns_to_checkpoint_and_is_staged_for_other_mode(tmp_p
             shutil.copytree(fixture, Path(destination) / 'checkpoint', symlinks=True, dirs_exist_ok=True)
     monkeypatch.setattr(lrz, '_mux_run', transfer)
     monkeypatch.setattr(lrz, '_ssh_run', lambda cfg, command, **kwargs: SimpleNamespace(
-        returncode=0, stderr='', stdout=('exited' if 'until = time.monotonic() + 30' in command else 'removed' if 'shutil.rmtree(p)' in command else json.dumps({'status': 'completed'}) if 'worker-status.json' in command else '')))
+        returncode=0, stderr='', stdout=(json.dumps({'state': {'status': 'completed'}, 'exit': '0'})
+            if 'def snapshot(' in command else 'exited' if 'until = time.monotonic() + 30' in command
+            else 'removed' if 'shutil.rmtree(p)' in command
+            else json.dumps({'status': 'completed'}) if 'worker-status.json' in command else '')))
     executor = SplatfixExecutor(cfg, store)
     # Isolate cache publication; source-preparation staging is tested separately.
     monkeypatch.setattr('splat_explorer.splatfix.artifixer.preflight.prepare_source_captures', lambda *a, **kw: None)

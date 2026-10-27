@@ -63,6 +63,19 @@ def test_reconstruction_and_plus_are_independent():
     assert stages['plus']['percent'] == 1
 
 
+def test_disabled_plus_pass_is_skipped_before_and_after_reconstruction():
+    p = packet()
+    p['plan'] = {'runtime': {'artifixer_plus_pass': False}}
+    for complete in (False, True):
+        p['reconstruction_complete'] = complete
+        p['state'].update(phase='finished' if complete else 'distill', status='completed' if complete else 'running')
+        stages = summarize(p, observed_at=100)['stages']
+        assert stages['plus']['status'] == 'skipped'
+        assert 'final output' in stages['plus']['detail']
+        if complete:
+            assert stages['reconstruction']['status'] == 'completed'
+
+
 def test_failure_retains_observed_progress_and_ignores_weight_loading_bars():
     p = packet();p['state'].update(status='error',phase='finished',failed_phase='infer')
     stage = summarize(p, observed_at=100)['stages']['inference']
@@ -197,3 +210,21 @@ def test_training_report_tracks_upstream_iterations_and_restores_trainer(tmp_pat
     p=packet();p['state']['phase']='distill';p['training']=data
     stages=summarize(p,observed_at=100)['stages']
     assert stages['reconstruction']['percent']==(40 if fail else 99.9)
+
+
+def test_student_progress_uses_causal_sampling_not_teacher_clip_schedule():
+    p = {'state': {'status': 'running', 'phase': 'infer'},
+         'plan': {'runtime': {'inference_model': '14b', 'artifixer_plus_pass': False}},
+         'logs': {'inference': 'SPLATFIX_STUDENT_MEMORY: {"phase":"cache_allocation"}\n'}}
+    progress = summarize(p, observed_at=100)['stages']
+    assert progress['inference']['label'] == '14B student inference'
+    assert '4 steps per block' in progress['inference']['detail']
+    assert progress['inference']['total'] is None
+    assert progress['plus']['status'] == 'skipped'
+    p['state']['phase'] = 'distill'
+    assert summarize(p, observed_at=110)['stages']['inference']['percent'] == 100
+    p['plan']['runtime']['artifixer_plus_pass'] = True
+    p['state'].update(phase='finished', status='completed')
+    progress = summarize(p, observed_at=120)['stages']
+    assert progress['plus']['status'] == 'completed'
+    assert progress['plus']['percent'] == 100

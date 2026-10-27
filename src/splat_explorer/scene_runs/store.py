@@ -326,6 +326,10 @@ class SceneRunStore:
         saved = _read_json(path / CONFIG_NAME)
         # Missing fields in historical configs predate the new-run defaults.
         # Reading history must not relabel or silently change those experiments.
+        if saved.get('pipeline') == 'splatfix':
+            options = saved.get('splatfix', {})
+            if options.get('stage') == 'repair' and options.get('reconstruction_method', 'artifixer') == 'artifixer':
+                options.setdefault('artifixer_plus_pass', True)
         if saved.get('pipeline') == 'extended' and isinstance(saved.get('extended', {}), dict):
             saved['extended'] = {'model_variant': '1.3b', 'source_conditioning': 'none', 'generated_cache': 'clean',
                                  'max_repair_pixels': 0, 'block_schedule': 'exact_starter', **saved.get('extended', {})}

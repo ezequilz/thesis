@@ -34,7 +34,7 @@ def enabled(options, *, default=False):
     return value
 
 
-def configure(options, *, default=True):
+def configure(options, *, default=False):
     """Resolve new-run defaults; explicit fallback modes keep their own policy."""
     compatible = (not options.get('handoff_generation', False)
                   and options.get('image_trajectory', 'checkpoint') != 'endpoints'

@@ -17,7 +17,7 @@ def test_options_default_off_and_scoped():
     from splat_explorer.splatfix.artifixer.backend import validate_options
     base = {'stage': 'repair', 'teacher_inference': False, 'mode': 'edited'}
     assert validate_options(base)['handoff_generation'] is False
-    assert validate_options(base)['connected_trajectory_generation'] is True
+    assert validate_options(base)['connected_trajectory_generation'] is False
     assert validate_options({**base, 'handoff_generation': False})['handoff_generation'] is False
     assert validate_options({**base, 'mode': 'baseline'})['handoff_generation'] is False
     assert validate_options({**base, 'image_trajectory': 'endpoints'})['handoff_generation'] is False

@@ -121,7 +121,8 @@ def test_missing_edits_fail_before_gpu_or_api_work(tmp_path, monkeypatch):
 @pytest.mark.parametrize('images', ['all', 'distilled'])
 @pytest.mark.parametrize('initialization', ['full_splat', 'point_cloud'])
 @pytest.mark.parametrize('mode', ['baseline', 'edited'])
-def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, monkeypatch, mode, initialization, images):
+@pytest.mark.parametrize('plus_pass', [False, True])
+def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, monkeypatch, mode, initialization, images, plus_pass):
     cp = make_checkpoint(tmp_path)
     mock_scene(monkeypatch)
     if mode == 'edited':
@@ -130,7 +131,9 @@ def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, 
         cp.views[0]['repaired_rgb'] = str(edit.relative_to(cp.root))
         cp.save()
     trajectory_root, trajectory = repair.prepare_trajectory(cp, frames=9, renderer_factory=FakeRenderer)
-    monkeypatch.setattr(repair, 'validate_runtime', lambda runtime: {**repair.DEFAULT_RUNTIME, 'connected_trajectory_generation': False, 'artifixer_pipeline': 'legacy_gsplat', 'reconstruction_initialization': initialization, 'reconstruction_images': images, 'worldexplorer_source': '/old/bundle'})
+    monkeypatch.setattr(repair, 'validate_runtime', lambda runtime: {**repair.DEFAULT_RUNTIME, 'inference_model': '1.3b', 'artifixer_plus_pass': plus_pass, 'connected_trajectory_generation': False, 'artifixer_pipeline': 'legacy_gsplat', 'reconstruction_initialization': initialization, 'reconstruction_images': images, 'worldexplorer_source': '/old/bundle'})
+    if not plus_pass:
+        monkeypatch.setattr(repair, 'capture_plus_rgb', lambda *a, **k: pytest.fail('Skipped + pass must not capture renders'))
     phases = []
     def worker(command, **kwargs):
         phase = command[-1]
@@ -160,9 +163,16 @@ def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, 
             output = root / 'artifixer3d.ply'
             output.write_bytes(b'new isolated splat')
             (root / 'result.json').write_text(json.dumps({'splat_path': str(output), 'merged': False}))
+        if phase == 'distill' and not plus_pass:
+            output = root / 'artifixer3d.ply'
+            output.write_bytes(b'new isolated splat')
+            (root / 'distillation.json').write_text(json.dumps({'splat_path': str(output), 'render_dir': None}))
     monkeypatch.setattr(repair, 'run_worker', worker)
     result = repair.run_repair(cp.root, tmp_path / 'repairs', mode=mode, frames=9, camera_scale=1., trajectory_mode='legacy_local_loops')
-    assert phases == ['caption', 'infer', 'distill', 'plus']
+    assert phases == ['caption', 'infer', 'distill'] + (['plus'] if plus_pass else [])
+    if not plus_pass:
+        assert result['plus_pass_status'] == 'skipped' and result['plus_frames'] is None
+        assert result['artifixer_plus_pass'] is False
     assert Path(result['splat_path']).read_bytes() == b'new isolated splat'
     assert Path(cp.manifest['scene_path']).read_bytes().startswith(b'ply\n')
 
@@ -170,7 +180,8 @@ def test_replay_uses_selected_reference_and_all_three_official_phases(tmp_path, 
 @pytest.mark.parametrize('mode', ['baseline', 'edited'])
 @pytest.mark.parametrize('loops', [1, 2])
 @pytest.mark.parametrize('full_splat', [True, False])
-def test_worker_calls_authors_fresh_reconstruction_and_exports_only_that_model(tmp_path, monkeypatch, mode, loops, full_splat):
+@pytest.mark.parametrize('plus_pass', [False, True])
+def test_worker_calls_authors_fresh_reconstruction_and_exports_only_that_model(tmp_path, monkeypatch, mode, loops, full_splat, plus_pass):
     """Exercise the actual adapter and its file/camera contract without CUDA."""
     import sys
     import types
@@ -197,7 +208,8 @@ def test_worker_calls_authors_fresh_reconstruction_and_exports_only_that_model(t
         reference = tmp_path / 'edited.png'
         Image.fromarray(np.full((32, 32, 3), 125, np.uint8)).save(reference)
     request = {'mode': mode, 'seed': 42, 'references': [str(reference)] * loops,
-               'source_points3d': str(cp.root / trajectory['points3d']), 'camera_scale': 1.}
+               'source_points3d': str(cp.root / trajectory['points3d']), 'camera_scale': 1.,
+               'runtime': {'artifixer_plus_pass': plus_pass}}
     if full_splat:
         request.update(repair.prepare_splat_initialization(cp.manifest['scene_path'], root / 'initialization.ply'))
     prediction_root = root / 'inference/splatfix/frames/batch_0000/pred'
@@ -300,7 +312,8 @@ def test_worker_calls_authors_fresh_reconstruction_and_exports_only_that_model(t
     module('threedgrut.export.ply_exporter', PLYExporter=Exporter)
     module('threedgrut.render', Renderer=Renderer)
     distill(root, request, trajectory)
-    assert events == ['train', 'render', 'export']
+    assert events == ['train'] + (['render'] if plus_pass else []) + ['export']
+    assert (json.loads((root / 'distillation.json').read_text())['render_dir'] is not None) is plus_pass
     assert (root / 'artifixer3d.ply').read_bytes() == b'fresh model only'
     assert Path(cp.manifest['scene_path']).read_bytes().startswith(b'ply\n')
     assert json.loads((root / 'distillation.json').read_text())['splat_path'] == str(root / 'artifixer3d.ply')
