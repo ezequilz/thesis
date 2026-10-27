@@ -14,7 +14,7 @@ from ..checkpoint import atomic_json
 def publish_inputs(root, *, split=None):
     """Snapshot actual conditioning images before inference, independent of fitting."""
     root = Path(root)
-    references, captures = [], []
+    references, captures, context_only = [], [], set()
     if split is not None:
         split = Path(split)
         scenes = json.loads(split.read_text())['test']
@@ -29,6 +29,7 @@ def publish_inputs(root, *, split=None):
         request = json.loads((root / 'request.json').read_text())
         references = list(enumerate(map(Path, request['references'])))
         trajectory = json.loads(Path(request['trajectory']).read_text())
+        context_only = set(trajectory.get('context_only_indices', []))
         captures = [(i, Path(request['checkpoint_root']) / frame['rgb'])
                     for i, frame in enumerate(trajectory['frames'])]
     data = {'inputs_ready': True}
@@ -42,6 +43,7 @@ def publish_inputs(root, *, split=None):
             destination = directory / f'{index:05d}{source.suffix.lower()}'
             shutil.copyfile(source, destination)
             data[key].append({'index': index, 'name': source.name,
+                              **({'context_only': True} if key == 'original_rgb_images' and index in context_only else {}),
                               'path': str(destination.relative_to(root))})
     atomic_json(root / 'input-preview.json', data)
 

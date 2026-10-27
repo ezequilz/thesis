@@ -348,6 +348,13 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
         generated = [i for s in segments for i in s['indices']]
         if sorted(generated) != [i for i in range(len(cameras)) if i not in anchor_indices]:
             raise ValueError('Trajectory legs must cover each non-reference camera exactly once')
+    base_frame_count = len(cameras)
+    extension_groups = []
+    if orbit and orbit.get('teacher_extensions'):
+        from .teacher_extensions import render_poses, extension_manifest
+        extension_groups = extension_manifest(orbit)
+        cameras.extend(replace(anchors[0], position=np.asarray(pose)[:3, 3], rotation=np.asarray(pose)[:3, :3])
+                       for pose in render_poses(orbit)[base_frame_count:])
     recipe = {'trajectory_version': 7, 'repair_policy': 'endpoints' if cp.endpoint_only else 'all', 'anchor_rgb_policy': 'viser', 'kind': 'authors_orbit' if orbit else 'scale_anchors',
               'views': [{k: v for k, v in view.items() if k in ('id', 'camera', 'original_rgb')} for view in cp.views],
               'source': cp.manifest.get('source_fingerprint', cp.manifest['scene_path']),
@@ -424,6 +431,9 @@ def prepare_saved_path(checkpoint, *, orbit=None, should_stop=lambda: False,
                     'segments': segments, 'anchors': anchor_records,
                     'frames': records, 'points3d': str((root / 'points3D.bin').relative_to(cp.root)),
                     'source_scene': source_path}
+        if extension_groups:
+            manifest.update(base_frame_count=base_frame_count, teacher_extensions=extension_groups,
+                            context_only_indices=list(range(base_frame_count, len(cameras))))
         paths = {entry[key] for entry in records for key in ('rgb', 'opacity')} | {manifest['points3d']} | {anchor['depth'] for anchor in anchor_records}
         manifest['sha256'] = {path: digest_file(cp.root / path) for path in sorted(paths)}
         atomic_json(root / 'trajectory.json', manifest)
@@ -571,6 +581,8 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
         effective_runtime['connected_bridge_seeding'] = repeat['runtime'].get('connected_bridge_seeding', 'off')
         effective_runtime['generated_context_references'] = repeat['runtime'].get('generated_context_references', False)
     cfg = apply_pipeline(validate_runtime(effective_runtime))
+    if cfg.get('teacher_endpoint_extension') and trajectory_mode != 'authors_orbit':
+        raise ValueError('Teacher endpoint extension requires the authored/picked trajectory pipeline')
     backend = rgb_backend(cfg)
     if geometry_backend(cfg) == '3dgut' and trajectory_mode == 'legacy_local_loops':
         raise ValueError('Legacy local loops require the legacy_gsplat pipeline')
@@ -724,6 +736,8 @@ def run_repair(checkpoint_dir, output_dir, *, mode='edited', runtime=None, frame
                 full = json.loads((root / 'orbit-full.json').read_text())
                 poses = np.asarray([frame['transform_matrix'] for frame in full['frames']]) @ np.diag([1., -1., -1., 1.])
                 orbit = {'poses': poses.tolist(), 'provenance': {key: value for key, value in orbit_provenance.items() if key != 'source_transforms'}}
+                from .teacher_extensions import prepare_extensions
+                orbit = prepare_extensions(orbit, cp, cfg, should_stop=should_stop)
                 planned_orbit = orbit
                 if prepare_source_only:
                     # Return exact official poses before any intermediate RGB,

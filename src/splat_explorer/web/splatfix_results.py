@@ -850,6 +850,7 @@ class ResultCatalog:
                 path = local(item.get('path'))
                 if path and path.is_file() and path.suffix.lower() in ('.png', '.jpg', '.jpeg'):
                     row[key].append({'index': item['index'], 'name': item['name'],
+                                     **({'context_only': True} if item.get('context_only') else {}),
                                      'url': self.studio.file_url(path)})
         snapshot_references = list(row['reference_images'])
         supervision = local(result.get('supervision_manifest') or 'supervision.json')

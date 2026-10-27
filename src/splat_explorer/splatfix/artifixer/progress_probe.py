@@ -51,7 +51,8 @@ def snapshot(root, container):
     result['plan'] = {'runtime': request.get('runtime', {}),
                       'repair_policy': request.get('repair_policy'),
                       'trajectory_mode': request.get('trajectory_mode'),
-                      'trajectory': {key: trajectory.get(key, []) for key in ('anchors', 'segments')},
+                      'trajectory': {**{key: trajectory.get(key, []) for key in ('anchors', 'segments', 'teacher_extensions')},
+                                     'base_frame_count': trajectory.get('base_frame_count', len(trajectory.get('frames', [])))},
                       'frame_count': len(trajectory.get('frames', []))}
     for phase, filename in (('inference', 'infer'), ('reconstruction', 'distill'), ('plus', 'plus')):
         result['logs'][phase] = read(output / (filename + '.log'), tail=True)

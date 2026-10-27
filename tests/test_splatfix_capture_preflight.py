@@ -353,3 +353,23 @@ def test_executor_stages_lean_plans_captures_all_then_stages_full(source, monkey
     assert request['prepare_source_first'] and request['runtime']['source_rgb_prepared']
     assert request['runtime']['source_anchor_capture_signature'] == Path(
         json.loads((root / 'source-capture-preflight.json').read_text())['input_cache']).name
+
+
+def test_preflight_captures_extension_context_and_keeps_cache_policy_separate(source, monkeypatch):
+    cp,root,runtime,captures,_=source
+    from splat_explorer.splatfix.artifixer import source_plan
+    from splat_explorer.splatfix.artifixer.teacher_extensions import extend_orbit
+    preflight.prepare_source_captures(cp,runtime,root)
+    plan=make_plan(cp,runtime,root/'prepared',count=5)
+    class Clear:
+        def intersects(self,*args):return False
+    plan['orbit']=extend_orbit(plan['orbit'],[0,4],8,Clear())
+    plan['identity'].update(teacher_endpoint_extension=8,teacher_extension_version=1)
+    plan['sha256']=source_plan.signature({k:v for k,v in plan.items() if k!='sha256'})
+    extending={**runtime,'teacher_endpoint_extension':8}
+    result=preflight.prepare_source_captures(cp,extending,root,source_plan=plan)
+    assert len(captures)==21  # 5 wanted poses + 16 context poses, anchors reused.
+    assert result['trajectory_frames']==5
+    monkeypatch.setattr(preflight,'CaptureSession',lambda *a,**kw:pytest.fail('Reuse settled context RGB'))
+    assert preflight.prepare_source_captures(cp,extending,root)['captured_frames']==0
+    assert preflight.prepare_source_captures(cp,runtime,root)['source_plan'] is None

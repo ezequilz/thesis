@@ -65,7 +65,7 @@ def clip_jobs(jobs, maximum):
             yield indices[offset:offset + maximum], references, directory
 
 
-def planned_clips(jobs, maximum, anchors, *, seeding=False, layout='segment'):
+def planned_clips(jobs, maximum, anchors, *, seeding=False, layout='segment', extensions=(), include_warmup=False):
     """Reserve one slot for the trusted leg endpoint without exporting it.
 
 Each bounded clip starts at that endpoint's real camera, including reverse
@@ -76,7 +76,14 @@ legs. Long legs keep the same repaired anchor for each independent clip.
             from .teacher_clips import filled_leg_clips
         else:
             from teacher_clips import filled_leg_clips
-        yield from filled_leg_clips(jobs, maximum, anchors, seeding=seeding)
+        exported = set()
+        for job in filled_leg_clips(jobs, maximum, anchors, seeding=seeding, extensions=extensions):
+            warmup = [i for i in job['extension_frame_indices'] if (job['output'], i) not in exported] if include_warmup else []
+            exported.update((job['output'], i) for i in warmup)
+            job['warmup_frame_indices'] = warmup
+            job['indices'] = [*warmup, *job['indices']]
+            job['context_frame_indices'] = [i for i in job['context_frame_indices'] if i not in warmup]
+            yield job
         return
     if layout != 'segment':
         raise ValueError('Unknown teacher clip layout')
@@ -157,7 +164,9 @@ def run(root, request, trajectory, *, plus=False, max_clips=None):
     cp = Path(request['checkpoint_root'])
     anchors = [a['frame_index'] for a in trajectory['anchors']]
     jobs = list(planned_clips(inference_jobs(request, trajectory, plus=plus), cfg['teacher_max_frames'],
-                             anchors, seeding=cfg['initial_image_seeding'], layout=cfg['teacher_clip_layout']))
+                             anchors, seeding=cfg['initial_image_seeding'], layout=cfg['teacher_clip_layout'],
+                             extensions=trajectory.get('teacher_extensions', []) if cfg['teacher_endpoint_extension'] else (),
+                             include_warmup=cfg['teacher_warmup_supervision']))
     expected_frames = {i for job in jobs if job['output'] == phase for i in job['indices']}
     render_dir = Path(json.loads((root / 'distillation.json').read_text())['render_dir']) if plus else None
 
@@ -199,11 +208,16 @@ def run(root, request, trajectory, *, plus=False, max_clips=None):
             'output_resampling': 'bilinear' if size != native_size else None,
             'sampling': 'stage-1 bidirectional UniPC; CFG 5; independent bounded clips',
             'references': 'selected anchors according to endpoint-reference policy; sequential VAE encoding',
-            'seeding': ('trusted reference at its real camera; first encoded latent restored after every UniPC step'
+            'seeding': ('continuous extension -> repaired endpoint -> targets; reference unlocked; interior clips use reference attention'
+                        if cfg['teacher_endpoint_extension'] else 'trusted reference at its real camera; first encoded latent restored after every UniPC step'
                         if cfg['image_cache_insertion'] else 'trusted reference seeds the first latent; denoising may change it'
                         if cfg['initial_image_seeding'] else 'reference cross-attention only'),
             'persistent_kv_cache': False,
             'teacher_clip_layout': cfg['teacher_clip_layout'],
+            'teacher_endpoint_extension': cfg['teacher_endpoint_extension'],
+            'teacher_opacity_scale': cfg['teacher_opacity_scale'],
+            'teacher_warmup_supervision': cfg['teacher_warmup_supervision'],
+            'endpoint_extensions': trajectory.get('teacher_extensions', []),
             'expected_frame_count': len(expected_frames), 'planned_clip_count': len(jobs), 'clips': records, **extra}
         # Readers poll while the GPU works; publish complete JSON atomically.
         temporary = manifest.with_suffix('.json.tmp')
@@ -228,7 +242,8 @@ def run(root, request, trajectory, *, plus=False, max_clips=None):
                 indices, reference_order, directory = job['indices'], job['references'], job['output']
                 seed_index = job['seed_index']
                 context = job.get('input_indices', indices)
-                input_indices = [seed_index, *context] if seed_index is not None else context
+                extension = job.get('extension_frame_indices', [])
+                input_indices = [*extension, seed_index, *context] if seed_index is not None else context
                 stage = 'clip_loading'
                 start = time.monotonic()
                 neighbors = [anchors[i] for i in reference_order]
@@ -236,17 +251,21 @@ def run(root, request, trajectory, *, plus=False, max_clips=None):
                                           cp / trajectory['frames'][i]['rgb']) for i in input_indices])
                 references = torch.stack([rgb(request['references'][i]) for i in reference_order])
                 opacity = torch.stack([alpha(i) for i in input_indices])
+                opacity *= cfg['teacher_opacity_scale']
                 owned = set(indices)
                 valid = torch.tensor([i in owned for i in input_indices], dtype=torch.bool)
                 seeding_audit = {'enabled': seed_index is not None, 'seed_global_index': seed_index,
                                  'preserve_starting_latent': cfg['image_cache_insertion'], 'starter_exported': False}
                 if seed_index is not None:
+                    seed_position = input_indices.index(seed_index)
                     reference_slot = neighbors.index(seed_index)
                     reference_path = Path(request['references'][reference_order[reference_slot]])
-                    renders[0] = references[reference_slot]
-                    opacity[0] = 1
-                    valid[0] = False
+                    renders[seed_position] = references[reference_slot]
+                    opacity[seed_position] = 1
+                    valid[seed_position] = False
                     seeding_audit.update(reference_path=str(reference_path),
+                                         reference_input_position=seed_position,
+                                         extension_frame_indices=extension,
                                          reference_sha256=caption_digest(reference_path))
                 item = {'scene_id': 'splatfix', 'rgb_rendered': renders,
                         'rgb_neighbors': references, 'opacity': opacity, 'encoded_prompt': encoded_prompt,
@@ -274,6 +293,7 @@ def run(root, request, trajectory, *, plus=False, max_clips=None):
                 row = record('clip_complete', frame_indices=indices, output=directory, seeding=seeding_audit,
                              input_frame_indices=input_indices,
                              context_frame_indices=job.get('context_frame_indices', []),
+                             warmup_frame_indices=job.get('warmup_frame_indices', []),
                              input_frame_count=len(input_indices),
                              elapsed_seconds=time.monotonic() - start)
                 records.append(row)

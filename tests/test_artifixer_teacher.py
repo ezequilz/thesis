@@ -159,9 +159,9 @@ def test_cli_accepts_teacher_inference_only_controls():
     assert args.teacher_resolution == '480p'
 
 
-@pytest.mark.parametrize('layout', ['segment', 'full-leg'])
-@pytest.mark.parametrize('seeding', [False, True])
-def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monkeypatch, layout, seeding):
+@pytest.mark.parametrize('layout,seeding,extension', [('segment',False,0),('segment',True,0),
+    ('full-leg',False,0),('full-leg',True,0),('full-leg',True,4)])
+def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monkeypatch, layout, seeding, extension):
     import argparse
     import json
     import sys
@@ -177,19 +177,26 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
         monkeypatch.setitem(sys.modules, name, value)
     checkpoint = tmp_path / 'artifixer-s1-14b.pt'
     checkpoint.touch()
-    for index in range(12):
+    limit = 9 if extension else 5
+    frame_count = 20 if extension else 12
+    for index in range(frame_count):
         Image.new('RGB', (160, 96), (index, 10, 30)).save(tmp_path / f'{index}.png')
         np.save(tmp_path / f'{index}.npy', np.full((96, 160), .5, dtype=np.float32))
-    frames = [{'rgb': f'{i}.png', 'opacity': f'{i}.npy'} for i in range(12)]
+    frames = [{'rgb': f'{i}.png', 'opacity': f'{i}.npy'} for i in range(frame_count)]
     transforms = {'w': 160, 'h': 96, 'fl_x': 100., 'fl_y': 100., 'cx': 80., 'cy': 48.,
                   'frames': [{'transform_matrix': np.eye(4).tolist()} for _ in frames]}
     trajectory = {'frames': frames, 'transforms': transforms, 'anchors': [{'frame_index': 0}, {'frame_index': 10}],
                   'segments': [{'indices': list(range(12)), 'cache_seed_index': 0}]}
     request = {'runtime': {'checkpoint': str(checkpoint), 'model_id': MODELS['14b'][1],
-                          'inference_model': '14b-teacher', 'teacher_max_frames': 5,
-                          'teacher_clip_layout': layout, 'initial_image_seeding': seeding},
+                          'inference_model': '14b-teacher', 'teacher_max_frames': limit,
+                          'teacher_clip_layout': layout, 'initial_image_seeding': seeding,
+                          'teacher_endpoint_extension':extension, 'teacher_opacity_scale':.75},
                'checkpoint_root': str(tmp_path), 'references': [str(tmp_path / '0.png'), str(tmp_path / '10.png')],
                'camera_scale': 1., 'caption_path': 'unused', 'caption_sha256': 'unused', 'seed': 42}
+    if extension:
+        trajectory.update(base_frame_count=12,context_only_indices=list(range(12,20)),teacher_extensions=[
+            {'seed_frame_index':0,'interior_frame_index':1,'frame_indices':list(range(12,16))},
+            {'seed_frame_index':10,'interior_frame_index':9,'frame_indices':list(range(16,20))}])
     monkeypatch.setattr(official_worker, 'validate_caption', lambda *a: None)
     monkeypatch.setattr(teacher_inference, 'load_pipe', lambda *a: SimpleNamespace(vae=SimpleNamespace(config=SimpleNamespace(scale_factor_temporal=4))))
     monkeypatch.setattr(teacher_inference, 'memory_record', lambda *a, **kw: {'phase': a[2], **kw})
@@ -204,13 +211,16 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
         assert item['rgb_rendered'].device.type == 'cpu'
         assert item['rgb_neighbors'].device.type == 'cpu'
         assert item['rgb_neighbors'].shape[0] == 2
-        assert len(item['frame_indices']) <= 5
+        assert len(item['frame_indices']) <= limit
         exported = item['frame_indices'][item['valid_frames_mask']].tolist()
         observed.extend(exported)
-        if seeding:
-            assert item['frame_indices'][0] in (0, 10)
-            assert not item['valid_frames_mask'][0]
-            assert torch.all(item['opacity'][0] == 1)
+        for position,index in enumerate(item['frame_indices'].tolist()):
+            if index in (0,10):
+                assert not item['valid_frames_mask'][position]
+                assert torch.all(item['opacity'][position] == 1)
+                assert position in (0,4)
+            else:
+                assert torch.all(item['opacity'][position] == .375)
         folder = output / 'splatfix/frames/batch_0000/pred'
         folder.mkdir(parents=True, exist_ok=True)
         for index in exported:
@@ -226,9 +236,9 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
     module('model_training.data')
     module('model_training.data.utils', compute_camera_rays=rays, load_encoded_prompt=lambda *a: (torch.zeros(2), None))
     teacher_inference.run(tmp_path / 'output', request, trajectory)
-    expected = [i for i in range(12) if i not in (0, 10)]
+    expected = [i for i in range(12) if i not in (0, 10)] + (list(range(12,20)) if extension else [])
     assert sorted(observed) == expected
-    assert set(camera_indices) <= set(range(12))
+    assert set(camera_indices) <= set(range(frame_count))
     predicted = tmp_path / 'output/inference/splatfix/frames/batch_0000/pred'
     assert sorted(int(p.stem) for p in predicted.glob('*.png')) == expected
     assert parsed[parsed.index('--num_inference_steps') + 1] == '50'
@@ -237,8 +247,13 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
     report = json.loads((tmp_path / 'output/inference-teacher.json').read_text())
     assert report['complete'] and len(report['clips']) == (4 if layout == 'full-leg' else 3)
     assert report['teacher_clip_layout'] == layout
-    assert all(len(row['input_frame_indices']) == row['input_frame_count'] <= 5 for row in report['clips'])
-    if layout == 'full-leg':
+    assert all(len(row['input_frame_indices']) == row['input_frame_count'] <= limit for row in report['clips'])
+    if extension:
+        assert report['clips'][0]['seeding']['reference_input_position']==4
+        assert not report['image_cache_insertion']
+        assert set(range(12,20)) <= set(observed)
+        assert len(observed)==len(set(observed))
+    if layout == 'full-leg' and not extension:
         assert report['clips'][2]['context_frame_indices']
         assert len(report['clips'][2]['input_frame_indices']) == 4 + int(seeding)
 

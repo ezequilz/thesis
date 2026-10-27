@@ -282,3 +282,48 @@ manager shares one remote observation per run across all tabs, at most once ever
 attempt time persists across manager restarts. Browser refreshes read the local
 snapshot; they do not initiate SSH queries. Explicit cancellation and required
 capture/control operations remain responsive independently of progress polling.
+
+### Endpoint blur experiments (October 27)
+
+These are optional, off by default, and have not yet been validated for GPU image
+quality. The active 37-frame run keeps its saved settings. New normal runs use
+24 target/context views plus a preserved reference, with whole-leg packing.
+
+**Endpoint extension** accepts 4 or 8 requested views. Preparation extends the
+endpoint's translation tangent, using the adjacent authored camera step and
+fixed endpoint orientation/intrinsics. Every full movement segment is checked
+against the existing 3-sigma Gaussian collision index with camera clearance.
+The first colliding view and all farther views are excluded. Available context
+is rounded down to complete groups of four for inference; a collision leaving
+fewer than four safe views means no warm-up at that endpoint.
+
+The inference order is farthest safe extension → nearer extension → repaired
+endpoint → wanted views. There is no jump from a leading reference into the
+extension. Extension mode explicitly unlocks the repaired reference: it is
+inserted at its actual camera with opacity 1, but its latent is allowed to
+denoise. Interior windows that do not reach a reference use reference attention
+without inserting a distant endpoint into the video. All input views count
+against the 25-frame total budget. Used warm-up views are exported once as generated supervision and included in
+reconstruction at their calibrated cameras. Unused rendered context and collision-
+rejected views stay excluded. Source captures label extension context in review. All original wanted cameras and repaired-reference
+supervision are retained.
+
+**Rendered opacity strength** is a multiplier in [0,1], default 1. It affects
+only teacher RGB/opacity conditioning, in both inference passes. It changes
+neither stored depth nor camera geometry, and the repaired reference is restored
+to opacity 1 after scaling. Lower values increase the noise component in the
+initial latent and reduce supplied opacity conditioning. They are not a precise
+spatial mask for invalid geometry, and can increase hallucination or drift.
+
+The upstream encoder groups temporal frames in fours after its initial frame,
+and initializes latents using max-pooled opacity. Warm-up lengths divisible by
+four place the interior reference at the end of a temporal group, preventing its
+full opacity from being pooled into the next group's wanted frames. This is a
+conditioning hypothesis, not proof of improved sharpness.
+
+Suggested controlled comparison: same source, camera IDs, resolution and random
+seed; 50 steps at opacity 1 (control), 50 steps at opacity .75 with extensions
+off, then 50 steps at opacity 1 with 8-frame extensions and an unlocked reference.
+Only then compare 75 steps at otherwise identical settings. Compare the same
+wanted cameras near each endpoint, not different clip/gallery positions.
+More denoising steps do not by themselves remove strong blurry-render conditioning.

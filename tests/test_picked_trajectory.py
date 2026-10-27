@@ -169,3 +169,30 @@ def test_rendered_path_uses_named_waypoint_after_incidental_crossing(tmp_path, m
     assert indices == result['provenance']['reference_frame_indices']
     assert indices[2] > indices[1]
     connected_trajectory.plan_legs(trajectory)
+
+
+def test_rendered_extension_cameras_keep_base_indices_and_separate_context(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from test_splatfix_repair import make_checkpoint, mock_scene, FakeRenderer
+    from splat_explorer.splatfix.checkpoint import camera_from_record
+    from splat_explorer.splatfix.artifixer.repair import prepare_saved_path
+    from splat_explorer.splatfix.artifixer.teacher_extensions import extend_orbit
+    cp=make_checkpoint(tmp_path);camera=camera_from_record(cp.views[0])
+    cp.manifest['target_views']=2
+    cp.add_view(np.full((32,32,3),90,np.uint8),replace(camera,position=camera.position+[1,0,0]))
+    poses=[]
+    for t in np.linspace(0,1,5):
+        p=camera.c2w.copy();p[:3,3]+=np.array([t,0,0]);poses.append(p.tolist())
+    orbit={'poses':poses,'provenance':{'trajectory_order':'picked','ordering_version':1,
+        'reference_frame_indices':[0,4],'segments':[{'full_frame_indices':[1,2,3],'seed_full_frame_index':0}]}}
+    class Clear:
+        def intersects(self,*args):return False
+    extended=extend_orbit(orbit,[0,4],4,Clear())
+    mock_scene(monkeypatch)
+    _,trajectory=prepare_saved_path(cp,orbit=extended,renderer_factory=FakeRenderer,runtime={'trajectory_order':'picked'})
+    assert trajectory['base_frame_count']==5
+    assert trajectory['context_only_indices']==list(range(5,13))
+    assert len(trajectory['frames'])==13
+    assert [a['frame_index'] for a in trajectory['anchors']]==[0,4]
+    assert trajectory['segments']==[{'indices':[1,2,3],'seed_index':0}]
+    assert all((cp.root/f['opacity']).is_file() and (cp.root/f['rgb']).is_file() for f in trajectory['frames'])

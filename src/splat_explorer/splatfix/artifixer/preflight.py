@@ -83,7 +83,8 @@ def prepare_source_captures(checkpoint, runtime, root, *, should_stop=lambda: Fa
             atomic_json(plan_path, source_plan)
         orbit = source_plan['orbit'] if source_plan else (repeat.get('orbit') if repeat else None)
         if orbit:
-            poses = np.asarray(orbit['poses'], dtype=np.float64)
+            from .teacher_extensions import render_poses
+            poses = np.asarray(render_poses(orbit), dtype=np.float64)
             if poses.ndim != 3 or poses.shape[1:] != (4, 4) or not np.isfinite(poses).all():
                 raise ValueError('Invalid repeat orbit before staging')
             anchor = camera_from_record(prepared.views[0])

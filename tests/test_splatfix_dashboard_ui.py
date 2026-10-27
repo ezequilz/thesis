@@ -51,6 +51,12 @@ Promise.resolve(vm.runInContext(`(async()=>{
   $('teacher-seeding').value='seed';assert.equal(payload('repair').initial_image_seeding,true);assert.equal(payload('repair').image_cache_insertion,false);
   $('teacher-seeding').value='off';assert.equal(payload('repair').initial_image_seeding,false);assert.equal(payload('repair').image_cache_insertion,false);
   $('teacher-seeding').value='preserve';
+  $('teacher-endpoint-extension').value='8';$('teacher-opacity-scale').value='0.75';renderTeacherControls();
+  assert.equal($('teacher-seeding').disabled,true);assert.equal($('teacher-seeding').value,'seed');
+  assert.equal(payload('repair').teacher_endpoint_extension,8);assert.equal(payload('repair').teacher_opacity_scale,.75);
+  assert.equal(payload('repair').image_cache_insertion,false);assert.equal(payload('repair').initial_image_seeding,true);
+  $('teacher-endpoint-extension').value='0';renderTeacherControls();assert.equal($('teacher-seeding').disabled,false);
+  $('teacher-seeding').value='preserve';
   $('teacher-inference').checked=false;$('artifixer-inference-model').value='1.3b';$('handoff-generation').value='off';
   renderTeacherControls();
   assert.equal($('artifixer-teacher-controls').hidden,true);

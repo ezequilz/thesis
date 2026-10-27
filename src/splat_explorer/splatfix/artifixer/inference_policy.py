@@ -1,5 +1,6 @@
 """Serializable model/sampling choices for Step 4, independent of GPU setup."""
 from pathlib import Path
+import math
 
 
 MODELS = {
@@ -40,6 +41,21 @@ def inference_options(raw):
         layout = raw.get('teacher_clip_layout', 'segment')
         if layout not in ('segment', 'full-leg'):
             raise ValueError('teacher_clip_layout must be segment or full-leg')
+        extension = raw.get('teacher_endpoint_extension', 0)
+        opacity = raw.get('teacher_opacity_scale', 1.0)
+        warmup_supervision = raw.get('teacher_warmup_supervision', True)
+        if type(warmup_supervision) is not bool:
+            raise ValueError('teacher_warmup_supervision must be a boolean')
+        if type(extension) is not int or extension not in (0, 4, 8):
+            raise ValueError('teacher_endpoint_extension must be 0, 4 or 8')
+        if type(opacity) not in (int, float) or not math.isfinite(opacity) or not 0 <= opacity <= 1:
+            raise ValueError('teacher_opacity_scale must be between 0 and 1')
+        if extension and (layout != 'full-leg' or extension >= frames - 1):
+            raise ValueError('Endpoint extension requires full-leg clips and room for target views')
+        if extension:
+            # A natural warm-up path places the repaired reference inside the
+            # video. Its temporal latent cannot be locked as an isolated frame.
+            seeding, preserve = True, False
         if type(frames) is not int or not 5 <= frames <= 81 or (frames - 1) % 4:
             raise ValueError('teacher_max_frames must be 1 + 4*n, between 5 and 81')
         if type(steps) is not int or not 1 <= steps <= 100:
@@ -48,6 +64,8 @@ def inference_options(raw):
             raise ValueError('teacher_resolution must be 480p or native')
         result.update(teacher_max_frames=frames, teacher_steps=steps, teacher_resolution=resolution,
                       teacher_clip_layout=layout,
+                      teacher_endpoint_extension=extension, teacher_opacity_scale=float(opacity),
+                      teacher_warmup_supervision=warmup_supervision,
                       initial_image_seeding=seeding or preserve, image_cache_insertion=preserve,
                       **{key: False for key in TEACHER_DISABLED})
     return result

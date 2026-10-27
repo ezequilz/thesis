@@ -15,7 +15,9 @@ def identity(checkpoint, runtime):
     metadata = checkpoint.manifest.get('metadata', {})
     split = 'no-split' if checkpoint.endpoint_only else ('single-split' if runtime.get('handoff_generation')
                                                       else runtime.get('split_mode', 'double-split'))
-    return {'version': 2, 'upstream_revision': UPSTREAM_REVISION,
+    return {**({'teacher_endpoint_extension': runtime['teacher_endpoint_extension'], 'teacher_extension_version': 1}
+               if runtime.get('teacher_endpoint_extension') else {}),
+            'version': 2, 'upstream_revision': UPSTREAM_REVISION,
             'trajectory_order': ('picked' if checkpoint.endpoint_only else
                                  validate_trajectory_order(runtime.get('trajectory_order', 'picked'))),
             'trajectory_version': 7, 'metric_sampling': SCALE_SAMPLING,
@@ -42,6 +44,9 @@ def validate(plan, checkpoint, runtime):
     if isinstance(plan['camera_scale'], bool) or not math.isfinite(plan['camera_scale']) or plan['camera_scale'] <= 0:
         raise ValueError('Invalid camera scale in source trajectory plan')
     poses = np.asarray(plan['orbit']['poses'], dtype=np.float64)
+    extension = plan['orbit'].get('teacher_extensions', {})
+    if extension.get('requested_frames', 0) != runtime.get('teacher_endpoint_extension', 0):
+        raise ValueError('Endpoint extension plan does not match the requested setting')
     if poses.ndim != 3 or poses.shape[1:] != (4, 4) or not len(poses) or not np.isfinite(poses).all():
         raise ValueError('Invalid source trajectory poses')
     for anchor in plan['identity']['anchors']:

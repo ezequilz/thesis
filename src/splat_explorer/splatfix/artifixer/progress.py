@@ -36,7 +36,8 @@ def planned_count(packet, plus=False):
     return len(list(planned_clips(inference_jobs(plan, trajectory, plus=plus),
         cfg.get('teacher_max_frames', 37), anchors,
         seeding=bool(cfg.get('initial_image_seeding') or cfg.get('image_cache_insertion')),
-        layout=cfg.get('teacher_clip_layout', 'segment'))))
+        layout=cfg.get('teacher_clip_layout', 'segment'),
+        extensions=trajectory.get('teacher_extensions', []) if cfg.get('teacher_endpoint_extension') else ())))
 
 
 def stage(label, current=0, total=None, *, status='pending', detail='Waiting', **extra):

@@ -142,7 +142,7 @@ def repair_splat(cfg, args):
             if getattr(args, key, None) is not None:
                 runtime[key] = getattr(args, key)
     if method == 'artifixer':
-        for key in ('teacher_inference', 'inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution', 'teacher_clip_layout'):
+        for key in ('teacher_inference', 'inference_model', 'teacher_steps', 'teacher_max_frames', 'teacher_resolution', 'teacher_clip_layout', 'teacher_endpoint_extension', 'teacher_opacity_scale', 'teacher_warmup_supervision'):
             if getattr(args, key, None) is not None:
                 runtime[key] = getattr(args, key)
         from .artifixer.inference_policy import new_job_options
@@ -277,6 +277,12 @@ def _add_stages(parser):
                         help='Total input budget including starter/padding: 1+4*n (default 25 = 24 views + reference)')
     repair.add_argument('--teacher-clip-layout', choices=('full-leg', 'segment'), default=None,
                         help='Fill clips across complete captured legs (default), or retain legacy half-leg boundaries')
+    repair.add_argument('--teacher-endpoint-extension', type=int, choices=(0, 4, 8), default=None,
+                        help='Experimental collision-truncated warm-up views; unlocks the reference (default off)')
+    repair.add_argument('--teacher-opacity-scale', type=float, default=None,
+                        help='Experimental rendered-opacity multiplier in [0,1]; repaired reference stays opaque (default 1)')
+    repair.add_argument('--teacher-warmup-supervision', action=argparse.BooleanOptionalAction, default=None,
+                        help='Include generated safe warm-up views in reconstruction (default on)')
     repair.add_argument('--teacher-steps', type=int, default=None)
     repair.set_defaults(func=repair_splat)
     inspect = stages.add_parser("inspect", help="Print checkpoint metadata without network calls")

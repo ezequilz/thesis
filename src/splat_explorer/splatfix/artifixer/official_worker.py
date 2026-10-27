@@ -653,7 +653,7 @@ def inference_jobs(request, trajectory, *, plus=False):
             # One temporal sequence in authored trajectory order, with every
             # saved reference retained as conditioning. Never inherit inward
             # half-leg direction changes or cache resets from segment metadata.
-            segments = [{'indices': [i for i in range(len(trajectory['frames'])) if i not in anchors],
+            segments = [{'indices': [i for i in range(trajectory.get('base_frame_count', len(trajectory['frames']))) if i not in anchors],
                          **({'cache_seed_index': anchors[0]} if anchors else {})}]
         return [(s, list(range(len(anchors))), 'plus' if plus else 'inference')
                 for s in segments]
@@ -662,7 +662,7 @@ def inference_jobs(request, trajectory, *, plus=False):
     mode = request['runtime'].get('endpoint_reference_mode', 'both')
     if mode not in ('both', 'initial'):
         raise ValueError('Invalid endpoint reference mode')
-    indices = list(range(len(trajectory['frames'])))
+    indices = list(range(trajectory.get('base_frame_count', len(trajectory['frames']))))
     if anchors != [indices[0], indices[-1]]:
         raise ValueError('Endpoint reference cameras must bound the ordered trajectory')
     jobs = []
@@ -1063,7 +1063,7 @@ def finish_inference(root, request, cfg, output, *, plus, handoff=False,
     if plus:
         result = json.loads((root / 'distillation.json').read_text())
         result.update(inference_model=cfg['inference_model'],
-                      inference_settings={key: cfg[key] for key in ('teacher_resolution', 'teacher_max_frames', 'teacher_steps', 'teacher_clip_layout', 'initial_image_seeding', 'image_cache_insertion') if key in cfg},
+                      inference_settings={key: cfg[key] for key in ('teacher_resolution', 'teacher_max_frames', 'teacher_steps', 'teacher_clip_layout', 'teacher_endpoint_extension', 'teacher_opacity_scale', 'teacher_warmup_supervision', 'initial_image_seeding', 'image_cache_insertion') if key in cfg},
                       teacher_reference_preservation=cfg['inference_model'] == '14b-teacher' and cfg.get('image_cache_insertion', False),
                       inference_memory=str(root / 'plus-memory.jsonl') if cfg['inference_model'] == '14b-teacher' else None,
                       teacher_diagnostics=str(root / 'plus-teacher.json') if cfg['inference_model'] == '14b-teacher' else None,
@@ -1204,7 +1204,20 @@ def reconstruction_supervision(root, request, trajectory):
             from connected_trajectory import validate_completed
         validate_completed(root, request, trajectory)
     if not request.get('runtime', {}).get('handoff_generation', False):
-        return unique_supervision(trajectory, request['references'])
+        excluded = set(trajectory.get('context_only_indices', ()))
+        runtime = request.get('runtime', {})
+        warmup = set()
+        if runtime.get('teacher_endpoint_extension') and runtime.get('teacher_warmup_supervision', True):
+            manifest = json.loads((Path(root) / 'inference-teacher.json').read_text())
+            warmup = {i for clip in manifest['clips'] if clip.get('output') == 'inference'
+                      for i in clip.get('warmup_frame_indices', [])}
+            if not warmup <= excluded:
+                raise ValueError('Warm-up supervision contains non-extension camera indices')
+        transforms, supervision = unique_supervision(trajectory, request['references'], excluded_indices=excluded - warmup)
+        if runtime.get('teacher_endpoint_extension'):
+            supervision['warmup_supervision_indices'] = sorted(warmup)
+            supervision['excluded_extension_indices'] = sorted(excluded - warmup)
+        return transforms, supervision
     state = load_handoff_references(root, request, trajectory)
     if request.get('runtime', {}).get('handoff_type', 'boundary') == 'middle':
         anchors = [*trajectory['anchors'], *[

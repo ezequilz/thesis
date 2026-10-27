@@ -21,6 +21,10 @@ rotations and opacity afresh (`reconstruction_initialization: point_cloud_geomet
 The existing point-cloud-with-color and full-PLY modes remain available.
 Turn the setting off to select the legacy 1.3B or 14B distilled model; historical
 jobs and their saved generation policies retain their previous behavior.
+Optional teacher experiments add collision-truncated endpoint context (4 or 8
+views, reference unlocked) and rendered-opacity scaling (default 1). Context
+views share the clip budget; used generated warm-up views also supervise fitting. These controls do
+not change stored depth maps.
 Teacher clips become reviewable as they finish. Results also includes isolated
 full-trajectory teacher replays, with references, source captures and live progress.
 See [teacher setup, memory limits and sampling differences](artifixer-14b-loading.md).
