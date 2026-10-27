@@ -3,8 +3,9 @@ import math
 
 
 def validate_options(raw):
+    from .official_worker import NEW_REPAIR_LOSS_DEFAULTS
     raw = {'regularization_profile': 'base_mcmc',
-           **({'generated_lpips_downscale': False} if raw['stage'] == 'repair' else {}), **raw}
+           **(NEW_REPAIR_LOSS_DEFAULTS if raw['stage'] == 'repair' else {}), **raw}
     from .pipeline_profile import apply_pipeline
     if raw['stage'] == 'repair':
         from .inference_policy import new_job_options, TEACHER_DISABLED

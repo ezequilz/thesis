@@ -68,7 +68,7 @@ def test_config_inheritance_is_scoped_and_preserves_other_settings(monkeypatch, 
 
 
 @pytest.mark.parametrize('pipeline', ['authors_3dgut', 'authors_3dgut_viser_rgb', 'legacy_gsplat'])
-@pytest.mark.parametrize('weight', [0.1, 1.0])
+@pytest.mark.parametrize('weight', [0.1, 0.5, 1.0])
 @pytest.mark.parametrize('rgb', [False, True])
 @pytest.mark.parametrize('downscale', [False, True])
 def test_generated_loss_job_choices_survive_pipeline(pipeline, rgb, downscale, weight):
@@ -85,14 +85,17 @@ def test_generated_loss_job_choices_survive_pipeline(pipeline, rgb, downscale, w
 
 def test_generated_loss_defaults_and_validation():
     options = validate_job(dict(stage='repair', checkpoint='saved'))
-    assert worker.generated_loss_options(options) == dict(generated_rgb_loss=False, generated_lpips_downscale=False, generated_rgb_loss_weight=1.0)
+    assert worker.generated_loss_options(options) == dict(generated_rgb_loss=True, generated_lpips_downscale=False, generated_rgb_loss_weight=0.5)
+    # Historical worker requests and explicit off remain valid.
+    assert worker.generated_loss_options({}) == dict(generated_rgb_loss=False, generated_lpips_downscale=True, generated_rgb_loss_weight=1.0)
+    assert not validate_job(dict(stage='repair', checkpoint='saved', generated_rgb_loss=False))['generated_rgb_loss']
     for key in ('generated_rgb_loss', 'generated_lpips_downscale'):
         for value in ['off', 'on', 0, 1, None]:
             with pytest.raises(ValueError, match=key):
                 validate_job(dict(stage='repair', checkpoint='saved', **{key: value}))
 
 
-@pytest.mark.parametrize('weight', [0.1, 1.0])
+@pytest.mark.parametrize('weight', [0.1, 0.5, 1.0])
 @pytest.mark.parametrize('rgb', [False, True])
 @pytest.mark.parametrize('downscale', [False, True])
 @pytest.mark.parametrize('profile', ['artifixer', 'base_mcmc', 'base_mcmc_0_2'])
@@ -170,7 +173,7 @@ def test_gaussian_limit_reaches_training_and_restores_compose(monkeypatch, limit
     assert sparse.strategy.add.max_n_gaussians == 1_000_000
 
 
-@pytest.mark.parametrize('weight', [False, True, 0, -0.1, 0.5, float('nan'), float('inf'), '0.1', None])
+@pytest.mark.parametrize('weight', [False, True, 0, -0.1, 0.6, float('nan'), float('inf'), '0.1', None])
 def test_invalid_generated_rgb_weight_rejected(weight):
     with pytest.raises(ValueError, match='generated_rgb_loss_weight'):
         validate_job(dict(stage='repair', checkpoint='saved', generated_rgb_loss=True,

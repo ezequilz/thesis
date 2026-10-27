@@ -201,20 +201,21 @@ and full source PLY initialization for saved-view repairs).
 
 ArtiFixer repair runs expose two independent controls in all three pipeline modes:
 
-- **RGB L1/SSIM contribution for generated images** defaults to off
-  (`generated_rgb_loss=false`, `lambda_reconlosses_override=0`). On sets the
-  multiplier to 1 and copies the reference-image L1/SSIM weights: 0.8 / 0.2.
-- **LPIPS loss downscale for generated images** defaults to on
-  (`generated_lpips_downscale=true`, `lambda_lpips_override=0.1`). Off uses 1.0,
-  retaining LPIPS without downscaling.
+- **RGB L1/SSIM contribution for generated images** defaults to **0.5 ×**
+  (`generated_rgb_loss=true`, `generated_rgb_loss_weight=0.5`). This uses half
+  the reference-image L1/SSIM term: `0.4 × L1 + 0.1 × (1 − SSIM)`. It applies to
+  every generated image used for fitting, including generated warm-up views.
+  Off, 0.1 × and 1.0 × remain available.
+- **LPIPS loss downscale for generated images** defaults to off
+  (`generated_lpips_downscale=false`, `lambda_lpips_override=1.0`). On uses 0.1.
 
-Thus generated-image loss is `RGB_enabled × (0.8 L1 + 0.2 (1 − SSIM)) +
-LPIPS_weight × LPIPS`, plus any separately enabled Gaussian regularization.
-Reference-image losses are unchanged. These choices survive the authors pipeline
-preset enforcement, are saved in job/runtime settings and reconstruction recipes,
-and affect the fitting configuration recorded by the trainer. Historical jobs
-without these fields retain the original ArtiFixer weights. Benchmark controls
-are unchanged.
+Generated-image loss therefore defaults to `0.4 L1 + 0.1 (1 − SSIM) + LPIPS`,
+plus the selected Gaussian regularization. Reference-image losses retain
+`0.8 L1 + 0.2 (1 − SSIM)` and their existing regularization. These defaults apply
+at new repair submission (dashboard/API and CLI); explicit saved choices and
+historical worker fallbacks remain intact. The controls work in all three
+ArtiFixer pipeline modes and are saved in job/runtime settings and reconstruction
+recipes. Published benchmark controls are unchanged.
 
 The [original MCMC training code](https://github.com/ubc-vision/3dgs-mcmc/blob/main/train.py)
 uses RGB L1/SSIM and Gaussian regularization, with default SSIM weight 0.2; it
@@ -1522,7 +1523,7 @@ Handoff GPT image context also supports **Original RGB capture** (`original_rgb_
 
 With this option On, fitting and OracleGS export retain the first and last original repairs plus all completed interior handoff repairs. VGGT maps each replacement half to its actual backward seed, preserving repaired-reference-first assignment. Off (and historical runs lacking the option) preserves forward-only behavior, including exclusion of the last endpoint from fitting. The option has no effect outside handoff generation.
 
-Generated RGB L1/SSIM also offers **On · 0.1 × RGB L1/SSIM**. This sets `generated_rgb_loss=true` and `generated_rgb_loss_weight=0.1`, applying `0.1 × (0.8 × L1 + 0.2 × (1 − SSIM))` only to generated views. Full On and historical enabled jobs retain weight 1.0; Off remains the default. LPIPS and reference-view weights are unchanged.
+Generated RGB L1/SSIM also offers **On · 0.1 × RGB L1/SSIM**. This sets `generated_rgb_loss=true` and `generated_rgb_loss_weight=0.1`, applying `0.1 × (0.8 × L1 + 0.2 × (1 − SSIM))` only to generated views. Full On uses weight 1.0; new repair runs default to 0.5 ×. Historical worker requests without a multiplier retain weight 1.0. LPIPS and reference-view weights are independent.
 
 **Vignette ellipse size**, below Noise vignette, selects `handoff_vignette_size`: **Larger ellipse** (default) keeps the taller ellipse, 70–100% radius transition, and 95% edges. **Smaller ellipse · prior vignette** restores the original image-aspect ellipse, 50–100% radius transition, and 80% edges. Both Gaussian and pixel-sprinkle modes use the selected preset; with vignette Off, neither preset changes the uniform strength. The selected size and effective profile are saved with each repair.
 

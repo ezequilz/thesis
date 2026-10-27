@@ -26,6 +26,11 @@ else:
 ARTIFIXER3D_CONFIG = 'apps/colmap_3dgut_sparse_mcmc_lpips'
 ARTIFIXER3D_STEPS = 30000
 
+# Apply only at new repair submission entry points. Worker fallbacks below
+# retain the pinned objective for stored requests without explicit loss flags.
+NEW_REPAIR_LOSS_DEFAULTS = {'generated_rgb_loss': True, 'generated_rgb_loss_weight': 0.5,
+                            'generated_lpips_downscale': False}
+
 
 def generated_loss_options(raw):
     """Defaults preserve the pinned ArtiFixer generated-view objective."""
@@ -35,8 +40,8 @@ def generated_loss_options(raw):
         if type(value) is not bool:
             raise ValueError(f'{key} must be a boolean')
     weight = raw.get('generated_rgb_loss_weight', 1.0)
-    if type(weight) not in (int, float) or weight not in (0.1, 1.0):
-        raise ValueError('generated_rgb_loss_weight must be 0.1 or 1.0')
+    if type(weight) not in (int, float) or weight not in (0.1, 0.5, 1.0):
+        raise ValueError('generated_rgb_loss_weight must be 0.1, 0.5 or 1.0')
     result['generated_rgb_loss_weight'] = float(weight)
     return result
 

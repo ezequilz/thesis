@@ -119,6 +119,8 @@ def repair_splat(cfg, args):
     if getattr(args, 'image_cache_insertion', None) is not None:
         runtime['image_cache_insertion'] = args.image_cache_insertion
     if method == 'artifixer':
+        from .artifixer.official_worker import NEW_REPAIR_LOSS_DEFAULTS
+        runtime = {**NEW_REPAIR_LOSS_DEFAULTS, **runtime}
         if getattr(args, 'trajectory_order', None) is not None:
             runtime['trajectory_order'] = args.trajectory_order
         if getattr(args, 'generated_context_references', None) is not None:

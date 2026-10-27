@@ -63,8 +63,8 @@ def inference_options(raw):
             raise ValueError('Preserving the reference latent requires reference opacity 1; choose seed once to adjust it')
         if type(frames) is not int or not 5 <= frames <= 81 or (frames - 1) % 4:
             raise ValueError('teacher_max_frames must be 1 + 4*n, between 5 and 81')
-        if type(steps) is not int or not 1 <= steps <= 100:
-            raise ValueError('teacher_steps must be between 1 and 100 (50 for quality; 1 only for smoke tests)')
+        if type(steps) is not int or not 1 <= steps <= 150:
+            raise ValueError('teacher_steps must be between 1 and 150 (50 by default; 1 only for smoke tests)')
         if resolution not in ('480p', 'native'):
             raise ValueError('teacher_resolution must be 480p or native')
         result.update(teacher_max_frames=frames, teacher_steps=steps, teacher_resolution=resolution,

@@ -51,7 +51,7 @@ def test_new_jobs_default_to_teacher_but_legacy_opt_out_and_history_survive():
 
 @pytest.mark.parametrize('change', [
     {'teacher_max_frames': 18}, {'teacher_max_frames': True}, {'teacher_max_frames': 85},
-    {'teacher_steps': 0}, {'teacher_steps': 101}, {'teacher_steps': True},
+    {'teacher_steps': 0}, {'teacher_steps': 151}, {'teacher_steps': True},
     {'teacher_resolution': 'typo'}, {'inference_model': 'teacher'}, {'teacher_clip_layout': 'typo'},
     {'initial_image_seeding': 'false'}, {'image_cache_insertion': 1},
 ])
@@ -161,8 +161,8 @@ def test_cli_accepts_teacher_inference_only_controls():
 
 @pytest.mark.parametrize('layout,seeding,extension', [('segment',False,0),('segment',True,0),
     ('full-leg',False,0),('full-leg',True,0),('full-leg',True,4)])
-@pytest.mark.parametrize('opacity_scale', [.75, .5])
-def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monkeypatch, layout, seeding, extension, opacity_scale):
+@pytest.mark.parametrize('opacity_scale,teacher_steps', [(.75, 50), (.5, 150)])
+def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monkeypatch, layout, seeding, extension, opacity_scale, teacher_steps):
     import argparse
     import json
     import sys
@@ -191,6 +191,7 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
                   'segments': [{'indices': list(range(12)), 'cache_seed_index': 0}]}
     request = {'runtime': {'checkpoint': str(checkpoint), 'model_id': MODELS['14b'][1],
                           'inference_model': '14b-teacher', 'teacher_max_frames': limit,
+                          'teacher_steps': teacher_steps,
                           'teacher_clip_layout': layout, 'initial_image_seeding': seeding,
                           'teacher_endpoint_extension':extension, 'teacher_opacity_scale':opacity_scale,
                           'teacher_reference_opacity':reference_opacity},
@@ -245,7 +246,7 @@ def test_teacher_runs_bounded_cpu_items_and_exports_only_targets(tmp_path, monke
     assert set(camera_indices) <= set(range(frame_count))
     predicted = tmp_path / 'output/inference/splatfix/frames/batch_0000/pred'
     assert sorted(int(p.stem) for p in predicted.glob('*.png')) == expected
-    assert parsed[parsed.index('--num_inference_steps') + 1] == '50'
+    assert parsed[parsed.index('--num_inference_steps') + 1] == str(teacher_steps)
     assert parsed[parsed.index('--max_neighbors_per_encode') + 1] == '1'
     assert parsed[parsed.index('--inference_pipeline') + 1] == 'bidirectional'
     report = json.loads((tmp_path / 'output/inference-teacher.json').read_text())

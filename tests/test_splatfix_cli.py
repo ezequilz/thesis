@@ -83,6 +83,9 @@ def test_repair_command_passes_only_saved_run_and_runtime(monkeypatch, tmp_path)
                              "--artifixer-repo", "/gpu/official"])
     repair_splat(Config({"splatfix": {"runtime": {"python": "/gpu/python"}}}), args)
     assert received["mode"] == "baseline"
+    assert received["runtime"]["generated_rgb_loss"] is True
+    assert received["runtime"]["generated_rgb_loss_weight"] == .5
+    assert received["runtime"]["generated_lpips_downscale"] is False
     assert {k: received["runtime"][k] for k in ("repo", "python", "resolution_profile", "split_mode")} == {"repo": "/gpu/official", "python": "/gpu/python", "resolution_profile": "720p", "split_mode": "double-split"}
     assert received["runtime"]["teacher_inference"] is True
     assert received["runtime"]["inference_model"] == "14b-teacher"

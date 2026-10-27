@@ -15,7 +15,7 @@ def test_dashboard_stage_payloads_and_frozen_schedule_selection():
 const fs=require('fs'), vm=require('vm'), assert=require('assert/strict');
 const source=fs.readFileSync(process.argv[1],'utf8').split('<script>')[1].split('</script>')[0];
 const elements=new Map();
-const get=id=>{if(!elements.has(id))elements.set(id,{value:id==='image-repair-mode'?'auto':id==='artifixer-max-gaussians'?'1000000':id==='handoff-add-noise'?'repaired_pixel_sprinkle':'',textContent:'',innerHTML:'',disabled:false,checked:false,valid:true,opened:false,
+const get=id=>{if(!elements.has(id))elements.set(id,{value:id==='image-repair-mode'?'auto':id==='artifixer-max-gaussians'?'1000000':id==='artifixer-generated-rgb-loss'?'0.5':id==='handoff-add-noise'?'repaired_pixel_sprinkle':'',textContent:'',innerHTML:'',disabled:false,checked:false,valid:true,opened:false,
   selectedOptions:[{textContent:'Other scene'}],classList:{toggle(){}},style:{},addEventListener(){},querySelectorAll(){return[]},
   setCustomValidity(message){this.valid=!message},reportValidity(){return this.valid},showModal(){this.opened=true},close(){this.opened=false}});return elements.get(id)};
 const context=vm.createContext({document:{getElementById:get,querySelectorAll(){return [{id:"future-setting",name:"",type:"select-one",tagName:"SELECT",value:"future",labels:[{textContent:"Future setting"}],selectedOptions:[{value:"future",textContent:"Future option"}],matches(){return false},getClientRects(){return [{}]}}]}},fetch:()=>new Promise(()=>{}),setInterval(){},setTimeout(){},assert});
@@ -32,7 +32,7 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal(payload('repair').checkpoint,'/saved/cp');
   assert.equal(payload('repair').mode,'edited');
   $('teacher-inference').checked=true;$('artifixer-inference-model').value='1.3b';
-  $('teacher-resolution').value='480p';$('teacher-max-frames').value='24';$('teacher-steps').value='50';
+  $('teacher-resolution').value='480p';$('teacher-max-frames').value='24';$('teacher-steps').value='150';
   $('handoff-generation').value='on';$('split-mode').value='double-split';
   renderTeacherControls();
   assert.equal($('artifixer-teacher-controls').hidden,false);
@@ -41,7 +41,7 @@ Promise.resolve(vm.runInContext(`(async()=>{
   assert.equal($('connected-trajectory-generation').disabled,true);
   const teacher=payload('repair');
   assert.equal(teacher.inference_model,'14b-teacher');
-  assert.equal(teacher.teacher_steps,50);
+  assert.equal(teacher.teacher_steps,150);assert.equal(teacher.generated_rgb_loss,true);assert.equal(teacher.generated_rgb_loss_weight,.5);
   assert.equal(teacher.teacher_max_frames,25);
   assert.equal(teacher.teacher_clip_layout,'full-leg');
   assert.equal(teacher.teacher_resolution,'480p');
@@ -162,14 +162,14 @@ Promise.resolve(vm.runInContext(`(async()=>{
   $('handoff-generation').value='off';
   for(const pipeline of ['authors_3dgut','authors_3dgut_viser_rgb','legacy_gsplat']){
     $('artifixer-pipeline').value=pipeline;
-    for(const rgb of ['on','off','0.1'])for(const downscale of ['on','off']){
+    for(const rgb of ['on','off','0.5','0.1'])for(const downscale of ['on','off']){
       $('artifixer-generated-rgb-loss').value=rgb;
       $('artifixer-generated-lpips-downscale').value=downscale;
       renderArtifixerPipeline();
       assert.equal($('artifixer-generated-rgb-loss').disabled,false);
       assert.equal($('artifixer-generated-lpips-downscale').disabled,false);
       assert.equal(payload('repair').generated_rgb_loss,rgb!=='off');
-      assert.equal(payload('repair').generated_rgb_loss_weight,rgb==='0.1'?0.1:1);
+      assert.equal(payload('repair').generated_rgb_loss_weight,['0.1','0.5'].includes(rgb)?Number(rgb):1);
       assert.equal(payload('repair').generated_lpips_downscale,downscale==='on');
       assert.equal(payload('benchmark').generated_rgb_loss,undefined);
     }
